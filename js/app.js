@@ -212,7 +212,7 @@ async function loadFeed() {
 
   const { data, error } = await supabase
     .from('posts')
-    .select(`*, profiles(username, avatar_url, is_guest)`)
+    .select(`*, profiles(username, avatar_url, is_guest), original:reposted_from(*, profiles(username, avatar_url, is_guest))`)
     .order('created_at', { ascending: false })
     .limit(50);
 
@@ -259,8 +259,27 @@ function renderPost(post) {
         <button class="comment-action-btn" style="margin-left:auto" onclick="deletePost('${post.id}')">✕ Delete</button>
       ` : ''}
     </div>
+    ${post.reposted_from && post.original ? `
+      <div class="reposted-banner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        ${escHTML(name)} reposted
+      </div>
+    ` : ''}
     ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
+    ${post.reposted_from && post.original ? `
+      <div class="reposted-card">
+        <div class="post-header">
+          <div class="avatar">${post.original.profiles?.avatar_url ? `<img src="${post.original.profiles.avatar_url}"/>` : initials(post.original.profiles?.username || 'U')}</div>
+          <div>
+            <div style="display:flex;align-items:center;gap:0.5rem"><span class="post-author">${escHTML(post.original.profiles?.username || 'Unknown')}</span></div>
+            <div class="post-time">${timeAgo(post.original.created_at)}</div>
+          </div>
+        </div>
+        ${post.original.body ? `<div class="post-body">${linkify(post.original.body)}</div>` : ''}
+        ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
+      </div>
+    ` : ''}
     <div class="post-actions">
       <div class="reaction-wrap" data-target="${post.id}" data-type="post">
         <button class="reaction-trigger" data-target="${post.id}" data-type="post">
@@ -280,6 +299,22 @@ function renderPost(post) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         <span id="ccount-${post.id}">Comment</span>
       </button>
+      <button class="comment-toggle" onclick="repostPost('${post.id}')" title="Repost on Sele">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        Repost
+      </button>
+      <div class="share-wrap">
+        <button class="comment-toggle" onclick="toggleShareMenu(event, '${post.id}')" title="Share">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+          Share
+        </button>
+        <div class="share-menu" id="sharemenu-${post.id}">
+          <button class="share-option" onclick="shareTo('facebook','${post.id}')">📘 Facebook</button>
+          <button class="share-option" onclick="shareTo('twitter','${post.id}')">🐦 Twitter / X</button>
+          <button class="share-option" onclick="shareTo('whatsapp','${post.id}')">💬 WhatsApp</button>
+          <button class="share-option" onclick="shareTo('copy','${post.id}')">🔗 Copy link</button>
+        </div>
+      </div>
     </div>
     <div class="comments-section" id="comments-${post.id}" style="display:none"></div>
   `;
@@ -711,6 +746,52 @@ function setupRealtime() {
     .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'posts' }, () => loadFeed())
     .subscribe();
 }
+
+// ── Share & Repost ──
+window.repostPost = async (postId) => {
+  if (!currentUser) return toast('Sign in to repost', 'error');
+  if (!confirm('Repost this on your feed?')) return;
+
+  const { error } = await supabase.from('posts').insert({
+    user_id: currentUser.id,
+    body: '',
+    reposted_from: postId
+  });
+
+  if (error) toast(error.message, 'error');
+  else { toast('Reposted!', 'success'); loadFeed(); }
+};
+
+window.toggleShareMenu = (e, postId) => {
+  e.stopPropagation();
+  document.querySelectorAll('.share-menu.visible').forEach(m => {
+    if (m.id !== `sharemenu-${postId}`) m.classList.remove('visible');
+  });
+  document.getElementById(`sharemenu-${postId}`).classList.toggle('visible');
+};
+
+window.shareTo = (platform, postId) => {
+  const url = `${window.location.origin}?post=${postId}`;
+  const text = 'Check out this post on Sele';
+  const urls = {
+    facebook: `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`,
+    twitter:  `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
+    whatsapp: `https://wa.me/?text=${encodeURIComponent(text + ' ' + url)}`
+  };
+  if (platform === 'copy') {
+    navigator.clipboard.writeText(url).then(() => toast('Link copied!', 'success'));
+  } else if (urls[platform]) {
+    window.open(urls[platform], '_blank');
+  }
+  document.getElementById(`sharemenu-${postId}`).classList.remove('visible');
+};
+
+// Close share menu on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.share-wrap')) {
+    document.querySelectorAll('.share-menu.visible').forEach(m => m.classList.remove('visible'));
+  }
+});
 
 // ── Init ──
 initAuth();
