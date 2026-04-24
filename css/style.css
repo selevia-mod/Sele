@@ -259,10 +259,12 @@ button { font-family: var(--font); cursor: pointer; }
 
 /* ── ACTION BAR ── */
 .post-actions {
-  display: flex; gap: 0.25rem;
+  display: flex; gap: 0.25rem; align-items: center;
   padding-top: 0.4rem; border-top: 1px solid var(--border);
-  position: relative; justify-content: flex-start;
+  position: relative;
 }
+.post-actions .reaction-wrap { display: inline-flex; }
+.post-actions > *:first-child { margin-right: auto; }
 .action-btn {
   background: none; border: none; color: var(--text3); font-size: 0.74rem; font-weight: 500;
   padding: 0.35rem 0.75rem; border-radius: 99px; cursor: pointer;
