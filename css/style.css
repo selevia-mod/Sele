@@ -1,4 +1,4 @@
-/* ── Reset & Base ── */
+/* â”€â”€ Reset & Base â”€â”€ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
@@ -31,7 +31,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── Nav ── */
+/* â”€â”€ Nav â”€â”€ */
 .nav {
   display: flex;
   align-items: center;
@@ -65,7 +65,7 @@ body {
 }
 .nav-link:hover, .nav-link.active { color: var(--purple-700); }
 
-/* ── Buttons ── */
+/* â”€â”€ Buttons â”€â”€ */
 .btn-primary {
   background: var(--purple-700);
   color: #fff;
@@ -98,7 +98,7 @@ body {
 }
 .btn-ghost:hover { background: var(--surface-2); }
 
-/* ── Hero ── */
+/* â”€â”€ Hero â”€â”€ */
 .hero {
   text-align: center;
   padding: 6rem 2rem 4rem;
@@ -142,7 +142,7 @@ body {
   font-weight: 300;
 }
 
-/* ── Feed ── */
+/* â”€â”€ Feed â”€â”€ */
 .feed {
   max-width: 780px;
   margin: 0 auto;
@@ -152,7 +152,7 @@ body {
   gap: 1.25rem;
 }
 
-/* ── Post Card ── */
+/* â”€â”€ Post Card â”€â”€ */
 .post-card {
   background: #fff;
   border: 1px solid var(--border);
@@ -272,7 +272,7 @@ body {
   font-weight: 500;
 }
 
-/* ── Modal ── */
+/* â”€â”€ Modal â”€â”€ */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -344,7 +344,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-/* ── Comments ── */
+/* â”€â”€ Comments â”€â”€ */
 .comments-title {
   font-family: var(--font-display);
   font-size: 1.3rem;
@@ -391,7 +391,7 @@ body {
 }
 .comment-input:focus { border-color: var(--purple-500); }
 
-/* ── Write Page ── */
+/* â”€â”€ Write Page â”€â”€ */
 .write-page {
   min-height: calc(100vh - 70px);
   display: flex;
@@ -454,7 +454,96 @@ body {
 }
 .publish-success a { color: var(--purple-700); font-weight: 500; }
 
-/* ── Empty State ── */
+/* â”€â”€ Reactions â”€â”€ */
+.reaction-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.reaction-trigger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  transition: border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.reaction-trigger:hover, .reaction-trigger.reacted {
+  border-color: var(--border-strong);
+  background: var(--purple-50);
+  color: var(--purple-700);
+}
+
+.reaction-current { font-size: 15px; line-height: 1; }
+.reaction-tops { font-size: 13px; line-height: 1; letter-spacing: -2px; }
+.reaction-count { font-size: 0.78rem; font-weight: 500; }
+
+.reaction-picker {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  display: flex;
+  gap: 4px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 6px 10px;
+  box-shadow: 0 8px 24px rgba(46, 16, 101, 0.12);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px) scale(0.95);
+  transition: opacity 0.15s, transform 0.15s;
+  z-index: 50;
+  white-space: nowrap;
+}
+.reaction-picker.visible {
+  opacity: 1;
+  pointer-events: all;
+  transform: translateY(0) scale(1);
+}
+
+.reaction-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 4px 6px;
+  transition: transform 0.15s, background 0.1s;
+}
+.reaction-option:hover { transform: scale(1.3) translateY(-2px); background: var(--purple-50); }
+.reaction-option.active { background: var(--purple-50); }
+.reaction-option.active .r-emoji { filter: drop-shadow(0 0 3px rgba(124,58,237,0.4)); }
+
+.r-emoji { font-size: 20px; line-height: 1; display: block; }
+.r-label { font-size: 10px; color: var(--ink-muted); font-family: var(--font-body); }
+
+.reaction-summary {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.reaction-stat {
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.reaction-stat strong { color: var(--ink); font-weight: 500; }
+
+/* â”€â”€ Empty State â”€â”€ */
 .empty-state {
   text-align: center;
   padding: 4rem 2rem;
@@ -467,7 +556,7 @@ body {
   margin-bottom: 0.5rem;
 }
 
-/* ── Responsive ── */
+/* â”€â”€ Responsive â”€â”€ */
 @media (max-width: 600px) {
   .nav { padding: 1rem 1.25rem; }
   .hero { padding: 3.5rem 1.25rem 2.5rem; }
