@@ -494,7 +494,7 @@ button { font-family: var(--font); cursor: pointer; }
 
 /* Profile tabs */
 .profile-tabs {
-  display: flex; gap: 0.25rem; margin: 0.5rem 0;
+  display: flex; gap: 0.25rem; margin: 0.1rem 0;
   border-bottom: 1px solid var(--border);
   min-height: 48px; align-items: stretch;
 }
