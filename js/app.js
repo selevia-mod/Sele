@@ -180,32 +180,7 @@ async function loadStories() {
 
 // ── Filter by user ──
 window.filterByUser = async (userId, username) => {
-  const feed = document.getElementById('feed');
-  feed.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;padding:0.75rem 1rem;background:var(--bg2);border-radius:var(--radius);border:1px solid var(--border)">
-      <span>Showing posts by <strong>${escHTML(username)}</strong></span>
-      <button class="btn btn-ghost btn-sm" onclick="loadFeed()">Show all</button>
-    </div>
-    <div class="loading">Loading...</div>
-  `;
-
-  const { data } = await supabase
-    .from('posts')
-    .select(`*, profiles(username, avatar_url, is_guest), original:reposted_from(*, profiles(username, avatar_url, is_guest))`)
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(50);
-
-  posts = data || [];
-  const wrap = document.createElement('div');
-  if (!posts.length) {
-    wrap.innerHTML = '<div class="empty"><h3>No posts yet</h3></div>';
-  } else {
-    posts.forEach(p => wrap.appendChild(renderPost(p)));
-  }
-
-  const loadingEl = feed.querySelector('.loading');
-  if (loadingEl) loadingEl.replaceWith(...wrap.children);
+  openProfile(userId);
 };
 
 // ── Feed ──
