@@ -276,6 +276,7 @@ function renderPost(post) {
           `).join('')}
         </div>
       </div>
+      <div class="reaction-summary" id="rsummary-${post.id}"></div>
       <button class="comment-toggle" data-postid="${post.id}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         <span id="ccount-${post.id}">Comment</span>
@@ -331,17 +332,15 @@ async function loadReactions(targetId, targetType) {
   updateReactionUI(targetId, targetType, counts, userReaction);
 }
 
-const trigger = wrap.querySelector('.reaction-trigger');
+function updateReactionUI(targetId, targetType, counts, userReaction) {
+  const wrap = document.querySelector(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
+  if (!wrap) return;
+
+  const trigger = wrap.querySelector('.reaction-trigger');
   const total = Object.values(counts).reduce((a,b) => a+b, 0);
+  const activeR = userReaction ? REACTIONS.find(r => r.key === userReaction) : null;
 
-  // Show all unique emojis that people have used, sorted by popularity
-  const usedEmojis = REACTIONS
-    .filter(r => counts[r.key] > 0)
-    .sort((a, b) => counts[b.key] - counts[a.key])
-    .map(r => r.emoji)
-    .join('');
-
-  trigger.querySelector('.r-current').textContent = usedEmojis || '♡';
+  trigger.querySelector('.r-current').textContent = activeR ? activeR.emoji : '♡';
   trigger.querySelector('.r-count').textContent = total > 0 ? total : '';
   trigger.classList.toggle('reacted', !!userReaction);
 
