@@ -276,7 +276,6 @@ function renderPost(post) {
           `).join('')}
         </div>
       </div>
-      <div class="reaction-summary" id="rsummary-${post.id}"></div>
       <button class="comment-toggle" data-postid="${post.id}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         <span id="ccount-${post.id}">Comment</span>
@@ -354,18 +353,6 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
     btn.classList.toggle('active', btn.dataset.key === userReaction);
   });
 
-  // Summary (only for posts)
-  if (targetType === 'post') {
-    const summary = document.getElementById(`rsummary-${targetId}`);
-    if (summary) {
-      summary.innerHTML = REACTIONS
-        .filter(r => counts[r.key] > 0)
-        .sort((a,b) => counts[b.key] - counts[a.key])
-        .slice(0,3)
-        .map(r => `<span class="reaction-stat">${r.emoji} ${counts[r.key]}</span>`)
-        .join('');
-    }
-  }
 }
 
 async function handleReaction(targetId, targetType, emojiKey) {
