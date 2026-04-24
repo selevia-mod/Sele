@@ -496,13 +496,15 @@ button { font-family: var(--font); cursor: pointer; }
 .profile-tabs {
   display: flex; gap: 0.25rem; margin: 1rem 0 0.75rem;
   border-bottom: 1px solid var(--border);
+  min-height: 48px; align-items: stretch;
 }
 .profile-tab {
-  background: none; border: none; padding: 0.75rem 1.25rem;
-  color: var(--text3); font-size: 0.9rem; font-weight: 500; font-family: var(--font);
-  cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s;
+  background: none; border: none; padding: 0.85rem 1.5rem;
+  color: var(--text3); font-size: 0.95rem; font-weight: 600; font-family: var(--font);
+  cursor: pointer; border-bottom: 3px solid transparent; transition: all 0.15s;
+  display: inline-flex; align-items: center;
 }
-.profile-tab:hover { color: var(--text); }
+.profile-tab:hover { color: var(--text); background: var(--bg3); border-radius: 8px 8px 0 0; }
 .profile-tab.active { color: var(--purple-lt); border-bottom-color: var(--purple); }
 
 /* About cards */
