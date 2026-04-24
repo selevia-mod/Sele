@@ -353,7 +353,7 @@ async function loadComments(postId) {
   inputWrap.querySelector(`#csend-${postId}`).addEventListener('click', () => submitComment(postId, null, ta));
 }
 
-async function renderComment(comment, postId, isReply = false) {
+async function renderComment(comment, postId, isReply = false, topLevelId = null) {
   const div = document.createElement('div');
   div.className = isReply ? 'reply-item' : 'comment-item';
   div.dataset.commentid = comment.id;
@@ -361,6 +361,11 @@ async function renderComment(comment, postId, isReply = false) {
   const profile = comment.profiles || {};
   const name = profile.username || 'Unknown';
   const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
+
+  // For replies, the "thread root" is the top-level comment id (passed in)
+  // All nested replies attach to that root so the thread stays flat-but-readable
+  const replyTargetId = isReply ? topLevelId : comment.id;
+  const replyToName = isReply ? name : null;
 
   div.innerHTML = `
     <div class="avatar sm">${avatarHTML}</div>
@@ -386,7 +391,7 @@ async function renderComment(comment, postId, isReply = false) {
             `).join('')}
           </div>
         </div>
-        ${!isReply ? `<button class="comment-action-btn reply-btn" data-commentid="${comment.id}" data-postid="${postId}">Reply</button>` : ''}
+        <button class="comment-action-btn reply-btn" data-commentid="${replyTargetId}" data-postid="${postId}" data-replyto="${escHTML(replyToName || '')}">Reply</button>
         ${currentUser && currentUser.id === comment.user_id ? `<button class="comment-action-btn" onclick="deleteComment('${comment.id}','${postId}')">Delete</button>` : ''}
       </div>
       ${!isReply ? `<div class="replies" id="replies-${comment.id}"></div>` : ''}
@@ -395,7 +400,7 @@ async function renderComment(comment, postId, isReply = false) {
 
   loadReactions(comment.id, 'comment');
 
-  // Load replies
+  // Load replies (only top-level comments load their replies)
   if (!isReply) {
     await loadReplies(comment.id, postId, div.querySelector(`#replies-${comment.id}`));
   }
@@ -412,7 +417,8 @@ async function loadReplies(commentId, postId, container) {
 
   if (!data || !data.length) return;
   for (const reply of data) {
-    const el = await renderComment(reply, postId, true);
+    // Pass commentId as topLevelId so nested replies still attach to the top-level thread
+    const el = await renderComment(reply, postId, true, commentId);
     container.appendChild(el);
   }
 }
@@ -480,8 +486,8 @@ document.addEventListener('click', (e) => {
   // Reply button
   const replyBtn = e.target.closest('.reply-btn');
   if (replyBtn) {
-    const { commentid, postid } = replyBtn.dataset;
-    showReplyInput(commentid, postid);
+    const { commentid, postid, replyto } = replyBtn.dataset;
+    showReplyInput(commentid, postid, replyto);
     return;
   }
 
@@ -506,7 +512,7 @@ document.addEventListener('mouseout', (e) => {
 });
 
 // ── Reply input ──
-function showReplyInput(commentId, postId) {
+function showReplyInput(commentId, postId, replyToName = '') {
   // Remove any existing reply inputs
   document.querySelectorAll('.reply-input-wrap').forEach(el => el.remove());
 
@@ -516,19 +522,26 @@ function showReplyInput(commentId, postId) {
   const wrap = document.createElement('div');
   wrap.className = 'comment-input-wrap reply-input-wrap';
   wrap.style.marginTop = '0.5rem';
+  const placeholder = replyToName ? `Reply to ${replyToName}…` : 'Write a reply…';
   wrap.innerHTML = `
     <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
-    <textarea class="comment-input" placeholder="Write a reply…" rows="1"></textarea>
+    <textarea class="comment-input" placeholder="${placeholder}" rows="1"></textarea>
     <button class="btn-send">Reply</button>
   `;
 
   const ta = wrap.querySelector('textarea');
+  // Prefill @mention if replying to a specific person
+  if (replyToName) {
+    ta.value = `@${replyToName} `;
+  }
   ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
   ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, commentId, ta); } });
   wrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, commentId, ta));
 
   repliesContainer.appendChild(wrap);
   ta.focus();
+  // Place cursor at end
+  ta.setSelectionRange(ta.value.length, ta.value.length);
 }
 
 // ── Realtime updates ──
