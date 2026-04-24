@@ -455,7 +455,7 @@ button { font-family: var(--font); cursor: pointer; }
 
 .profile-head {
   background: var(--bg2); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); padding: 1.25rem;
+  border-radius: var(--radius-lg); padding: 1.25rem 1.25rem 1rem;
   display: flex; gap: 1.25rem; align-items: flex-start;
   position: relative;
 }
