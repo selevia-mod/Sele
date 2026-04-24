@@ -189,11 +189,18 @@ button { font-family: var(--font); cursor: pointer; }
 }
 .compose-footer { margin-top: 0.5rem; }
 .compose-top { display: flex; gap: 0.75rem; align-items: flex-start; }
+.compose-text-wrap { flex: 1; position: relative; }
 .compose textarea {
-  flex: 1; background: var(--bg3); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 0.7rem 0.9rem;
+  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 0.7rem 3.5rem 0.7rem 0.9rem;
   color: var(--text); font-family: var(--font); font-size: 0.9rem;
   resize: none; min-height: 48px; line-height: 1.5; transition: border-color 0.15s;
+  display: block;
+}
+.compose-text-wrap .char-count {
+  position: absolute; bottom: 8px; right: 12px;
+  font-size: 0.7rem; color: var(--text3);
+  pointer-events: none; background: var(--bg3); padding: 0 4px;
 }
 .compose textarea:focus { outline: none; border-color: var(--purple); }
 .compose textarea::placeholder { color: var(--text3); }
