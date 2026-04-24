@@ -782,6 +782,213 @@ supabase.channel('public-feed')
   .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'posts' }, () => loadFeed())
   .subscribe();
 
+// ── Profile page ──
+const profilePage = document.getElementById('profilePage');
+const feedEl = document.getElementById('feed');
+const storiesEl = document.getElementById('storiesRow');
+const composeEl = document.querySelector('.compose');
+let viewingProfileId = null;
+
+function showFeed() {
+  feedEl.style.display = '';
+  storiesEl.style.display = '';
+  composeEl.style.display = '';
+  profilePage.style.display = 'none';
+  viewingProfileId = null;
+}
+
+function showProfileView() {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'block';
+}
+
+async function openProfile(userId) {
+  showProfileView();
+  viewingProfileId = userId;
+
+  const { data: profile } = await supabase.from('profiles').select('*').eq('id', userId).single();
+  if (!profile) return;
+
+  // Banner
+  const banner = document.getElementById('profileBanner');
+  banner.innerHTML = profile.banner_url ? `<img src="${profile.banner_url}" alt="banner"/>` : '';
+
+  // Avatar
+  const avatarBig = document.getElementById('profileAvatarBig');
+  avatarBig.innerHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(profile.username);
+
+  // Name / badge / bio
+  document.getElementById('profileName').textContent = profile.username;
+  const badge = document.getElementById('profileBadge');
+  badge.textContent = profile.is_guest ? 'Guest' : 'Member';
+  badge.className = 'profile-badge' + (profile.is_guest ? ' guest' : '');
+  document.getElementById('profileBio').textContent = profile.bio || '';
+
+  // Joined date
+  const joined = new Date(profile.created_at);
+  const joinedStr = joined.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  document.getElementById('profileJoined').textContent = joinedStr;
+
+  // Counts
+  const [{ count: followers }, { count: following }, { count: postCount }] = await Promise.all([
+    supabase.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', userId),
+    supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId),
+    supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId)
+  ]);
+  document.getElementById('statFollowers').innerHTML = `<strong>${followers || 0}</strong> followers`;
+  document.getElementById('statFollowing').innerHTML = `<strong>${following || 0}</strong> following`;
+  document.getElementById('statPosts').innerHTML = `<strong>${postCount || 0}</strong> posts`;
+
+  // About tab
+  document.getElementById('aboutUsername').textContent = profile.username;
+  document.getElementById('aboutBio').textContent = profile.bio || '—';
+  document.getElementById('aboutLocation').textContent = profile.location || '—';
+  document.getElementById('aboutWebsite').innerHTML = profile.website ? `<a href="${profile.website}" target="_blank">${profile.website}</a>` : '—';
+  document.getElementById('aboutJoined').textContent = joined.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  document.getElementById('aboutType').textContent = profile.is_guest ? 'Guest account' : 'Member';
+
+  // Action button + edit controls
+  const isOwn = currentUser && currentUser.id === userId;
+  const actionBtn = document.getElementById('profileActionBtn');
+  const editAvatarBtn = document.getElementById('editAvatarBtn');
+  const editBannerBtn = document.getElementById('editBannerBtn');
+
+  if (isOwn) {
+    actionBtn.textContent = '⚙️ Edit profile';
+    actionBtn.onclick = () => openEditProfile(profile);
+    editAvatarBtn.style.display = 'flex';
+    editBannerBtn.style.display = 'flex';
+  } else {
+    const { data: existing } = await supabase.from('follows').select('*').eq('follower_id', currentUser.id).eq('following_id', userId).maybeSingle();
+    actionBtn.textContent = existing ? 'Unfollow' : 'Follow';
+    actionBtn.onclick = () => toggleFollow(userId, !!existing);
+    editAvatarBtn.style.display = 'none';
+    editBannerBtn.style.display = 'none';
+  }
+
+  // Load user's posts
+  loadProfilePosts(userId);
+
+  // Reset tab
+  document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'posts'));
+  document.getElementById('profilePosts').style.display = '';
+  document.getElementById('profileAbout').style.display = 'none';
+}
+
+async function loadProfilePosts(userId) {
+  const wrap = document.getElementById('profilePosts');
+  wrap.innerHTML = '<div class="loading">Loading posts...</div>';
+  const { data } = await supabase
+    .from('posts')
+    .select(`*, profiles(username, avatar_url, is_guest), original:reposted_from(*, profiles(username, avatar_url, is_guest))`)
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+  posts = data || [];
+  wrap.innerHTML = '';
+  if (!posts.length) wrap.innerHTML = '<div class="empty"><h3>No posts yet</h3></div>';
+  else posts.forEach(p => wrap.appendChild(renderPost(p)));
+}
+
+async function toggleFollow(userId, currentlyFollowing) {
+  if (currentlyFollowing) {
+    await supabase.from('follows').delete().eq('follower_id', currentUser.id).eq('following_id', userId);
+    toast('Unfollowed', 'success');
+  } else {
+    await supabase.from('follows').insert({ follower_id: currentUser.id, following_id: userId });
+    toast('Following!', 'success');
+  }
+  openProfile(userId);
+}
+
+// Profile tabs
+document.querySelectorAll('.profile-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.profile-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('profilePosts').style.display = tab.dataset.tab === 'posts' ? '' : 'none';
+    document.getElementById('profileAbout').style.display = tab.dataset.tab === 'about' ? '' : 'none';
+  });
+});
+
+// Edit profile modal
+function openEditProfile(profile) {
+  document.getElementById('editUsername').value = profile.username || '';
+  document.getElementById('editBio').value = profile.bio || '';
+  document.getElementById('editLocation').value = profile.location || '';
+  document.getElementById('editWebsite').value = profile.website || '';
+  document.getElementById('editProfileModal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function closeEditProfile() {
+  document.getElementById('editProfileModal').classList.remove('open');
+  document.body.style.overflow = '';
+}
+document.getElementById('editProfileClose').addEventListener('click', closeEditProfile);
+document.getElementById('editProfileCancel').addEventListener('click', closeEditProfile);
+document.getElementById('editProfileModal').addEventListener('click', (e) => { if (e.target.id === 'editProfileModal') closeEditProfile(); });
+
+document.getElementById('editProfileSave').addEventListener('click', async () => {
+  const btn = document.getElementById('editProfileSave');
+  btn.disabled = true; btn.textContent = 'Saving...';
+  const { error } = await supabase.from('profiles').update({
+    username: document.getElementById('editUsername').value.trim() || 'User',
+    bio: document.getElementById('editBio').value.trim(),
+    location: document.getElementById('editLocation').value.trim(),
+    website: document.getElementById('editWebsite').value.trim()
+  }).eq('id', currentUser.id);
+  btn.disabled = false; btn.textContent = 'Save';
+  if (error) { toast(error.message, 'error'); return; }
+  toast('Profile updated!', 'success');
+  closeEditProfile();
+  const { data: updated } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
+  currentProfile = updated;
+  updateTopbarUser();
+  openProfile(currentUser.id);
+});
+
+// Avatar upload
+document.getElementById('editAvatarBtn').addEventListener('click', () => document.getElementById('avatarInput').click());
+document.getElementById('avatarInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  toast('Uploading...', '');
+  const url = await uploadImage(file);
+  if (!url) return;
+  await supabase.from('profiles').update({ avatar_url: url }).eq('id', currentUser.id);
+  currentProfile.avatar_url = url;
+  updateTopbarUser();
+  toast('Avatar updated!', 'success');
+  openProfile(currentUser.id);
+});
+
+// Banner upload
+document.getElementById('editBannerBtn').addEventListener('click', () => document.getElementById('bannerInput').click());
+document.getElementById('bannerInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  toast('Uploading banner...', '');
+  const url = await uploadImage(file);
+  if (!url) return;
+  await supabase.from('profiles').update({ banner_url: url }).eq('id', currentUser.id);
+  toast('Cover updated!', 'success');
+  openProfile(currentUser.id);
+});
+
+// Open own profile from sidebar
+document.getElementById('btnProfile').addEventListener('click', () => {
+  if (currentUser) openProfile(currentUser.id);
+});
+
+// Open profile when clicking avatar in topbar
+document.getElementById('topbarAvatar').addEventListener('click', () => {
+  if (currentUser) openProfile(currentUser.id);
+});
+
+// Add Home button functionality — the first sidebar item
+document.querySelector('.sidebar-item.active')?.addEventListener('click', showFeed);
+
 initAuth();
 
 // ── Theme toggle ──
