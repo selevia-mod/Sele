@@ -157,16 +157,16 @@ button { font-family: var(--font); cursor: pointer; }
 /* ── STORIES ROW (user avatars) ── */
 .stories-row {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  padding: 1rem; margin-bottom: 1.5rem;
-  display: flex; gap: 1rem; overflow-x: auto; position: relative;
+  padding: 0.75rem; margin-bottom: 1rem;
+  display: flex; gap: 0.75rem; overflow-x: auto; position: relative;
 }
 .stories-row::-webkit-scrollbar { height: 4px; }
 .story-item { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; cursor: pointer; flex-shrink: 0; }
 .story-avatar {
-  width: 76px; height: 76px; border-radius: var(--radius); overflow: hidden;
+  width: 60px; height: 60px; border-radius: var(--radius-sm); overflow: hidden;
   border: 2px solid transparent; transition: all 0.15s;
   background: var(--purple); display: flex; align-items: center; justify-content: center;
-  color: #fff; font-weight: 600; font-size: 1.5rem;
+  color: #fff; font-weight: 600; font-size: 1.2rem;
 }
 .story-item:hover .story-avatar { border-color: var(--pink); transform: scale(1.03); }
 .story-avatar img { width: 100%; height: 100%; object-fit: cover; }
@@ -185,14 +185,15 @@ button { font-family: var(--font); cursor: pointer; }
 /* ── COMPOSE BOX ── */
 .compose {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  padding: 1.25rem; margin-bottom: 1.5rem;
+  padding: 0.9rem 1rem; margin-bottom: 1rem;
 }
+.compose-footer { margin-top: 0.5rem; }
 .compose-top { display: flex; gap: 0.75rem; align-items: flex-start; }
 .compose textarea {
   flex: 1; background: var(--bg3); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 0.85rem 1rem;
+  border-radius: var(--radius); padding: 0.7rem 0.9rem;
   color: var(--text); font-family: var(--font); font-size: 0.9rem;
-  resize: none; min-height: 80px; line-height: 1.6; transition: border-color 0.15s;
+  resize: none; min-height: 48px; line-height: 1.5; transition: border-color 0.15s;
 }
 .compose textarea:focus { outline: none; border-color: var(--purple); }
 .compose textarea::placeholder { color: var(--text3); }
@@ -229,11 +230,11 @@ button { font-family: var(--font); cursor: pointer; }
 /* ── POST CARD ── */
 .post-card {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  padding: 1.25rem; margin-bottom: 1.25rem; animation: fadeUp 0.3s ease both;
+  padding: 1rem 1.1rem; margin-bottom: 0.85rem; animation: fadeUp 0.3s ease both;
 }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
-.post-header { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 1rem; }
+.post-header { display: flex; align-items: center; gap: 0.65rem; margin-bottom: 0.65rem; }
 .post-author { font-size: 0.95rem; font-weight: 600; }
 .post-time { font-size: 0.75rem; color: var(--text3); margin-top: 2px; }
 .post-guest { font-size: 0.67rem; background: var(--bg3); color: var(--text3); padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); margin-left: 0.4rem; }
