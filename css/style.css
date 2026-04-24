@@ -253,10 +253,10 @@ button { font-family: var(--font); cursor: pointer; }
 .reposted-card .post-body { font-size: 0.85rem; margin-bottom: 0.5rem; }
 
 /* ── REACTION COUNTS (above action bar) ── */
-.post-stats { display: flex; align-items: center; justify-content: space-between; padding: 0.25rem 0 0.5rem; font-size: 0.74rem; color: var(--text3); min-height: 18px; }
+.post-stats { display: flex; align-items: center; justify-content: space-between; padding: 0.25rem 0 0.5rem; font-size: 0.8rem; color: var(--text3); min-height: 20px; }
 .post-stats:empty { display: none; }
-.post-stats .rcount { display: flex; align-items: center; gap: 3px; }
-.post-stats .rcount-emojis { display: inline-flex; font-size: 12px; letter-spacing: -3px; margin-right: 3px; }
+.post-stats .rcount { display: flex; align-items: center; gap: 4px; }
+.post-stats .rcount-emojis { display: inline-flex; font-size: 15px; letter-spacing: -2px; margin-right: 4px; }
 
 /* ── ACTION BAR ── */
 .post-actions {
