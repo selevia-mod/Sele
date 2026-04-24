@@ -87,8 +87,21 @@
 
 <div id="toast" style="display:none"></div>
 
-<!-- Lightbox -->
-<div class="lightbox" id="lightbox">
+<!-- Repost Modal -->
+<div class="modal-overlay" id="repostModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">Repost</div>
+      <button class="modal-close-btn" id="repostClose">×</button>
+    </div>
+    <textarea class="repost-caption" id="repostCaption" placeholder="Add a caption (optional)…" maxlength="2000"></textarea>
+    <div id="repostPreview" class="repost-preview"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="repostCancel">Cancel</button>
+      <button class="btn btn-purple btn-sm" id="repostSubmit">Repost</button>
+    </div>
+  </div>
+</div>
   <button class="lightbox-close" id="lightboxClose">×</button>
   <img id="lightboxImg" src="" alt=""/>
 </div>
