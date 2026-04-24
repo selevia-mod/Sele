@@ -388,7 +388,7 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
   const labelEl = trigger.querySelector('.r-label-text');
 
   if (activeR) {
-    iconEl.innerHTML = `<span style="font-size:15px">${activeR.emoji}</span>`;
+    iconEl.innerHTML = `<span style="font-size:17px">${activeR.emoji}</span>`;
     if (labelEl) labelEl.textContent = activeR.label;
     trigger.classList.add('reacted');
   } else {
