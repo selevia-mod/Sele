@@ -207,3 +207,21 @@ button { font-family: var(--font); cursor: pointer; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
 .upload-progress { font-size: 0.75rem; color: var(--text3); margin-top: 4px; }
+
+/* ── Repost Modal ── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 1500; display: none; align-items: center; justify-content: center; padding: 1rem; }
+.modal-overlay.open { display: flex; animation: fadeIn 0.2s; }
+.modal-box { background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius); padding: 1.5rem; max-width: 520px; width: 100%; max-height: 90vh; overflow-y: auto; animation: slideUp 0.2s ease; }
+@keyframes slideUp { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+.modal-title { font-family: var(--display); font-size: 1.3rem; color: var(--text); }
+.modal-close-btn { background: var(--bg3); border: none; color: var(--text2); width: 30px; height: 30px; border-radius: 50%; font-size: 1.1rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.modal-close-btn:hover { background: var(--border2); color: var(--text); }
+.repost-caption { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.85rem 1rem; color: var(--text); font-family: var(--font); font-size: 0.9rem; resize: none; min-height: 80px; line-height: 1.6; margin-bottom: 1rem; }
+.repost-caption:focus { outline: none; border-color: var(--purple); }
+.repost-preview { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem; margin-bottom: 1rem; max-height: 300px; overflow-y: auto; }
+.repost-preview .post-header { margin-bottom: 0.5rem; }
+.repost-preview .avatar { width: 32px; height: 32px; font-size: 0.72rem; }
+.repost-preview .post-body { font-size: 0.85rem; margin-bottom: 0.5rem; }
+.repost-preview img { max-height: 180px; border-radius: 8px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 0.5rem; }
