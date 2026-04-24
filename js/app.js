@@ -783,3 +783,17 @@ supabase.channel('public-feed')
   .subscribe();
 
 initAuth();
+
+// ── Theme toggle ──
+function applyTheme(theme) {
+  if (theme === 'light') document.body.classList.add('light');
+  else document.body.classList.remove('light');
+}
+applyTheme(localStorage.getItem('selebox_theme') || 'dark');
+
+document.getElementById('btnTheme').addEventListener('click', () => {
+  const isLight = document.body.classList.contains('light');
+  const newTheme = isLight ? 'dark' : 'light';
+  applyTheme(newTheme);
+  localStorage.setItem('selebox_theme', newTheme);
+});
