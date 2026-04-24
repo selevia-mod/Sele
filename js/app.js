@@ -927,34 +927,93 @@ document.getElementById('editProfileSave').addEventListener('click', async () =>
   openProfile(currentUser.id);
 });
 
+// ── Image cropper ──
+let cropperInstance = null;
+let cropField = null; // 'avatar_url' or 'banner_url'
+
+function openCropModal(file, aspectRatio, field, title) {
+  cropField = field;
+  document.getElementById('cropTitle').textContent = title;
+
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const img = document.getElementById('cropImage');
+    img.src = ev.target.result;
+    document.getElementById('cropModal').classList.add('open');
+    document.body.style.overflow = 'hidden';
+
+    setTimeout(() => {
+      if (cropperInstance) cropperInstance.destroy();
+      cropperInstance = new Cropper(img, {
+        aspectRatio: aspectRatio,
+        viewMode: 1,
+        autoCropArea: 1,
+        background: false,
+        movable: true,
+        zoomable: true,
+        scalable: false,
+        rotatable: true
+      });
+    }, 150);
+  };
+  reader.readAsDataURL(file);
+}
+
+function closeCropModal() {
+  document.getElementById('cropModal').classList.remove('open');
+  document.body.style.overflow = '';
+  if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
+}
+
+document.getElementById('cropClose').addEventListener('click', closeCropModal);
+document.getElementById('cropCancel').addEventListener('click', closeCropModal);
+
+document.getElementById('cropSave').addEventListener('click', async () => {
+  if (!cropperInstance) return;
+  const btn = document.getElementById('cropSave');
+  btn.disabled = true; btn.textContent = 'Saving...';
+
+  const canvas = cropperInstance.getCroppedCanvas({
+    maxWidth: 1600, maxHeight: 1600,
+    imageSmoothingQuality: 'high'
+  });
+
+  canvas.toBlob(async (blob) => {
+    const file = new File([blob], `crop-${Date.now()}.jpg`, { type: 'image/jpeg' });
+    const url = await uploadImage(file);
+    if (!url) { btn.disabled = false; btn.textContent = 'Save'; return; }
+
+    await supabase.from('profiles').update({ [cropField]: url }).eq('id', currentUser.id);
+    if (cropField === 'avatar_url') {
+      currentProfile.avatar_url = url;
+      updateTopbarUser();
+      toast('Avatar updated!', 'success');
+    } else {
+      toast('Cover updated!', 'success');
+    }
+    btn.disabled = false; btn.textContent = 'Save';
+    closeCropModal();
+    openProfile(currentUser.id);
+  }, 'image/jpeg', 0.92);
+});
+
 // Avatar upload
 document.getElementById('editAvatarBtn').addEventListener('click', () => document.getElementById('avatarInput').click());
-document.getElementById('avatarInput').addEventListener('change', async (e) => {
+document.getElementById('avatarInput').addEventListener('change', (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  toast('Uploading...', '');
-  const url = await uploadImage(file);
-  if (!url) return;
-  await supabase.from('profiles').update({ avatar_url: url }).eq('id', currentUser.id);
-  currentProfile.avatar_url = url;
-  updateTopbarUser();
-  toast('Avatar updated!', 'success');
-  openProfile(currentUser.id);
+  openCropModal(file, 1, 'avatar_url', 'Crop your avatar');
+  e.target.value = '';
 });
 
 // Banner upload
 document.getElementById('editBannerBtn').addEventListener('click', () => document.getElementById('bannerInput').click());
-document.getElementById('bannerInput').addEventListener('change', async (e) => {
+document.getElementById('bannerInput').addEventListener('change', (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  toast('Uploading banner...', '');
-  const url = await uploadImage(file);
-  if (!url) return;
-  await supabase.from('profiles').update({ banner_url: url }).eq('id', currentUser.id);
-  toast('Cover updated!', 'success');
-  openProfile(currentUser.id);
+  openCropModal(file, 3, 'banner_url', 'Crop your cover photo');
+  e.target.value = '';
 });
-
 // Open own profile from sidebar
 document.getElementById('btnProfile').addEventListener('click', () => {
   if (currentUser) openProfile(currentUser.id);
