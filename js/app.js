@@ -331,15 +331,17 @@ async function loadReactions(targetId, targetType) {
   updateReactionUI(targetId, targetType, counts, userReaction);
 }
 
-function updateReactionUI(targetId, targetType, counts, userReaction) {
-  const wrap = document.querySelector(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
-  if (!wrap) return;
-
-  const trigger = wrap.querySelector('.reaction-trigger');
+const trigger = wrap.querySelector('.reaction-trigger');
   const total = Object.values(counts).reduce((a,b) => a+b, 0);
-  const activeR = userReaction ? REACTIONS.find(r => r.key === userReaction) : null;
 
-  trigger.querySelector('.r-current').textContent = activeR ? activeR.emoji : '♡';
+  // Show all unique emojis that people have used, sorted by popularity
+  const usedEmojis = REACTIONS
+    .filter(r => counts[r.key] > 0)
+    .sort((a, b) => counts[b.key] - counts[a.key])
+    .map(r => r.emoji)
+    .join('');
+
+  trigger.querySelector('.r-current').textContent = usedEmojis || '♡';
   trigger.querySelector('.r-count').textContent = total > 0 ? total : '';
   trigger.classList.toggle('reacted', !!userReaction);
 
