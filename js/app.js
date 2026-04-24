@@ -834,7 +834,9 @@ async function openProfile(userId) {
     actionBtn.textContent = '⚙️ Edit profile';
     actionBtn.onclick = () => openEditProfile(profile);
     editAvatarBtn.style.display = 'flex';
+    editAvatarBtn.style.visibility = 'visible';
     editBannerBtn.style.display = 'flex';
+    editBannerBtn.style.visibility = 'visible';
   } else {
     const { data: existing } = await supabase.from('follows').select('*').eq('follower_id', currentUser.id).eq('following_id', userId).maybeSingle();
     actionBtn.textContent = existing ? 'Unfollow' : 'Follow';
