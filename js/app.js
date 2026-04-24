@@ -388,7 +388,7 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
   const labelEl = trigger.querySelector('span:last-child');
 
   if (activeR) {
-    iconEl.innerHTML = `<span style="font-size:18px">${activeR.emoji}</span>`;
+    iconEl.innerHTML = `<span style="font-size:15px">${activeR.emoji}</span>`;
     labelEl.textContent = activeR.label;
     trigger.classList.add('reacted');
   } else {
