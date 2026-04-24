@@ -531,3 +531,7 @@ button { font-family: var(--font); cursor: pointer; }
 /* Light mode tweaks */
 body.light .profile-banner { background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 50%, #f472b6 100%); }
 body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d97706; }
+
+/* ── Image cropper ── */
+.crop-container { max-height: 500px; background: #000; border-radius: var(--radius-sm); overflow: hidden; }
+.crop-container img { display: block; max-width: 100%; }
