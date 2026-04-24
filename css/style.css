@@ -218,25 +218,26 @@ button { font-family: var(--font); cursor: pointer; }
 .reposted-card .post-body { font-size: 0.85rem; margin-bottom: 0.5rem; }
 
 /* ── REACTION COUNTS (above action bar) ── */
-.post-stats { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0 0.75rem; font-size: 0.8rem; color: var(--text3); }
-.post-stats .rcount { display: flex; align-items: center; gap: 4px; }
-.post-stats .rcount-emojis { display: inline-flex; font-size: 14px; letter-spacing: -4px; margin-right: 4px; }
+.post-stats { display: flex; align-items: center; justify-content: space-between; padding: 0.25rem 0 0.5rem; font-size: 0.74rem; color: var(--text3); min-height: 18px; }
+.post-stats:empty { display: none; }
+.post-stats .rcount { display: flex; align-items: center; gap: 3px; }
+.post-stats .rcount-emojis { display: inline-flex; font-size: 12px; letter-spacing: -3px; margin-right: 3px; }
 
 /* ── ACTION BAR ── */
 .post-actions {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
-  padding-top: 0.75rem; border-top: 1px solid var(--border);
+  padding-top: 0.5rem; border-top: 1px solid var(--border);
   position: relative;
 }
 .action-btn {
-  background: none; border: none; color: var(--text2); font-size: 0.82rem; font-weight: 500;
-  padding: 0.7rem; border-radius: var(--radius-sm); cursor: pointer;
-  display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+  background: none; border: none; color: var(--text3); font-size: 0.78rem; font-weight: 500;
+  padding: 0.45rem; border-radius: var(--radius-sm); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 0.4rem;
   transition: background 0.15s, color 0.15s;
 }
 .action-btn:hover { background: var(--bg3); color: var(--text); }
-.action-btn.reacted { color: var(--pink); }
-.action-btn svg { width: 18px; height: 18px; }
+.action-btn.reacted { color: var(--pink); font-weight: 600; }
+.action-btn svg { width: 15px; height: 15px; }
 
 /* ── REACTION PICKER ── */
 .reaction-wrap { position: relative; }
