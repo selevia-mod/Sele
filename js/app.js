@@ -340,7 +340,12 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
   const total = Object.values(counts).reduce((a,b) => a+b, 0);
   const activeR = userReaction ? REACTIONS.find(r => r.key === userReaction) : null;
 
-  trigger.querySelector('.r-current').textContent = activeR ? activeR.emoji : '♡';
+  const usedEmojis = REACTIONS
+    .filter(r => counts[r.key] > 0)
+    .sort((a, b) => counts[b.key] - counts[a.key])
+    .map(r => r.emoji)
+    .join('');
+  trigger.querySelector('.r-current').textContent = usedEmojis || '♡';
   trigger.querySelector('.r-count').textContent = total > 0 ? total : '';
   trigger.classList.toggle('reacted', !!userReaction);
 
