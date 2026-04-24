@@ -124,6 +124,19 @@ button { font-family: var(--font); cursor: pointer; }
 .comment-toggle { display: flex; align-items: center; gap: 5px; background: none; border: none; color: var(--text2); font-size: 0.8rem; padding: 5px 10px; border-radius: 99px; transition: all 0.15s; }
 .comment-toggle:hover { color: var(--purple2); background: rgba(139,92,246,0.1); }
 .comment-toggle svg { width: 14px; height: 14px; }
+.reposted-banner { display: flex; align-items: center; gap: 6px; color: var(--text3); font-size: 0.75rem; margin-bottom: 0.5rem; }
+.reposted-banner svg { width: 12px; height: 12px; }
+.reposted-card { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.85rem 1rem; margin-top: 0.5rem; }
+.reposted-card .post-header { margin-bottom: 0.5rem; }
+.reposted-card .avatar { width: 28px; height: 28px; font-size: 0.7rem; }
+.reposted-card .post-author { font-size: 0.82rem; }
+.reposted-card .post-body { font-size: 0.85rem; margin-bottom: 0.5rem; }
+.reposted-card .post-image img { max-height: 300px; }
+.share-menu { position: absolute; bottom: calc(100% + 8px); right: 0; background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-sm); padding: 0.5rem; box-shadow: 0 8px 32px rgba(0,0,0,0.4); z-index: 50; min-width: 180px; display: none; }
+.share-menu.visible { display: block; }
+.share-option { display: flex; align-items: center; gap: 10px; padding: 0.5rem 0.75rem; border-radius: 6px; color: var(--text); font-size: 0.82rem; cursor: pointer; background: none; border: none; width: 100%; text-align: left; transition: background 0.15s; }
+.share-option:hover { background: var(--bg3); }
+.share-wrap { position: relative; }
 
 /* ── Comments ── */
 .comments-section { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
