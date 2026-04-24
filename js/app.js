@@ -1,13 +1,13 @@
-// â”€â”€ Reactions config â”€â”€
+// ── Reactions config ──
 const REACTIONS = [
-  { key: 'heart',  emoji: 'â¤ï¸',  label: 'Love' },
-  { key: 'laugh',  emoji: 'ðŸ˜‚',  label: 'Haha' },
-  { key: 'sad',    emoji: 'ðŸ˜¢',  label: 'Sad' },
-  { key: 'cry',    emoji: 'ðŸ˜­',  label: 'Cry' },
-  { key: 'angry',  emoji: 'ðŸ˜¡',  label: 'Angry' }
+  { key: 'heart',  emoji: '❤️',  label: 'Love' },
+  { key: 'laugh',  emoji: '😂',  label: 'Haha' },
+  { key: 'sad',    emoji: '😢',  label: 'Sad' },
+  { key: 'cry',    emoji: '😭',  label: 'Cry' },
+  { key: 'angry',  emoji: '😡',  label: 'Angry' }
 ];
 
-// â”€â”€ Storage helpers â”€â”€
+// ── Storage ──
 function getPosts() {
   return JSON.parse(localStorage.getItem('luminary_posts') || '[]');
 }
@@ -15,7 +15,7 @@ function savePosts(posts) {
   localStorage.setItem('luminary_posts', JSON.stringify(posts));
 }
 
-// â”€â”€ Seed demo posts if first visit â”€â”€
+// ── Seed demo posts ──
 function seedPosts() {
   if (getPosts().length > 0) return;
   const demos = [
@@ -24,13 +24,13 @@ function seedPosts() {
       author: 'Sofia Reyes',
       title: 'The Art of Slowing Down',
       tag: 'Life',
-      body: `We live in a world that celebrates speed. Fast food, fast fashion, fast replies. But I've been learning, slowly and awkwardly, that the most meaningful things in life resist acceleration.\n\nLast month I spent a week without my phone's notifications. Not a digital detox â€” I still used my phone â€” but I turned off every ping, buzz, and banner. What I found surprised me: I had opinions again. Quiet, unhurried ones.\n\nSlowing down isn't laziness. It's a radical act of self-possession in an age that profits from your distraction.`,
+      body: "We live in a world that celebrates speed. Fast food, fast fashion, fast replies. But I've been learning, slowly and awkwardly, that the most meaningful things in life resist acceleration.\n\nLast month I spent a week without my phone's notifications. Not a digital detox — I still used my phone — but I turned off every ping, buzz, and banner. What I found surprised me: I had opinions again. Quiet, unhurried ones.\n\nSlowing down isn't laziness. It's a radical act of self-possession in an age that profits from your distraction.",
       date: 'April 20, 2026',
       reactions: { heart: 18, laugh: 3, sad: 1, cry: 0, angry: 2 },
       userReaction: null,
       comments: [
         { author: 'James', text: 'This really resonated with me. Beautifully written.' },
-        { author: 'Pia', text: 'The part about having opinions again â€” yes. Exactly this.' }
+        { author: 'Pia', text: 'The part about having opinions again — yes. Exactly this.' }
       ]
     },
     {
@@ -38,20 +38,18 @@ function seedPosts() {
       author: 'Marcus Lin',
       title: 'Why I Started Cooking at Midnight',
       tag: 'Food',
-      body: `It started out of insomnia and boredom. Now it's the thing I look forward to most.\n\nThere's something about cooking at midnight that strips away the performance of it. No one's watching. There's no occasion. Just you, a pan, and whatever's left in the fridge.\n\nI've made my best meals at 1am. Pasta carbonara on a Tuesday. A lamb stew that took three hours and was gone in ten minutes. Cooking stopped being a chore when it became a secret.`,
+      body: "It started out of insomnia and boredom. Now it's the thing I look forward to most.\n\nThere's something about cooking at midnight that strips away the performance of it. No one's watching. There's no occasion. Just you, a pan, and whatever's left in the fridge.\n\nI've made my best meals at 1am. Pasta carbonara on a Tuesday. A lamb stew that took three hours and was gone in ten minutes. Cooking stopped being a chore when it became a secret.",
       date: 'April 18, 2026',
       reactions: { heart: 31, laugh: 8, sad: 0, cry: 0, angry: 2 },
       userReaction: null,
-      comments: [
-        { author: 'Tara', text: 'Midnight cooking hits different. Totally agree.' }
-      ]
+      comments: [{ author: 'Tara', text: 'Midnight cooking hits different. Totally agree.' }]
     },
     {
       id: 'demo3',
       author: 'Nadia Osei',
       title: 'Notes from a Long Train Ride',
       tag: 'Travel',
-      body: `Sixteen hours on a train from Lisbon to Madrid. I brought a book I never opened.\n\nInstead I watched Portugal turn into Spain through a dirty window. I eavesdropped on a grandmother teaching her grandson to play cards. I ate a terrible ham sandwich and thought it was perfect.\n\nTravel doesn't have to be efficient. Sometimes the journey is the destination â€” not as a clichÃ©, but as a literal, stubborn fact.`,
+      body: "Sixteen hours on a train from Lisbon to Madrid. I brought a book I never opened.\n\nInstead I watched Portugal turn into Spain through a dirty window. I eavesdropped on a grandmother teaching her grandson to play cards. I ate a terrible ham sandwich and thought it was perfect.\n\nTravel doesn't have to be efficient. Sometimes the journey is the destination — not as a cliché, but as a literal, stubborn fact.",
       date: 'April 15, 2026',
       reactions: { heart: 45, laugh: 5, sad: 2, cry: 3, angry: 1 },
       userReaction: null,
@@ -61,42 +59,34 @@ function seedPosts() {
   savePosts(demos);
 }
 
-// â”€â”€ Utilities â”€â”€
+// ── Utilities ──
 function initials(name) {
   return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
 }
 function excerpt(text, len = 160) {
   return text.length > len ? text.slice(0, len).trimEnd() + '...' : text;
 }
-function totalReactions(reactions) {
-  return Object.values(reactions).reduce((a, b) => a + b, 0);
-}
-function topReactions(reactions) {
-  return REACTIONS
-    .filter(r => reactions[r.key] > 0)
-    .sort((a, b) => reactions[b.key] - reactions[a.key])
-    .slice(0, 3)
-    .map(r => r.emoji)
-    .join('');
+function totalReactions(r) { return Object.values(r).reduce((a, b) => a + b, 0); }
+function topReactions(r) {
+  return REACTIONS.filter(x => r[x.key] > 0).sort((a, b) => r[b.key] - r[a.key]).slice(0, 3).map(x => x.emoji).join('');
 }
 
-// â”€â”€ Reaction pill HTML â”€â”€
+// ── Reaction pill HTML ──
 function reactionPillHTML(post) {
   const total = totalReactions(post.reactions);
   const top = topReactions(post.reactions);
   const active = post.userReaction;
-  const activeEmoji = active ? REACTIONS.find(r => r.key === active).emoji : 'heart';
-  const triggerLabel = active ? REACTIONS.find(r => r.key === active).emoji : 'React';
+  const activeEmoji = active ? REACTIONS.find(r => r.key === active).emoji : '';
   return `
-    <div class="reaction-wrap" data-id="${post.id}">
-      <button class="reaction-trigger ${active ? 'reacted' : ''}" title="React">
-        ${active ? '<span class="reaction-current">' + triggerLabel + '</span>' : '<span class="reaction-current">&#9825;</span>'}
-        ${top && active ? '<span class="reaction-tops">' + top + '</span>' : ''}
+    <div class="reaction-wrap" data-postid="${post.id}">
+      <button type="button" class="reaction-trigger ${active ? 'reacted' : ''}" data-postid="${post.id}">
+        <span class="reaction-current">${active ? activeEmoji : '♡'}</span>
+        ${top && !active ? '<span class="reaction-tops">' + top + '</span>' : ''}
         <span class="reaction-count">${total > 0 ? total : 'React'}</span>
       </button>
-      <div class="reaction-picker">
+      <div class="reaction-picker" data-postid="${post.id}">
         ${REACTIONS.map(r => `
-          <button class="reaction-option ${active === r.key ? 'active' : ''}" data-key="${r.key}" data-postid="${post.id}" title="${r.label}">
+          <button type="button" class="reaction-option ${active === r.key ? 'active' : ''}" data-key="${r.key}" data-postid="${post.id}" title="${r.label}">
             <span class="r-emoji">${r.emoji}</span>
             <span class="r-label">${r.label}</span>
           </button>
@@ -106,7 +96,7 @@ function reactionPillHTML(post) {
   `;
 }
 
-// â”€â”€ Handle reaction â”€â”€
+// ── Handle reaction ──
 function handleReaction(postId, key) {
   const posts = getPosts();
   const post = posts.find(p => p.id === postId);
@@ -125,62 +115,10 @@ function handleReaction(postId, key) {
   }
   savePosts(posts);
   renderFeed();
-  if (activePostId === postId) openModal(postId);
+  if (activePostId === postId) refreshModalActions(post.id);
 }
 
-// â”€â”€ Attach reaction events (delegation-based, no DOM rebuild issues) â”€â”€
-function attachReactionEvents(container) {
-  container.querySelectorAll('.reaction-wrap').forEach(wrap => {
-    const picker = wrap.querySelector('.reaction-picker');
-    const trigger = wrap.querySelector('.reaction-trigger');
-    let hideTimer;
-
-    // Hover to open (desktop)
-    trigger.addEventListener('mouseenter', () => {
-      clearTimeout(hideTimer);
-      picker.classList.add('visible');
-    });
-    wrap.addEventListener('mouseleave', () => {
-      hideTimer = setTimeout(() => picker.classList.remove('visible'), 300);
-    });
-    picker.addEventListener('mouseenter', () => clearTimeout(hideTimer));
-
-    // Click trigger to toggle (mobile)
-    trigger.addEventListener('click', (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      picker.classList.toggle('visible');
-    });
-  });
-
-  // Global delegation: catch reaction clicks anywhere in container
-  // Using mousedown so it fires before card's click closes things
-  container.addEventListener('mousedown', (e) => {
-    const btn = e.target.closest('.reaction-option');
-    if (!btn) return;
-    e.stopPropagation();
-    e.preventDefault();
-    const postId = btn.dataset.postid;
-    const key = btn.dataset.key;
-    const picker = btn.closest('.reaction-picker');
-    if (picker) picker.classList.remove('visible');
-    handleReaction(postId, key);
-  });
-
-  container.addEventListener('touchend', (e) => {
-    const btn = e.target.closest('.reaction-option');
-    if (!btn) return;
-    e.stopPropagation();
-    e.preventDefault();
-    const postId = btn.dataset.postid;
-    const key = btn.dataset.key;
-    const picker = btn.closest('.reaction-picker');
-    if (picker) picker.classList.remove('visible');
-    handleReaction(postId, key);
-  });
-}
-
-// â”€â”€ Render feed â”€â”€
+// ── Render feed ──
 function renderFeed() {
   const feed = document.getElementById('feed');
   if (!feed) return;
@@ -194,39 +132,37 @@ function renderFeed() {
   }
 
   posts.forEach((post, i) => {
-    const card = document.createElement('div');
+    const card = document.createElement('article');
     card.className = 'post-card';
+    card.dataset.postid = post.id;
     card.style.animationDelay = `${i * 0.07}s`;
     card.innerHTML = `
-      <div class="post-meta">
-        <div class="post-avatar">${initials(post.author)}</div>
-        <span class="post-author">${post.author}</span>
-        ${post.tag ? '<span class="post-tag">' + post.tag + '</span>' : ''}
-        <span class="post-date">${post.date}</span>
+      <div class="post-clickable" data-action="open" data-postid="${post.id}">
+        <div class="post-meta">
+          <div class="post-avatar">${initials(post.author)}</div>
+          <span class="post-author">${post.author}</span>
+          ${post.tag ? '<span class="post-tag">' + post.tag + '</span>' : ''}
+          <span class="post-date">${post.date}</span>
+        </div>
+        <h2 class="post-title">${post.title}</h2>
+        <p class="post-excerpt">${excerpt(post.body)}</p>
       </div>
-      <h2 class="post-title">${post.title}</h2>
-      <p class="post-excerpt">${excerpt(post.body)}</p>
       <div class="post-footer">
         ${reactionPillHTML(post)}
-        <button class="action-btn comment-btn" data-id="${post.id}">
+        <button type="button" class="action-btn comment-btn" data-action="open" data-postid="${post.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
           ${post.comments.length}
         </button>
-        <span class="read-more">Read more</span>
+        <span class="read-more" data-action="open" data-postid="${post.id}">Read more →</span>
       </div>
     `;
-    card.addEventListener('click', (e) => {
-      if (!e.target.closest('.reaction-wrap')) openModal(post.id);
-    });
     feed.appendChild(card);
   });
-
-  attachReactionEvents(feed);
 }
 
-// â”€â”€ Modal â”€â”€
+// ── Modal ──
 let activePostId = null;
 
 function openModal(id) {
@@ -246,22 +182,26 @@ function openModal(id) {
     <p class="modal-body-text">${post.body}</p>
   `;
 
-  const actionsEl = document.getElementById('modalActions');
-  actionsEl.innerHTML = `
+  refreshModalActions(id);
+  renderComments(post);
+  document.getElementById('postModal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function refreshModalActions(id) {
+  const posts = getPosts();
+  const post = posts.find(p => p.id === id);
+  if (!post) return;
+  document.getElementById('modalActions').innerHTML = `
     <div style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap;">
       ${reactionPillHTML(post)}
       <div class="reaction-summary">
-        ${REACTIONS.filter(r => (post.reactions && post.reactions[r.key] > 0)).map(r =>
+        ${REACTIONS.filter(r => post.reactions && post.reactions[r.key] > 0).map(r =>
           '<span class="reaction-stat">' + r.emoji + ' <strong>' + post.reactions[r.key] + '</strong></span>'
         ).join('')}
       </div>
     </div>
   `;
-
-  attachReactionEvents(actionsEl);
-  renderComments(post);
-  document.getElementById('postModal').classList.add('open');
-  document.body.style.overflow = 'hidden';
 }
 
 function renderComments(post) {
@@ -269,8 +209,14 @@ function renderComments(post) {
   list.innerHTML = post.comments.length === 0
     ? '<p style="font-size:0.85rem;color:var(--ink-muted);">No comments yet. Be the first!</p>'
     : post.comments.map(c =>
-        '<div class="comment-item"><p class="comment-author">' + c.author + '</p><p class="comment-text">' + c.text + '</p></div>'
+        '<div class="comment-item"><p class="comment-author">' + escapeHTML(c.author) + '</p><p class="comment-text">' + escapeHTML(c.text) + '</p></div>'
       ).join('');
+}
+
+function escapeHTML(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
 }
 
 function closeModal() {
@@ -279,11 +225,89 @@ function closeModal() {
   activePostId = null;
 }
 
-// â”€â”€ Comment submit â”€â”€
+// ── GLOBAL delegated click handler — handles everything in one place ──
+document.addEventListener('click', (e) => {
+  // 1. Reaction option click (emoji picker)
+  const option = e.target.closest('.reaction-option');
+  if (option) {
+    e.preventDefault();
+    e.stopPropagation();
+    const postId = option.dataset.postid;
+    const key = option.dataset.key;
+    const picker = option.closest('.reaction-picker');
+    if (picker) picker.classList.remove('visible');
+    handleReaction(postId, key);
+    return;
+  }
+
+  // 2. Reaction trigger click (toggle picker on mobile/desktop)
+  const trigger = e.target.closest('.reaction-trigger');
+  if (trigger) {
+    e.preventDefault();
+    e.stopPropagation();
+    const wrap = trigger.closest('.reaction-wrap');
+    const picker = wrap.querySelector('.reaction-picker');
+    const wasVisible = picker.classList.contains('visible');
+    // Close all other pickers
+    document.querySelectorAll('.reaction-picker.visible').forEach(p => {
+      if (p !== picker) p.classList.remove('visible');
+    });
+    picker.classList.toggle('visible', !wasVisible);
+    return;
+  }
+
+  // 3. Modal close button
+  if (e.target.closest('#modalClose')) {
+    e.preventDefault();
+    closeModal();
+    return;
+  }
+
+  // 4. Modal overlay click (outside modal box)
+  if (e.target.id === 'postModal') {
+    closeModal();
+    return;
+  }
+
+  // 5. Open post (any element with data-action="open")
+  const opener = e.target.closest('[data-action="open"]');
+  if (opener) {
+    const postId = opener.dataset.postid;
+    if (postId) openModal(postId);
+    return;
+  }
+
+  // 6. Close any open reaction pickers on outside click
+  document.querySelectorAll('.reaction-picker.visible').forEach(p => p.classList.remove('visible'));
+});
+
+// Desktop hover: show picker when hovering trigger
+document.addEventListener('mouseover', (e) => {
+  const trigger = e.target.closest('.reaction-trigger');
+  if (trigger) {
+    const wrap = trigger.closest('.reaction-wrap');
+    const picker = wrap.querySelector('.reaction-picker');
+    picker.classList.add('visible');
+  }
+});
+
+document.addEventListener('mouseout', (e) => {
+  const wrap = e.target.closest('.reaction-wrap');
+  if (!wrap) return;
+  // Only hide if mouse left the whole wrap
+  const to = e.relatedTarget;
+  if (wrap.contains(to)) return;
+  const picker = wrap.querySelector('.reaction-picker');
+  setTimeout(() => {
+    if (!wrap.matches(':hover')) picker.classList.remove('visible');
+  }, 200);
+});
+
+// ── Comment submit ──
 function setupCommentSubmit() {
   const btn = document.getElementById('commentSubmit');
   if (!btn) return;
-  btn.addEventListener('click', () => {
+  const submit = () => {
     const input = document.getElementById('commentInput');
     const text = input.value.trim();
     if (!text || !activePostId) return;
@@ -297,10 +321,15 @@ function setupCommentSubmit() {
     input.value = '';
     renderComments(post);
     renderFeed();
+  };
+  btn.addEventListener('click', submit);
+  const input = document.getElementById('commentInput');
+  if (input) input.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') submit();
   });
 }
 
-// â”€â”€ Write / Publish â”€â”€
+// ── Publish ──
 function setupPublish() {
   const btn = document.getElementById('publishBtn');
   if (!btn) return;
@@ -336,20 +365,12 @@ function setupPublish() {
   });
 }
 
-// â”€â”€ Init â”€â”€
+// ── Init ──
 document.addEventListener('DOMContentLoaded', () => {
   seedPosts();
   renderFeed();
   setupCommentSubmit();
   setupPublish();
-
-  const closeBtn = document.getElementById('modalClose');
-  if (closeBtn) closeBtn.addEventListener('click', closeModal);
-
-  const overlay = document.getElementById('postModal');
-  if (overlay) overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) closeModal();
-  });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeModal();
