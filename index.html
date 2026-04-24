@@ -107,9 +107,92 @@
 
     <!-- Feed -->
     <div id="feed"><div class="loading">Loading feed...</div></div>
+    <!-- Profile Page -->
+    <div id="profilePage" style="display:none">
+      <div class="profile-banner" id="profileBanner">
+        <button class="profile-banner-edit" id="editBannerBtn" style="display:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17v4a1 1 0 0 0 1 1h4l11-11-5-5L3 17z"/></svg>
+          Edit cover
+          <input type="file" accept="image/*" id="bannerInput" style="display:none"/>
+        </button>
+      </div>
+      <div class="profile-head">
+        <div class="profile-avatar-wrap">
+          <div class="profile-avatar" id="profileAvatarBig">?</div>
+          <button class="profile-avatar-edit" id="editAvatarBtn" style="display:none" title="Change photo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <input type="file" accept="image/*" id="avatarInput" style="display:none"/>
+          </button>
+        </div>
+        <div class="profile-info">
+          <div class="profile-name-row">
+            <h1 class="profile-name" id="profileName">Loading...</h1>
+            <span class="profile-badge" id="profileBadge">Member</span>
+          </div>
+          <div class="profile-stats">
+            <button class="profile-stat" id="statFollowing"><strong>0</strong> following</button>
+            <button class="profile-stat" id="statFollowers"><strong>0</strong> followers</button>
+            <button class="profile-stat" id="statPosts"><strong>0</strong> posts</button>
+            <span class="profile-joined">📅 Joined <span id="profileJoined">recently</span></span>
+          </div>
+          <div class="profile-bio" id="profileBio"></div>
+          <div class="profile-actions">
+            <button class="btn btn-purple btn-sm" id="profileActionBtn">Settings</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Profile tabs -->
+      <div class="profile-tabs">
+        <button class="profile-tab active" data-tab="posts">Posts</button>
+        <button class="profile-tab" data-tab="about">About</button>
+      </div>
+
+      <!-- Profile content -->
+      <div id="profilePosts" class="profile-tab-content"></div>
+      <div id="profileAbout" class="profile-tab-content" style="display:none">
+        <div class="about-grid">
+          <div class="about-card">
+            <h3 class="about-card-title">📇 Personal Information</h3>
+            <div class="about-row"><span class="about-label">Username</span><span class="about-value" id="aboutUsername">—</span></div>
+            <div class="about-row"><span class="about-label">Bio</span><span class="about-value" id="aboutBio">—</span></div>
+            <div class="about-row"><span class="about-label">Location</span><span class="about-value" id="aboutLocation">—</span></div>
+            <div class="about-row"><span class="about-label">Website</span><span class="about-value" id="aboutWebsite">—</span></div>
+            <div class="about-row"><span class="about-label">Joined</span><span class="about-value" id="aboutJoined">—</span></div>
+          </div>
+          <div class="about-card">
+            <h3 class="about-card-title">🛡️ Account Status</h3>
+            <div class="about-row"><span class="about-label">Status</span><span class="about-pill success">Active</span></div>
+            <div class="about-row"><span class="about-label">Type</span><span class="about-value" id="aboutType">Member</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 
+  <!-- Edit Profile Modal -->
+<div class="modal-overlay" id="editProfileModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">Edit profile</div>
+      <button class="modal-close-btn" id="editProfileClose">×</button>
+    </div>
+    <label class="form-label">Display name</label>
+    <input class="form-input" id="editUsername" placeholder="Your name"/>
+    <label class="form-label">Bio</label>
+    <textarea class="form-input" id="editBio" rows="3" placeholder="Tell us about yourself..."></textarea>
+    <label class="form-label">Location</label>
+    <input class="form-input" id="editLocation" placeholder="City, Country"/>
+    <label class="form-label">Website</label>
+    <input class="form-input" id="editWebsite" placeholder="https://..."/>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="editProfileCancel">Cancel</button>
+      <button class="btn btn-purple btn-sm" id="editProfileSave">Save</button>
+    </div>
+  </div>
+</div>
+  
 <!-- Repost Modal -->
 <div class="modal-overlay" id="repostModal">
   <div class="modal-box">
