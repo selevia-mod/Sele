@@ -442,12 +442,14 @@ button { font-family: var(--font); cursor: pointer; }
 }
 .profile-banner img { width: 100%; height: 100%; object-fit: cover; }
 .profile-banner-edit {
-  position: absolute; top: 12px; right: 12px;
-  background: rgba(0,0,0,0.6); color: #fff; border: 1px solid rgba(255,255,255,0.2);
-  padding: 8px 14px; border-radius: 99px; font-size: 0.8rem; font-weight: 500;
-  display: flex !important; align-items: center; gap: 6px; cursor: pointer;
-  backdrop-filter: blur(8px); z-index: 5;
+  position: absolute !important; top: 16px !important; right: 16px !important;
+  background: rgba(0,0,0,0.75); color: #fff !important; border: 1px solid rgba(255,255,255,0.3);
+  padding: 10px 16px; border-radius: 99px; font-size: 0.85rem; font-weight: 600;
+  display: flex !important; align-items: center; gap: 8px; cursor: pointer;
+  z-index: 100; backdrop-filter: blur(10px);
 }
+.profile-banner-edit:hover { background: rgba(0,0,0,0.9); transform: translateY(-1px); }
+.profile-banner-edit svg { width: 16px; height: 16px; }
 .profile-banner-edit:hover { background: rgba(0,0,0,0.7); }
 .profile-banner-edit svg { width: 14px; height: 14px; }
 
