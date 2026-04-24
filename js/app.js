@@ -259,7 +259,7 @@ function renderPost(post) {
         <button class="comment-action-btn" style="margin-left:auto" onclick="deletePost('${post.id}')">✕ Delete</button>
       ` : ''}
     </div>
-    ${post.body ? `<div class="post-body">${escHTML(post.body)}</div>` : ''}
+    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
     <div class="post-actions">
       <div class="reaction-wrap" data-target="${post.id}" data-type="post">
@@ -293,6 +293,14 @@ function escHTML(str) {
   const d = document.createElement('div');
   d.textContent = str || '';
   return d.innerHTML;
+}
+
+function linkify(str) {
+  const escaped = escHTML(str);
+  return escaped.replace(
+    /(https?:\/\/[^\s<>"']+)/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer" style="color:var(--purple2);text-decoration:underline;word-break:break-all;">$1</a>'
+  );
 }
 
 // ── Delete post ──
@@ -475,7 +483,7 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
         <span class="comment-time">${timeAgo(comment.created_at)}</span>
         ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
       </div>
-      ${comment.body ? `<div class="comment-bubble">${escHTML(comment.body)}</div>` : ''}
+      ${comment.body ? `<div class="comment-bubble">${linkify(comment.body)}</div>` : ''}
       ${comment.image_url ? `<div class="comment-image" onclick="openLightbox('${comment.image_url}')"><img src="${comment.image_url}" alt="comment image" loading="lazy"/></div>` : ''}
       <div class="comment-actions">
         <div class="reaction-wrap" data-target="${comment.id}" data-type="comment" style="position:relative">
