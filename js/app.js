@@ -786,10 +786,12 @@ async function openProfile(userId) {
   const { data: profile } = await supabase.from('profiles').select('*').eq('id', userId).single();
   if (!profile) return;
 
-  // Banner
+  // Banner (preserve the edit button!)
   const banner = document.getElementById('profileBanner');
+  const existingBtn = document.getElementById('editBannerBtn');
   banner.innerHTML = profile.banner_url ? `<img src="${profile.banner_url}" alt="banner"/>` : '';
-
+  if (existingBtn) banner.appendChild(existingBtn);
+  
   // Avatar
   const avatarBig = document.getElementById('profileAvatarBig');
   avatarBig.innerHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(profile.username);
