@@ -14,6 +14,46 @@ function toast(msg, type = '') {
   setTimeout(() => el.style.display = 'none', 3000);
 }
 
+// ── Image upload helper ──
+async function uploadImage(file) {
+  if (!file) return null;
+  if (!file.type.startsWith('image/')) {
+    toast('Please select an image file', 'error');
+    return null;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    toast('Image must be smaller than 5MB', 'error');
+    return null;
+  }
+
+  const ext = file.name.split('.').pop().toLowerCase();
+  const filename = `${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+
+  const { error } = await supabase.storage.from('images').upload(filename, file, {
+    cacheControl: '3600',
+    upsert: false
+  });
+
+  if (error) {
+    toast('Upload failed: ' + error.message, 'error');
+    return null;
+  }
+
+  const { data } = supabase.storage.from('images').getPublicUrl(filename);
+  return data.publicUrl;
+}
+
+// ── Lightbox ──
+window.openLightbox = (url) => {
+  document.getElementById('lightboxImg').src = url;
+  document.getElementById('lightbox').classList.add('open');
+};
+document.getElementById('lightbox').addEventListener('click', (e) => {
+  if (e.target.id === 'lightbox' || e.target.id === 'lightboxClose') {
+    document.getElementById('lightbox').classList.remove('open');
+  }
+});
+
 // ── Auth ──
 async function initAuth() {
   const { data: { session } } = await supabase.auth.getSession();
@@ -94,6 +134,9 @@ document.getElementById('mobileSignOut').addEventListener('click', signOut);
 // ── Compose ──
 const composeText = document.getElementById('composeText');
 const charCount = document.getElementById('charCount');
+const composeImageInput = document.getElementById('composeImageInput');
+const composeImagePreview = document.getElementById('composeImagePreview');
+let composeImageFile = null;
 
 composeText.addEventListener('input', () => {
   const len = composeText.value.length;
@@ -103,21 +146,60 @@ composeText.addEventListener('input', () => {
   composeText.style.height = composeText.scrollHeight + 'px';
 });
 
+composeImageInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  composeImageFile = file;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    composeImagePreview.innerHTML = `
+      <div class="image-preview">
+        <img src="${ev.target.result}" alt="preview"/>
+        <button class="image-preview-remove" id="removeComposeImage">×</button>
+      </div>
+    `;
+    document.getElementById('removeComposeImage').addEventListener('click', () => {
+      composeImageFile = null;
+      composeImagePreview.innerHTML = '';
+      composeImageInput.value = '';
+    });
+  };
+  reader.readAsDataURL(file);
+});
+
 document.getElementById('btnPost').addEventListener('click', async () => {
   const body = composeText.value.trim();
-  if (!body) return;
+  if (!body && !composeImageFile) return;
   if (!currentUser) return toast('Please sign in first', 'error');
 
   const btn = document.getElementById('btnPost');
   btn.disabled = true;
-  btn.textContent = 'Posting...';
+  btn.textContent = composeImageFile ? 'Uploading...' : 'Posting...';
 
-  const { error } = await supabase.from('posts').insert({ user_id: currentUser.id, body });
+  let imageUrl = null;
+  if (composeImageFile) {
+    imageUrl = await uploadImage(composeImageFile);
+    if (!imageUrl) {
+      btn.disabled = false;
+      btn.textContent = 'Post';
+      return;
+    }
+  }
+
+  btn.textContent = 'Posting...';
+  const { error } = await supabase.from('posts').insert({
+    user_id: currentUser.id,
+    body: body || '',
+    image_url: imageUrl
+  });
   btn.disabled = false;
   btn.textContent = 'Post';
 
   if (error) { toast(error.message, 'error'); return; }
   composeText.value = '';
+  composeImageFile = null;
+  composeImagePreview.innerHTML = '';
+  composeImageInput.value = '';
   charCount.textContent = '0 / 5000';
   toast('Posted!', 'success');
   loadFeed();
@@ -177,7 +259,8 @@ function renderPost(post) {
         <button class="comment-action-btn" style="margin-left:auto" onclick="deletePost('${post.id}')">✕ Delete</button>
       ` : ''}
     </div>
-    <div class="post-body">${escHTML(post.body)}</div>
+    ${post.body ? `<div class="post-body">${escHTML(post.body)}</div>` : ''}
+    ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
     <div class="post-actions">
       <div class="reaction-wrap" data-target="${post.id}" data-type="post">
         <button class="reaction-trigger" data-target="${post.id}" data-type="post">
@@ -331,13 +414,25 @@ async function loadComments(postId) {
     section.appendChild(el);
   }
 
-  // Comment input
+  // Comment input with image support
   const inputWrap = document.createElement('div');
   inputWrap.className = 'comment-input-wrap';
+  inputWrap.style.flexDirection = 'column';
+  inputWrap.style.gap = '0.5rem';
   inputWrap.innerHTML = `
-    <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
-    <textarea class="comment-input" placeholder="Write a comment…" rows="1" id="cinput-${postId}"></textarea>
-    <button class="btn-send" id="csend-${postId}">Send</button>
+    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
+      <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
+      <textarea class="comment-input" placeholder="Write a comment…" rows="1" id="cinput-${postId}"></textarea>
+      <button class="btn-send" id="csend-${postId}">Send</button>
+    </div>
+    <div id="cimgpreview-${postId}" style="margin-left:38px"></div>
+    <div style="margin-left:38px;margin-top:-4px">
+      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        Add photo
+        <input type="file" accept="image/*" class="cimg-input" data-postid="${postId}" data-parentid=""/>
+      </label>
+    </div>
   `;
   section.appendChild(inputWrap);
 
@@ -348,9 +443,14 @@ async function loadComments(postId) {
     ta.style.height = ta.scrollHeight + 'px';
   });
   ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, null, ta); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, null, ta, `cimgpreview-${postId}`); }
   });
-  inputWrap.querySelector(`#csend-${postId}`).addEventListener('click', () => submitComment(postId, null, ta));
+  inputWrap.querySelector(`#csend-${postId}`).addEventListener('click', () => submitComment(postId, null, ta, `cimgpreview-${postId}`));
+
+  // Image input listener
+  inputWrap.querySelector('.cimg-input').addEventListener('change', (e) => {
+    handleCommentImageSelect(e.target, `cimgpreview-${postId}`);
+  });
 }
 
 async function renderComment(comment, postId, isReply = false, topLevelId = null) {
@@ -375,7 +475,8 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
         <span class="comment-time">${timeAgo(comment.created_at)}</span>
         ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
       </div>
-      <div class="comment-bubble">${escHTML(comment.body)}</div>
+      ${comment.body ? `<div class="comment-bubble">${escHTML(comment.body)}</div>` : ''}
+      ${comment.image_url ? `<div class="comment-image" onclick="openLightbox('${comment.image_url}')"><img src="${comment.image_url}" alt="comment image" loading="lazy"/></div>` : ''}
       <div class="comment-actions">
         <div class="reaction-wrap" data-target="${comment.id}" data-type="comment" style="position:relative">
           <button class="reaction-trigger" data-target="${comment.id}" data-type="comment" style="padding:2px 8px;font-size:0.72rem">
@@ -423,21 +524,65 @@ async function loadReplies(commentId, postId, container) {
   }
 }
 
-async function submitComment(postId, parentId, textarea) {
+// ── Comment image helpers ──
+const pendingCommentImages = {}; // previewId -> File
+
+function handleCommentImageSelect(input, previewId) {
+  const file = input.files[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { toast('Please select an image', 'error'); return; }
+  if (file.size > 5 * 1024 * 1024) { toast('Image must be smaller than 5MB', 'error'); return; }
+
+  pendingCommentImages[previewId] = file;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const preview = document.getElementById(previewId);
+    if (!preview) return;
+    preview.innerHTML = `
+      <div class="image-preview" style="max-width:240px">
+        <img src="${ev.target.result}"/>
+        <button class="image-preview-remove" data-previewid="${previewId}">×</button>
+      </div>
+    `;
+    preview.querySelector('.image-preview-remove').addEventListener('click', () => {
+      delete pendingCommentImages[previewId];
+      preview.innerHTML = '';
+      input.value = '';
+    });
+  };
+  reader.readAsDataURL(file);
+}
+
+async function submitComment(postId, parentId, textarea, previewId) {
   const body = textarea.value.trim();
-  if (!body) return;
+  const file = previewId ? pendingCommentImages[previewId] : null;
+  if (!body && !file) return;
   if (!currentUser) return toast('Sign in to comment', 'error');
+
+  let imageUrl = null;
+  if (file) {
+    textarea.disabled = true;
+    imageUrl = await uploadImage(file);
+    textarea.disabled = false;
+    if (!imageUrl) return;
+  }
 
   const { error } = await supabase.from('comments').insert({
     post_id: postId,
     user_id: currentUser.id,
     parent_id: parentId || null,
-    body
+    body: body || '',
+    image_url: imageUrl
   });
 
   if (error) { toast(error.message, 'error'); return; }
   textarea.value = '';
   textarea.style.height = 'auto';
+  if (previewId) {
+    delete pendingCommentImages[previewId];
+    const preview = document.getElementById(previewId);
+    if (preview) preview.innerHTML = '';
+  }
   loadComments(postId);
 }
 
@@ -519,14 +664,27 @@ function showReplyInput(commentId, postId, replyToName = '') {
   const repliesContainer = document.getElementById(`replies-${commentId}`);
   if (!repliesContainer) return;
 
+  const previewId = `rimgpreview-${commentId}-${Date.now()}`;
   const wrap = document.createElement('div');
   wrap.className = 'comment-input-wrap reply-input-wrap';
   wrap.style.marginTop = '0.5rem';
+  wrap.style.flexDirection = 'column';
+  wrap.style.gap = '0.5rem';
   const placeholder = replyToName ? `Reply to ${replyToName}…` : 'Write a reply…';
   wrap.innerHTML = `
-    <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
-    <textarea class="comment-input" placeholder="${placeholder}" rows="1"></textarea>
-    <button class="btn-send">Reply</button>
+    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
+      <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
+      <textarea class="comment-input" placeholder="${placeholder}" rows="1"></textarea>
+      <button class="btn-send">Reply</button>
+    </div>
+    <div id="${previewId}" style="margin-left:38px"></div>
+    <div style="margin-left:38px;margin-top:-4px">
+      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        Add photo
+        <input type="file" accept="image/*" class="rimg-input"/>
+      </label>
+    </div>
   `;
 
   const ta = wrap.querySelector('textarea');
@@ -535,12 +693,14 @@ function showReplyInput(commentId, postId, replyToName = '') {
     ta.value = `@${replyToName} `;
   }
   ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, commentId, ta); } });
-  wrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, commentId, ta));
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, commentId, ta, previewId); } });
+  wrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, commentId, ta, previewId));
+  wrap.querySelector('.rimg-input').addEventListener('change', (e) => {
+    handleCommentImageSelect(e.target, previewId);
+  });
 
   repliesContainer.appendChild(wrap);
   ta.focus();
-  // Place cursor at end
   ta.setSelectionRange(ta.value.length, ta.value.length);
 }
 
