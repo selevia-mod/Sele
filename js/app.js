@@ -295,7 +295,7 @@ function renderPost(post) {
           <span class="r-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
           </span>
-          <span>Like</span>
+          <span class="r-label-text">Like</span>
         </button>
         <div class="reaction-picker">
           ${REACTIONS.map(r => `
@@ -385,15 +385,15 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
   const activeR = userReaction ? REACTIONS.find(r => r.key === userReaction) : null;
 
   const iconEl = trigger.querySelector('.r-icon');
-  const labelEl = trigger.querySelector('span:last-child');
+  const labelEl = trigger.querySelector('.r-label-text');
 
   if (activeR) {
     iconEl.innerHTML = `<span style="font-size:15px">${activeR.emoji}</span>`;
-    labelEl.textContent = activeR.label;
+    if (labelEl) labelEl.textContent = activeR.label;
     trigger.classList.add('reacted');
   } else {
     iconEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
-    labelEl.textContent = 'Like';
+    if (labelEl) labelEl.textContent = 'Like';
     trigger.classList.remove('reacted');
   }
 
@@ -483,7 +483,7 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
         <div class="reaction-wrap" data-target="${comment.id}" data-type="comment" style="position:relative">
           <button class="reaction-trigger comment-action-btn" data-target="${comment.id}" data-type="comment">
             <span class="r-icon">♡</span>
-            <span>Like</span>
+            <span class="r-label-text">Like</span>
           </button>
           <div class="reaction-picker">
             ${REACTIONS.map(r => `
