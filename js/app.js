@@ -747,20 +747,74 @@ function setupRealtime() {
     .subscribe();
 }
 
-// ── Share & Repost ──
-window.repostPost = async (postId) => {
+// ── Repost Modal ──
+let repostTargetId = null;
+
+window.repostPost = (postId) => {
   if (!currentUser) return toast('Sign in to repost', 'error');
-  if (!confirm('Repost this on your feed?')) return;
+  const post = posts.find(p => p.id === postId);
+  if (!post) return;
+
+  repostTargetId = postId;
+
+  const profile = post.profiles || {};
+  const name = profile.username || 'Unknown';
+  const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
+
+  document.getElementById('repostPreview').innerHTML = `
+    <div class="post-header">
+      <div class="avatar">${avatarHTML}</div>
+      <div>
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <span class="post-author">${escHTML(name)}</span>
+          ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
+        </div>
+        <div class="post-time">${timeAgo(post.created_at)}</div>
+      </div>
+    </div>
+    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
+    ${post.image_url ? `<div style="border-radius:8px;overflow:hidden;margin-top:0.5rem"><img src="${post.image_url}" style="width:100%"/></div>` : ''}
+  `;
+
+  document.getElementById('repostCaption').value = '';
+  document.getElementById('repostModal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => document.getElementById('repostCaption').focus(), 100);
+};
+
+function closeRepostModal() {
+  document.getElementById('repostModal').classList.remove('open');
+  document.body.style.overflow = '';
+  repostTargetId = null;
+}
+
+document.getElementById('repostClose').addEventListener('click', closeRepostModal);
+document.getElementById('repostCancel').addEventListener('click', closeRepostModal);
+document.getElementById('repostModal').addEventListener('click', (e) => {
+  if (e.target.id === 'repostModal') closeRepostModal();
+});
+
+document.getElementById('repostSubmit').addEventListener('click', async () => {
+  if (!repostTargetId) return;
+  const caption = document.getElementById('repostCaption').value.trim();
+  const btn = document.getElementById('repostSubmit');
+  btn.disabled = true;
+  btn.textContent = 'Posting...';
 
   const { error } = await supabase.from('posts').insert({
     user_id: currentUser.id,
-    body: '',
-    reposted_from: postId
+    body: caption,
+    reposted_from: repostTargetId
   });
 
-  if (error) toast(error.message, 'error');
-  else { toast('Reposted!', 'success'); loadFeed(); }
-};
+  btn.disabled = false;
+  btn.textContent = 'Repost';
+
+  if (error) { toast(error.message, 'error'); return; }
+  closeRepostModal();
+  toast('Reposted!', 'success');
+  loadFeed();
+});
 
 window.toggleShareMenu = (e, postId) => {
   e.stopPropagation();
