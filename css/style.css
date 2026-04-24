@@ -225,19 +225,19 @@ button { font-family: var(--font); cursor: pointer; }
 
 /* ── ACTION BAR ── */
 .post-actions {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
-  padding-top: 0.5rem; border-top: 1px solid var(--border);
-  position: relative;
+  display: flex; gap: 0.25rem;
+  padding-top: 0.4rem; border-top: 1px solid var(--border);
+  position: relative; justify-content: flex-start;
 }
 .action-btn {
-  background: none; border: none; color: var(--text3); font-size: 0.78rem; font-weight: 500;
-  padding: 0.45rem; border-radius: var(--radius-sm); cursor: pointer;
-  display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+  background: none; border: none; color: var(--text3); font-size: 0.74rem; font-weight: 500;
+  padding: 0.35rem 0.75rem; border-radius: 99px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 0.35rem;
   transition: background 0.15s, color 0.15s;
 }
 .action-btn:hover { background: var(--bg3); color: var(--text); }
 .action-btn.reacted { color: var(--pink); font-weight: 600; }
-.action-btn svg { width: 15px; height: 15px; }
+.action-btn svg { width: 14px; height: 14px; }
 
 /* ── REACTION PICKER ── */
 .reaction-wrap { position: relative; }
