@@ -1,4 +1,4 @@
-/* â”€â”€ Reset & Base â”€â”€ */
+/* ── Reset & Base ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
@@ -31,7 +31,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* â”€â”€ Nav â”€â”€ */
+/* ── Nav ── */
 .nav {
   display: flex;
   align-items: center;
@@ -65,7 +65,7 @@ body {
 }
 .nav-link:hover, .nav-link.active { color: var(--purple-700); }
 
-/* â”€â”€ Buttons â”€â”€ */
+/* ── Buttons ── */
 .btn-primary {
   background: var(--purple-700);
   color: #fff;
@@ -98,7 +98,7 @@ body {
 }
 .btn-ghost:hover { background: var(--surface-2); }
 
-/* â”€â”€ Hero â”€â”€ */
+/* ── Hero ── */
 .hero {
   text-align: center;
   padding: 6rem 2rem 4rem;
@@ -142,7 +142,7 @@ body {
   font-weight: 300;
 }
 
-/* â”€â”€ Feed â”€â”€ */
+/* ── Feed ── */
 .feed {
   max-width: 780px;
   margin: 0 auto;
@@ -152,7 +152,7 @@ body {
   gap: 1.25rem;
 }
 
-/* â”€â”€ Post Card â”€â”€ */
+/* ── Post Card ── */
 .post-card {
   background: #fff;
   border: 1px solid var(--border);
@@ -168,6 +168,9 @@ body {
   box-shadow: 0 4px 24px rgba(124,58,237,0.08);
   transform: translateY(-2px);
 }
+
+.post-clickable { cursor: pointer; }
+.read-more { cursor: pointer; }
 
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(16px); }
@@ -272,7 +275,7 @@ body {
   font-weight: 500;
 }
 
-/* â”€â”€ Modal â”€â”€ */
+/* ── Modal ── */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -344,7 +347,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-/* â”€â”€ Comments â”€â”€ */
+/* ── Comments ── */
 .comments-title {
   font-family: var(--font-display);
   font-size: 1.3rem;
@@ -391,7 +394,7 @@ body {
 }
 .comment-input:focus { border-color: var(--purple-500); }
 
-/* â”€â”€ Write Page â”€â”€ */
+/* ── Write Page ── */
 .write-page {
   min-height: calc(100vh - 70px);
   display: flex;
@@ -454,7 +457,7 @@ body {
 }
 .publish-success a { color: var(--purple-700); font-weight: 500; }
 
-/* â”€â”€ Reactions â”€â”€ */
+/* ── Reactions ── */
 .reaction-wrap {
   position: relative;
   display: inline-flex;
@@ -543,7 +546,7 @@ body {
 }
 .reaction-stat strong { color: var(--ink); font-weight: 500; }
 
-/* â”€â”€ Empty State â”€â”€ */
+/* ── Empty State ── */
 .empty-state {
   text-align: center;
   padding: 4rem 2rem;
@@ -556,7 +559,7 @@ body {
   margin-bottom: 0.5rem;
 }
 
-/* â”€â”€ Responsive â”€â”€ */
+/* ── Responsive ── */
 @media (max-width: 600px) {
   .nav { padding: 1rem 1.25rem; }
   .hero { padding: 3.5rem 1.25rem 2.5rem; }
