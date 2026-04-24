@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Write — Luminary</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <nav class="nav">
+    <a href="index.html" class="nav-logo">Luminary</a>
+    <div class="nav-links">
+      <a href="index.html" class="nav-link">Feed</a>
+      <a href="write.html" class="nav-link active">Write</a>
+    </div>
+    <a href="index.html" class="btn-ghost">← Back to Feed</a>
+  </nav>
+
+  <main class="write-page">
+    <div class="write-container">
+      <p class="hero-eyebrow">New Post</p>
+      <h1 class="write-heading">Tell your story</h1>
+
+      <div class="form-group">
+        <input type="text" id="postAuthor" class="form-input" placeholder="Your name" />
+      </div>
+      <div class="form-group">
+        <input type="text" id="postTitle" class="form-input title-input" placeholder="Post title…" />
+      </div>
+      <div class="form-group">
+        <input type="text" id="postTag" class="form-input" placeholder="Tag (e.g. Travel, Life, Tech)" />
+      </div>
+      <div class="form-group">
+        <textarea id="postBody" class="form-textarea" placeholder="Write something beautiful…"></textarea>
+      </div>
+
+      <div class="write-actions">
+        <a href="index.html" class="btn-ghost">Cancel</a>
+        <button class="btn-primary" id="publishBtn">Publish Post</button>
+      </div>
+
+      <div class="publish-success" id="publishSuccess">
+        ✦ Your post is live! <a href="index.html">View feed →</a>
+      </div>
+    </div>
+  </main>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
