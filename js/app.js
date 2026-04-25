@@ -38,7 +38,10 @@ async function initAuth() {
   if (session) await onSignedIn(session.user);
   else showAuth();
 
-  supabase.auth.onAuthStateChange(async (_, session) => {
+  let isFirstAuthEvent = true;
+  supabase.auth.onAuthStateChange(async (event, session) => {
+    // Skip the initial event — we already handled the session above
+    if (isFirstAuthEvent) { isFirstAuthEvent = false; return; }
     if (session) await onSignedIn(session.user);
     else showAuth();
   });
