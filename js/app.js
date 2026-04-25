@@ -1707,9 +1707,96 @@ function showStudio() {
 
 async function loadStudio() {
   const content = document.getElementById('studioContent');
-  content.innerHTML = '<div class="empty"><h3>Loading...</h3></div>';
-  // Phase 2 will fill this in
-  content.innerHTML = '<div class="empty"><h3>Coming soon</h3><p>Your videos will appear here.</p></div>';
+  content.innerHTML = '<div class="empty"><h3>Loading your videos...</h3></div>';
+  
+  if (!currentUser) {
+    content.innerHTML = '<div class="empty"><h3>Please sign in</h3></div>';
+    return;
+  }
+  
+  const { data: videos, error } = await supabase
+    .from('videos')
+    .select('id, title, description, thumbnail_url, video_url, views, duration, status, created_at, tags, category')
+    .eq('uploader_id', currentUser.id)
+    .order('created_at', { ascending: false });
+  
+  if (error) {
+    content.innerHTML = `<div class="empty"><h3>Error loading videos</h3><p>${escHTML(error.message)}</p></div>`;
+    return;
+  }
+  
+  if (!videos || !videos.length) {
+    content.innerHTML = `
+      <div class="empty">
+        <h3>No videos yet</h3>
+        <p>Upload your first video to see it here.</p>
+        <button class="btn-primary" onclick="document.getElementById('btnVideos').click()" style="margin-top:1rem">Go to Videos</button>
+      </div>
+    `;
+    return;
+  }
+  
+  content.innerHTML = `
+    <div class="studio-stats">
+      <div class="studio-stat">
+        <div class="studio-stat-value">${videos.length}</div>
+        <div class="studio-stat-label">Total videos</div>
+      </div>
+      <div class="studio-stat">
+        <div class="studio-stat-value">${videos.reduce((sum, v) => sum + (v.views || 0), 0).toLocaleString()}</div>
+        <div class="studio-stat-label">Total views</div>
+      </div>
+    </div>
+    <div class="studio-table-wrap">
+      <table class="studio-table">
+        <thead>
+          <tr>
+            <th class="studio-col-video">Video</th>
+            <th class="studio-col-date">Date</th>
+            <th class="studio-col-views">Views</th>
+            <th class="studio-col-status">Status</th>
+            <th class="studio-col-actions">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${videos.map(v => renderStudioRow(v)).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderStudioRow(v) {
+  const thumb = v.thumbnail_url 
+    ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>` 
+    : '<div class="studio-thumb-placeholder"></div>';
+  const date = new Date(v.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  const desc = v.description ? `<div class="studio-row-desc">${escHTML(v.description.slice(0, 80))}${v.description.length > 80 ? '…' : ''}</div>` : '';
+  const statusBadge = v.status === 'ready' 
+    ? '<span class="studio-badge studio-badge-ready">Published</span>' 
+    : `<span class="studio-badge studio-badge-processing">${escHTML(v.status || 'processing')}</span>`;
+  
+  return `
+    <tr data-video-id="${v.id}">
+      <td>
+        <div class="studio-row-video">
+          <div class="studio-thumb">${thumb}</div>
+          <div class="studio-row-text">
+            <div class="studio-row-title">${escHTML(v.title || 'Untitled')}</div>
+            ${desc}
+          </div>
+        </div>
+      </td>
+      <td>${date}</td>
+      <td>${(v.views || 0).toLocaleString()}</td>
+      <td>${statusBadge}</td>
+      <td>
+        <button class="studio-btn studio-btn-delete" data-action="delete" data-id="${v.id}" title="Delete">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
+      </td>
+    </tr>
+  `;
 }
 
 function showVideoPlayer() {
