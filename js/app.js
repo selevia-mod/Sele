@@ -1,4 +1,4 @@
-import { supabase, REACTIONS, timeAgo, initials, appwriteList, appwriteGet, APPWRITE } from './supabase.js';
+import { supabase, REACTIONS, timeAgo, initials, appwriteList, appwriteGet, APPWRITE, callEdgeFunction, BUNNY } from './supabase.js';
 
 let currentUser = null;
 let currentProfile = null;
