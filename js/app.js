@@ -1236,29 +1236,3 @@ document.getElementById('btnTheme').addEventListener('click', () => {
   applyTheme(newTheme);
   localStorage.setItem('selebox_theme', newTheme);
 });
-
-// Helper to query Appwrite REST API
-export async function appwriteList(collectionId, queries = []) {
-  const url = new URL(`${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents`);
-  queries.forEach(q => url.searchParams.append('queries[]', q));
-  const res = await fetch(url, {
-    headers: {
-      'X-Appwrite-Project': APPWRITE.projectId,
-      'Content-Type': 'application/json'
-    }
-  });
-  if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
-  return res.json();
-}
-
-export async function appwriteGet(collectionId, documentId) {
-  const url = `${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents/${documentId}`;
-  const res = await fetch(url, {
-    headers: {
-      'X-Appwrite-Project': APPWRITE.projectId,
-      'Content-Type': 'application/json'
-    }
-  });
-  if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
-  return res.json();
-}
