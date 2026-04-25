@@ -1391,7 +1391,78 @@ async function loadVideos() {
   }
 
   renderTagPills();
-  renderVideoResults(allVideosCache);
+
+  // If no search/tag filter, show personalized feed
+  if (!activeSearchQuery && !activeTagFilter) {
+    const personalized = getPersonalizedFeed();
+    renderVideoResults(personalized);
+  } else {
+    runSearch();
+  }
+}
+
+function getPersonalizedFeed() {
+  const { tagWeights, watchedIds, recentUploaders } = getInterestProfile();
+  const hasHistory = Object.keys(tagWeights).length > 0;
+
+  // Filter out already-watched (last 30 days)
+  let pool = allVideosCache.filter(v => !watchedIds.has(v.$id));
+
+  if (!hasHistory) {
+    // No watch history → show by recency (newest first)
+    return pool;
+  }
+
+  // Score each video
+  pool.forEach(v => {
+    let score = 0;
+
+    // Tag matching (interest profile)
+    (v.tags || []).forEach(tag => {
+      if (tagWeights[tag]) score += tagWeights[tag] * 100;
+    });
+
+    // Same uploader bonus (creators you've watched before)
+    if (recentUploaders.includes(v.uploader)) score += 15;
+
+    // Engagement boost
+    const views = v.videoStats?.views || 0;
+    score += Math.log10(views + 1) * 2;
+
+    // Recency boost (newer videos slightly preferred)
+    const ageHours = (Date.now() - new Date(v.$createdAt).getTime()) / 3600000;
+    if (ageHours < 24) score += 8;
+    else if (ageHours < 168) score += 4;
+
+    // Random spice (30% chance to boost a random video)
+    if (Math.random() < 0.3) score += Math.random() * 20;
+
+    v._feedScore = score;
+  });
+
+  // Sort: 70% personalized + 30% trending mixed in
+  pool.sort((a, b) => b._feedScore - a._feedScore);
+
+  // Take top 70 personalized
+  const personalized = pool.slice(0, 70);
+  // Take 30 trending (high views, not in personalized)
+  const personalizedIds = new Set(personalized.map(v => v.$id));
+  const trending = pool
+    .filter(v => !personalizedIds.has(v.$id))
+    .sort((a, b) => (b.videoStats?.views || 0) - (a.videoStats?.views || 0))
+    .slice(0, 30);
+
+  // Interleave them (every 3rd is trending)
+  const result = [];
+  const maxLen = Math.max(personalized.length, trending.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (personalized[i]) result.push(personalized[i]);
+    if (i % 2 === 1 && trending[Math.floor(i/2)]) {
+      result.push(trending[Math.floor(i/2)]);
+    }
+  }
+
+  return result;
 }
 
 // ── Video search ──
@@ -1491,7 +1562,12 @@ function renderTagPills() {
       const tag = pill.dataset.tag;
       activeTagFilter = (activeTagFilter === tag) ? null : tag;
       renderTagPills();
-      runSearch();
+      // If no tag selected, show personalized feed; else show filtered
+      if (!activeTagFilter && !activeSearchQuery) {
+        renderVideoResults(getPersonalizedFeed());
+      } else {
+        runSearch();
+      }
     };
   });
 }
