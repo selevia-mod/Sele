@@ -123,10 +123,12 @@
     <!-- Video Player Page -->
     <div id="videoPlayerPage" style="display:none">
       <button class="btn btn-ghost btn-sm" id="btnBackVideos" style="margin-bottom:0.75rem">← Back</button>
-      <div class="video-player-wrap">
-        <video id="videoPlayer" controls></video>
-      </div>
-      <div class="video-info">
+      <div class="video-player-layout">
+        <div class="video-player-main">
+          <div class="video-player-wrap">
+            <video id="videoPlayer" controls></video>
+          </div>
+          <div class="video-info">
         <h1 class="video-title-big" id="videoTitle">—</h1>
         <div class="video-meta">
           <span id="videoViews"></span>
@@ -140,6 +142,12 @@
           </div>
         </div>
         <div class="video-description" id="videoDescription"></div>
+          </div>
+        </div>
+        <aside class="video-upnext">
+          <h3 class="upnext-title">Up next</h3>
+          <div id="upNextList" class="upnext-list"></div>
+        </aside>
       </div>
     </div>
     
