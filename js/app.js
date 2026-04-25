@@ -1041,7 +1041,7 @@ function updateSearchPlaceholder() {
 
 searchInput.addEventListener('input', (e) => {
   const value = e.target.value;
-  topbarSearchClear.style.display = value ? 'flex' : 'none';
+  if (topbarSearchClear) topbarSearchClear.style.display = value ? 'flex' : 'none';
 
   const ctx = getSearchContext();
   if (ctx === 'videos') {
@@ -1060,15 +1060,17 @@ searchInput.addEventListener('input', (e) => {
   searchDebounce = setTimeout(() => runFeedSearch(value), 250);
 });
 
-topbarSearchClear.addEventListener('click', () => {
-  searchInput.value = '';
-  topbarSearchClear.style.display = 'none';
-  searchResultsEl.classList.remove('open');
-  if (getSearchContext() === 'videos') {
-    activeSearchQuery = '';
-    runSearch();
-  }
-});
+if (topbarSearchClear) {
+  topbarSearchClear.addEventListener('click', () => {
+    searchInput.value = '';
+    if (topbarSearchClear) topbarSearchClear.style.display = value ? 'flex' : 'none';
+    searchResultsEl.classList.remove('open');
+    if (getSearchContext() === 'videos') {
+      activeSearchQuery = '';
+      runSearch();
+    }
+  });
+}
 
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
@@ -1131,7 +1133,7 @@ async function runFeedSearch(query) {
       const id = item.dataset.id;
       searchResultsEl.classList.remove('open');
       searchInput.value = '';
-      topbarSearchClear.style.display = 'none';
+      
       if (type === 'profile') openProfile(id);
     };
   });
