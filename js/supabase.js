@@ -59,11 +59,6 @@ export async function appwriteGet(collectionId, documentId) {
   return res.json();
 }
 
-// ── Bunny Stream Config ──
-export const BUNNY = {
-  cdnHostname: 'vz-fdf88b4d-33a.b-cdn.net',
-};
-
 // ── Edge Function helper ──
 export async function callEdgeFunction(functionName, payload = {}) {
   const { data: { session } } = await supabase.auth.getSession();
