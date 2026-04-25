@@ -51,7 +51,15 @@ async function onSignedIn(user) {
   updateTopbarUser();
   showApp();
   loadStories();
-  loadFeed();
+
+  // Check URL hash for routing
+  const hash = window.location.hash;
+  if (hash.startsWith('#profile/')) {
+    const userId = hash.replace('#profile/', '');
+    openProfile(userId);
+  } else {
+    loadFeed();
+  }
 }
 
 function showAuth() {
@@ -770,6 +778,7 @@ function showFeed() {
   composeEl.style.display = '';
   profilePage.style.display = 'none';
   viewingProfileId = null;
+  if (window.location.hash) history.pushState(null, '', window.location.pathname);
 }
 
 function showProfileView() {
@@ -782,6 +791,10 @@ function showProfileView() {
 async function openProfile(userId) {
   showProfileView();
   viewingProfileId = userId;
+  // Set URL hash so refresh keeps user on profile
+  if (window.location.hash !== `#profile/${userId}`) {
+    history.pushState(null, '', `#profile/${userId}`);
+  }
 
   // Retry up to 3 times in case profile isn't ready yet
   let profile = null;
@@ -1041,6 +1054,18 @@ document.getElementById('topbarAvatar').addEventListener('click', openMyProfile)
 
 // Add Home button functionality — the first sidebar item
 document.querySelector('.sidebar-item.active')?.addEventListener('click', showFeed);
+
+// Handle browser back/forward
+window.addEventListener('popstate', () => {
+  const hash = window.location.hash;
+  if (hash.startsWith('#profile/')) {
+    const userId = hash.replace('#profile/', '');
+    openProfile(userId);
+  } else {
+    showFeed();
+    loadFeed();
+  }
+});
 
 initAuth();
 
