@@ -260,6 +260,11 @@ function renderPost(post) {
 
     ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
+    ${post.videos ? `
+      <div class="post-video" data-video-url="${escHTML(post.videos.video_url || '')}" data-video-id="${escHTML(post.videos.id || '')}">
+        <video class="post-video-player" poster="${escHTML(post.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
+      </div>
+    ` : ''}
 
     ${post.reposted_from && post.original ? `
       <div class="reposted-card">
@@ -272,8 +277,11 @@ function renderPost(post) {
         </div>
         ${post.original.body ? `<div class="post-body">${linkify(post.original.body)}</div>` : ''}
         ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
-      </div>
-    ` : ''}
+        ${post.original.videos ? `
+          <div class="post-video" data-video-url="${escHTML(post.original.videos.video_url || '')}" data-video-id="${escHTML(post.original.videos.id || '')}">
+            <video class="post-video-player" poster="${escHTML(post.original.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
+          </div>
+        ` : ''}
 
     <div class="post-stats">
       <div class="rcount" id="rsummary-${post.id}"></div>
