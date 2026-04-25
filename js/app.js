@@ -1681,6 +1681,7 @@ function showVideos(forceReload = false) {
   composeEl.style.display = 'none';
   profilePage.style.display = 'none';
   videoPlayerPage.style.display = 'none';
+  studioPage.style.display = 'none';
   videosPage.style.display = 'block';
   document.body.classList.add('on-videos');
   stopVideoPlayer();
@@ -1705,6 +1706,14 @@ function showStudio() {
   loadStudio();
 }
 
+// ════════════════════════════════════════
+// CREATOR STUDIO
+// ════════════════════════════════════════
+
+let studioVideosCache = [];
+let studioSearchQuery = '';
+let studioEditingVideoId = null;
+
 async function loadStudio() {
   const content = document.getElementById('studioContent');
   content.innerHTML = '<div class="empty"><h3>Loading your videos...</h3></div>';
@@ -1716,7 +1725,7 @@ async function loadStudio() {
   
   const { data: videos, error } = await supabase
     .from('videos')
-    .select('id, title, description, thumbnail_url, video_url, views, duration, status, created_at, tags, category')
+    .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id')
     .eq('uploader_id', currentUser.id)
     .order('created_at', { ascending: false });
   
@@ -1725,45 +1734,148 @@ async function loadStudio() {
     return;
   }
   
-  if (!videos || !videos.length) {
+  studioVideosCache = videos || [];
+  renderStudio();
+}
+
+function renderStudio() {
+  const content = document.getElementById('studioContent');
+  const videos = studioVideosCache;
+  
+  if (!videos.length) {
     content.innerHTML = `
-      <div class="empty">
+      <div class="studio-empty">
+        <div class="studio-empty-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2"/>
+          </svg>
+        </div>
         <h3>No videos yet</h3>
-        <p>Upload your first video to see it here.</p>
-        <button class="btn-primary" onclick="document.getElementById('btnVideos').click()" style="margin-top:1rem">Go to Videos</button>
+        <p>Upload your first video to get started</p>
+        <button class="vu-btn vu-btn-primary" onclick="document.getElementById('btnStudioUpload').click()" style="margin-top:1rem">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Upload your first video
+        </button>
       </div>
     `;
     return;
   }
   
+  const totalVideos = videos.length;
+  const totalViews = videos.reduce((sum, v) => sum + (v.views || 0), 0);
+  const totalLikes = videos.reduce((sum, v) => sum + (v.likes || 0), 0);
+  const publishedCount = videos.filter(v => v.status === 'ready').length;
+  
+  // Filter by search
+  const q = studioSearchQuery.trim().toLowerCase();
+  const filtered = q
+    ? videos.filter(v => 
+        (v.title || '').toLowerCase().includes(q) ||
+        (v.description || '').toLowerCase().includes(q) ||
+        (v.tags || []).some(t => t.toLowerCase().includes(q))
+      )
+    : videos;
+  
   content.innerHTML = `
     <div class="studio-stats">
       <div class="studio-stat">
-        <div class="studio-stat-value">${videos.length}</div>
-        <div class="studio-stat-label">Total videos</div>
+        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+        </div>
+        <div>
+          <div class="studio-stat-value">${totalVideos.toLocaleString()}</div>
+          <div class="studio-stat-label">Total videos</div>
+        </div>
       </div>
       <div class="studio-stat">
-        <div class="studio-stat-value">${videos.reduce((sum, v) => sum + (v.views || 0), 0).toLocaleString()}</div>
-        <div class="studio-stat-label">Total views</div>
+        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+        <div>
+          <div class="studio-stat-value">${totalViews.toLocaleString()}</div>
+          <div class="studio-stat-label">Total views</div>
+        </div>
+      </div>
+      <div class="studio-stat">
+        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#ec4899,#f43f5e)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        </div>
+        <div>
+          <div class="studio-stat-value">${totalLikes.toLocaleString()}</div>
+          <div class="studio-stat-label">Total likes</div>
+        </div>
+      </div>
+      <div class="studio-stat">
+        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div>
+          <div class="studio-stat-value">${publishedCount.toLocaleString()}</div>
+          <div class="studio-stat-label">Published</div>
+        </div>
       </div>
     </div>
+
+    <div class="studio-toolbar">
+      <div class="studio-search">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="studioSearchInput" placeholder="Search your videos..." value="${escHTML(studioSearchQuery)}"/>
+      </div>
+      <div class="studio-toolbar-info">${filtered.length} of ${totalVideos} ${totalVideos === 1 ? 'video' : 'videos'}</div>
+    </div>
+
     <div class="studio-table-wrap">
-      <table class="studio-table">
-        <thead>
-          <tr>
-            <th class="studio-col-video">Video</th>
-            <th class="studio-col-date">Date</th>
-            <th class="studio-col-views">Views</th>
-            <th class="studio-col-status">Status</th>
-            <th class="studio-col-actions">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${videos.map(v => renderStudioRow(v)).join('')}
-        </tbody>
-      </table>
+      ${filtered.length === 0 ? `
+        <div class="studio-empty" style="padding:3rem 1rem">
+          <h3>No matches</h3>
+          <p>Try a different search term</p>
+        </div>
+      ` : `
+        <table class="studio-table">
+          <thead>
+            <tr>
+              <th class="studio-col-video">Video</th>
+              <th class="studio-col-status">Visibility</th>
+              <th class="studio-col-date">Date</th>
+              <th class="studio-col-views">Views</th>
+              <th class="studio-col-likes">Likes</th>
+              <th class="studio-col-actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.map(v => renderStudioRow(v)).join('')}
+          </tbody>
+        </table>
+      `}
     </div>
   `;
+  
+  // Wire up search input
+  const searchInput = document.getElementById('studioSearchInput');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      studioSearchQuery = e.target.value;
+      renderStudio();
+      // Re-focus the input after re-render
+      const newInput = document.getElementById('studioSearchInput');
+      if (newInput) {
+        newInput.focus();
+        newInput.setSelectionRange(studioSearchQuery.length, studioSearchQuery.length);
+      }
+    });
+  }
+  
+  // Wire up edit/delete buttons via delegation
+  content.querySelectorAll('[data-studio-action]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.studioAction;
+      const id = btn.dataset.id;
+      if (action === 'edit') openStudioEditModal(id);
+      else if (action === 'delete') deleteStudioVideo(id);
+    });
+  });
 }
 
 function renderStudioRow(v) {
@@ -1771,33 +1883,176 @@ function renderStudioRow(v) {
     ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>` 
     : '<div class="studio-thumb-placeholder"></div>';
   const date = new Date(v.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-  const desc = v.description ? `<div class="studio-row-desc">${escHTML(v.description.slice(0, 80))}${v.description.length > 80 ? '…' : ''}</div>` : '';
+  const desc = v.description 
+    ? `<div class="studio-row-desc">${escHTML(v.description.slice(0, 100))}${v.description.length > 100 ? '…' : ''}</div>` 
+    : '<div class="studio-row-desc" style="color:#aaa;font-style:italic">No description</div>';
   const statusBadge = v.status === 'ready' 
-    ? '<span class="studio-badge studio-badge-ready">Published</span>' 
-    : `<span class="studio-badge studio-badge-processing">${escHTML(v.status || 'processing')}</span>`;
+    ? '<span class="studio-badge studio-badge-ready"><span class="studio-dot studio-dot-green"></span>Public</span>' 
+    : `<span class="studio-badge studio-badge-processing"><span class="studio-dot studio-dot-yellow"></span>Processing</span>`;
+  const duration = v.duration ? formatDuration(v.duration) : '';
   
   return `
     <tr data-video-id="${v.id}">
       <td>
         <div class="studio-row-video">
-          <div class="studio-thumb">${thumb}</div>
+          <div class="studio-thumb">
+            ${thumb}
+            ${duration ? `<span class="studio-thumb-duration">${duration}</span>` : ''}
+          </div>
           <div class="studio-row-text">
             <div class="studio-row-title">${escHTML(v.title || 'Untitled')}</div>
             ${desc}
           </div>
         </div>
       </td>
-      <td>${date}</td>
-      <td>${(v.views || 0).toLocaleString()}</td>
       <td>${statusBadge}</td>
+      <td><span class="studio-cell-muted">${date}</span></td>
+      <td>${(v.views || 0).toLocaleString()}</td>
+      <td>${(v.likes || 0).toLocaleString()}</td>
       <td>
-        <button class="studio-btn studio-btn-delete" data-action="delete" data-id="${v.id}" title="Delete">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-        </button>
+        <div class="studio-actions">
+          <button class="studio-btn" data-studio-action="edit" data-id="${v.id}" title="Edit details">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          </button>
+          <button class="studio-btn studio-btn-danger" data-studio-action="delete" data-id="${v.id}" title="Delete forever">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
       </td>
     </tr>
   `;
 }
+
+function openStudioEditModal(videoId) {
+  const v = studioVideosCache.find(x => x.id === videoId);
+  if (!v) return;
+  
+  studioEditingVideoId = videoId;
+  
+  document.getElementById('studioEditTitle').value = v.title || '';
+  document.getElementById('studioEditDescription').value = v.description || '';
+  document.getElementById('studioEditTags').value = (v.tags || []).join(', ');
+  document.getElementById('studioEditCategory').value = v.category || 'general';
+  
+  const preview = document.getElementById('studioEditPreview');
+  const thumb = document.getElementById('studioEditThumb');
+  if (v.thumbnail_url) {
+    thumb.src = v.thumbnail_url;
+    preview.style.display = '';
+  } else {
+    preview.style.display = 'none';
+  }
+  
+  document.getElementById('studioEditTitleCount').textContent = `${(v.title || '').length} / 100`;
+  document.getElementById('studioEditDescCount').textContent = `${(v.description || '').length} / 2000`;
+  
+  document.getElementById('studioEditModal').style.display = 'flex';
+}
+
+function closeStudioEditModal() {
+  document.getElementById('studioEditModal').style.display = 'none';
+  studioEditingVideoId = null;
+}
+
+async function saveStudioEdit() {
+  if (!studioEditingVideoId) return;
+  
+  const saveBtn = document.getElementById('studioEditSave');
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving...';
+  
+  const title = document.getElementById('studioEditTitle').value.trim();
+  const description = document.getElementById('studioEditDescription').value.trim();
+  const tagsRaw = document.getElementById('studioEditTags').value;
+  const category = document.getElementById('studioEditCategory').value;
+  
+  if (!title) {
+    toast('Title is required', 'error');
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save changes';
+    return;
+  }
+  
+  const tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t);
+  
+  const { error } = await supabase
+    .from('videos')
+    .update({ title, description, tags, category, updated_at: new Date().toISOString() })
+    .eq('id', studioEditingVideoId);
+  
+  saveBtn.disabled = false;
+  saveBtn.textContent = 'Save changes';
+  
+  if (error) {
+    toast('Failed to save: ' + error.message, 'error');
+    return;
+  }
+  
+  toast('Saved', 'success');
+  closeStudioEditModal();
+  
+  // Invalidate caches and reload
+  allVideosCache = [];
+  loadStudio();
+}
+
+async function deleteStudioVideo(videoId) {
+  const v = studioVideosCache.find(x => x.id === videoId);
+  if (!v) return;
+  
+  if (!confirm(`Permanently delete "${v.title || 'this video'}"?\n\nThis will remove the video from all locations including the home feed and Bunny CDN. This cannot be undone.`)) return;
+  
+  // Show loading state on the row
+  const row = document.querySelector(`tr[data-video-id="${videoId}"]`);
+  if (row) row.style.opacity = '0.4';
+  
+  try {
+    // 1. Call Edge Function to delete from Bunny + Supabase videos table
+    await callEdgeFunction('bunny-delete', { videoId });
+    
+    // 2. Also delete any post that links to this video
+    await supabase.from('posts').delete().eq('video_id', videoId);
+    
+    // 3. Update local cache
+    studioVideosCache = studioVideosCache.filter(x => x.id !== videoId);
+    
+    // 4. Invalidate other caches
+    allVideosCache = [];
+    
+    toast('Video deleted', 'success');
+    renderStudio();
+    
+    // 5. Refresh feed if it's open
+    if (feedEl.style.display !== 'none') {
+      loadFeed();
+    }
+  } catch (err) {
+    console.error('Delete failed:', err);
+    toast('Failed to delete: ' + err.message, 'error');
+    if (row) row.style.opacity = '1';
+  }
+}
+
+// Wire up edit modal events
+document.getElementById('studioEditClose')?.addEventListener('click', closeStudioEditModal);
+document.getElementById('studioEditCancel')?.addEventListener('click', closeStudioEditModal);
+document.getElementById('studioEditSave')?.addEventListener('click', saveStudioEdit);
+document.getElementById('studioEditModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'studioEditModal') closeStudioEditModal();
+});
+
+// Live char counters in edit modal
+document.getElementById('studioEditTitle')?.addEventListener('input', (e) => {
+  document.getElementById('studioEditTitleCount').textContent = `${e.target.value.length} / 100`;
+});
+document.getElementById('studioEditDescription')?.addEventListener('input', (e) => {
+  document.getElementById('studioEditDescCount').textContent = `${e.target.value.length} / 2000`;
+});
+
+// Studio upload button → trigger same upload modal as Videos page
+document.getElementById('btnStudioUpload')?.addEventListener('click', () => {
+  document.getElementById('btnUploadVideo')?.click();
+});
 
 function showVideoPlayer() {
   feedEl.style.display = 'none';
