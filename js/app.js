@@ -1124,7 +1124,6 @@ async function loadVideos() {
     const uploaders = {};
     if (uploaderIds.length) {
       try {
-        try {
         const idsString = uploaderIds.map(id => `"${id}"`).join(',');
         const userResult = await appwriteList(APPWRITE.usersCollection, [
           `equal("$id",[${idsString}])`,
@@ -1132,7 +1131,17 @@ async function loadVideos() {
         ]);
         userResult.documents.forEach(u => { uploaders[u.$id] = u; });
       } catch (e) { console.warn('Could not fetch uploaders:', e); }
-    }
+
+    grid.innerHTML = '';
+    result.documents.forEach((v, i) => {
+      const card = renderVideoCard(v, uploaders[v.uploader]);
+      card.style.animationDelay = `${i * 0.04}s`;
+      grid.appendChild(card);
+    });
+  } catch (error) {
+    grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Couldn't load videos</h3><p>${error.message}</p></div>`;
+  }
+}
 
     grid.innerHTML = '';
     result.documents.forEach((v, i) => {
