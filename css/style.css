@@ -727,3 +727,53 @@ body.on-videos .main-wrap {
   font-size: 0.62rem; padding: 1px 6px; border-radius: 99px;
   margin-top: 0.2rem; font-weight: 500;
 }
+
+/* Video search */
+.videos-header {
+  display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.video-search-wrap {
+  flex: 1; min-width: 280px; position: relative;
+  max-width: 600px;
+}
+.video-search-icon {
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; color: var(--text3);
+  pointer-events: none;
+}
+.video-search-input {
+  width: 100%; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 99px; padding: 0.65rem 2.5rem 0.65rem 2.5rem;
+  color: var(--text); font-family: var(--font); font-size: 0.9rem;
+  outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+}
+.video-search-input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px rgba(124,58,237,0.15); }
+.video-search-input::placeholder { color: var(--text3); }
+.video-search-clear {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; border-radius: 50%; border: none;
+  background: var(--bg3); color: var(--text2); cursor: pointer;
+  font-size: 1rem; line-height: 1; display: flex; align-items: center; justify-content: center;
+}
+.video-search-clear:hover { background: var(--purple); color: #fff; }
+
+.video-search-tags {
+  display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem;
+}
+.video-search-tags:empty { display: none; }
+.search-tag-pill {
+  background: var(--bg2); border: 1px solid var(--border);
+  color: var(--text2); padding: 4px 12px; border-radius: 99px;
+  font-size: 0.78rem; cursor: pointer; transition: all 0.15s;
+}
+.search-tag-pill:hover { border-color: var(--purple); color: var(--purple-lt); }
+.search-tag-pill.active {
+  background: var(--purple); border-color: var(--purple); color: #fff; font-weight: 600;
+}
+
+.video-search-empty {
+  text-align: center; padding: 3rem 1rem; color: var(--text3);
+  grid-column: 1 / -1;
+}
+.video-search-empty h3 { color: var(--text); margin-bottom: 0.5rem; }
