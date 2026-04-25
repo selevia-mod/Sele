@@ -1038,3 +1038,49 @@ body.light .topbar-search input { color: #111; }
   color: var(--text-muted, #888);
   margin-top: 0.3rem;
 }
+
+/* Videos page header with upload button */
+.videos-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.btn-upload-video {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.2rem;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  border: none;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.3);
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.btn-upload-video:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(124, 58, 237, 0.4);
+}
+
+.btn-upload-video:active {
+  transform: translateY(0);
+}
+
+.btn-upload-video svg {
+  flex-shrink: 0;
+}
+
+@media (max-width: 700px) {
+  .btn-upload-video {
+    padding: 0.55rem 1rem;
+    font-size: 0.85rem;
+  }
+}
