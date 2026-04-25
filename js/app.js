@@ -1237,15 +1237,6 @@ document.getElementById('btnTheme').addEventListener('click', () => {
   localStorage.setItem('selebox_theme', newTheme);
 });
 
-// ── Appwrite (read-only for video metadata) ──
-export const APPWRITE = {
-  endpoint: 'https://fra.cloud.appwrite.io/v1',
-  projectId: '66b8be7400121b5d4697',
-  databaseId: '66b32b3600246bc34956',
-  videosCollection: '6915577000216471ecf7',
-  usersCollection: '66b32b4a0022880bc87e'
-};
-
 // Helper to query Appwrite REST API
 export async function appwriteList(collectionId, queries = []) {
   const url = new URL(`${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents`);
