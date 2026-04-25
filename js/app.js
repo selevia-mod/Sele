@@ -1642,14 +1642,13 @@ async function fetchSupabaseVideos() {
         uploader_id,
         profiles!videos_uploader_id_fkey (
           id,
-          display_name,
+          username,
           avatar_url
         )
       `)
       .order('created_at', { ascending: false })
       .limit(100);
     
-    console.log('🎥 Supabase videos query result:', { data, error, count: data?.length });
     if (error) {
       console.error('Supabase videos fetch error:', error);
       return [];
@@ -1673,7 +1672,7 @@ async function fetchSupabaseVideos() {
       // Pre-populated uploader info (saves an extra fetch)
       _uploaderInfo: v.profiles ? {
         $id: v.profiles.id,
-        username: v.profiles.display_name,
+        username: v.profiles.username,
         avatar: v.profiles.avatar_url,
       } : null,
     }));
