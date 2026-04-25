@@ -1179,6 +1179,193 @@ if (videosTitle) {
   });
 }
 
+// ════════════════════════════════════════
+// VIDEO UPLOAD
+// ════════════════════════════════════════
+
+let pendingVideoFile = null;
+
+// Open modal when "Video" button clicked
+document.getElementById('btnOpenVideoUpload')?.addEventListener('click', () => {
+  if (!currentUser) {
+    toast('Please log in to upload videos', 'error');
+    return;
+  }
+  document.getElementById('videoUploadModal').style.display = 'flex';
+  resetVideoUploadModal();
+});
+
+// Close modal
+document.getElementById('closeVideoUploadModal')?.addEventListener('click', closeVideoUploadModal);
+document.getElementById('cancelVideoUpload')?.addEventListener('click', closeVideoUploadModal);
+
+function closeVideoUploadModal() {
+  document.getElementById('videoUploadModal').style.display = 'none';
+  resetVideoUploadModal();
+}
+
+function resetVideoUploadModal() {
+  pendingVideoFile = null;
+  document.getElementById('videoUploadStep1').style.display = 'block';
+  document.getElementById('videoUploadStep2').style.display = 'none';
+  document.getElementById('videoUploadFile').value = '';
+  document.getElementById('videoUploadTitle').value = '';
+  document.getElementById('videoUploadDescription').value = '';
+  document.getElementById('videoUploadTags').value = '';
+  document.getElementById('videoUploadCategory').value = 'general';
+  document.getElementById('videoUploadProgress').classList.remove('active');
+  document.getElementById('videoUploadFill').style.width = '0%';
+  document.getElementById('confirmVideoUpload').disabled = true;
+  document.getElementById('confirmVideoUpload').textContent = 'Upload';
+  document.getElementById('titleCharCount').textContent = '0';
+  document.getElementById('descCharCount').textContent = '0';
+}
+
+// Handle file selection
+document.getElementById('videoUploadFile')?.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  
+  // 2GB limit
+  if (file.size > 2 * 1024 * 1024 * 1024) {
+    toast('Video too large (max 2GB)', 'error');
+    return;
+  }
+  
+  pendingVideoFile = file;
+  
+  // Show preview + form
+  const preview = document.getElementById('videoUploadPreview');
+  preview.src = URL.createObjectURL(file);
+  
+  document.getElementById('videoUploadStep1').style.display = 'none';
+  document.getElementById('videoUploadStep2').style.display = 'block';
+  
+  // Auto-fill title with filename (without extension)
+  const titleInput = document.getElementById('videoUploadTitle');
+  titleInput.value = file.name.replace(/\.[^.]+$/, '').slice(0, 100);
+  document.getElementById('titleCharCount').textContent = titleInput.value.length;
+  document.getElementById('confirmVideoUpload').disabled = false;
+});
+
+// Char counters
+document.getElementById('videoUploadTitle')?.addEventListener('input', (e) => {
+  document.getElementById('titleCharCount').textContent = e.target.value.length;
+  document.getElementById('confirmVideoUpload').disabled = !e.target.value.trim();
+});
+document.getElementById('videoUploadDescription')?.addEventListener('input', (e) => {
+  document.getElementById('descCharCount').textContent = e.target.value.length;
+});
+
+// Handle upload
+document.getElementById('confirmVideoUpload')?.addEventListener('click', async () => {
+  if (!pendingVideoFile) return;
+  
+  const title = document.getElementById('videoUploadTitle').value.trim();
+  if (!title) {
+    toast('Please add a title', 'error');
+    return;
+  }
+  
+  const description = document.getElementById('videoUploadDescription').value.trim();
+  const tagsRaw = document.getElementById('videoUploadTags').value.trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const category = document.getElementById('videoUploadCategory').value;
+  
+  const confirmBtn = document.getElementById('confirmVideoUpload');
+  const cancelBtn = document.getElementById('cancelVideoUpload');
+  const progress = document.getElementById('videoUploadProgress');
+  const fill = document.getElementById('videoUploadFill');
+  const percent = document.getElementById('videoUploadPercent');
+  const status = document.getElementById('videoUploadStatus');
+  
+  confirmBtn.disabled = true;
+  cancelBtn.disabled = true;
+  confirmBtn.textContent = 'Uploading...';
+  progress.classList.add('active');
+  
+  try {
+    // 1. Get upload URL from Edge Function
+    status.textContent = 'Preparing upload...';
+    const uploadInfo = await callEdgeFunction('bunny-upload', { title });
+    
+    // 2. Upload file to Bunny via PUT with progress tracking
+    status.textContent = 'Uploading video...';
+    await uploadFileToBunny(pendingVideoFile, uploadInfo, (pct) => {
+      fill.style.width = pct + '%';
+      percent.textContent = pct + '%';
+    });
+    
+    // 3. Save metadata to Supabase
+    status.textContent = 'Saving...';
+    const { error } = await supabaseClient.from('videos').insert({
+      bunny_video_id: uploadInfo.videoId,
+      bunny_library_id: uploadInfo.libraryId,
+      video_url: uploadInfo.videoUrl,
+      thumbnail_url: uploadInfo.thumbnailUrl,
+      title,
+      description,
+      tags,
+      category,
+      uploader_id: currentUser.id,
+      status: 'processing',
+    });
+    
+    if (error) throw error;
+    
+    status.textContent = 'Done!';
+    fill.style.width = '100%';
+    percent.textContent = '100%';
+    
+    toast('Video uploaded! Processing in the background...', 'success');
+    setTimeout(() => {
+      closeVideoUploadModal();
+      // Refresh video page if open
+      if (videosPage.style.display === 'block') {
+        allVideosCache = [];
+        loadVideos();
+      }
+    }, 1500);
+    
+  } catch (err) {
+    console.error('Upload failed:', err);
+    toast('Upload failed: ' + err.message, 'error');
+    confirmBtn.disabled = false;
+    cancelBtn.disabled = false;
+    confirmBtn.textContent = 'Try again';
+    progress.classList.remove('active');
+  }
+});
+
+// Helper: Upload file to Bunny with progress
+function uploadFileToBunny(file, info, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', info.uploadUrl);
+    xhr.setRequestHeader('AccessKey', info.accessKey);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        onProgress(pct);
+      }
+    });
+    
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error('Bunny upload failed: ' + xhr.status));
+      }
+    });
+    xhr.addEventListener('error', () => reject(new Error('Network error')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+    
+    xhr.send(file);
+  });
+}
+
 initAuth();
 
 // ── Watch history & smart recommendations ──
