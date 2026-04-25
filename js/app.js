@@ -1196,7 +1196,7 @@ function renderVideoCard(video, uploader) {
         <div class="video-card-title">${escHTML(video.title || 'Untitled')}</div>
         <div class="video-card-meta">
           ${escHTML(name)}<br>
-          ${timeAgo(video.$createdAt)}
+          ${(video.videoStats?.views || 0).toLocaleString()} views • ${timeAgo(video.$createdAt)}
         </div>
       </div>
     </div>
