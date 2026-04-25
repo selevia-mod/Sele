@@ -1111,8 +1111,8 @@ async function loadVideos() {
 
   try {
     const result = await appwriteList(APPWRITE.videosCollection, [
-      'orderDesc("$createdAt")',
-      'limit(50)'
+      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
+      JSON.stringify({ method: 'limit', values: [50] })
     ]);
 
     if (!result.documents || !result.documents.length) {
@@ -1123,9 +1123,11 @@ async function loadVideos() {
     const uploaderIds = [...new Set(result.documents.map(v => v.uploader).filter(Boolean))];
     const uploaders = {};
     if (uploaderIds.length) {
-      const idsQuery = `equal("$id",[${uploaderIds.map(id => `"${id}"`).join(',')}])`;
       try {
-        const userResult = await appwriteList(APPWRITE.usersCollection, [idsQuery, 'limit(100)']);
+        const userResult = await appwriteList(APPWRITE.usersCollection, [
+          JSON.stringify({ method: 'equal', attribute: '$id', values: uploaderIds }),
+          JSON.stringify({ method: 'limit', values: [100] })
+        ]);
         userResult.documents.forEach(u => { uploaders[u.$id] = u; });
       } catch (e) { console.warn('Could not fetch uploaders:', e); }
     }
