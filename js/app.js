@@ -50,13 +50,31 @@ async function onSignedIn(user) {
   currentProfile = profile;
   updateTopbarUser();
   showApp();
-  loadStories();
+
+  // Check URL hash for routing FIRST
+  const hash = window.location.hash;
+  if (hash.startsWith('#profile/')) {
+    loadStories();
+    loadFeed();
+    openProfile(hash.replace('#profile/', ''));
+  } else if (hash === '#videos') {
+    showVideos();
+  } else if (hash.startsWith('#video/')) {
+    playVideo(hash.replace('#video/', ''));
+  } else {
+    loadStories();
+    loadFeed();
+  }
+}
 
   // Check URL hash for routing
   const hash = window.location.hash;
   if (hash.startsWith('#profile/')) {
-    const userId = hash.replace('#profile/', '');
-    openProfile(userId);
+    openProfile(hash.replace('#profile/', ''));
+  } else if (hash === '#videos') {
+    showVideos();
+  } else if (hash.startsWith('#video/')) {
+    playVideo(hash.replace('#video/', ''));
   } else {
     loadFeed();
   }
