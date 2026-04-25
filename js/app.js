@@ -1087,9 +1087,33 @@ const videosPage = document.getElementById('videosPage');
 const videoPlayerPage = document.getElementById('videoPlayerPage');
 let currentHls = null;
 
+// Resume playback storage
+function getResumeKey(videoId) { return `video_resume_${videoId}`; }
+function getResumeTime(videoId) {
+  const t = localStorage.getItem(getResumeKey(videoId));
+  return t ? parseFloat(t) : 0;
+}
+function saveResumeTime(videoId, time, duration) {
+  if (!time || time < 5) return; // ignore very early
+  if (duration && time > duration - 10) {
+    localStorage.removeItem(getResumeKey(videoId));
+    return;
+  }
+  localStorage.setItem(getResumeKey(videoId), time);
+}
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return '';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+  return `${m}:${s.toString().padStart(2,'0')}`;
+}
+
 function stopVideoPlayer() {
   const player = document.getElementById('videoPlayer');
   if (player) {
+    if (player._saveInterval) { clearInterval(player._saveInterval); player._saveInterval = null; }
     player.pause();
     player.removeAttribute('src');
     player.load();
@@ -1183,12 +1207,16 @@ function renderVideoCard(video, uploader) {
   const avatarHTML = uploader?.avatar ? `<img src="${uploader.avatar}" alt="${name}"/>` : initials(name);
 
   const thumbHTML = video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : '';
+  const resumeTime = getResumeTime(video.$id);
+  const videoDuration = video.videoStats?.duration || 0;
+  const progressPct = (resumeTime && videoDuration) ? Math.min(100, (resumeTime / videoDuration) * 100) : 0;
 
   div.innerHTML = `
     <div class="video-thumb">
       ${thumbHTML}
       <video class="preview" muted playsinline preload="none"></video>
-      <div class="video-thumb-play"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
+      <span class="video-thumb-duration" data-duration></span>
+      ${progressPct > 0 ? `<div class="video-thumb-progress"><div class="video-thumb-progress-fill" style="width:${progressPct}%"></div></div>` : ''}
     </div>
     <div class="video-card-info">
       <div class="avatar">${avatarHTML}</div>
@@ -1201,6 +1229,33 @@ function renderVideoCard(video, uploader) {
       </div>
     </div>
   `;
+
+  // Show duration if available, otherwise fetch from video metadata
+  const durationEl = div.querySelector('[data-duration]');
+  if (videoDuration) {
+    durationEl.textContent = formatDuration(videoDuration);
+  } else if (video.videoUrl) {
+    const tempVid = document.createElement('video');
+    tempVid.preload = 'metadata';
+    tempVid.muted = true;
+    if (video.videoUrl.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !tempVid.canPlayType('application/vnd.apple.mpegurl')) {
+      const tempHls = new Hls();
+      tempHls.loadSource(video.videoUrl);
+      tempHls.attachMedia(tempVid);
+      tempHls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (tempVid.duration && !isNaN(tempVid.duration)) {
+          durationEl.textContent = formatDuration(tempVid.duration);
+        }
+        setTimeout(() => tempHls.destroy(), 500);
+      });
+    } else {
+      tempVid.src = video.videoUrl;
+      tempVid.addEventListener('loadedmetadata', () => {
+        durationEl.textContent = formatDuration(tempVid.duration);
+        tempVid.removeAttribute('src');
+      });
+    }
+  }
 
   // Hover to play preview
   const previewEl = div.querySelector('video.preview');
@@ -1255,20 +1310,46 @@ async function playVideo(videoId) {
     const player = document.getElementById('videoPlayer');
     if (currentHls) { currentHls.destroy(); currentHls = null; }
 
+    const resumeFrom = getResumeTime(videoId);
+
+    const startPlayback = () => {
+      if (resumeFrom > 0) {
+        player.currentTime = resumeFrom;
+        toast(`Resumed at ${formatDuration(resumeFrom)}`, '');
+      }
+      player.play().catch(() => {});
+    };
+
     if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
       if (player.canPlayType('application/vnd.apple.mpegurl')) {
         player.src = video.videoUrl;
+        player.addEventListener('loadedmetadata', startPlayback, { once: true });
       } else if (window.Hls && Hls.isSupported()) {
         currentHls = new Hls();
         currentHls.loadSource(video.videoUrl);
         currentHls.attachMedia(player);
+        currentHls.on(Hls.Events.MANIFEST_PARSED, startPlayback);
       } else {
         toast('HLS not supported in this browser', 'error');
       }
     } else {
       player.src = video.videoUrl || '';
+      player.addEventListener('loadedmetadata', startPlayback, { once: true });
     }
-    player.play().catch(() => {});
+
+    // Save position every 3 seconds
+    let saveInterval = setInterval(() => {
+      if (!player.paused && player.currentTime > 0) {
+        saveResumeTime(videoId, player.currentTime, player.duration);
+      }
+    }, 3000);
+
+    // Clean up interval when video changes
+    player._saveInterval && clearInterval(player._saveInterval);
+    player._saveInterval = saveInterval;
+
+    // Save when paused
+    player.onpause = () => saveResumeTime(videoId, player.currentTime, player.duration);
 
     document.getElementById('videoTitle').textContent = video.title || 'Untitled';
     document.getElementById('videoViews').textContent = '';
