@@ -51,7 +51,7 @@ async function onSignedIn(user) {
   updateTopbarUser();
   showApp();
 
-  // Check URL hash for routing FIRST
+  // Check URL hash for routing
   const hash = window.location.hash;
   if (hash.startsWith('#profile/')) {
     loadStories();
@@ -67,17 +67,21 @@ async function onSignedIn(user) {
   }
 }
 
-  // Check URL hash for routing
+  // Check URL hash for routing FIRST
   const hash = window.location.hash;
   if (hash.startsWith('#profile/')) {
+    loadStories();
+    loadFeed();
     openProfile(hash.replace('#profile/', ''));
   } else if (hash === '#videos') {
     showVideos();
   } else if (hash.startsWith('#video/')) {
     playVideo(hash.replace('#video/', ''));
   } else {
+    loadStories();
     loadFeed();
   }
+}
 
 function showAuth() {
   document.getElementById('authScreen').style.display = 'flex';
