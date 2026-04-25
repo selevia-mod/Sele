@@ -558,12 +558,12 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 }
 
 .video-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr);
-  gap: 1.25rem 1rem;
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 2rem 1.25rem;
 }
-@media (max-width: 1100px) { .video-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 800px)  { .video-grid { grid-template-columns: repeat(2, 1fr); gap: 1rem 0.75rem; } }
-@media (max-width: 500px)  { .video-grid { grid-template-columns: 1fr; gap: 1rem; } }
+@media (max-width: 1400px) { .video-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 1100px) { .video-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 700px)  { .video-grid { grid-template-columns: 1fr; gap: 1.5rem; } }
 
 .video-card {
   background: transparent; border: none;
@@ -580,9 +580,15 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 .video-thumb {
   position: relative; aspect-ratio: 16 / 9;
   background: linear-gradient(135deg, var(--purple-dk), var(--purple));
-  overflow: hidden; border-radius: 12px;
+  overflow: hidden; border-radius: 14px;
   transition: all 0.2s; outline: 2px solid transparent;
 }
+.video-thumb video.preview {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; opacity: 0; transition: opacity 0.3s;
+  z-index: 1;
+}
+.video-thumb video.preview.playing { opacity: 1; }
 .video-thumb img {
   position: absolute; top: 0; left: 0;
   width: 300%; height: 300%;
