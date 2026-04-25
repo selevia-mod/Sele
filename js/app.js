@@ -1688,6 +1688,19 @@ async function loadVideos() {
 
   await ensureVideoCache();
 
+// Merge in new Supabase uploads
+const supabaseVideos = await fetchSupabaseVideos();
+if (supabaseVideos.length) {
+  supabaseVideos.forEach(v => {
+    if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
+      allUploadersCache[v.uploader] = v._uploaderInfo;
+    }
+  });
+  const existingIds = new Set(allVideosCache.map(v => v.$id));
+  const newOnes = supabaseVideos.filter(v => !existingIds.has(v.$id));
+  allVideosCache = [...newOnes, ...allVideosCache];
+}
+
   if (!allVideosCache.length) {
     grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
     return;
