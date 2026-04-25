@@ -81,7 +81,6 @@ async function onSignedIn(user) {
     loadStories();
     loadFeed();
   }
-}
 
 function showAuth() {
   document.getElementById('authScreen').style.display = 'flex';
