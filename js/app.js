@@ -728,6 +728,11 @@ function showFeed() {
   viewingProfileId = null;
   stopVideoPlayer();
   if (window.location.hash) history.pushState(null, '', window.location.pathname);
+
+  // Reload feed if it's empty or stuck
+  if (!feedEl.querySelector('.post-card') || feedEl.querySelector('.loading')) {
+    loadFeed();
+  }
 }
 
 function showProfileView() {
