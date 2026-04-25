@@ -783,9 +783,18 @@ async function openProfile(userId) {
   showProfileView();
   viewingProfileId = userId;
 
-  const { data: profile } = await supabase.from('profiles').select('*').eq('id', userId).single();
-  if (!profile) return;
-
+  // Retry up to 3 times in case profile isn't ready yet
+  let profile = null;
+  for (let i = 0; i < 3; i++) {
+    const result = await supabase.from('profiles').select('*').eq('id', userId).single();
+    if (result.data) { profile = result.data; break; }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  if (!profile) {
+    toast('Could not load profile', 'error');
+    return;
+  }
+  
   // Banner (preserve the edit button!)
   const banner = document.getElementById('profileBanner');
   const existingBtn = document.getElementById('editBannerBtn');
@@ -1015,14 +1024,20 @@ document.getElementById('bannerInput').addEventListener('change', (e) => {
   e.target.value = '';
 });
 // Open own profile from sidebar
-document.getElementById('btnProfile').addEventListener('click', () => {
-  if (currentUser) openProfile(currentUser.id);
-});
-
-// Open profile when clicking avatar in topbar
-document.getElementById('topbarAvatar').addEventListener('click', () => {
-  if (currentUser) openProfile(currentUser.id);
-});
+async function openMyProfile() {
+  if (!currentUser) {
+    toast('Loading your profile...', '');
+    return;
+  }
+  // Make sure profile is loaded before opening
+  if (!currentProfile) {
+    const { data: profile } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
+    currentProfile = profile;
+  }
+  openProfile(currentUser.id);
+}
+document.getElementById('btnProfile').addEventListener('click', openMyProfile);
+document.getElementById('topbarAvatar').addEventListener('click', openMyProfile);
 
 // Add Home button functionality — the first sidebar item
 document.querySelector('.sidebar-item.active')?.addEventListener('click', showFeed);
