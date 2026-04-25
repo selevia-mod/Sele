@@ -1321,42 +1321,162 @@ async function loadVideos() {
   const grid = document.getElementById('videoGrid');
   grid.innerHTML = '<div class="loading">Loading videos...</div>';
 
+  await ensureVideoCache();
+
+  if (!allVideosCache.length) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
+    return;
+  }
+
+  renderTagPills();
+  renderVideoResults(allVideosCache);
+}
+
+// ── Video search ──
+let allVideosCache = [];
+let allUploadersCache = {};
+let activeSearchQuery = '';
+let activeTagFilter = null;
+let searchDebounceTimer = null;
+
+async function ensureVideoCache() {
+  if (allVideosCache.length) return;
   try {
     const result = await appwriteList(APPWRITE.videosCollection, [
       JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit', values: [50] })
+      JSON.stringify({ method: 'limit', values: [200] })
     ]);
+    allVideosCache = result.documents || [];
 
-    if (!result.documents || !result.documents.length) {
-      grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
-      return;
-    }
-
-    const uploaderIds = [...new Set(result.documents.map(v => v.uploader).filter(Boolean))];
-    const uploaders = {};
-
+    // Fetch all unique uploaders
+    const uploaderIds = [...new Set(allVideosCache.map(v => v.uploader).filter(Boolean))];
     if (uploaderIds.length) {
-      try {
-        const userResult = await appwriteList(APPWRITE.usersCollection, [
-          JSON.stringify({ method: 'equal', attribute: '$id', values: uploaderIds }),
-          JSON.stringify({ method: 'limit', values: [100] })
-        ]);
-        userResult.documents.forEach(u => { uploaders[u.$id] = u; });
-      } catch (e) {
-        console.warn('Could not fetch uploaders:', e);
+      // Appwrite has a 100 limit on equal() values, so we batch
+      for (let i = 0; i < uploaderIds.length; i += 100) {
+        const batch = uploaderIds.slice(i, i + 100);
+        try {
+          const res = await appwriteList(APPWRITE.usersCollection, [
+            JSON.stringify({ method: 'equal', attribute: '$id', values: batch }),
+            JSON.stringify({ method: 'limit', values: [100] })
+          ]);
+          res.documents.forEach(u => { allUploadersCache[u.$id] = u; });
+        } catch {}
       }
     }
-
-    grid.innerHTML = '';
-    result.documents.forEach((v, i) => {
-      const card = renderVideoCard(v, uploaders[v.uploader]);
-      card.style.animationDelay = `${i * 0.04}s`;
-      grid.appendChild(card);
-    });
-  } catch (error) {
-    grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Couldn't load videos</h3><p>${error.message}</p></div>`;
+  } catch (e) {
+    console.error('Failed to load video cache:', e);
   }
 }
+
+function searchVideos(query, tagFilter) {
+  query = (query || '').trim().toLowerCase();
+  if (!query && !tagFilter) return allVideosCache;
+
+  // Detect hashtag search (e.g. "#music")
+  const hashtagMatch = query.match(/^#(\w+)/);
+  const isHashtag = !!hashtagMatch;
+  const cleanQuery = isHashtag ? hashtagMatch[1].toLowerCase() : query;
+
+  return allVideosCache.filter(v => {
+    // Tag filter (when user clicks a tag pill)
+    if (tagFilter) {
+      const hasTag = (v.tags || []).some(t => t.toLowerCase() === tagFilter.toLowerCase());
+      if (!hasTag) return false;
+    }
+    if (!cleanQuery) return true;
+
+    // Hashtag mode: ONLY match tags
+    if (isHashtag) {
+      return (v.tags || []).some(t => t.toLowerCase().includes(cleanQuery));
+    }
+
+    // Normal search: match title, description, tags, uploader
+    const title = (v.title || '').toLowerCase();
+    const desc = (v.description || '').toLowerCase();
+    const tags = (v.tags || []).join(' ').toLowerCase();
+    const uploader = allUploadersCache[v.uploader];
+    const uploaderName = (uploader?.username || '').toLowerCase();
+
+    return title.includes(cleanQuery)
+        || desc.includes(cleanQuery)
+        || tags.includes(cleanQuery)
+        || uploaderName.includes(cleanQuery);
+  });
+}
+
+function getTopTags(limit = 12) {
+  const tagCounts = {};
+  allVideosCache.forEach(v => {
+    (v.tags || []).forEach(t => {
+      tagCounts[t] = (tagCounts[t] || 0) + 1;
+    });
+  });
+  return Object.entries(tagCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([tag]) => tag);
+}
+
+function renderTagPills() {
+  const wrap = document.getElementById('videoSearchTags');
+  const tags = getTopTags(12);
+  wrap.innerHTML = tags.map(tag => 
+    `<button class="search-tag-pill ${tag === activeTagFilter ? 'active' : ''}" data-tag="${escHTML(tag)}">${escHTML(tag)}</button>`
+  ).join('');
+
+  wrap.querySelectorAll('.search-tag-pill').forEach(pill => {
+    pill.onclick = () => {
+      const tag = pill.dataset.tag;
+      activeTagFilter = (activeTagFilter === tag) ? null : tag;
+      renderTagPills();
+      runSearch();
+    };
+  });
+}
+
+function runSearch() {
+  const filtered = searchVideos(activeSearchQuery, activeTagFilter);
+  renderVideoResults(filtered);
+}
+
+function renderVideoResults(videos) {
+  const grid = document.getElementById('videoGrid');
+  if (!videos.length) {
+    grid.innerHTML = `
+      <div class="video-search-empty">
+        <h3>No videos found</h3>
+        <p>Try a different keyword or tag</p>
+      </div>
+    `;
+    return;
+  }
+
+  grid.innerHTML = '';
+  videos.slice(0, 100).forEach((v, i) => {
+    const card = renderVideoCard(v, allUploadersCache[v.uploader]);
+    card.style.animationDelay = `${i * 0.03}s`;
+    grid.appendChild(card);
+  });
+}
+
+// Wire up search input
+document.getElementById('videoSearchInput').addEventListener('input', (e) => {
+  const value = e.target.value;
+  activeSearchQuery = value;
+  document.getElementById('videoSearchClear').style.display = value ? 'flex' : 'none';
+
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    runSearch();
+  }, 200);
+});
+
+document.getElementById('videoSearchClear').addEventListener('click', () => {
+  document.getElementById('videoSearchInput').value = '';
+  document.getElementById('videoSearchClear').style.display = 'none';
+  activeSearchQuery = '';
+  runSearch();
+});
 
 function renderVideoCard(video, uploader) {
   const div = document.createElement('div');
