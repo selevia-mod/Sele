@@ -137,18 +137,30 @@
   Upload
 </button>
       </div>
-      <div id="studioPage" style="display:none">
-  <div class="studio-header">
-    <h1 class="studio-title">Creator Studio</h1>
-    <p class="studio-subtitle">Manage your uploaded videos</p>
-  </div>
-  <div id="studioContent">
-    <div class="empty"><h3>Loading...</h3></div>
-  </div>
-</div>
       <div id="videoSearchTags" class="video-search-tags"></div>
       <div class="video-grid" id="videoGrid">
         <div class="loading">Loading videos...</div>
+      </div>
+    </div>
+
+    <!-- Creator Studio Page -->
+    <div id="studioPage" style="display:none">
+      <div class="studio-header">
+        <div>
+          <h1 class="studio-title">Creator Studio</h1>
+          <p class="studio-subtitle">Manage your videos, track performance, and engage your audience</p>
+        </div>
+        <button class="btn-upload-video" id="btnStudioUpload">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          Upload
+        </button>
+      </div>
+      <div id="studioContent">
+        <div class="empty"><h3>Loading...</h3></div>
       </div>
     </div>
     
@@ -446,6 +458,59 @@
       </button>
     </div>
     
+  </div>
+</div>
+
+<!-- Studio Edit Modal -->
+<div class="modal-overlay video-upload-overlay" id="studioEditModal" style="display:none">
+  <div class="vu-modal">
+    <div class="vu-header">
+      <div class="vu-header-text">
+        <h2 class="vu-title">Edit video</h2>
+        <p class="vu-subtitle">Update your video's details</p>
+      </div>
+      <button class="vu-close" id="studioEditClose" aria-label="Close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="vu-body">
+      <div class="vu-preview-box" id="studioEditPreview" style="display:none">
+        <img id="studioEditThumb" alt=""/>
+      </div>
+      <div class="vu-form">
+        <label class="vu-label">Title <span class="vu-required">*</span></label>
+        <input type="text" id="studioEditTitle" class="vu-input" maxlength="100" placeholder="Add a catchy title">
+        <div class="vu-hint" id="studioEditTitleCount">0 / 100</div>
+
+        <label class="vu-label">Description</label>
+        <textarea id="studioEditDescription" class="vu-textarea" maxlength="2000" rows="4" placeholder="Tell viewers about your video..."></textarea>
+        <div class="vu-hint" id="studioEditDescCount">0 / 2000</div>
+
+        <label class="vu-label">Tags <small style="color:#888">comma-separated</small></label>
+        <input type="text" id="studioEditTags" class="vu-input" placeholder="romance, drama, story">
+
+        <label class="vu-label">Category</label>
+        <select id="studioEditCategory" class="vu-input">
+          <option value="general">General</option>
+          <option value="romance">Romance</option>
+          <option value="hot-romance">Hot Romance</option>
+          <option value="thriller">Thriller</option>
+          <option value="horror">Horror</option>
+          <option value="comedy">Comedy</option>
+          <option value="anime">Anime</option>
+          <option value="music">Music</option>
+          <option value="audiobook">Audiobook</option>
+          <option value="books">Books</option>
+          <option value="relaxing">Relaxing</option>
+          <option value="shorts">Shorts</option>
+          <option value="reels">Reels</option>
+        </select>
+      </div>
+    </div>
+    <div class="vu-footer">
+      <button class="vu-btn vu-btn-secondary" id="studioEditCancel">Cancel</button>
+      <button class="vu-btn vu-btn-primary" id="studioEditSave">Save changes</button>
+    </div>
   </div>
 </div>
 
