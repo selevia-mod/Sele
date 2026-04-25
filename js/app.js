@@ -1147,16 +1147,6 @@ async function loadVideos() {
   }
 }
 
-    grid.innerHTML = '';
-    result.documents.forEach((v, i) => {
-      const card = renderVideoCard(v, uploaders[v.uploader]);
-      card.style.animationDelay = `${i * 0.04}s`;
-      grid.appendChild(card);
-    });
-  } catch (error) {
-    grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Couldn't load videos</h3><p>${error.message}</p></div>`;
-  }
-
 function renderVideoCard(video, uploader) {
   const div = document.createElement('div');
   div.className = 'video-card';
