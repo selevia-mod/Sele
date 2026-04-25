@@ -1308,7 +1308,7 @@ document.getElementById('confirmVideoUpload')?.addEventListener('click', async (
     
     // 3. Save metadata to Supabase
     status.textContent = 'Saving...';
-    const { error } = await supabaseClient.from('videos').insert({
+    const { error } = await supabase.from('videos').insert({
       bunny_video_id: uploadInfo.videoId,
       bunny_library_id: uploadInfo.libraryId,
       video_url: uploadInfo.videoUrl,
