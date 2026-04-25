@@ -1383,7 +1383,8 @@ function stopVideoPlayer() {
   }
 }
 
-function showVideos() {
+function showVideos(forceReload = false) {
+  const wasOnVideosPage = videosPage.style.display === 'block';
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
@@ -1393,7 +1394,10 @@ function showVideos() {
   document.body.classList.add('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#videos');
-  loadVideos();
+  // Only reload if cache is empty or forced
+  if (forceReload || !allVideosCache.length) {
+    loadVideos();
+  }
 }
 
 function showVideoPlayer() {
