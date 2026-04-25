@@ -25,6 +25,34 @@ export function initials(name) {
   return (name || 'G').split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2);
 }
 
+// ── Appwrite (read-only for video metadata) ──
+export const APPWRITE = {
+  endpoint: 'https://fra.cloud.appwrite.io/v1',
+  projectId: '66b8be7400121b5d4697',
+  databaseId: '66b32b3600246bc34956',
+  videosCollection: '6915577000216471ecf7',
+  usersCollection: '66b32b4a0022880bc87e'
+};
+
+export async function appwriteList(collectionId, queries = []) {
+  const url = new URL(`${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents`);
+  queries.forEach(q => url.searchParams.append('queries[]', q));
+  const res = await fetch(url, {
+    headers: { 'X-Appwrite-Project': APPWRITE.projectId, 'Content-Type': 'application/json' }
+  });
+  if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
+  return res.json();
+}
+
+export async function appwriteGet(collectionId, documentId) {
+  const url = `${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents/${documentId}`;
+  const res = await fetch(url, {
+    headers: { 'X-Appwrite-Project': APPWRITE.projectId, 'Content-Type': 'application/json' }
+  });
+  if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
+  return res.json();
+}
+
 export const APPWRITE = {
   endpoint: 'https://fra.cloud.appwrite.io/v1',
   projectId: '66b8be7400121b5d4697',
