@@ -36,11 +36,17 @@ export const APPWRITE = {
 
 export async function appwriteList(collectionId, queries = []) {
   const url = new URL(`${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents`);
-  queries.forEach(q => url.searchParams.append('queries[]', q));
+  // Appwrite expects queries as JSON-stringified objects
+  queries.forEach(q => {
+    url.searchParams.append('queries[]', typeof q === 'string' ? q : JSON.stringify(q));
+  });
   const res = await fetch(url, {
     headers: { 'X-Appwrite-Project': APPWRITE.projectId, 'Content-Type': 'application/json' }
   });
-  if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(`Appwrite error: ${errorData.message || res.status}`);
+  }
   return res.json();
 }
 
