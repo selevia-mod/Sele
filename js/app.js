@@ -1723,18 +1723,27 @@ window._cache = allVideosCache; // expose for debugging
 function getPersonalizedFeed() {
   const { tagWeights, watchedIds, recentUploaders } = getInterestProfile();
   const hasHistory = Object.keys(tagWeights).length > 0;
-
-  // Filter out already-watched (last 30 days)
   const myId = currentUser?.id;
-    let pool = allVideosCache.filter(v => v.uploader === myId || !watchedIds.has(v.$id));
+
+  // Filter out already-watched (last 30 days), but always show user's own uploads
+  let pool = allVideosCache.filter(v => v.uploader === myId || !watchedIds.has(v.$id));
+
+  // Pin user's own recent uploads (last 7 days) at the top
+  const myRecent = pool.filter(v =>
+    v.uploader === myId &&
+    v.$createdAt &&
+    (Date.now() - new Date(v.$createdAt).getTime()) < 7 * 24 * 3600 * 1000
+  );
+  const myRecentIds = new Set(myRecent.map(v => v.$id));
+  const others = pool.filter(v => !myRecentIds.has(v.$id));
 
   if (!hasHistory) {
-    // No watch history → show by recency (newest first)
-    return pool;
+    // No watch history → my recent uploads first, then by recency
+    return [...myRecent, ...others];
   }
 
-  // Score each video
-  pool.forEach(v => {
+  // Score each remaining video
+  others.forEach(v => {
     let score = 0;
 
     // Tag matching (interest profile)
@@ -1761,13 +1770,13 @@ function getPersonalizedFeed() {
   });
 
   // Sort: 70% personalized + 30% trending mixed in
-  pool.sort((a, b) => b._feedScore - a._feedScore);
+  others.sort((a, b) => b._feedScore - a._feedScore);
 
   // Take top 70 personalized
-  const personalized = pool.slice(0, 70);
+  const personalized = others.slice(0, 70);
   // Take 30 trending (high views, not in personalized)
   const personalizedIds = new Set(personalized.map(v => v.$id));
-  const trending = pool
+  const trending = others
     .filter(v => !personalizedIds.has(v.$id))
     .sort((a, b) => (b.videoStats?.views || 0) - (a.videoStats?.views || 0))
     .slice(0, 30);
@@ -1782,7 +1791,8 @@ function getPersonalizedFeed() {
     }
   }
 
-  return result;
+  // Pin my recent uploads at the top
+  return [...myRecent, ...result];
 }
 
 // ── Video search ──
