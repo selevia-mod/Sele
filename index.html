@@ -436,64 +436,7 @@
     
   </div>
 </div>
-    
-    <div class="modal-body">
-      <!-- File picker (shown first) -->
-      <div id="videoUploadStep1">
-        <label class="video-file-picker" id="videoFilePicker">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="17 8 12 3 7 8"/>
-            <line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
-          <h3>Click to select video</h3>
-          <p>MP4, MOV, AVI up to 2GB</p>
-          <input type="file" accept="video/*" id="videoUploadFile" style="display:none">
-        </label>
-      </div>
-      
-      <!-- Form (shown after file selected) -->
-      <div id="videoUploadStep2" style="display:none">
-        <video id="videoUploadPreview" controls style="width:100%; max-height:300px; border-radius:12px; background:#000; margin-bottom:1rem;"></video>
-        
-        <div class="form-group">
-          <label>Title <span class="required">*</span></label>
-          <input type="text" id="videoUploadTitle" maxlength="100" placeholder="Add a title for your video">
-          <small class="char-hint"><span id="titleCharCount">0</span> / 100</small>
-        </div>
-        
-        <div class="form-group">
-          <label>Description</label>
-          <textarea id="videoUploadDescription" maxlength="2000" rows="4" placeholder="Tell viewers about your video..."></textarea>
-          <small class="char-hint"><span id="descCharCount">0</span> / 2000</small>
-        </div>
-        
-        <div class="form-group">
-          <label>Tags <small>(comma-separated, e.g. romance, drama, tagalog)</small></label>
-          <input type="text" id="videoUploadTags" placeholder="romance, drama, story">
-        </div>
-        
-        <div class="form-group">
-          <label>Category</label>
-          <select id="videoUploadCategory">
-            <option value="general">General</option>
-            <option value="romance">Romance</option>
-            <option value="hot-romance">Hot Romance</option>
-            <option value="thriller">Thriller</option>
-            <option value="horror">Horror</option>
-            <option value="comedy">Comedy</option>
-            <option value="anime">Anime</option>
-            <option value="music">Music</option>
-            <option value="audiobook">Audiobook</option>
-            <option value="books">Books</option>
-            <option value="relaxing">Relaxing</option>
-            <option value="shorts">Shorts</option>
-            <option value="reels">Reels</option>
-          </select>
-        </div>
-        
-        <!-- Upload progress (shown during upload) -->
-  
+
 <!-- Lightbox -->
 <div class="lightbox" id="lightbox">
   <button class="lightbox-close" id="lightboxClose">×</button>
