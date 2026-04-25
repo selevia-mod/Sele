@@ -777,7 +777,11 @@ function showFeed() {
   storiesEl.style.display = '';
   composeEl.style.display = '';
   profilePage.style.display = 'none';
+  videosPage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  document.body.classList.remove('on-videos');
   viewingProfileId = null;
+  stopVideoPlayer();
   if (window.location.hash) history.pushState(null, '', window.location.pathname);
 }
 
@@ -786,6 +790,10 @@ function showProfileView() {
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
   profilePage.style.display = 'block';
+  videosPage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  document.body.classList.remove('on-videos');
+  stopVideoPlayer();
 }
 
 async function openProfile(userId) {
@@ -1074,6 +1082,19 @@ const videosPage = document.getElementById('videosPage');
 const videoPlayerPage = document.getElementById('videoPlayerPage');
 let currentHls = null;
 
+function stopVideoPlayer() {
+  const player = document.getElementById('videoPlayer');
+  if (player) {
+    player.pause();
+    player.removeAttribute('src');
+    player.load();
+  }
+  if (currentHls) {
+    currentHls.destroy();
+    currentHls = null;
+  }
+}
+
 function showVideos() {
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
@@ -1081,6 +1102,8 @@ function showVideos() {
   profilePage.style.display = 'none';
   videoPlayerPage.style.display = 'none';
   videosPage.style.display = 'block';
+  document.body.classList.add('on-videos');
+  stopVideoPlayer();
   history.pushState(null, '', '#videos');
   loadVideos();
 }
