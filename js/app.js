@@ -1602,25 +1602,6 @@ function renderVideoResults(videos) {
   });
 }
 
-// Wire up search input
-document.getElementById('videoSearchInput').addEventListener('input', (e) => {
-  const value = e.target.value;
-  activeSearchQuery = value;
-  document.getElementById('videoSearchClear').style.display = value ? 'flex' : 'none';
-
-  clearTimeout(searchDebounceTimer);
-  searchDebounceTimer = setTimeout(() => {
-    runSearch();
-  }, 200);
-});
-
-document.getElementById('videoSearchClear').addEventListener('click', () => {
-  document.getElementById('videoSearchInput').value = '';
-  document.getElementById('videoSearchClear').style.display = 'none';
-  activeSearchQuery = '';
-  runSearch();
-});
-
 function renderVideoCard(video, uploader) {
   const div = document.createElement('div');
   div.className = 'video-card';
