@@ -559,10 +559,9 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 
 .video-grid {
   display: grid; grid-template-columns: repeat(3, 1fr);
-  gap: 2rem 1.25rem;
+  gap: 2.25rem 0.75rem;
 }
-@media (max-width: 1400px) { .video-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 1100px) { .video-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 1100px) { .video-grid { grid-template-columns: repeat(2, 1fr); gap: 1.75rem 0.75rem; } }
 @media (max-width: 700px)  { .video-grid { grid-template-columns: 1fr; gap: 1.5rem; } }
 
 .video-card {
@@ -607,16 +606,7 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 }
 .video-card:hover .video-thumb::after { opacity: 1; }
 
-.video-thumb-play {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  z-index: 2;
-}
-.video-thumb-play svg {
-  width: 56px; height: 56px; color: #fff; opacity: 0;
-  transform: scale(0.8); transition: all 0.2s;
-  filter: drop-shadow(0 4px 12px rgba(0,0,0,0.6));
-}
-.video-card:hover .video-thumb-play svg { opacity: 1; transform: scale(1); }
+.video-thumb-play { display: none; }
 
 .video-card-info {
   padding: 0.75rem 0.25rem 0; display: flex; gap: 0.65rem; align-items: flex-start;
@@ -627,8 +617,8 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 }
 .video-card-text { flex: 1; min-width: 0; }
 .video-card-title {
-  font-size: 0.9rem; font-weight: 600; line-height: 1.35;
-  margin-bottom: 0.3rem; color: var(--text);
+  font-size: 0.82rem; font-weight: 600; line-height: 1.35;
+  margin-bottom: 0.25rem; color: var(--text);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .video-card-meta {
