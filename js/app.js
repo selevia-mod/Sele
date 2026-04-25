@@ -78,7 +78,6 @@ async function onSignedIn(user) {
   } else {
     loadFeed();
   }
-}
 
 function showAuth() {
   document.getElementById('authScreen').style.display = 'flex';
