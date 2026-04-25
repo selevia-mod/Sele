@@ -1,4 +1,4 @@
-import { supabase, REACTIONS, timeAgo, initials } from './supabase.js';
+import { supabase, REACTIONS, timeAgo, initials, appwriteList, appwriteGet, APPWRITE } from './supabase.js';
 
 let currentUser = null;
 let currentProfile = null;
@@ -1069,6 +1069,160 @@ window.addEventListener('popstate', () => {
 
 initAuth();
 
+// ── Videos (from Appwrite) ──
+const videosPage = document.getElementById('videosPage');
+const videoPlayerPage = document.getElementById('videoPlayerPage');
+let currentHls = null;
+
+function showVideos() {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  videosPage.style.display = 'block';
+  history.pushState(null, '', '#videos');
+  loadVideos();
+}
+
+function showVideoPlayer() {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'none';
+  videosPage.style.display = 'none';
+  videoPlayerPage.style.display = 'block';
+}
+
+document.getElementById('btnVideos').addEventListener('click', showVideos);
+document.getElementById('btnBackVideos').addEventListener('click', () => {
+  if (currentHls) { currentHls.destroy(); currentHls = null; }
+  document.getElementById('videoPlayer').pause();
+  showVideos();
+});
+
+// Hide upload button (uploads managed elsewhere)
+const btnUploadVideo = document.getElementById('btnUploadVideo');
+if (btnUploadVideo) btnUploadVideo.style.display = 'none';
+
+async function loadVideos() {
+  const grid = document.getElementById('videoGrid');
+  grid.innerHTML = '<div class="loading">Loading videos...</div>';
+
+  try {
+    const result = await appwriteList(APPWRITE.videosCollection, [
+      'orderDesc("$createdAt")',
+      'limit(50)'
+    ]);
+
+    if (!result.documents || !result.documents.length) {
+      grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
+      return;
+    }
+
+    const uploaderIds = [...new Set(result.documents.map(v => v.uploader).filter(Boolean))];
+    const uploaders = {};
+    if (uploaderIds.length) {
+      const idsQuery = `equal("$id",[${uploaderIds.map(id => `"${id}"`).join(',')}])`;
+      try {
+        const userResult = await appwriteList(APPWRITE.usersCollection, [idsQuery, 'limit(100)']);
+        userResult.documents.forEach(u => { uploaders[u.$id] = u; });
+      } catch (e) { console.warn('Could not fetch uploaders:', e); }
+    }
+
+    grid.innerHTML = '';
+    result.documents.forEach((v, i) => {
+      const card = renderVideoCard(v, uploaders[v.uploader]);
+      card.style.animationDelay = `${i * 0.04}s`;
+      grid.appendChild(card);
+    });
+  } catch (error) {
+    grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Couldn't load videos</h3><p>${error.message}</p></div>`;
+  }
+}
+
+function renderVideoCard(video, uploader) {
+  const div = document.createElement('div');
+  div.className = 'video-card';
+  div.onclick = () => playVideo(video.$id);
+
+  const name = uploader?.username || 'Unknown';
+  const avatarHTML = uploader?.avatar ? `<img src="${uploader.avatar}" alt="${name}"/>` : initials(name);
+
+  div.innerHTML = `
+    <div class="video-thumb">
+      ${video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : ''}
+      <div class="video-thumb-play"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
+    </div>
+    <div class="video-card-info">
+      <div class="avatar">${avatarHTML}</div>
+      <div class="video-card-text">
+        <div class="video-card-title">${escHTML(video.title || 'Untitled')}</div>
+        <div class="video-card-meta">
+          ${escHTML(name)}<br>
+          ${timeAgo(video.$createdAt)}
+        </div>
+      </div>
+    </div>
+  `;
+  return div;
+}
+
+async function playVideo(videoId) {
+  try {
+    const video = await appwriteGet(APPWRITE.videosCollection, videoId);
+    if (!video) return;
+
+    let uploader = null;
+    if (video.uploader) {
+      try { uploader = await appwriteGet(APPWRITE.usersCollection, video.uploader); } catch {}
+    }
+
+    showVideoPlayer();
+    history.pushState(null, '', `#video/${videoId}`);
+
+    const player = document.getElementById('videoPlayer');
+    if (currentHls) { currentHls.destroy(); currentHls = null; }
+
+    if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
+      if (player.canPlayType('application/vnd.apple.mpegurl')) {
+        player.src = video.videoUrl;
+      } else if (window.Hls && Hls.isSupported()) {
+        currentHls = new Hls();
+        currentHls.loadSource(video.videoUrl);
+        currentHls.attachMedia(player);
+      } else {
+        toast('HLS not supported in this browser', 'error');
+      }
+    } else {
+      player.src = video.videoUrl || '';
+    }
+    player.play().catch(() => {});
+
+    document.getElementById('videoTitle').textContent = video.title || 'Untitled';
+    document.getElementById('videoViews').textContent = '';
+    document.getElementById('videoDate').textContent = timeAgo(video.$createdAt);
+    document.getElementById('videoDescription').textContent = video.description || '';
+
+    const name = uploader?.username || 'Unknown';
+    const avatarEl = document.getElementById('videoUploaderAvatar');
+    avatarEl.innerHTML = uploader?.avatar ? `<img src="${uploader.avatar}"/>` : initials(name);
+    document.getElementById('videoUploaderName').textContent = name;
+    document.getElementById('videoUploaderBadge').textContent = video.tags?.length ? video.tags.join(' • ') : '';
+  } catch (error) {
+    toast('Couldn\'t load video: ' + error.message, 'error');
+  }
+}
+
+// Update popstate to handle videos
+window.addEventListener('popstate', () => {
+  const hash = window.location.hash;
+  if (hash.startsWith('#profile/')) openProfile(hash.replace('#profile/', ''));
+  else if (hash === '#videos') showVideos();
+  else if (hash.startsWith('#video/')) playVideo(hash.replace('#video/', ''));
+  else { showFeed(); loadFeed(); }
+});
+
 // ── Theme toggle ──
 function applyTheme(theme) {
   if (theme === 'light') document.body.classList.add('light');
@@ -1082,3 +1236,38 @@ document.getElementById('btnTheme').addEventListener('click', () => {
   applyTheme(newTheme);
   localStorage.setItem('selebox_theme', newTheme);
 });
+
+// ── Appwrite (read-only for video metadata) ──
+export const APPWRITE = {
+  endpoint: 'https://fra.cloud.appwrite.io/v1',
+  projectId: '66b8be7400121b5d4697',
+  databaseId: '66b32b3600246bc34956',
+  videosCollection: '6915577000216471ecf7',
+  usersCollection: '66b32b4a0022880bc87e'
+};
+
+// Helper to query Appwrite REST API
+export async function appwriteList(collectionId, queries = []) {
+  const url = new URL(`${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents`);
+  queries.forEach(q => url.searchParams.append('queries[]', q));
+  const res = await fetch(url, {
+    headers: {
+      'X-Appwrite-Project': APPWRITE.projectId,
+      'Content-Type': 'application/json'
+    }
+  });
+  if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
+  return res.json();
+}
+
+export async function appwriteGet(collectionId, documentId) {
+  const url = `${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents/${documentId}`;
+  const res = await fetch(url, {
+    headers: {
+      'X-Appwrite-Project': APPWRITE.projectId,
+      'Content-Type': 'application/json'
+    }
+  });
+  if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
+  return res.json();
+}
