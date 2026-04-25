@@ -1406,12 +1406,12 @@ function showVideoPlayer() {
 }
 
 document.getElementById('btnVideos').addEventListener('click', () => {
-  // If already on videos page → scroll to top
+  // If already on videos page → just scroll, don't reload
   if (videosPage.style.display === 'block') {
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    document.getElementById('videoGrid')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     return;
   }
-  // Otherwise → navigate to videos page
   showVideos();
 });
 document.getElementById('btnBackVideos').addEventListener('click', () => {
