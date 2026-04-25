@@ -1630,6 +1630,7 @@ function renderUpNextItem(video, uploader, currentTags) {
 // ── Videos (from Appwrite) ──
 const videosPage = document.getElementById('videosPage');
 const videoPlayerPage = document.getElementById('videoPlayerPage');
+const studioPage = document.getElementById('studioPage');
 let currentHls = null;
 
 // Resume playback storage
