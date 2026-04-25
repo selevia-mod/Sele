@@ -1690,6 +1690,7 @@ async function loadVideos() {
 
 // Merge in new Supabase uploads
 const supabaseVideos = await fetchSupabaseVideos();
+console.log('🎥 fetchSupabaseVideos returned:', supabaseVideos.length, supabaseVideos);
 if (supabaseVideos.length) {
   supabaseVideos.forEach(v => {
     if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
@@ -1698,8 +1699,10 @@ if (supabaseVideos.length) {
   });
   const existingIds = new Set(allVideosCache.map(v => v.$id));
   const newOnes = supabaseVideos.filter(v => !existingIds.has(v.$id));
+  console.log('🎥 New ones to merge:', newOnes.length, 'Total cache after merge:', allVideosCache.length + newOnes.length);
   allVideosCache = [...newOnes, ...allVideosCache];
 }
+window._cache = allVideosCache; // expose for debugging
 
   if (!allVideosCache.length) {
     grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
