@@ -1405,7 +1405,15 @@ function showVideoPlayer() {
   videoPlayerPage.style.display = 'block';
 }
 
-document.getElementById('btnVideos').addEventListener('click', showVideos);
+document.getElementById('btnVideos').addEventListener('click', () => {
+  // If already on videos page → scroll to top
+  if (videosPage.style.display === 'block') {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return;
+  }
+  // Otherwise → navigate to videos page
+  showVideos();
+});
 document.getElementById('btnBackVideos').addEventListener('click', () => {
   if (currentHls) { currentHls.destroy(); currentHls = null; }
   document.getElementById('videoPlayer').pause();
