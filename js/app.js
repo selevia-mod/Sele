@@ -279,6 +279,9 @@ function renderPost(post) {
     ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
     ${post.videos ? `
+      ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
+    ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
+    ${post.videos ? `
       <div class="post-video" data-video-url="${escHTML(post.videos.video_url || '')}" data-video-id="${escHTML(post.videos.id || '')}">
         <video class="post-video-player" poster="${escHTML(post.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
       </div>
