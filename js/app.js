@@ -1622,6 +1622,66 @@ document.getElementById('btnBackVideos').addEventListener('click', () => {
   showVideos();
 });
 
+// Fetch new videos uploaded via web (from Supabase)
+async function fetchSupabaseVideos() {
+  try {
+    const { data, error } = await supabase
+      .from('videos')
+      .select(`
+        id,
+        bunny_video_id,
+        title,
+        description,
+        tags,
+        category,
+        video_url,
+        thumbnail_url,
+        views,
+        duration,
+        created_at,
+        uploader_id,
+        profiles!videos_uploader_id_fkey (
+          id,
+          display_name,
+          avatar_url
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    
+    if (error) {
+      console.error('Supabase videos fetch error:', error);
+      return [];
+    }
+    
+    // Transform to match Appwrite video format so the rest of the code works
+    return (data || []).map(v => ({
+      $id: 'sb_' + v.id, // prefix so we can tell Supabase videos apart
+      _supabase: true,    // flag for special handling
+      _supabaseId: v.id,
+      title: v.title,
+      description: v.description || '',
+      tags: v.tags || [],
+      uploader: v.uploader_id,
+      thumbnail: v.thumbnail_url,
+      videoUrl: v.video_url,
+      uri: v.video_url,
+      videoStats: { views: v.views || 0, duration: v.duration || 0 },
+      status: 'ready',
+      $createdAt: v.created_at,
+      // Pre-populated uploader info (saves an extra fetch)
+      _uploaderInfo: v.profiles ? {
+        $id: v.profiles.id,
+        username: v.profiles.display_name,
+        avatar: v.profiles.avatar_url,
+      } : null,
+    }));
+  } catch (err) {
+    console.error('Failed to fetch Supabase videos:', err);
+    return [];
+  }
+}
+
 async function loadVideos() {
   const grid = document.getElementById('videoGrid');
   grid.innerHTML = '<div class="loading">Loading videos...</div>';
