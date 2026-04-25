@@ -1061,16 +1061,16 @@ searchInput.addEventListener('input', (e) => {
 });
 
 if (topbarSearchClear) {
-  topbarSearchClear.addEventListener('click', () => {
-    searchInput.value = '';
-    if (topbarSearchClear) topbarSearchClear.style.display = value ? 'flex' : 'none';
-    searchResultsEl.classList.remove('open');
-    if (getSearchContext() === 'videos') {
-      activeSearchQuery = '';
-      runSearch();
-    }
-  });
-}
+    topbarSearchClear.addEventListener('click', () => {
+      searchInput.value = '';
+      topbarSearchClear.style.display = 'none';
+      searchResultsEl.classList.remove('open');
+      if (getSearchContext() === 'videos') {
+        activeSearchQuery = '';
+        runSearch();
+      }
+    });
+  }
 
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
