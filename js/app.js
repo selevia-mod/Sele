@@ -1082,6 +1082,166 @@ window.addEventListener('popstate', () => {
 
 initAuth();
 
+// ── Watch history & smart recommendations ──
+const WATCH_HISTORY_KEY = 'selebox_watch_history';
+
+function getWatchHistory() {
+  try {
+    const raw = localStorage.getItem(WATCH_HISTORY_KEY);
+    if (!raw) return [];
+    const history = JSON.parse(raw);
+    // Filter out entries older than 30 days
+    const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    return history.filter(h => h.timestamp > cutoff);
+  } catch { return []; }
+}
+
+function addToWatchHistory(video, uploader) {
+  const history = getWatchHistory();
+  // Remove if already exists (we'll add to top)
+  const filtered = history.filter(h => h.id !== video.$id);
+  filtered.unshift({
+    id: video.$id,
+    tags: video.tags || [],
+    uploader: video.uploader,
+    uploaderName: uploader?.username || '',
+    timestamp: Date.now()
+  });
+  // Keep only last 50
+  const trimmed = filtered.slice(0, 50);
+  try { localStorage.setItem(WATCH_HISTORY_KEY, JSON.stringify(trimmed)); } catch {}
+}
+
+function getInterestProfile() {
+  const history = getWatchHistory();
+  const recent = history.slice(0, 5); // last 5 videos
+
+  // Weight tags: most recent = highest weight
+  const tagWeights = {};
+  const weights = [0.4, 0.25, 0.15, 0.1, 0.1];
+  recent.forEach((entry, idx) => {
+    const w = weights[idx] || 0.05;
+    (entry.tags || []).forEach(tag => {
+      tagWeights[tag] = (tagWeights[tag] || 0) + w;
+    });
+  });
+
+  const watchedIds = new Set(history.map(h => h.id));
+  const recentUploaders = [...new Set(recent.map(h => h.uploader).filter(Boolean))];
+
+  return { tagWeights, watchedIds, recentUploaders };
+}
+
+async function loadUpNext(currentVideo) {
+  const list = document.getElementById('upNextList');
+  list.innerHTML = '<div class="loading" style="padding:0.5rem">Loading...</div>';
+
+  const { tagWeights, watchedIds, recentUploaders } = getInterestProfile();
+  const currentTags = currentVideo.tags || [];
+
+  try {
+    // Fetch a larger pool to pick from
+    const result = await appwriteList(APPWRITE.videosCollection, [
+      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
+      JSON.stringify({ method: 'limit', values: [200] })
+    ]);
+
+    let pool = result.documents.filter(v =>
+      v.$id !== currentVideo.$id && !watchedIds.has(v.$id)
+    );
+
+    // Score each video
+    pool.forEach(v => {
+      let score = 0;
+
+      // Tag matching (40% from interest profile + boost for current video tags)
+      (v.tags || []).forEach(tag => {
+        if (tagWeights[tag]) score += tagWeights[tag] * 100;
+        if (currentTags.includes(tag)) score += 30;
+      });
+
+      // Same uploader bonus
+      if (v.uploader === currentVideo.uploader) score += 25;
+      if (recentUploaders.includes(v.uploader)) score += 15;
+
+      // Engagement boost (views)
+      const views = v.videoStats?.views || 0;
+      score += Math.log10(views + 1) * 2;
+
+      // Small randomness so it doesn't feel static
+      score += Math.random() * 5;
+
+      v._score = score;
+    });
+
+    // Sort by score, take top 10
+    pool.sort((a, b) => b._score - a._score);
+    const suggestions = pool.slice(0, 10);
+
+    // Fetch uploaders for these
+    const uploaderIds = [...new Set(suggestions.map(v => v.uploader).filter(Boolean))];
+    const uploaders = {};
+    if (uploaderIds.length) {
+      try {
+        const userResult = await appwriteList(APPWRITE.usersCollection, [
+          JSON.stringify({ method: 'equal', attribute: '$id', values: uploaderIds }),
+          JSON.stringify({ method: 'limit', values: [100] })
+        ]);
+        userResult.documents.forEach(u => { uploaders[u.$id] = u; });
+      } catch {}
+    }
+
+    // Render
+    list.innerHTML = '';
+    if (!suggestions.length) {
+      list.innerHTML = '<div style="color:var(--text3);font-size:0.85rem;padding:0.5rem">No suggestions yet</div>';
+      return;
+    }
+
+    suggestions.forEach(v => {
+      const uploader = uploaders[v.uploader];
+      const item = renderUpNextItem(v, uploader, currentTags);
+      list.appendChild(item);
+    });
+  } catch (e) {
+    list.innerHTML = `<div style="color:var(--text3);font-size:0.85rem;padding:0.5rem">Couldn't load: ${e.message}</div>`;
+  }
+}
+
+function renderUpNextItem(video, uploader, currentTags) {
+  const div = document.createElement('div');
+  div.className = 'upnext-item';
+  div.onclick = () => playVideo(video.$id);
+
+  const name = uploader?.username || 'Unknown';
+  const views = (video.videoStats?.views || 0).toLocaleString();
+  const matchingTag = (video.tags || []).find(t => currentTags.includes(t));
+
+  div.innerHTML = `
+    <div class="upnext-thumb">
+      ${video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : ''}
+      <span class="upnext-thumb-duration" data-duration></span>
+    </div>
+    <div class="upnext-info">
+      <div class="upnext-title-text">${escHTML(video.title || 'Untitled')}</div>
+      <div class="upnext-meta">
+        ${escHTML(name)}<br>
+        ${views} views • ${timeAgo(video.$createdAt)}
+      </div>
+      ${matchingTag ? `<span class="upnext-tag">${escHTML(matchingTag)}</span>` : ''}
+    </div>
+  `;
+
+  // Lazy-load duration
+  const durationEl = div.querySelector('[data-duration]');
+  const videoDuration = video.videoStats?.duration;
+  if (videoDuration) {
+    durationEl.textContent = formatDuration(videoDuration);
+  }
+
+  return div;
+}
+
 // ── Videos (from Appwrite) ──
 const videosPage = document.getElementById('videosPage');
 const videoPlayerPage = document.getElementById('videoPlayerPage');
@@ -1361,6 +1521,10 @@ async function playVideo(videoId) {
     avatarEl.innerHTML = uploader?.avatar ? `<img src="${uploader.avatar}"/>` : initials(name);
     document.getElementById('videoUploaderName').textContent = name;
     document.getElementById('videoUploaderBadge').textContent = video.tags?.length ? video.tags.join(' • ') : '';
+    
+    // Track watch history & load suggestions
+    addToWatchHistory(video, uploader);
+    loadUpNext(video);
   } catch (error) {
     toast('Couldn\'t load video: ' + error.message, 'error');
   }
