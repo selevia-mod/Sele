@@ -1195,6 +1195,16 @@ document.getElementById('btnOpenVideoUpload')?.addEventListener('click', () => {
   resetVideoUploadModal();
 });
 
+// Videos page Upload button → opens same modal
+document.getElementById('btnUploadVideo')?.addEventListener('click', () => {
+  if (!currentUser) {
+    toast('Please log in to upload videos', 'error');
+    return;
+  }
+  document.getElementById('videoUploadModal').style.display = 'flex';
+  resetVideoUploadModal();
+});
+
 // Close modal
 document.getElementById('closeVideoUploadModal')?.addEventListener('click', closeVideoUploadModal);
 document.getElementById('cancelVideoUpload')?.addEventListener('click', closeVideoUploadModal);
@@ -1611,10 +1621,6 @@ document.getElementById('btnBackVideos').addEventListener('click', () => {
   document.getElementById('videoPlayer').pause();
   showVideos();
 });
-
-// Hide upload button (uploads managed elsewhere)
-const btnUploadVideo = document.getElementById('btnUploadVideo');
-if (btnUploadVideo) btnUploadVideo.style.display = 'none';
 
 async function loadVideos() {
   const grid = document.getElementById('videoGrid');
