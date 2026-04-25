@@ -1182,8 +1182,7 @@ function renderVideoCard(video, uploader) {
   const name = uploader?.username || 'Unknown';
   const avatarHTML = uploader?.avatar ? `<img src="${uploader.avatar}" alt="${name}"/>` : initials(name);
 
-  const isBunnyGrid = video.thumbnail && video.thumbnail.includes('b-cdn.net') && video.thumbnail.endsWith('.jpg');
-  const thumbHTML = video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" class="${isBunnyGrid ? 'bunny-grid' : ''}" onerror="this.style.display='none'"/>` : '';
+  const thumbHTML = video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : '';
 
   div.innerHTML = `
     <div class="video-thumb">
