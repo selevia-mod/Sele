@@ -647,3 +647,11 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
   font-size: 0.88rem; line-height: 1.65; color: var(--text2); white-space: pre-wrap;
 }
 .video-description:empty { display: none; }
+
+body.on-videos .main-wrap {
+  max-width: none !important;
+  width: calc(100vw - var(--sidebar-w)) !important;
+  margin-left: var(--sidebar-w) !important;
+  margin-right: 0 !important;
+  padding: 1rem 1.5rem !important;
+}
