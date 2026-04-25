@@ -1122,6 +1122,7 @@ async function loadVideos() {
 
     const uploaderIds = [...new Set(result.documents.map(v => v.uploader).filter(Boolean))];
     const uploaders = {};
+
     if (uploaderIds.length) {
       try {
         const idsString = uploaderIds.map(id => `"${id}"`).join(',');
@@ -1130,7 +1131,10 @@ async function loadVideos() {
           'limit(100)'
         ]);
         userResult.documents.forEach(u => { uploaders[u.$id] = u; });
-      } catch (e) { console.warn('Could not fetch uploaders:', e); }
+      } catch (e) {
+        console.warn('Could not fetch uploaders:', e);
+      }
+    }
 
     grid.innerHTML = '';
     result.documents.forEach((v, i) => {
@@ -1152,7 +1156,6 @@ async function loadVideos() {
   } catch (error) {
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Couldn't load videos</h3><p>${error.message}</p></div>`;
   }
-}
 
 function renderVideoCard(video, uploader) {
   const div = document.createElement('div');
