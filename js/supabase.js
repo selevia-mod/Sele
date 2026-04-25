@@ -58,3 +58,31 @@ export async function appwriteGet(collectionId, documentId) {
   if (!res.ok) throw new Error(`Appwrite error: ${res.status}`);
   return res.json();
 }
+
+// ── Bunny Stream Config ──
+const BUNNY = {
+  cdnHostname: 'vz-fdf88b4d-33a.b-cdn.net',
+};
+
+// ── Edge Function helper ──
+async function callEdgeFunction(functionName, payload = {}) {
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  if (!session) throw new Error('Not logged in');
+  
+  const url = `${SUPABASE.url}/functions/v1/${functionName}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${session.access_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(err.error || 'Request failed');
+  }
+  
+  return await response.json();
+}
