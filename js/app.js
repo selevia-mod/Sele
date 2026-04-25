@@ -206,7 +206,7 @@ window.loadFeed = async function() {
 
   const { data, error } = await supabase
     .from('posts')
-    .select(`*, profiles(username, avatar_url, is_guest), original:reposted_from(*, profiles(username, avatar_url, is_guest))`)
+    .select(`*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
     .order('created_at', { ascending: false })
     .limit(50);
 
@@ -870,7 +870,7 @@ async function loadProfilePosts(userId) {
   wrap.innerHTML = '<div class="loading">Loading posts...</div>';
   const { data } = await supabase
     .from('posts')
-    .select(`*, profiles(username, avatar_url, is_guest), original:reposted_from(*, profiles(username, avatar_url, is_guest))`)
+    .select(`*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
   posts = data || [];
