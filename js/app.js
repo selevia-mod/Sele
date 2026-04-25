@@ -300,6 +300,8 @@ function renderPost(post) {
             <video class="post-video-player" poster="${escHTML(post.original.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
           </div>
         ` : ''}
+       </div>
+      ` : ''}
 
     <div class="post-stats">
       <div class="rcount" id="rsummary-${post.id}"></div>
