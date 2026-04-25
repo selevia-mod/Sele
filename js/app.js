@@ -61,8 +61,10 @@ async function onSignedIn(user) {
     loadFeed();
     openProfile(hash.replace('#profile/', ''));
   } else if (hash === '#videos') {
-    showVideos();
-  } else if (hash.startsWith('#video/')) {
+  showVideos();
+} else if (hash === '#studio') {
+  showStudio();
+} else if (hash.startsWith('#video/')) {
     playVideo(hash.replace('#video/', ''));
   } else {
     loadStories();
@@ -799,6 +801,7 @@ function showFeed() {
   composeEl.style.display = '';
   profilePage.style.display = 'none';
   videosPage.style.display = 'none';
+  studioPage.style.display = 'none';
   videoPlayerPage.style.display = 'none';
   document.body.classList.remove('on-videos');
   viewingProfileId = null;
@@ -817,6 +820,7 @@ function showProfileView() {
   composeEl.style.display = 'none';
   profilePage.style.display = 'block';
   videosPage.style.display = 'none';
+  studioPage.style.display = 'none';
   videoPlayerPage.style.display = 'none';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
@@ -1687,12 +1691,34 @@ function showVideos(forceReload = false) {
   }
 }
 
+function showStudio() {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  videosPage.style.display = 'none';
+  studioPage.style.display = 'block';
+  document.body.classList.remove('on-videos');
+  stopVideoPlayer();
+  history.pushState(null, '', '#studio');
+  loadStudio();
+}
+
+async function loadStudio() {
+  const content = document.getElementById('studioContent');
+  content.innerHTML = '<div class="empty"><h3>Loading...</h3></div>';
+  // Phase 2 will fill this in
+  content.innerHTML = '<div class="empty"><h3>Coming soon</h3><p>Your videos will appear here.</p></div>';
+}
+
 function showVideoPlayer() {
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
   profilePage.style.display = 'none';
   videosPage.style.display = 'none';
+  studioPage.style.display = 'none';
   videoPlayerPage.style.display = 'block';
 }
 
@@ -1705,6 +1731,9 @@ document.getElementById('btnVideos').addEventListener('click', () => {
     return;
   }
   showVideos();
+});
+document.getElementById('btnStudio').addEventListener('click', () => {
+  showStudio();
 });
 document.getElementById('btnBackVideos').addEventListener('click', () => {
   if (currentHls) { currentHls.destroy(); currentHls = null; }
@@ -2193,7 +2222,8 @@ window.addEventListener('popstate', () => {
   const hash = window.location.hash;
   if (hash.startsWith('#profile/')) openProfile(hash.replace('#profile/', ''));
   else if (hash === '#videos') showVideos();
-  else if (hash.startsWith('#video/')) playVideo(hash.replace('#video/', ''));
+else if (hash === '#studio') showStudio();
+else if (hash.startsWith('#video/')) playVideo(hash.replace('#video/', ''));
   else { showFeed(); loadFeed(); }
 });
 
