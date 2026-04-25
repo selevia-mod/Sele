@@ -1649,6 +1649,7 @@ async function fetchSupabaseVideos() {
       .order('created_at', { ascending: false })
       .limit(100);
     
+    console.log('🎥 Supabase videos query result:', { data, error, count: data?.length });
     if (error) {
       console.error('Supabase videos fetch error:', error);
       return [];
