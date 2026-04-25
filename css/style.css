@@ -595,12 +595,6 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
   object-fit: contain; display: block;
   background: #000;
 }
-.video-thumb img.bunny-grid {
-  width: 300%; height: 300%;
-  object-fit: cover;
-  inset: auto;
-  top: 0; left: 0;
-}
 .video-thumb video {
   width: 100%; height: 100%; object-fit: cover; display: block;
 }
