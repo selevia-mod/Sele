@@ -1147,6 +1147,38 @@ async function runFeedSearch(query) {
 window.addEventListener('hashchange', updateSearchPlaceholder);
 updateSearchPlaceholder();
 
+// ── Videos title click behavior ──
+const videosTitle = document.querySelector('.videos-title');
+if (videosTitle) {
+  videosTitle.style.cursor = 'pointer';
+  videosTitle.title = 'Click to scroll top • Double-click to refresh';
+
+  let clickTimer = null;
+  videosTitle.addEventListener('click', (e) => {
+    if (clickTimer) {
+      // Double click detected
+      clearTimeout(clickTimer);
+      clickTimer = null;
+      // Refresh: clear cache and reload
+      allVideosCache = [];
+      allUploadersCache = {};
+      activeSearchQuery = '';
+      activeTagFilter = null;
+      const searchInput = document.getElementById('searchInput');
+      if (searchInput) searchInput.value = '';
+      loadVideos();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      toast('Videos refreshed', 'success');
+    } else {
+      // Single click: wait to confirm it's not a double click
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 250);
+    }
+  });
+}
+
 initAuth();
 
 // ── Watch history & smart recommendations ──
