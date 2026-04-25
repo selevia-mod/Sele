@@ -1,4 +1,4 @@
-import { supabase, REACTIONS, timeAgo, initials, appwriteList, appwriteGet, APPWRITE, callEdgeFunction, BUNNY } from './supabase.js';
+import { supabase, REACTIONS, timeAgo, initials, appwriteList, appwriteGet, APPWRITE, callEdgeFunction } from './supabase.js';
 
 let currentUser = null;
 let currentProfile = null;
@@ -1786,7 +1786,6 @@ let allVideosCache = [];
 let allUploadersCache = {};
 let activeSearchQuery = '';
 let activeTagFilter = null;
-let searchDebounceTimer = null;
 
 async function ensureVideoCache() {
   if (allVideosCache.length) return;
