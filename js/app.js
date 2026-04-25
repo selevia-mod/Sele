@@ -1111,8 +1111,8 @@ async function loadVideos() {
 
   try {
     const result = await appwriteList(APPWRITE.videosCollection, [
-      'orderDesc("$createdAt")',
-      'limit(50)'
+      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
+      JSON.stringify({ method: 'limit', values: [50] })
     ]);
 
     if (!result.documents || !result.documents.length) {
@@ -1125,10 +1125,9 @@ async function loadVideos() {
 
     if (uploaderIds.length) {
       try {
-        const idsString = uploaderIds.map(id => `"${id}"`).join(',');
         const userResult = await appwriteList(APPWRITE.usersCollection, [
-          `equal("$id",[${idsString}])`,
-          'limit(100)'
+          JSON.stringify({ method: 'equal', attribute: '$id', values: uploaderIds }),
+          JSON.stringify({ method: 'limit', values: [100] })
         ]);
         userResult.documents.forEach(u => { uploaders[u.$id] = u; });
       } catch (e) {
