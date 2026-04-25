@@ -35,11 +35,11 @@ export const APPWRITE = {
 };
 
 export async function appwriteList(collectionId, queries = []) {
-  const url = new URL(`${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents`);
-  // Appwrite expects queries as JSON-stringified objects
-  queries.forEach(q => {
-    url.searchParams.append('queries[]', typeof q === 'string' ? q : JSON.stringify(q));
-  });
+  let url = `${APPWRITE.endpoint}/databases/${APPWRITE.databaseId}/collections/${collectionId}/documents`;
+  if (queries.length) {
+    const params = queries.map(q => `queries[]=${encodeURIComponent(q)}`).join('&');
+    url += '?' + params;
+  }
   const res = await fetch(url, {
     headers: { 'X-Appwrite-Project': APPWRITE.projectId, 'Content-Type': 'application/json' }
   });
