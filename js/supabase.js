@@ -60,16 +60,16 @@ export async function appwriteGet(collectionId, documentId) {
 }
 
 // ── Bunny Stream Config ──
-const BUNNY = {
+export const BUNNY = {
   cdnHostname: 'vz-fdf88b4d-33a.b-cdn.net',
 };
 
 // ── Edge Function helper ──
-async function callEdgeFunction(functionName, payload = {}) {
-  const { data: { session } } = await supabaseClient.auth.getSession();
+export async function callEdgeFunction(functionName, payload = {}) {
+  const { data: { session } } = await supabase.auth.getSession();
   if (!session) throw new Error('Not logged in');
   
-  const url = `${SUPABASE.url}/functions/v1/${functionName}`;
+  const url = `${SUPABASE_URL}/functions/v1/${functionName}`;
   const response = await fetch(url, {
     method: 'POST',
     headers: {
