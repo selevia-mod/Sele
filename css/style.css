@@ -1453,3 +1453,25 @@ body.light .vu-btn-ghost:hover {
   object-fit: contain;
   background: #000;
 }
+
+/* Creator Studio */
+#studioPage {
+  padding: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.studio-header {
+  margin-bottom: 2rem;
+}
+.studio-title {
+  font-size: 2rem;
+  background: linear-gradient(135deg, #a855f7, #6366f1);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin: 0;
+}
+.studio-subtitle {
+  color: #888;
+  margin: 0.25rem 0 0 0;
+}
