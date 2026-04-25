@@ -1157,6 +1157,7 @@ function renderVideoCard(video, uploader) {
   div.innerHTML = `
     <div class="video-thumb">
       ${video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : ''}
+      <video class="preview" muted playsinline preload="none"></video>
       <div class="video-thumb-play"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
     </div>
     <div class="video-card-info">
@@ -1170,6 +1171,41 @@ function renderVideoCard(video, uploader) {
       </div>
     </div>
   `;
+
+  // Hover to play preview
+  const previewEl = div.querySelector('video.preview');
+  let hoverHls = null;
+  let hoverTimeout = null;
+
+  div.addEventListener('mouseenter', () => {
+    hoverTimeout = setTimeout(() => {
+      if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
+        if (previewEl.canPlayType('application/vnd.apple.mpegurl')) {
+          previewEl.src = video.videoUrl;
+        } else if (window.Hls && Hls.isSupported()) {
+          hoverHls = new Hls();
+          hoverHls.loadSource(video.videoUrl);
+          hoverHls.attachMedia(previewEl);
+        }
+      } else {
+        previewEl.src = video.videoUrl;
+      }
+      previewEl.play().then(() => {
+        previewEl.classList.add('playing');
+      }).catch(() => {});
+    }, 600); // 600ms delay before preview starts (like YouTube)
+  });
+
+  div.addEventListener('mouseleave', () => {
+    clearTimeout(hoverTimeout);
+    previewEl.classList.remove('playing');
+    previewEl.pause();
+    previewEl.currentTime = 0;
+    if (hoverHls) { hoverHls.destroy(); hoverHls = null; }
+    previewEl.removeAttribute('src');
+    previewEl.load();
+  });
+
   return div;
 }
 
