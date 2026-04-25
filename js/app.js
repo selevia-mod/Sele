@@ -704,66 +704,6 @@ window.shareTo = (platform, postId) => {
   document.getElementById(`sharemenu-${postId}`).classList.remove('visible');
 };
 
-// ── Search ──
-let searchTimer = null;
-const searchInput = document.getElementById('searchInput');
-const searchResults = document.getElementById('searchResults');
-
-searchInput.addEventListener('input', () => {
-  clearTimeout(searchTimer);
-  const q = searchInput.value.trim();
-  if (!q) { searchResults.classList.remove('visible'); return; }
-  searchTimer = setTimeout(() => doSearch(q), 300);
-});
-searchInput.addEventListener('focus', () => {
-  if (searchInput.value.trim()) searchResults.classList.add('visible');
-});
-
-async function doSearch(q) {
-  searchResults.innerHTML = '<div style="padding:1rem;color:var(--text3);font-size:0.85rem">Searching...</div>';
-  searchResults.classList.add('visible');
-
-  const [profilesRes, postsRes] = await Promise.all([
-    supabase.from('profiles').select('id, username, avatar_url, is_guest').ilike('username', `%${q}%`).limit(5),
-    supabase.from('posts').select('id, body, user_id, profiles(username, avatar_url)').ilike('body', `%${q}%`).limit(5)
-  ]);
-
-  const profiles = profilesRes.data || [];
-  const postResults = postsRes.data || [];
-
-  let html = '';
-  if (profiles.length) {
-    html += '<div class="search-section-title">People</div>';
-    html += profiles.map(p => `
-      <div class="search-result-item" onclick="filterByUser('${p.id}','${escHTML(p.username)}');document.getElementById('searchResults').classList.remove('visible');document.getElementById('searchInput').value='';">
-        <div class="avatar">${p.avatar_url ? `<img src="${p.avatar_url}"/>` : initials(p.username)}</div>
-        <div class="srtext">
-          <div class="srtitle">${escHTML(p.username)}</div>
-          <div class="srsub">${p.is_guest ? 'Guest' : 'Member'}</div>
-        </div>
-      </div>
-    `).join('');
-  }
-  if (postResults.length) {
-    html += '<div class="search-section-title">Posts</div>';
-    html += postResults.map(p => {
-      const prof = p.profiles || {};
-      const body = p.body ? p.body.slice(0, 80) + (p.body.length > 80 ? '...' : '') : '(no text)';
-      return `
-        <div class="search-result-item" onclick="document.getElementById('searchResults').classList.remove('visible');document.getElementById('searchInput').value='';">
-          <div class="avatar">${prof.avatar_url ? `<img src="${prof.avatar_url}"/>` : initials(prof.username)}</div>
-          <div class="srtext">
-            <div class="srtitle">${escHTML(prof.username || 'Unknown')}</div>
-            <div class="srsub">${escHTML(body)}</div>
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-  if (!html) html = '<div style="padding:1rem;color:var(--text3);font-size:0.85rem">No results found</div>';
-  searchResults.innerHTML = html;
-}
-
 // ── Realtime ──
 supabase.channel('public-feed')
   .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, () => loadFeed())
@@ -1079,6 +1019,126 @@ window.addEventListener('popstate', () => {
     loadFeed();
   }
 });
+
+// ── Smart context-aware search ──
+const searchInput = document.getElementById('searchInput');
+const searchResultsEl = document.getElementById('searchResults');
+const topbarSearchClear = document.getElementById('topbarSearchClear');
+let searchDebounce = null;
+
+function getSearchContext() {
+  const hash = window.location.hash;
+  if (hash === '#videos' || hash.startsWith('#video/')) return 'videos';
+  return 'feed';
+}
+
+function updateSearchPlaceholder() {
+  const ctx = getSearchContext();
+  searchInput.placeholder = ctx === 'videos'
+    ? 'Search videos, tags, uploaders...'
+    : 'Search posts and people...';
+}
+
+searchInput.addEventListener('input', (e) => {
+  const value = e.target.value;
+  topbarSearchClear.style.display = value ? 'flex' : 'none';
+
+  const ctx = getSearchContext();
+  if (ctx === 'videos') {
+    activeSearchQuery = value;
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => runSearch(), 200);
+    searchResultsEl.classList.remove('open');
+    return;
+  }
+
+  clearTimeout(searchDebounce);
+  if (!value.trim()) {
+    searchResultsEl.classList.remove('open');
+    return;
+  }
+  searchDebounce = setTimeout(() => runFeedSearch(value), 250);
+});
+
+topbarSearchClear.addEventListener('click', () => {
+  searchInput.value = '';
+  topbarSearchClear.style.display = 'none';
+  searchResultsEl.classList.remove('open');
+  if (getSearchContext() === 'videos') {
+    activeSearchQuery = '';
+    runSearch();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
+    searchResultsEl.classList.remove('open');
+  }
+});
+
+async function runFeedSearch(query) {
+  query = query.trim().toLowerCase();
+  if (!query) { searchResultsEl.classList.remove('open'); return; }
+
+  searchResultsEl.classList.add('open');
+  searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
+
+  const [{ data: profiles }, { data: posts }] = await Promise.all([
+    supabase.from('profiles').select('*').ilike('username', `%${query}%`).limit(5),
+    supabase.from('posts').select('*, profiles(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
+  ]);
+
+  let html = '';
+  if (profiles?.length) {
+    html += `<div class="search-result-section">People</div>`;
+    profiles.forEach(p => {
+      const avatar = p.avatar_url ? `<img src="${p.avatar_url}"/>` : initials(p.username);
+      html += `
+        <div class="search-result-item" data-type="profile" data-id="${p.id}">
+          <div class="avatar">${avatar}</div>
+          <div class="search-result-info">
+            <div class="search-result-title">${escHTML(p.username)}</div>
+            <div class="search-result-meta">${p.is_guest ? 'Guest' : 'Member'}</div>
+          </div>
+        </div>
+      `;
+    });
+  }
+  if (posts?.length) {
+    html += `<div class="search-result-section">Posts</div>`;
+    posts.forEach(p => {
+      const author = p.profiles || {};
+      const avatar = author.avatar_url ? `<img src="${author.avatar_url}"/>` : initials(author.username || 'U');
+      const snippet = (p.body || '').slice(0, 80);
+      html += `
+        <div class="search-result-item" data-type="post" data-id="${p.id}">
+          <div class="avatar">${avatar}</div>
+          <div class="search-result-info">
+            <div class="search-result-title">${escHTML(snippet)}${p.body && p.body.length > 80 ? '...' : ''}</div>
+            <div class="search-result-meta">by ${escHTML(author.username || 'Unknown')}</div>
+          </div>
+        </div>
+      `;
+    });
+  }
+  if (!html) html = '<div style="padding:1rem;color:var(--text3);text-align:center">No results found</div>';
+
+  searchResultsEl.innerHTML = html;
+
+  searchResultsEl.querySelectorAll('.search-result-item').forEach(item => {
+    item.onclick = () => {
+      const type = item.dataset.type;
+      const id = item.dataset.id;
+      searchResultsEl.classList.remove('open');
+      searchInput.value = '';
+      topbarSearchClear.style.display = 'none';
+      if (type === 'profile') openProfile(id);
+    };
+  });
+}
+
+window.addEventListener('hashchange', updateSearchPlaceholder);
+updateSearchPlaceholder();
 
 initAuth();
 
