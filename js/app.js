@@ -370,9 +370,31 @@ function linkify(str) {
 
 window.deletePost = async (postId) => {
   if (!confirm('Delete this post?')) return;
+  
+  // Check if this post has a video — if so, also delete the video & Bunny file
+  const { data: post } = await supabase.from('posts').select('video_id').eq('id', postId).single();
+  
+  if (post?.video_id) {
+    try {
+      await callEdgeFunction('bunny-delete', { videoId: post.video_id });
+    } catch (err) {
+      console.error('Failed to delete video:', err);
+      toast('Failed to delete video file: ' + err.message, 'error');
+      return;
+    }
+  }
+  
   const { error } = await supabase.from('posts').delete().eq('id', postId);
-  if (error) toast(error.message, 'error');
-  else { toast('Deleted', 'success'); loadFeed(); }
+  if (error) { toast(error.message, 'error'); return; }
+  
+  toast('Deleted', 'success');
+  loadFeed();
+  
+  // Also refresh videos page if open
+  if (videosPage.style.display === 'block') {
+    allVideosCache = [];
+    loadVideos();
+  }
 };
 
 async function loadCommentCount(postId) {
