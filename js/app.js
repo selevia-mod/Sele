@@ -371,28 +371,51 @@ function linkify(str) {
 window.deletePost = async (postId) => {
   if (!confirm('Delete this post?')) return;
   
+  console.log('🗑️ Deleting post:', postId);
+  
   // Check if this post has a video — if so, also delete the video & Bunny file
-  const { data: post } = await supabase.from('posts').select('video_id').eq('id', postId).single();
+  const { data: post, error: lookupError } = await supabase
+    .from('posts')
+    .select('video_id')
+    .eq('id', postId)
+    .single();
+  
+  if (lookupError) {
+    console.error('Failed to look up post:', lookupError);
+    toast('Failed to find post: ' + lookupError.message, 'error');
+    return;
+  }
+  
+  console.log('🗑️ Post lookup result:', post);
   
   if (post?.video_id) {
+    console.log('🗑️ Post has video_id, calling bunny-delete:', post.video_id);
     try {
-      await callEdgeFunction('bunny-delete', { videoId: post.video_id });
+      const result = await callEdgeFunction('bunny-delete', { videoId: post.video_id });
+      console.log('🗑️ bunny-delete result:', result);
     } catch (err) {
-      console.error('Failed to delete video:', err);
+      console.error('🗑️ bunny-delete failed:', err);
       toast('Failed to delete video file: ' + err.message, 'error');
       return;
     }
+  } else {
+    console.log('🗑️ No video_id on this post — skipping bunny-delete');
   }
   
   const { error } = await supabase.from('posts').delete().eq('id', postId);
-  if (error) { toast(error.message, 'error'); return; }
+  if (error) { 
+    console.error('🗑️ Failed to delete post row:', error);
+    toast(error.message, 'error'); 
+    return; 
+  }
   
+  console.log('🗑️ Delete complete');
   toast('Deleted', 'success');
   loadFeed();
   
-  // Also refresh videos page if open
+  // Always invalidate videos cache so next visit to videos page is fresh
+  allVideosCache = [];
   if (videosPage.style.display === 'block') {
-    allVideosCache = [];
     loadVideos();
   }
 };
