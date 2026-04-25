@@ -1410,10 +1410,11 @@ function showVideoPlayer() {
 }
 
 document.getElementById('btnVideos').addEventListener('click', () => {
-  // If already on videos page → just scroll, don't reload
   if (videosPage.style.display === 'block') {
+    // Scroll the actual scrolling element to the very top
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    document.getElementById('videoGrid')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     return;
   }
   showVideos();
