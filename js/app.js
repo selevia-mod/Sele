@@ -1722,7 +1722,8 @@ function getPersonalizedFeed() {
   const hasHistory = Object.keys(tagWeights).length > 0;
 
   // Filter out already-watched (last 30 days)
-  let pool = allVideosCache.filter(v => !watchedIds.has(v.$id));
+  const myId = currentUser?.id;
+    let pool = allVideosCache.filter(v => v.uploader === myId || !watchedIds.has(v.$id));
 
   if (!hasHistory) {
     // No watch history → show by recency (newest first)
