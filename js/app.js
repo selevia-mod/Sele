@@ -224,7 +224,25 @@ window.loadFeed = async function() {
     el.style.animationDelay = `${i * 0.04}s`;
     feed.appendChild(el);
   });
+  attachFeedVideoPlayers();
 };
+
+function attachFeedVideoPlayers() {
+  document.querySelectorAll('.post-video').forEach(wrap => {
+    const url = wrap.dataset.videoUrl;
+    const video = wrap.querySelector('.post-video-player');
+    if (!url || !video || video.dataset.attached) return;
+    video.dataset.attached = '1';
+
+    if (url.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !video.canPlayType('application/vnd.apple.mpegurl')) {
+      const hls = new Hls();
+      hls.loadSource(url);
+      hls.attachMedia(video);
+    } else {
+      video.src = url;
+    }
+  });
+}
 
 function renderPost(post) {
   const div = document.createElement('div');
