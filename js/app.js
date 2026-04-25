@@ -370,51 +370,93 @@ function linkify(str) {
   return escaped.replace(/(https?:\/\/[^\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
 }
 
+// ── Premium confirmation dialog (replaces native confirm()) ──
+// Usage: const ok = await confirmDialog({ title, body, confirmLabel, danger });
+function confirmDialog({ title = 'Are you sure?', body = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = true } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('confirmModal');
+    const titleEl = document.getElementById('confirmTitle');
+    const bodyEl  = document.getElementById('confirmBody');
+    const okBtn   = document.getElementById('confirmOk');
+    const okLabel = document.getElementById('confirmOkLabel');
+    const cancelBtn = document.getElementById('confirmCancel');
+    if (!overlay) { resolve(window.confirm(`${title}\n\n${body}`)); return; }
+
+    titleEl.textContent = title;
+    bodyEl.textContent  = body;
+    okLabel.textContent = confirmLabel;
+    cancelBtn.textContent = cancelLabel;
+    okBtn.classList.toggle('confirm-btn-danger', !!danger);
+
+    overlay.style.display = 'flex';
+    requestAnimationFrame(() => overlay.classList.add('open'));
+
+    const cleanup = () => {
+      overlay.classList.remove('open');
+      overlay.style.display = 'none';
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      overlay.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+    };
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    const onBackdrop = (e) => { if (e.target === overlay) onCancel(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') onCancel();
+      else if (e.key === 'Enter') onOk();
+    };
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    overlay.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+
+    // Focus the cancel button by default for safer UX
+    setTimeout(() => cancelBtn.focus(), 50);
+  });
+}
+// Expose globally so any onclick="..." handlers can use it too
+window.confirmDialog = confirmDialog;
+
 window.deletePost = async (postId) => {
-  if (!confirm('Delete this post?')) return;
-  
-  console.log('🗑️ Deleting post:', postId);
-  
+  const ok = await confirmDialog({
+    title: 'Delete this post?',
+    body: 'This permanently removes the post from your feed. If it includes a video, the video file will also be deleted from storage. This can\'t be undone.',
+    confirmLabel: 'Delete forever',
+  });
+  if (!ok) return;
+
   // Check if this post has a video — if so, also delete the video & Bunny file
   const { data: post, error: lookupError } = await supabase
     .from('posts')
     .select('video_id')
     .eq('id', postId)
     .single();
-  
+
   if (lookupError) {
-    console.error('Failed to look up post:', lookupError);
     toast('Failed to find post: ' + lookupError.message, 'error');
     return;
   }
-  
-  console.log('🗑️ Post lookup result:', post);
-  
+
   if (post?.video_id) {
-    console.log('🗑️ Post has video_id, calling bunny-delete:', post.video_id);
     try {
-      const result = await callEdgeFunction('bunny-delete', { videoId: post.video_id });
-      console.log('🗑️ bunny-delete result:', result);
+      await callEdgeFunction('bunny-delete', { videoId: post.video_id });
     } catch (err) {
-      console.error('🗑️ bunny-delete failed:', err);
       toast('Failed to delete video file: ' + err.message, 'error');
       return;
     }
-  } else {
-    console.log('🗑️ No video_id on this post — skipping bunny-delete');
   }
-  
+
   const { error } = await supabase.from('posts').delete().eq('id', postId);
-  if (error) { 
-    console.error('🗑️ Failed to delete post row:', error);
-    toast(error.message, 'error'); 
-    return; 
+  if (error) {
+    toast(error.message, 'error');
+    return;
   }
-  
-  console.log('🗑️ Delete complete');
+
   toast('Deleted', 'success');
   loadFeed();
-  
+
   // Always invalidate videos cache so next visit to videos page is fresh
   allVideosCache = [];
   if (videosPage.style.display === 'block') {
@@ -625,7 +667,12 @@ async function submitComment(postId, parentId, textarea, previewId) {
 }
 
 window.deleteComment = async (commentId, postId) => {
-  if (!confirm('Delete this comment?')) return;
+  const ok = await confirmDialog({
+    title: 'Delete this comment?',
+    body: 'This comment will be removed permanently and can\'t be recovered.',
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
   await supabase.from('comments').delete().eq('id', commentId);
   loadComments(postId);
   loadCommentCount(postId);
@@ -1999,8 +2046,13 @@ async function saveStudioEdit() {
 async function deleteStudioVideo(videoId) {
   const v = studioVideosCache.find(x => x.id === videoId);
   if (!v) return;
-  
-  if (!confirm(`Permanently delete "${v.title || 'this video'}"?\n\nThis will remove the video from all locations including the home feed and Bunny CDN. This cannot be undone.`)) return;
+
+  const ok = await confirmDialog({
+    title: `Delete "${v.title || 'this video'}"?`,
+    body: 'This permanently removes the video from your feed and Bunny storage. This can\'t be undone.',
+    confirmLabel: 'Delete forever',
+  });
+  if (!ok) return;
   
   // Show loading state on the row
   const row = document.querySelector(`tr[data-video-id="${videoId}"]`);
@@ -2151,7 +2203,6 @@ async function loadVideos() {
 
 // Merge in new Supabase uploads
 const supabaseVideos = await fetchSupabaseVideos();
-console.log('🎥 fetchSupabaseVideos returned:', supabaseVideos.length, supabaseVideos);
 if (supabaseVideos.length) {
   supabaseVideos.forEach(v => {
     if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
@@ -2160,7 +2211,6 @@ if (supabaseVideos.length) {
   });
   const existingIds = new Set(allVideosCache.map(v => v.$id));
   const newOnes = supabaseVideos.filter(v => !existingIds.has(v.$id));
-  console.log('🎥 New ones to merge:', newOnes.length, 'Total cache after merge:', allVideosCache.length + newOnes.length);
   allVideosCache = [...newOnes, ...allVideosCache];
 }
 window._cache = allVideosCache; // expose for debugging
