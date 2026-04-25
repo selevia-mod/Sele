@@ -878,3 +878,11 @@ body.light .topbar-search input { color: #111; }
   color: var(--text3); letter-spacing: 0.05em;
   padding: 0.5rem 0.75rem 0.25rem;
 }
+
+.videos-title {
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s;
+  user-select: none;
+}
+.videos-title:hover { opacity: 0.85; }
+.videos-title:active { transform: scale(0.98); }
