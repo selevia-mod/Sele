@@ -1309,9 +1309,9 @@ document.getElementById('confirmVideoUpload')?.addEventListener('click', async (
       percent.textContent = pct + '%';
     });
     
-    // 3. Save metadata to Supabase
+    // 3. Save metadata to Supabase (return the new row so we can link a post to it)
     status.textContent = 'Saving...';
-    const { error } = await supabase.from('videos').insert({
+    const { data: newVideo, error } = await supabase.from('videos').insert({
       bunny_video_id: uploadInfo.videoId,
       bunny_library_id: uploadInfo.libraryId,
       video_url: uploadInfo.videoUrl,
@@ -1322,9 +1322,18 @@ document.getElementById('confirmVideoUpload')?.addEventListener('click', async (
       category,
       uploader_id: currentUser.id,
       status: 'processing',
-    });
+    }).select().single();
     
     if (error) throw error;
+    
+    // 4. Also create a post in the home feed linking to this video
+    const postBody = description?.trim() || title;
+    const { error: postError } = await supabase.from('posts').insert({
+      user_id: currentUser.id,
+      body: postBody,
+      video_id: newVideo.id,
+    });
+    if (postError) console.error('Failed to create feed post:', postError);
     
     status.textContent = 'Done!';
     fill.style.width = '100%';
@@ -1337,6 +1346,10 @@ document.getElementById('confirmVideoUpload')?.addEventListener('click', async (
       if (videosPage.style.display === 'block') {
         allVideosCache = [];
         loadVideos();
+      }
+      // Refresh home feed if open
+      if (feedEl.style.display !== 'none') {
+        window.loadFeed();
       }
     }, 1500);
     
