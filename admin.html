@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Selebox · Moderation</title>
+  <link rel="stylesheet" href="css/style.css"/>
+  <link rel="stylesheet" href="css/admin.css"/>
+</head>
+<body class="light">
+  <!-- Loading state shown until role check completes -->
+  <div id="adminLoading" class="admin-loading">
+    <div class="admin-loading-pulse"></div>
+    <p>Verifying access…</p>
+  </div>
+
+  <!-- Access denied state -->
+  <div id="adminDenied" class="admin-denied" style="display:none">
+    <div class="admin-denied-icon">⊘</div>
+    <h1>Access denied</h1>
+    <p>Moderator privileges required.</p>
+    <a href="/" class="admin-denied-link">Return home</a>
+  </div>
+
+  <!-- Main admin shell -->
+  <div id="adminShell" class="admin-shell" style="display:none">
+
+    <!-- Header -->
+    <header class="admin-header">
+      <div class="admin-header-left">
+        <a href="/" class="admin-back" title="Back to Selebox">←</a>
+        <div class="admin-title">
+          <h1>Moderation</h1>
+          <span class="admin-role-badge" id="adminRoleBadge">Moderator</span>
+        </div>
+      </div>
+      <div class="admin-header-right">
+        <span class="admin-user-name" id="adminUserName"></span>
+      </div>
+    </header>
+
+    <!-- Tab nav -->
+    <nav class="admin-tabs">
+      <button class="admin-tab active" data-tab="inbox">
+        Inbox <span class="admin-tab-count" id="inboxCount">0</span>
+      </button>
+      <button class="admin-tab" data-tab="users">Users</button>
+      <button class="admin-tab" data-tab="content">Content</button>
+      <button class="admin-tab" data-tab="bans">Bans</button>
+      <button class="admin-tab" data-tab="activity">Activity</button>
+    </nav>
+
+    <!-- Tab content -->
+    <main class="admin-main">
+
+      <!-- INBOX -->
+      <section class="admin-tab-content" data-tab-content="inbox">
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>Pending reports</h2>
+            <span class="admin-toolbar-sub" id="inboxSubtitle">Loading…</span>
+          </div>
+          <div class="admin-toolbar-right">
+            <select id="inboxFilter" class="admin-select">
+              <option value="pending">Pending</option>
+              <option value="reviewing">Reviewing</option>
+              <option value="resolved">Resolved</option>
+              <option value="dismissed">Dismissed</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+        </div>
+        <div id="inboxList" class="admin-list">
+          <div class="admin-empty">Loading reports…</div>
+        </div>
+      </section>
+
+      <!-- USERS (placeholder) -->
+      <section class="admin-tab-content" data-tab-content="users" style="display:none">
+        <div class="admin-toolbar"><h2>Users</h2></div>
+        <div class="admin-coming-soon">User search and management coming next.</div>
+      </section>
+
+      <!-- CONTENT (placeholder) -->
+      <section class="admin-tab-content" data-tab-content="content" style="display:none">
+        <div class="admin-toolbar"><h2>Hidden content</h2></div>
+        <div class="admin-coming-soon">List of hidden posts and unhide actions coming next.</div>
+      </section>
+
+      <!-- BANS (placeholder) -->
+      <section class="admin-tab-content" data-tab-content="bans" style="display:none">
+        <div class="admin-toolbar"><h2>Banned &amp; suspended</h2></div>
+        <div class="admin-coming-soon">Suspended and banned user list coming next.</div>
+      </section>
+
+      <!-- ACTIVITY -->
+      <section class="admin-tab-content" data-tab-content="activity" style="display:none">
+        <div class="admin-toolbar">
+          <h2>Activity log</h2>
+          <span class="admin-toolbar-sub">Every moderation action, append-only</span>
+        </div>
+        <div id="activityList" class="admin-list">
+          <div class="admin-empty">Loading activity…</div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Report detail modal (lazy injected) -->
+  <div id="adminModalRoot"></div>
+
+  <script type="module" src="js/admin.js"></script>
+</body>
+</html>
