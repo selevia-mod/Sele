@@ -1639,15 +1639,32 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 }
 .profile-banner img { width: 100%; height: 100%; object-fit: cover; }
 .profile-banner-edit {
-  position: absolute !important; top: 16px !important; right: 16px !important;
-  background: rgba(0,0,0,0.75); color: #fff !important; border: 1px solid rgba(255,255,255,0.3);
-  padding: 10px 16px; border-radius: 99px; font-size: 0.85rem; font-weight: 600;
-  display: flex !important; align-items: center; gap: 8px; cursor: pointer;
-  z-index: 100; backdrop-filter: blur(10px);
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background 0.18s ease, transform 0.12s ease, border-color 0.18s ease;
 }
-.profile-banner-edit:hover { background: rgba(0,0,0,0.9); transform: translateY(-1px); }
-.profile-banner-edit svg { width: 16px; height: 16px; }
-.profile-banner-edit:hover { background: rgba(0,0,0,0.7); }
+.profile-banner-edit:hover {
+  background: rgba(124, 58, 237, 0.55);
+  border-color: rgba(167, 139, 250, 0.6);
+  transform: translateY(-1px);
+}
+.profile-banner-edit:active { transform: scale(0.98); }
 .profile-banner-edit svg { width: 14px; height: 14px; }
 
 .profile-head {
