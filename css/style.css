@@ -1431,6 +1431,214 @@ body.light .vu-btn-ghost:hover {
   box-shadow: none;
 }
 
+/* ═══════════════════════════════════════════
+   PREMIUM STUDIO EDIT MODAL
+   (uses .vu-modal / .vu-label / .vu-input / .vu-textarea / .vu-btn-secondary)
+   ═══════════════════════════════════════════ */
+
+.vu-modal {
+  position: relative;
+  background: linear-gradient(180deg, #1a1428 0%, #120c20 100%);
+  width: 100%;
+  max-width: 600px;
+  max-height: 92vh;
+  border-radius: 24px;
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(139, 92, 246, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: vuSlideIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Top accent ribbon — subtle purple glow stripe */
+.vu-modal::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent 0%, #7c3aed 25%, #a78bfa 50%, #7c3aed 75%, transparent 100%);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+body.light .vu-modal {
+  background: linear-gradient(180deg, #ffffff 0%, #faf8ff 100%);
+  border-color: rgba(124, 58, 237, 0.18);
+  box-shadow:
+    0 25px 70px rgba(0, 0, 0, 0.12),
+    0 0 0 1px rgba(124, 58, 237, 0.10);
+}
+
+.vu-title {
+  margin: 0 0 0.2rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, #c4b5fd, #ffffff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+body.light .vu-title {
+  background: linear-gradient(135deg, #7c3aed, #1f2937);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Labels (used by .vu-form > label.vu-label pattern) */
+.vu-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text, #e5e7eb);
+  margin: 0 0 0.45rem;
+}
+
+body.light .vu-label { color: #1f2937; }
+
+.vu-label small {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 0.72rem;
+}
+
+.vu-label + .vu-label { margin-top: 1.1rem; }
+
+/* Inputs */
+.vu-input,
+.vu-textarea,
+select.vu-input {
+  width: 100%;
+  padding: 0.78rem 1rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1.5px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  color: var(--text, #e5e7eb);
+  font-size: 0.93rem;
+  font-family: inherit;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+  outline: none;
+}
+
+body.light .vu-input,
+body.light .vu-textarea,
+body.light select.vu-input {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #1f2937;
+}
+
+.vu-textarea {
+  resize: vertical;
+  min-height: 90px;
+  line-height: 1.55;
+}
+
+.vu-input:hover:not(:focus),
+.vu-textarea:hover:not(:focus) {
+  border-color: rgba(139, 92, 246, 0.35);
+}
+
+.vu-input:focus,
+.vu-textarea:focus,
+select.vu-input:focus {
+  border-color: #7c3aed;
+  background: rgba(124, 58, 237, 0.06);
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.14);
+}
+
+body.light .vu-input:focus,
+body.light .vu-textarea:focus,
+body.light select.vu-input:focus {
+  background: #fefcff;
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+}
+
+/* Custom select chevron */
+select.vu-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23a78bfa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 1rem center;
+  padding-right: 2.5rem;
+  cursor: pointer;
+}
+
+/* Spacing between vu-hint after vu-input */
+.vu-input + .vu-hint,
+.vu-textarea + .vu-hint {
+  margin-top: 0.35rem;
+  display: block;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Studio edit thumbnail preview — refined frame */
+#studioEditModal .vu-preview-box {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  border-radius: 16px;
+  overflow: hidden;
+  margin-bottom: 1.25rem;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#studioEditModal .vu-preview-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Secondary button (Cancel) — used in studio edit modal footer */
+.vu-btn-secondary {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.10));
+  color: var(--text, #e5e7eb);
+}
+body.light .vu-btn-secondary {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #1f2937;
+}
+.vu-btn-secondary:hover {
+  background: rgba(139, 92, 246, 0.10);
+  border-color: rgba(139, 92, 246, 0.45);
+  color: var(--text, #e5e7eb);
+}
+.vu-btn-secondary:active { transform: scale(0.98); }
+
+/* When the primary button is in "saving" state */
+.vu-btn-primary.is-saving {
+  opacity: 0.85;
+  cursor: progress;
+  pointer-events: none;
+}
+.vu-btn-primary.is-saving::before {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
+  animation: vuSpin 0.7s linear infinite;
+  margin-right: 0.45rem;
+}
+@keyframes vuSpin { to { transform: rotate(360deg); } }
+
 /* Mobile */
 @media (max-width: 600px) {
   .video-upload-overlay { padding: 0; align-items: flex-end; }
