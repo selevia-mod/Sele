@@ -103,10 +103,28 @@
         </div>
       </section>
 
-      <!-- CONTENT (placeholder) -->
+      <!-- CONTENT -->
       <section class="admin-tab-content" data-tab-content="content" style="display:none">
-        <div class="admin-toolbar"><h2>Hidden content</h2></div>
-        <div class="admin-coming-soon">List of hidden posts and unhide actions coming next.</div>
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>Hidden content</h2>
+            <span class="admin-toolbar-sub" id="contentSubtitle">Loading…</span>
+          </div>
+          <div class="admin-toolbar-right">
+            <select id="contentFilter" class="admin-select">
+              <option value="all">All reasons</option>
+              <option value="spam">Spam</option>
+              <option value="harassment">Harassment</option>
+              <option value="hate">Hate speech</option>
+              <option value="nsfw">NSFW</option>
+              <option value="self_harm">Self-harm</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div id="contentList" class="admin-list">
+          <div class="admin-empty">Loading…</div>
+        </div>
       </section>
 
       <!-- BANS -->
