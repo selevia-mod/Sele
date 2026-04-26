@@ -1690,19 +1690,120 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 .profile-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
 
 /* Profile tabs */
+/* ── PREMIUM PROFILE TABS ── */
 .profile-tabs {
-  display: flex; gap: 0.25rem; margin: 0.5rem 0;
-  border-bottom: 1px solid var(--border);
-  min-height: 48px; align-items: stretch;
+  display: flex;
+  gap: 0.15rem;
+  margin: 1rem 0 1.25rem;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  position: relative;
 }
+.profile-tabs::-webkit-scrollbar { display: none; }
 .profile-tab {
-  background: none; border: none; padding: 0.85rem 1.5rem;
-  color: var(--text3); font-size: 0.95rem; font-weight: 600; font-family: var(--font);
-  cursor: pointer; border-bottom: 3px solid transparent; transition: all 0.15s;
-  display: inline-flex; align-items: center;
+  position: relative;
+  background: none;
+  border: none;
+  padding: 0.85rem 1.15rem;
+  margin-bottom: -1px;
+  color: var(--text2);
+  font-size: 0.92rem;
+  font-weight: 500;
+  font-family: var(--font);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.18s ease, background 0.18s ease, transform 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
 }
-.profile-tab:hover { color: var(--text); background: var(--bg3); border-radius: 8px 8px 0 0; }
-.profile-tab.active { color: var(--purple-lt); border-bottom-color: var(--purple); }
+.profile-tab svg { width: 18px; height: 18px; flex-shrink: 0; }
+.profile-tab:hover {
+  color: var(--text);
+  background: rgba(139, 92, 246, 0.06);
+  border-radius: 10px 10px 0 0;
+}
+.profile-tab:active { transform: scale(0.98); }
+.profile-tab.active {
+  color: #c4b5fd;
+  font-weight: 600;
+}
+.profile-tab.active::before {
+  /* Glowing underline accent */
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #a78bfa 30%, #7c3aed 50%, #a78bfa 70%, transparent);
+  border-radius: 2px;
+  box-shadow: 0 0 10px rgba(167, 139, 250, 0.6);
+}
+body.light .profile-tab:hover { background: rgba(124, 58, 237, 0.06); }
+body.light .profile-tab.active { color: #7c3aed; }
+body.light .profile-tab.active::before {
+  background: linear-gradient(90deg, transparent, #7c3aed 30%, #4c1d95 50%, #7c3aed 70%, transparent);
+}
+
+.profile-tab-content { animation: profileTabFade 0.25s ease both; }
+@keyframes profileTabFade {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Reuse video-grid + book-grid for the profile tabs */
+.profile-video-grid,
+.profile-book-grid {
+  display: grid;
+  gap: 1.5rem;
+  margin-top: 0.5rem;
+}
+.profile-video-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.profile-book-grid  { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+
+/* Inline empty state for profile tabs */
+.profile-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 3rem 1.5rem;
+  background: rgba(139, 92, 246, 0.03);
+  border: 1px dashed rgba(139, 92, 246, 0.20);
+  border-radius: 18px;
+  margin-top: 0.5rem;
+}
+body.light .profile-empty { background: #faf8ff; border-color: rgba(124, 58, 237, 0.18); }
+.profile-empty-icon {
+  width: 64px; height: 64px;
+  border-radius: 18px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.18), rgba(167, 139, 250, 0.06));
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  color: #c4b5fd;
+  margin-bottom: 1rem;
+}
+body.light .profile-empty-icon { color: #7c3aed; }
+.profile-empty h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.profile-empty p {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text2);
+  max-width: 360px;
+  line-height: 1.55;
+}
 
 /* About cards */
 .about-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
