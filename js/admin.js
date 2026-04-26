@@ -369,6 +369,224 @@ function openReasonModal(action, author) {
   });
 }
 
+// ─── USERS TAB ───────────────────────────────────────────────────────────────
+
+let _usersSearchTimer = null;
+
+function initUsersTab() {
+  const searchEl = document.getElementById('usersSearch');
+  const statusEl = document.getElementById('usersStatusFilter');
+  const roleEl   = document.getElementById('usersRoleFilter');
+
+  const debounced = () => {
+    clearTimeout(_usersSearchTimer);
+    _usersSearchTimer = setTimeout(loadUsers, 280);
+  };
+  searchEl?.addEventListener('input',  debounced);
+  statusEl?.addEventListener('change', loadUsers);
+  roleEl?.addEventListener('change',   loadUsers);
+}
+
+async function loadUsers() {
+  const listEl   = document.getElementById('usersList');
+  const subEl    = document.getElementById('usersSubtitle');
+  const query    = document.getElementById('usersSearch').value.trim();
+  const status   = document.getElementById('usersStatusFilter').value;
+  const roleFlt  = document.getElementById('usersRoleFilter').value;
+
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  let q = supabase
+    .from('profiles')
+    .select('id, username, email, avatar_url, role, is_banned, suspended_until, ban_reason, banned_at, created_at')
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  // Search across username + email
+  if (query) {
+    const safe = query.replace(/[%_\\]/g, '\\$&');
+    q = q.or(`username.ilike.%${safe}%,email.ilike.%${safe}%`);
+  }
+
+  // Role filter
+  if (roleFlt !== 'all') q = q.eq('role', roleFlt);
+
+  // Status filter
+  const nowIso = new Date().toISOString();
+  if (status === 'banned')    q = q.eq('is_banned', true);
+  if (status === 'suspended') q = q.eq('is_banned', false).gt('suspended_until', nowIso);
+  if (status === 'active')    q = q.eq('is_banned', false).or(`suspended_until.is.null,suspended_until.lt.${nowIso}`);
+
+  const { data: users, error } = await q;
+  if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
+  if (!users.length) {
+    listEl.innerHTML = `<div class="admin-empty">${query ? 'No matches.' : 'No users.'}</div>`;
+    subEl.textContent = '0 users';
+    return;
+  }
+
+  subEl.textContent = `${users.length} ${users.length === 50 ? 'shown · refine search to narrow down' : 'matched'}`;
+  listEl.innerHTML = '';
+
+  for (const u of users) {
+    const isSuspended = !u.is_banned && u.suspended_until && new Date(u.suspended_until) > new Date();
+    const status = u.is_banned ? 'banned' : isSuspended ? 'suspended' : 'active';
+
+    const row = document.createElement('div');
+    row.className = 'user-row';
+    row.dataset.userId = u.id;
+    row.innerHTML = `
+      <div class="user-row-head">
+        <div class="user-row-avatar">${u.avatar_url ? `<img src="${esc(u.avatar_url)}" alt=""/>` : esc(initials(u.username))}</div>
+        <div class="user-row-meta">
+          <div class="user-row-name">
+            ${esc(u.username || '(no username)')}
+            ${u.role !== 'user' ? `<span class="user-role-badge user-role-${u.role}">${esc(u.role)}</span>` : ''}
+            ${status === 'banned'    ? '<span class="user-status-badge user-status-banned">Banned</span>'    : ''}
+            ${status === 'suspended' ? '<span class="user-status-badge user-status-suspended">Suspended</span>' : ''}
+          </div>
+          <div class="user-row-email">${esc(u.email || '—')} · joined ${esc((u.created_at || '').slice(0,10))}</div>
+        </div>
+        <button class="user-row-toggle" aria-label="Expand">▾</button>
+      </div>
+      <div class="user-row-panel" style="display:none">
+        ${status === 'suspended' ? `<div class="user-status-detail">Suspended until <b>${esc(new Date(u.suspended_until).toLocaleString())}</b></div>` : ''}
+        ${status === 'banned'    ? `<div class="user-status-detail">Banned${u.ban_reason ? ` for <b>${esc(u.ban_reason)}</b>` : ''}${u.banned_at ? ` · ${esc(new Date(u.banned_at).toLocaleDateString())}` : ''}</div>` : ''}
+        <div class="user-actions">
+          ${status === 'banned'    ? '<button class="user-act-btn" data-act="unban">Unban</button>' : ''}
+          ${status === 'suspended' ? '<button class="user-act-btn" data-act="unsuspend">Lift suspension</button>' : ''}
+          ${status === 'active'    ? '<button class="user-act-btn" data-act="suspend">Suspend</button>' : ''}
+          ${status !== 'banned'    ? '<button class="user-act-btn user-act-btn-danger" data-act="ban">Ban</button>' : ''}
+          <span class="user-actions-divider"></span>
+          ${u.role === 'user'      ? '<button class="user-act-btn" data-act="make_mod">Make moderator</button>' : ''}
+          ${u.role === 'moderator' ? '<button class="user-act-btn" data-act="make_admin">Promote to admin</button>' : ''}
+          ${u.role === 'moderator' ? '<button class="user-act-btn" data-act="demote">Revoke moderator</button>' : ''}
+          ${u.role === 'admin' && u.id !== currentMod.id ? '<button class="user-act-btn" data-act="demote">Revoke admin</button>' : ''}
+        </div>
+      </div>
+    `;
+
+    // Toggle expand
+    const head    = row.querySelector('.user-row-head');
+    const panel   = row.querySelector('.user-row-panel');
+    const toggle  = row.querySelector('.user-row-toggle');
+    head.addEventListener('click', (e) => {
+      if (e.target.closest('.user-act-btn')) return;
+      const open = panel.style.display !== 'none';
+      panel.style.display = open ? 'none' : 'block';
+      toggle.textContent  = open ? '▾' : '▴';
+      row.classList.toggle('user-row-open', !open);
+    });
+
+    // Action buttons
+    row.querySelectorAll('[data-act]').forEach(b => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleUserAction(b.dataset.act, u);
+      });
+    });
+
+    listEl.appendChild(row);
+  }
+}
+
+async function handleUserAction(act, u) {
+  const reasonAndNote = await openReasonModal(
+    act === 'make_mod' || act === 'make_admin' || act === 'demote' ? 'role_change' : act,
+    u
+  );
+  if (!reasonAndNote) return;
+
+  const { reason, note, suspendDays } = reasonAndNote;
+
+  try {
+    if (act === 'suspend') {
+      const days = suspendDays || 7;
+      const until = new Date(); until.setDate(until.getDate() + days);
+      await supabase.from('profiles').update({ suspended_until: until.toISOString() }).eq('id', u.id);
+      await logAction({ action: 'suspend', target_user_id: u.id, reason, note, metadata: { days } });
+      toast(`${u.username || 'User'} suspended ${days}d`);
+    }
+    else if (act === 'unsuspend') {
+      await supabase.from('profiles').update({ suspended_until: null }).eq('id', u.id);
+      await logAction({ action: 'unsuspend', target_user_id: u.id, reason, note });
+      toast('Suspension lifted');
+    }
+    else if (act === 'ban') {
+      const ok = confirm(`Permanently ban ${u.username || 'this user'}?\n\nThis hides all their content globally and prevents them from posting.`);
+      if (!ok) return;
+      await supabase.from('profiles').update({
+        is_banned: true, ban_reason: reason, banned_at: new Date().toISOString(), banned_by: currentMod.id,
+      }).eq('id', u.id);
+      await logAction({ action: 'ban', target_user_id: u.id, reason, note });
+      toast(`${u.username || 'User'} banned`);
+    }
+    else if (act === 'unban') {
+      await supabase.from('profiles').update({
+        is_banned: false, ban_reason: null, banned_at: null, banned_by: null,
+      }).eq('id', u.id);
+      await logAction({ action: 'unban', target_user_id: u.id, reason, note });
+      toast(`${u.username || 'User'} unbanned`);
+    }
+    else if (act === 'make_mod') {
+      if (currentMod.role !== 'admin') return alert('Only admins can grant moderator role');
+      await supabase.from('profiles').update({ role: 'moderator' }).eq('id', u.id);
+      await logAction({ action: 'grant_role', target_user_id: u.id, reason, note, metadata: { role: 'moderator' } });
+      toast(`${u.username || 'User'} promoted to moderator`);
+    }
+    else if (act === 'make_admin') {
+      if (currentMod.role !== 'admin') return alert('Only admins can grant admin role');
+      const ok = confirm(`Promote ${u.username || 'this user'} to admin? They'll have full mod powers including the ability to ban/unban anyone.`);
+      if (!ok) return;
+      await supabase.from('profiles').update({ role: 'admin' }).eq('id', u.id);
+      await logAction({ action: 'grant_role', target_user_id: u.id, reason, note, metadata: { role: 'admin' } });
+      toast(`${u.username || 'User'} promoted to admin`);
+    }
+    else if (act === 'demote') {
+      if (currentMod.role !== 'admin') return alert('Only admins can revoke roles');
+      await supabase.from('profiles').update({ role: 'user' }).eq('id', u.id);
+      await logAction({ action: 'revoke_role', target_user_id: u.id, reason, note, metadata: { from: u.role } });
+      toast(`${u.username || 'User'} demoted to user`);
+    }
+    loadUsers();
+  } catch (e) {
+    alert('Action failed: ' + (e.message || e));
+  }
+}
+
+// Extend ACTION_REASONS for the new user-tab actions
+ACTION_REASONS.unsuspend    = ['mistake', 'time_served', 'context_ok', 'other'];
+ACTION_REASONS.unban        = ['mistake', 'appeal_accepted', 'context_ok', 'other'];
+ACTION_REASONS.role_change  = ['promotion', 'rotation', 'inactive', 'misconduct', 'other'];
+
+REASON_TEXT.time_served      = 'Time served / served punishment';
+REASON_TEXT.appeal_accepted  = 'Appeal accepted';
+REASON_TEXT.promotion        = 'Promotion / earned trust';
+REASON_TEXT.rotation         = 'Routine rotation';
+REASON_TEXT.inactive         = 'Inactive moderator';
+REASON_TEXT.misconduct       = 'Misconduct';
+
+ACTION_TITLES.unsuspend   = 'Lift suspension';
+ACTION_TITLES.unban       = 'Unban user';
+ACTION_TITLES.role_change = 'Change role';
+
+// Switch tab on Users → load
+const _origSwitchTab = switchTab;
+function switchTab2(name) {
+  _origSwitchTab(name);
+  if (name === 'users') {
+    if (!document.getElementById('usersSearch').dataset.bound) {
+      initUsersTab();
+      document.getElementById('usersSearch').dataset.bound = '1';
+    }
+    loadUsers();
+  }
+}
+// Re-bind tab clicks to use the augmented switchTab2
+document.querySelectorAll('.admin-tab').forEach(t => {
+  t.onclick = () => switchTab2(t.dataset.tab);
+});
+
 // ─── ACTIVITY LOG ────────────────────────────────────────────────────────────
 
 const ACTION_LABEL = {
