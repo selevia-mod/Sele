@@ -76,6 +76,15 @@ async function onSignedIn(user) {
   } else if (hash === '#author') {
     setSidebarActive('btnAuthor');
     showAuthor();
+  } else if (hash.startsWith('#author/book/')) {
+    setSidebarActive('btnAuthor');
+    const parts = hash.replace('#author/book/', '').split('/');
+    const bookId = parts[0];
+    if (parts[2]) {
+      openAuthorChapterEditor(bookId, parts[2] === 'new' ? null : parts[2]);
+    } else {
+      openAuthorBookEditor(bookId);
+    }
   } else if (hash.startsWith('#video/')) {
     setSidebarActive('btnVideos');
     playVideo(hash.replace('#video/', ''));
@@ -2156,11 +2165,496 @@ document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => 
 function showAuthor() {
   hideAllMainPages();
   authorPage.style.display = 'block';
+  setAuthorView('dashboard');
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#author');
-  // TODO: load manuscript dashboard once editor is in place
+  loadAuthorDashboard();
 }
+
+// ════════════════════════════════════════
+// AUTHOR — DASHBOARD + BOOK EDITOR + CHAPTER EDITOR
+// ════════════════════════════════════════
+const authorDashboard       = document.getElementById('authorDashboard');
+const authorBookEditor      = document.getElementById('authorBookEditor');
+const authorChapterEditor   = document.getElementById('authorChapterEditor');
+
+let authorBooksCache = [];
+let editingBookId = null;        // null = new book in editor
+let editingChapterId = null;     // null = new chapter
+let chapterQuill = null;
+let chapterAutosaveTimer = null;
+let chapterDirty = false;
+
+function setAuthorView(view) {
+  authorDashboard.style.display     = view === 'dashboard' ? 'block' : 'none';
+  authorBookEditor.style.display    = view === 'book'      ? 'block' : 'none';
+  authorChapterEditor.style.display = view === 'chapter'   ? 'block' : 'none';
+}
+
+// ── Dashboard ──
+async function loadAuthorDashboard() {
+  const content = document.getElementById('authorBooksContent');
+  content.innerHTML = '<div class="loading">Loading your books...</div>';
+
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    content.innerHTML = '<div class="loading">Sign in to start writing.</div>';
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from('books')
+    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, created_at, updated_at, published_at')
+    .eq('author_id', user.id)
+    .order('updated_at', { ascending: false });
+
+  if (error) {
+    content.innerHTML = `<div class="loading">Couldn't load books: ${escHTML(error.message)}</div>`;
+    return;
+  }
+
+  authorBooksCache = data || [];
+
+  // Stats
+  document.getElementById('statMyBooks').textContent = authorBooksCache.length.toLocaleString();
+  document.getElementById('statMyChapters').textContent = authorBooksCache.reduce((s, b) => s + (b.chapters_count || 0), 0).toLocaleString();
+  document.getElementById('statMyReads').textContent = authorBooksCache.reduce((s, b) => s + (b.views_count || 0), 0).toLocaleString();
+  document.getElementById('statMyLikes').textContent = authorBooksCache.reduce((s, b) => s + (b.likes_count || 0), 0).toLocaleString();
+
+  if (!authorBooksCache.length) {
+    content.innerHTML = `
+      <div class="page-empty">
+        <div class="page-empty-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+        </div>
+        <h2 class="page-empty-title">No manuscripts yet</h2>
+        <p class="page-empty-body">Click <strong>New book</strong> above to start your first story.</p>
+      </div>
+    `;
+    return;
+  }
+
+  content.innerHTML = `
+    <div class="author-books-table">
+      ${authorBooksCache.map(b => renderAuthorBookRow(b)).join('')}
+    </div>
+  `;
+
+  content.querySelectorAll('[data-author-action]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.authorAction;
+      const id = btn.dataset.id;
+      if (action === 'edit')   openAuthorBookEditor(id);
+      else if (action === 'delete') deleteAuthorBook(id);
+    });
+  });
+  content.querySelectorAll('.author-book-row').forEach(row => {
+    row.addEventListener('click', () => openAuthorBookEditor(row.dataset.id));
+  });
+}
+
+function renderAuthorBookRow(b) {
+  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
+  const cover = b.cover_url
+    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
+    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
+  const statusClass = `author-book-status-${b.status || 'draft'}`;
+  const visBadge = b.is_public ? '' : ' • Hidden';
+  return `
+    <div class="author-book-row" data-id="${b.id}">
+      <div class="author-book-row-cover">${cover}</div>
+      <div class="author-book-row-text">
+        <div class="author-book-row-title">${escHTML(b.title || 'Untitled')}</div>
+        <div class="author-book-row-genre">${escHTML((b.genre || '—').replace(/-/g, ' '))}${visBadge}</div>
+      </div>
+      <div><span class="author-book-status-badge ${statusClass}">${b.status || 'draft'}</span></div>
+      <div class="author-book-row-stat">${(b.chapters_count || 0)} ch</div>
+      <div class="author-book-row-stat">${(b.views_count || 0).toLocaleString()} 👁</div>
+      <div class="author-book-row-actions">
+        <button class="author-book-action-btn" data-author-action="edit" data-id="${b.id}" title="Edit">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        </button>
+        <button class="author-book-action-btn author-book-action-btn-danger" data-author-action="delete" data-id="${b.id}" title="Delete">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function deleteAuthorBook(bookId) {
+  const b = authorBooksCache.find(x => x.id === bookId);
+  if (!b) return;
+  const ok = await confirmDialog({
+    title: `Delete "${b.title || 'this book'}"?`,
+    body: 'This permanently removes the book and all its chapters. This can\'t be undone.',
+    confirmLabel: 'Delete forever',
+  });
+  if (!ok) return;
+  const { error } = await supabase.from('books').delete().eq('id', bookId);
+  if (error) { toast('Failed to delete: ' + error.message, 'error'); return; }
+  toast('Book deleted', 'success');
+  loadAuthorDashboard();
+}
+
+// ── New book modal ──
+const newBookModal = document.getElementById('newBookModal');
+function openNewBookModal() {
+  document.getElementById('newBookTitle').value = '';
+  document.getElementById('newBookGenre').value = '';
+  document.getElementById('newBookDescription').value = '';
+  newBookModal.style.display = 'flex';
+  setTimeout(() => document.getElementById('newBookTitle').focus(), 50);
+}
+function closeNewBookModal() { newBookModal.style.display = 'none'; }
+async function createNewBook() {
+  const title = document.getElementById('newBookTitle').value.trim();
+  if (!title) { toast('Title is required', 'error'); return; }
+  const genre = document.getElementById('newBookGenre').value || null;
+  const description = document.getElementById('newBookDescription').value.trim();
+
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) { toast('Sign in first', 'error'); return; }
+
+  const btn = document.getElementById('newBookCreate');
+  btn.disabled = true; btn.textContent = 'Creating…';
+
+  const { data, error } = await supabase.from('books').insert({
+    author_id: user.id,
+    title, description, genre,
+    status: 'draft',
+    is_public: false,
+  }).select().single();
+
+  btn.disabled = false; btn.textContent = 'Create book';
+
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  closeNewBookModal();
+  toast('Book created', 'success');
+  openAuthorBookEditor(data.id);
+}
+
+document.getElementById('btnNewBook')?.addEventListener('click', openNewBookModal);
+document.getElementById('newBookClose')?.addEventListener('click', closeNewBookModal);
+document.getElementById('newBookCancel')?.addEventListener('click', closeNewBookModal);
+document.getElementById('newBookCreate')?.addEventListener('click', createNewBook);
+newBookModal?.addEventListener('click', (e) => { if (e.target === newBookModal) closeNewBookModal(); });
+
+// ── Book editor (metadata + chapter list) ──
+async function openAuthorBookEditor(bookId) {
+  editingBookId = bookId;
+  hideAllMainPages();
+  authorPage.style.display = 'block';
+  setAuthorView('book');
+  history.pushState(null, '', `#author/book/${bookId}`);
+  await loadBookEditor(bookId);
+}
+
+async function loadBookEditor(bookId) {
+  const { data: book, error } = await supabase
+    .from('books')
+    .select('*')
+    .eq('id', bookId)
+    .single();
+  if (error || !book) { toast('Book not found', 'error'); showAuthor(); return; }
+
+  document.getElementById('bookEditorTitle').value = book.title || '';
+  document.getElementById('bookEditorDescription').value = book.description || '';
+  document.getElementById('bookEditorGenre').value = book.genre || '';
+  document.getElementById('bookEditorTags').value = (book.tags || []).join(', ');
+  document.getElementById('bookEditorBookStatus').value = book.status || 'draft';
+  document.getElementById('bookEditorPublic').checked = !!book.is_public;
+  document.getElementById('bookEditorStatusBadge').textContent = book.is_public ? 'Visible to readers' : 'Hidden draft';
+
+  const coverWrap = document.getElementById('bookEditorCover');
+  const initialLetter = (book.title || '?').trim().charAt(0).toUpperCase();
+  coverWrap.innerHTML = book.cover_url
+    ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
+    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
+
+  // Load chapters
+  const { data: chapters, error: chErr } = await supabase
+    .from('chapters')
+    .select('id, chapter_number, title, word_count, is_published, updated_at')
+    .eq('book_id', bookId)
+    .order('chapter_number', { ascending: true });
+
+  const chList = document.getElementById('bookEditorChapters');
+  if (chErr) {
+    chList.innerHTML = `<div class="loading">Couldn't load chapters: ${escHTML(chErr.message)}</div>`;
+    return;
+  }
+  if (!chapters?.length) {
+    chList.innerHTML = '<div style="color:var(--text2);padding:1rem 0">No chapters yet. Click <strong>Add chapter</strong> to write the first one.</div>';
+    return;
+  }
+  chList.innerHTML = chapters.map(c => `
+    <div class="author-chapter-row" data-chapter-id="${c.id}">
+      <span class="author-chapter-num">Ch ${c.chapter_number}</span>
+      <span class="author-chapter-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
+      <span class="author-chapter-meta">${(c.word_count || 0).toLocaleString()} words</span>
+      <span class="author-chapter-pub-pill ${c.is_published ? 'author-chapter-pub-published' : 'author-chapter-pub-draft'}">${c.is_published ? 'Published' : 'Draft'}</span>
+      <div class="author-chapter-actions">
+        <button class="author-book-action-btn" data-chapter-action="edit" data-id="${c.id}" title="Edit">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        </button>
+        <button class="author-book-action-btn author-book-action-btn-danger" data-chapter-action="delete" data-id="${c.id}" title="Delete">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+        </button>
+      </div>
+    </div>
+  `).join('');
+
+  chList.querySelectorAll('[data-chapter-action]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.chapterAction;
+      const chapterId = btn.dataset.id;
+      if (action === 'edit') openAuthorChapterEditor(bookId, chapterId);
+      else if (action === 'delete') deleteAuthorChapter(chapterId, bookId);
+    });
+  });
+  chList.querySelectorAll('.author-chapter-row').forEach(row => {
+    row.addEventListener('click', () => openAuthorChapterEditor(bookId, row.dataset.chapterId));
+  });
+}
+
+async function saveBookMetadata() {
+  if (!editingBookId) return;
+  const btn = document.getElementById('btnSaveBook');
+  const title = document.getElementById('bookEditorTitle').value.trim();
+  if (!title) { toast('Title is required', 'error'); return; }
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+
+  const tags = document.getElementById('bookEditorTags').value.split(',').map(t => t.trim()).filter(Boolean);
+  const description = document.getElementById('bookEditorDescription').value.trim();
+  const genre = document.getElementById('bookEditorGenre').value || null;
+  const status = document.getElementById('bookEditorBookStatus').value;
+  const isPublic = document.getElementById('bookEditorPublic').checked;
+
+  const update = {
+    title, description, genre, tags, status, is_public: isPublic,
+    updated_at: new Date().toISOString(),
+  };
+  // Set published_at the first time the book becomes public
+  if (isPublic) {
+    const { data: existing } = await supabase.from('books').select('published_at').eq('id', editingBookId).single();
+    if (!existing?.published_at) update.published_at = new Date().toISOString();
+  }
+
+  const { error } = await supabase.from('books').update(update).eq('id', editingBookId);
+  btn.disabled = false; btn.textContent = 'Save';
+
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  toast('Saved', 'success');
+  document.getElementById('bookEditorStatusBadge').textContent = isPublic ? 'Visible to readers' : 'Hidden draft';
+}
+document.getElementById('btnSaveBook')?.addEventListener('click', saveBookMetadata);
+document.getElementById('btnBackToDashboard')?.addEventListener('click', showAuthor);
+
+// Cover upload
+document.getElementById('btnUploadCover')?.addEventListener('click', () => {
+  document.getElementById('bookCoverFile').click();
+});
+document.getElementById('bookCoverFile')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file || !editingBookId) return;
+  if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
+  if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
+
+  toast('Uploading cover…', '');
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) { toast('Sign in first', 'error'); return; }
+
+  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+  const path = `${user.id}/${editingBookId}-${Date.now()}.${ext}`;
+  const { error: upErr } = await supabase.storage.from('book-covers').upload(path, file, { upsert: true, contentType: file.type });
+  if (upErr) { toast('Upload failed: ' + upErr.message, 'error'); return; }
+
+  const { data: { publicUrl } } = supabase.storage.from('book-covers').getPublicUrl(path);
+  const { error: updErr } = await supabase.from('books').update({ cover_url: publicUrl, updated_at: new Date().toISOString() }).eq('id', editingBookId);
+  if (updErr) { toast('Saved file but DB update failed: ' + updErr.message, 'error'); return; }
+
+  document.getElementById('bookEditorCover').innerHTML = `<img src="${escHTML(publicUrl)}" alt=""/>`;
+  toast('Cover updated', 'success');
+});
+
+// New chapter
+document.getElementById('btnNewChapter')?.addEventListener('click', () => {
+  if (!editingBookId) return;
+  openAuthorChapterEditor(editingBookId, null);
+});
+
+async function deleteAuthorChapter(chapterId, bookId) {
+  const ok = await confirmDialog({
+    title: 'Delete this chapter?',
+    body: 'The chapter and its content will be permanently removed. This can\'t be undone.',
+    confirmLabel: 'Delete forever',
+  });
+  if (!ok) return;
+  const { error } = await supabase.from('chapters').delete().eq('id', chapterId);
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  // Recompute denormalized counts
+  await recomputeBookCounts(bookId);
+  toast('Chapter deleted', 'success');
+  loadBookEditor(bookId);
+}
+
+async function recomputeBookCounts(bookId) {
+  const { data: rows } = await supabase
+    .from('chapters')
+    .select('word_count, is_published')
+    .eq('book_id', bookId);
+  if (!rows) return;
+  const chaptersCount = rows.filter(r => r.is_published).length;
+  const wordCount = rows.reduce((s, r) => s + (r.word_count || 0), 0);
+  await supabase.from('books').update({ chapters_count: chaptersCount, word_count: wordCount, updated_at: new Date().toISOString() }).eq('id', bookId);
+}
+
+// ── Chapter editor (Quill) ──
+async function openAuthorChapterEditor(bookId, chapterId) {
+  editingBookId = bookId;
+  editingChapterId = chapterId;
+  hideAllMainPages();
+  authorPage.style.display = 'block';
+  setAuthorView('chapter');
+  history.pushState(null, '', `#author/book/${bookId}/chapter/${chapterId || 'new'}`);
+
+  // Init Quill on first use
+  if (!chapterQuill) {
+    chapterQuill = new Quill('#chapterEditorQuill', {
+      theme: 'snow',
+      placeholder: 'Start writing your chapter…',
+      modules: {
+        toolbar: [
+          [{ header: [1, 2, 3, false] }],
+          ['bold', 'italic', 'underline', 'strike'],
+          [{ list: 'ordered' }, { list: 'bullet' }],
+          ['blockquote', 'link'],
+          [{ align: [] }],
+          ['clean'],
+        ],
+      },
+    });
+    chapterQuill.on('text-change', () => {
+      chapterDirty = true;
+      updateChapterWordCount();
+      scheduleChapterAutosave();
+    });
+    document.getElementById('chapterEditorTitle').addEventListener('input', () => {
+      chapterDirty = true;
+      scheduleChapterAutosave();
+    });
+    document.getElementById('chapterEditorPublished').addEventListener('change', () => {
+      chapterDirty = true;
+      scheduleChapterAutosave();
+    });
+  }
+
+  // Reset state
+  chapterQuill.setText('');
+  document.getElementById('chapterEditorTitle').value = '';
+  document.getElementById('chapterEditorPublished').checked = false;
+  setChapterSaveStatus('idle');
+  chapterDirty = false;
+
+  if (chapterId) {
+    const { data, error } = await supabase
+      .from('chapters')
+      .select('id, chapter_number, title, content, is_published')
+      .eq('id', chapterId)
+      .single();
+    if (error || !data) { toast('Chapter not found', 'error'); openAuthorBookEditor(bookId); return; }
+    document.getElementById('chapterEditorTitle').value = data.title || '';
+    document.getElementById('chapterEditorPublished').checked = !!data.is_published;
+    if (data.content) chapterQuill.clipboard.dangerouslyPasteHTML(data.content);
+    chapterDirty = false;
+  }
+
+  updateChapterWordCount();
+  setTimeout(() => chapterQuill.focus(), 100);
+}
+
+function updateChapterWordCount() {
+  if (!chapterQuill) return;
+  const text = chapterQuill.getText().trim();
+  const words = text.length ? text.split(/\s+/).length : 0;
+  document.getElementById('chapterWordCount').textContent = words.toLocaleString();
+}
+
+function setChapterSaveStatus(state) {
+  const el = document.getElementById('chapterSaveStatus');
+  el.classList.remove('saving', 'saved', 'error');
+  if (state === 'saving')      { el.classList.add('saving'); el.textContent = 'Saving…'; }
+  else if (state === 'saved')  { el.classList.add('saved');  el.textContent = 'Saved'; }
+  else if (state === 'error')  { el.classList.add('error');  el.textContent = 'Save failed'; }
+  else                          el.textContent = 'Idle';
+}
+
+function scheduleChapterAutosave() {
+  if (chapterAutosaveTimer) clearTimeout(chapterAutosaveTimer);
+  chapterAutosaveTimer = setTimeout(saveChapter, 1500);
+}
+
+async function saveChapter() {
+  if (!editingBookId || !chapterQuill) return;
+  setChapterSaveStatus('saving');
+  const title = document.getElementById('chapterEditorTitle').value.trim();
+  const isPublished = document.getElementById('chapterEditorPublished').checked;
+  const content = chapterQuill.root.innerHTML;
+  const text = chapterQuill.getText().trim();
+  const wordCount = text.length ? text.split(/\s+/).length : 0;
+
+  let result;
+  if (editingChapterId) {
+    result = await supabase.from('chapters').update({
+      title, content, word_count: wordCount,
+      is_published: isPublished,
+      updated_at: new Date().toISOString(),
+    }).eq('id', editingChapterId).select().single();
+  } else {
+    // Determine next chapter number
+    const { data: existing } = await supabase.from('chapters').select('chapter_number').eq('book_id', editingBookId).order('chapter_number', { ascending: false }).limit(1);
+    const nextNum = (existing?.[0]?.chapter_number || 0) + 1;
+    result = await supabase.from('chapters').insert({
+      book_id: editingBookId,
+      chapter_number: nextNum,
+      title, content, word_count: wordCount,
+      is_published: isPublished,
+    }).select().single();
+    if (result.data) {
+      editingChapterId = result.data.id;
+      // Update URL with the real chapter id
+      history.replaceState(null, '', `#author/book/${editingBookId}/chapter/${editingChapterId}`);
+    }
+  }
+
+  if (result.error) {
+    setChapterSaveStatus('error');
+    return;
+  }
+  await recomputeBookCounts(editingBookId);
+  setChapterSaveStatus('saved');
+  chapterDirty = false;
+}
+
+document.getElementById('btnSaveChapter')?.addEventListener('click', saveChapter);
+document.getElementById('btnBackToBookEditor')?.addEventListener('click', () => {
+  if (editingBookId) openAuthorBookEditor(editingBookId);
+  else showAuthor();
+});
+
+// Warn before leaving while dirty
+window.addEventListener('beforeunload', (e) => {
+  if (chapterDirty) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
 
 // ════════════════════════════════════════
 // CREATOR STUDIO
@@ -3085,6 +3579,16 @@ window.addEventListener('popstate', () => {
   } else if (hash === '#author') {
     setSidebarActive('btnAuthor');
     showAuthor();
+  } else if (hash.startsWith('#author/book/')) {
+    setSidebarActive('btnAuthor');
+    const parts = hash.replace('#author/book/', '').split('/');
+    const bookId = parts[0];
+    if (parts[2]) {
+      // chapter editor — parts[1] === 'chapter', parts[2] === id or 'new'
+      openAuthorChapterEditor(bookId, parts[2] === 'new' ? null : parts[2]);
+    } else {
+      openAuthorBookEditor(bookId);
+    }
   } else if (hash.startsWith('#video/')) {
     setSidebarActive('btnVideos');
     playVideo(hash.replace('#video/', ''));
