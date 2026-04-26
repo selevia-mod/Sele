@@ -1019,15 +1019,8 @@ function showFeed() {
 }
 
 function showProfileView() {
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
+  hideAllMainPages();   // also hides feedSentinel (and any future sibling overlays)
   profilePage.style.display = 'block';
-  videosPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  bookPage.style.display = 'none';
-  authorPage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
 }
