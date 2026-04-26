@@ -54,6 +54,9 @@ async function onSignedIn(user) {
   updateTopbarUser();
   showApp();
 
+  // Notifications — fetch initial batch + start realtime subscription
+  initNotifications();
+
   // Check URL hash for routing
   const hash = window.location.hash;
   if (hash.startsWith('#profile/')) {
@@ -4789,4 +4792,232 @@ document.getElementById('btnTheme').addEventListener('click', () => {
   const newTheme = isLight ? 'dark' : 'light';
   applyTheme(newTheme);
   localStorage.setItem('selebox_theme', newTheme);
+});
+
+// ════════════════════════════════════════
+// NOTIFICATIONS
+// ════════════════════════════════════════
+const NOTIF_PAGE_SIZE = 25;
+let _notifications = [];
+let _notifUnreadCount = 0;
+let _notifChannel = null;
+let _notifPanelOpen = false;
+const _notifActorCache = {};   // user_id → { username, avatar_url }
+
+async function initNotifications() {
+  if (!currentUser) return;
+
+  await loadNotifications();
+
+  // Realtime — subscribe to new notifications for this user only
+  if (_notifChannel) {
+    try { supabase.removeChannel(_notifChannel); } catch {}
+    _notifChannel = null;
+  }
+  try {
+    _notifChannel = supabase
+      .channel(`notif:${currentUser.id}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'notifications',
+        filter: `recipient_id=eq.${currentUser.id}`,
+      }, async (payload) => {
+        const n = payload.new;
+        // Fetch the actor profile for nicer rendering
+        await hydrateActorProfiles([n]);
+        _notifications.unshift(n);
+        if (_notifications.length > 100) _notifications.length = 100;
+        _notifUnreadCount += 1;
+        updateNotifBadge();
+        renderNotifications();
+        // Subtle toast so the user knows something happened
+        toast(notificationLabel(n), 'success');
+      })
+      .subscribe();
+  } catch (err) {
+    console.warn('Notifications realtime subscribe failed:', err);
+  }
+}
+
+async function loadNotifications() {
+  const list = document.getElementById('notificationsList');
+  if (list) list.innerHTML = '<div class="notifications-empty">Loading…</div>';
+
+  const { data, error } = await supabase
+    .from('notifications')
+    .select('*')
+    .eq('recipient_id', currentUser.id)
+    .order('created_at', { ascending: false })
+    .limit(NOTIF_PAGE_SIZE);
+
+  if (error) {
+    if (list) list.innerHTML = `<div class="notifications-empty">Couldn't load notifications</div>`;
+    console.warn('Notifications fetch error:', error);
+    return;
+  }
+  _notifications = data || [];
+  await hydrateActorProfiles(_notifications);
+
+  _notifUnreadCount = _notifications.filter(n => !n.is_read).length;
+  updateNotifBadge();
+  renderNotifications();
+}
+
+async function hydrateActorProfiles(items) {
+  const ids = [...new Set(items.map(n => n.actor_id).filter(Boolean).filter(id => !_notifActorCache[id]))];
+  if (!ids.length) return;
+  const { data } = await supabase.from('profiles').select('id, username, avatar_url').in('id', ids);
+  (data || []).forEach(p => { _notifActorCache[p.id] = p; });
+}
+
+function updateNotifBadge() {
+  const badge = document.getElementById('notifBadge');
+  const bell  = document.getElementById('btnNotifications');
+  if (!badge || !bell) return;
+  if (_notifUnreadCount > 0) {
+    badge.style.display = 'flex';
+    badge.textContent = _notifUnreadCount > 99 ? '99+' : String(_notifUnreadCount);
+    bell.classList.add('has-unread');
+    // Re-trigger animation
+    bell.classList.remove('has-unread');
+    void bell.offsetWidth;
+    bell.classList.add('has-unread');
+  } else {
+    badge.style.display = 'none';
+    bell.classList.remove('has-unread');
+  }
+}
+
+function renderNotifications() {
+  const list = document.getElementById('notificationsList');
+  if (!list) return;
+  if (!_notifications.length) {
+    list.innerHTML = `
+      <div class="notifications-empty">
+        <p style="margin:0;font-size:0.85rem">You're all caught up.</p>
+        <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone reacts, comments, or replies, it'll show up here.</p>
+      </div>`;
+    return;
+  }
+
+  list.innerHTML = _notifications.map(n => {
+    const actor = _notifActorCache[n.actor_id] || {};
+    const avatar = actor.avatar_url
+      ? `<img src="${escHTML(actor.avatar_url)}"/>`
+      : (actor.username ? initials(actor.username) : '?');
+    const text = notificationLabel(n, actor.username);
+    const snippet = n.metadata?.snippet || n.metadata?.caption || '';
+    const snippetHTML = snippet
+      ? `<div class="notification-snippet">"${escHTML(snippet)}"</div>`
+      : '';
+    return `
+      <div class="notification-item ${n.is_read ? '' : 'unread'}" data-id="${n.id}">
+        <div class="notification-avatar">${avatar}</div>
+        <div class="notification-body">
+          <div class="notification-text">${text}</div>
+          ${snippetHTML}
+          <div class="notification-time">${timeAgo(n.created_at)}</div>
+        </div>
+        <span class="notification-dot"></span>
+      </div>`;
+  }).join('');
+
+  list.querySelectorAll('.notification-item').forEach(item => {
+    item.addEventListener('click', () => onNotificationClick(item.dataset.id));
+  });
+}
+
+function notificationLabel(n, knownUsername) {
+  const username = knownUsername || _notifActorCache[n.actor_id]?.username || 'Someone';
+  const actorTag = `<strong>${escHTML(username)}</strong>`;
+  switch (n.type) {
+    case 'like_post':           return `${actorTag} reacted to your post`;
+    case 'like_comment':        return `${actorTag} reacted to your comment`;
+    case 'like_book':           return `${actorTag} liked your book${n.metadata?.title ? ` <em style="color:var(--text2)">"${escHTML(n.metadata.title)}"</em>` : ''}`;
+    case 'comment_post':        return `${actorTag} commented on your post`;
+    case 'reply_comment':       return `${actorTag} replied to your comment`;
+    case 'comment_chapter':     return `${actorTag} commented on your chapter`;
+    case 'reply_chapter_comment': return `${actorTag} replied to your chapter comment`;
+    case 'repost_post':         return `${actorTag} reposted your post`;
+    default:                    return `${actorTag} interacted with your content`;
+  }
+}
+
+async function onNotificationClick(notifId) {
+  const n = _notifications.find(x => x.id === notifId);
+  if (!n) return;
+
+  // Mark as read locally + in DB (optimistic)
+  if (!n.is_read) {
+    n.is_read = true;
+    _notifUnreadCount = Math.max(0, _notifUnreadCount - 1);
+    updateNotifBadge();
+    renderNotifications();
+    supabase.from('notifications').update({ is_read: true }).eq('id', notifId)
+      .then(({ error }) => { if (error) console.warn('Mark read failed:', error); });
+  }
+
+  closeNotifPanel();
+
+  // Navigate to a sensible target
+  if (n.target_type === 'book' || n.parent_target_type === 'book') {
+    const bookId = (n.target_type === 'book') ? n.target_id : n.parent_target_id;
+    if (bookId) openBookDetail(bookId);
+  } else if (n.target_type === 'chapter' || n.parent_target_type === 'chapter') {
+    const bookId = n.parent_target_type === 'book' ? n.parent_target_id : null;
+    if (bookId) openBookDetail(bookId);
+  } else if (n.parent_target_type === 'post' || n.target_type === 'post') {
+    // We don't have post-detail pages yet — drop them on Home so they can find it
+    setSidebarActive('btnHome');
+    showFeed();
+  } else {
+    setSidebarActive('btnHome');
+    showFeed();
+  }
+}
+
+async function markAllNotificationsRead() {
+  if (!_notifUnreadCount) return;
+  const unread = _notifications.filter(n => !n.is_read).map(n => n.id);
+  _notifications.forEach(n => { n.is_read = true; });
+  _notifUnreadCount = 0;
+  updateNotifBadge();
+  renderNotifications();
+  if (unread.length) {
+    const { error } = await supabase.from('notifications').update({ is_read: true }).in('id', unread);
+    if (error) console.warn('Mark all read failed:', error);
+  }
+}
+
+function toggleNotifPanel() {
+  if (_notifPanelOpen) closeNotifPanel();
+  else openNotifPanel();
+}
+function openNotifPanel() {
+  const panel = document.getElementById('notificationsPanel');
+  if (!panel) return;
+  panel.style.display = 'flex';
+  _notifPanelOpen = true;
+}
+function closeNotifPanel() {
+  const panel = document.getElementById('notificationsPanel');
+  if (!panel) return;
+  panel.style.display = 'none';
+  _notifPanelOpen = false;
+}
+
+document.getElementById('btnNotifications')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleNotifPanel();
+});
+document.getElementById('notifMarkAll')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  markAllNotificationsRead();
+});
+// Click outside the panel → close
+document.addEventListener('click', (e) => {
+  if (!_notifPanelOpen) return;
+  if (e.target.closest('#notificationsPanel') || e.target.closest('#btnNotifications')) return;
+  closeNotifPanel();
 });
