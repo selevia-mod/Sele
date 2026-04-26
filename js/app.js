@@ -1198,14 +1198,26 @@ let searchDebounce = null;
 function getSearchContext() {
   const hash = window.location.hash;
   if (hash === '#videos' || hash.startsWith('#video/')) return 'videos';
+  if (hash === '#book'   || hash.startsWith('#book/'))   return 'books';
   return 'feed';
 }
 
+let _lastSearchContext = null;
 function updateSearchPlaceholder() {
   const ctx = getSearchContext();
-  searchInput.placeholder = ctx === 'videos'
-    ? 'Search videos, tags, uploaders...'
-    : 'Search posts and people...';
+  if (ctx === 'videos')      searchInput.placeholder = 'Search videos · creator · tags · category…';
+  else if (ctx === 'books')  searchInput.placeholder = 'Search books · author · tags · genre…';
+  else                       searchInput.placeholder = 'Search posts and people…';
+
+  // Reset any active query when moving between contexts (videos ↔ books ↔ feed)
+  if (_lastSearchContext && _lastSearchContext !== ctx) {
+    searchInput.value = '';
+    if (topbarSearchClear) topbarSearchClear.style.display = 'none';
+    activeSearchQuery = '';
+    activeBookSearchQuery = '';
+    searchResultsEl.classList.remove('open');
+  }
+  _lastSearchContext = ctx;
 }
 
 searchInput.addEventListener('input', (e) => {
@@ -1213,6 +1225,7 @@ searchInput.addEventListener('input', (e) => {
   if (topbarSearchClear) topbarSearchClear.style.display = value ? 'flex' : 'none';
 
   const ctx = getSearchContext();
+
   if (ctx === 'videos') {
     activeSearchQuery = value;
     clearTimeout(searchDebounce);
@@ -1221,6 +1234,15 @@ searchInput.addEventListener('input', (e) => {
     return;
   }
 
+  if (ctx === 'books') {
+    activeBookSearchQuery = value;
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => runBookSearch(), 200);
+    searchResultsEl.classList.remove('open');
+    return;
+  }
+
+  // Feed (default): show dropdown of matching people + posts
   clearTimeout(searchDebounce);
   if (!value.trim()) {
     searchResultsEl.classList.remove('open');
@@ -1230,16 +1252,34 @@ searchInput.addEventListener('input', (e) => {
 });
 
 if (topbarSearchClear) {
-    topbarSearchClear.addEventListener('click', () => {
-      searchInput.value = '';
-      topbarSearchClear.style.display = 'none';
-      searchResultsEl.classList.remove('open');
-      if (getSearchContext() === 'videos') {
-        activeSearchQuery = '';
-        runSearch();
+  topbarSearchClear.addEventListener('click', () => {
+    searchInput.value = '';
+    topbarSearchClear.style.display = 'none';
+    searchResultsEl.classList.remove('open');
+    const ctx = getSearchContext();
+    if (ctx === 'videos') {
+      activeSearchQuery = '';
+      runSearch();
+    } else if (ctx === 'books') {
+      activeBookSearchQuery = '';
+      // Restore the original (filter+sort) view
+      const grid = document.getElementById('bookGrid');
+      grid.innerHTML = '';
+      allBooksCache.forEach((b, i) => {
+        const card = renderBookCard(b);
+        card.style.animationDelay = `${i * 0.025}s`;
+        grid.appendChild(card);
+      });
+      setupAppwriteStatsLazyLoad(grid);
+      // Resume infinite scroll if there's more to load
+      const sentinel = document.getElementById('bookGridSentinel');
+      if (sentinel && _hasMoreAppwriteBooks) {
+        sentinel.style.display = 'block';
+        setupBooksInfiniteScroll();
       }
-    });
-  }
+    }
+  });
+}
 
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
@@ -1805,6 +1845,7 @@ function showStudio() {
 let allBooksCache = [];
 let bookGenreFilter = '';
 let bookSortBy = 'trending';
+let activeBookSearchQuery = '';
 let currentBookDetail = null;       // { book, chapters }
 let currentChapterIndex = 0;
 let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
@@ -1950,6 +1991,87 @@ async function loadMoreBooks() {
   } finally {
     _isLoadingMoreBooks = false;
   }
+}
+
+// ── Book search (filters the currently-loaded book cache) ──
+// Searches: title, description, tags, genre, author/uploader name.
+// `#tag` prefix restricts to tag-only matches. Suspends infinite scroll while active.
+function searchBooks(query) {
+  query = (query || '').trim().toLowerCase();
+  if (!query) return allBooksCache;
+
+  const hashtagMatch = query.match(/^#(\w+)/);
+  const isHashtag = !!hashtagMatch;
+  const cleanQuery = isHashtag ? hashtagMatch[1].toLowerCase() : query;
+
+  return allBooksCache.filter(b => {
+    if (isHashtag) {
+      return (b.tags || []).some(t => (t || '').toLowerCase().includes(cleanQuery));
+    }
+
+    const title  = (b.title || '').toLowerCase();
+    const desc   = (b.description || '').toLowerCase();
+    const tags   = (b.tags || []).join(' ').toLowerCase();
+    const genre  = (b.genre || '').replace(/-/g, ' ').toLowerCase();
+    const author = (b.profiles?.username || b.author?.username || '').toLowerCase();
+
+    return title.includes(cleanQuery)
+        || desc.includes(cleanQuery)
+        || tags.includes(cleanQuery)
+        || genre.includes(cleanQuery)
+        || author.includes(cleanQuery);
+  });
+}
+
+function runBookSearch() {
+  const grid = document.getElementById('bookGrid');
+  const sentinel = document.getElementById('bookGridSentinel');
+  const empty = document.getElementById('bookEmpty');
+
+  // While search is active, hide the infinite-scroll sentinel so we don't
+  // append off-results books underneath.
+  if (sentinel) sentinel.style.display = 'none';
+  if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
+
+  if (!activeBookSearchQuery.trim()) {
+    // Empty query → restore full view
+    empty.style.display = 'none';
+    grid.style.display = 'grid';
+    grid.innerHTML = '';
+    allBooksCache.forEach((b, i) => {
+      const card = renderBookCard(b);
+      card.style.animationDelay = `${i * 0.025}s`;
+      grid.appendChild(card);
+    });
+    setupAppwriteStatsLazyLoad(grid);
+    if (sentinel && _hasMoreAppwriteBooks) {
+      sentinel.style.display = 'block';
+      setupBooksInfiniteScroll();
+    }
+    return;
+  }
+
+  const filtered = searchBooks(activeBookSearchQuery);
+  empty.style.display = 'none';
+  grid.style.display = 'grid';
+
+  if (!filtered.length) {
+    grid.innerHTML = `
+      <div class="video-search-empty" style="grid-column:1/-1">
+        <h3>No books found</h3>
+        <p>Try a different keyword, author, or #tag — or scroll the full list to load more books first.</p>
+      </div>
+    `;
+    return;
+  }
+
+  grid.innerHTML = '';
+  filtered.forEach((b, i) => {
+    const card = renderBookCard(b);
+    card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
+    grid.appendChild(card);
+  });
+  setupAppwriteStatsLazyLoad(grid);
 }
 
 function setupBooksInfiniteScroll() {
@@ -4031,16 +4153,18 @@ function searchVideos(query, tagFilter) {
       return (v.tags || []).some(t => t.toLowerCase().includes(cleanQuery));
     }
 
-    // Normal search: match title, description, tags, uploader
-    const title = (v.title || '').toLowerCase();
-    const desc = (v.description || '').toLowerCase();
-    const tags = (v.tags || []).join(' ').toLowerCase();
+    // Normal search: match title, description, tags, category, uploader
+    const title    = (v.title || '').toLowerCase();
+    const desc     = (v.description || '').toLowerCase();
+    const tags     = (v.tags || []).join(' ').toLowerCase();
+    const category = (v.category || '').replace(/-/g, ' ').toLowerCase();
     const uploader = allUploadersCache[v.uploader];
-    const uploaderName = (uploader?.username || '').toLowerCase();
+    const uploaderName = (uploader?.username || v._uploaderInfo?.username || '').toLowerCase();
 
     return title.includes(cleanQuery)
         || desc.includes(cleanQuery)
         || tags.includes(cleanQuery)
+        || category.includes(cleanQuery)
         || uploaderName.includes(cleanQuery);
   });
 }
