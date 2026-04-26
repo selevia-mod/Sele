@@ -420,6 +420,43 @@ body.light .mention-item.active {
 .mention-name strong { color: #c4b5fd; font-weight: 600; }
 body.light .mention-name strong { color: #7c3aed; }
 
+/* ── VIDEO COMMENTS SECTION ── */
+.video-comments-wrap {
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.4rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border, rgba(255,255,255,0.06));
+  border-radius: 16px;
+}
+body.light .video-comments-wrap {
+  background: #ffffff;
+  border-color: #e5e7eb;
+}
+.video-comments-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.10);
+}
+.video-comments-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.video-comments-count {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text2);
+  background: rgba(139, 92, 246, 0.10);
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  margin-left: 0.4rem;
+}
+
 /* Subtle styling for @mentions inside rendered comments */
 .mention-token {
   color: #c4b5fd;
