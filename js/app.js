@@ -283,7 +283,7 @@ async function loadMoreFeed() {
 
   const sentinel = document.getElementById('feedSentinel');
   sentinel.style.display = 'block';
-  sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more posts…</div>';
+  sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
 
   try {
     const { data, error } = await supabase
@@ -313,7 +313,7 @@ async function loadMoreFeed() {
     }
 
     if (_hasMoreFeedPosts) {
-      sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more posts…</div>';
+      sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
     } else {
       sentinel.innerHTML = `<div class="book-grid-end-msg">You\'re all caught up · ${posts.length.toLocaleString()} posts</div>`;
       if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
@@ -649,11 +649,13 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
   const labelEl = trigger.querySelector('.r-label-text');
 
   if (activeR) {
-    iconEl.innerHTML = `<span style="font-size:17px">${activeR.emoji}</span>`;
+    // Sizing comes from CSS (.action-btn .r-icon vs .comment-action-btn .r-icon)
+    // — no inline font-size, so liking a comment/reply doesn't grow the row.
+    iconEl.innerHTML = `<span>${activeR.emoji}</span>`;
     if (labelEl) labelEl.textContent = activeR.label;
     trigger.classList.add('reacted');
   } else {
-    iconEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
+    iconEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
     if (labelEl) labelEl.textContent = 'Like';
     trigger.classList.remove('reacted');
   }
@@ -743,7 +745,7 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
       <div class="comment-actions">
         <div class="reaction-wrap" data-target="${comment.id}" data-type="comment" style="position:relative">
           <button class="reaction-trigger comment-action-btn" data-target="${comment.id}" data-type="comment">
-            <span class="r-icon">♡</span>
+            <span class="r-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></span>
             <span class="r-label-text">Like</span>
           </button>
           <div class="reaction-picker">
@@ -1000,6 +1002,11 @@ function showFeed() {
   feedEl.style.display = '';
   storiesEl.style.display = '';
   composeEl.style.display = '';
+  // Restore the feed sentinel only when there's actually more to load and posts already rendered
+  const feedSentinel = document.getElementById('feedSentinel');
+  if (feedSentinel && _hasMoreFeedPosts && feedEl.querySelector('.post-card')) {
+    feedSentinel.style.display = 'block';
+  }
   document.body.classList.remove('on-videos');
   viewingProfileId = null;
   stopVideoPlayer();
@@ -1920,6 +1927,9 @@ function hideAllMainPages() {
   if (authorPage) authorPage.style.display = 'none';
   if (bookDetailPage) bookDetailPage.style.display = 'none';
   if (chapterReaderPage) chapterReaderPage.style.display = 'none';
+  // Sibling sentinels (live outside the page divs) — also hide
+  const feedSentinel = document.getElementById('feedSentinel');
+  if (feedSentinel) feedSentinel.style.display = 'none';
 }
 let currentHls = null;
 
@@ -2093,7 +2103,7 @@ async function loadMoreBooks() {
 
   const sentinel = document.getElementById('bookGridSentinel');
   sentinel.style.display = 'block';
-  sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more books…</div>';
+  sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
 
   try {
     const more = await fetchAppwriteBooks(_appwriteOffset);
@@ -2122,7 +2132,7 @@ async function loadMoreBooks() {
     }
 
     if (_hasMoreAppwriteBooks) {
-      sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more books…</div>';
+      sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
     } else {
       sentinel.innerHTML = '<div class="book-grid-end-msg">You\'ve reached the end · ' + allBooksCache.length.toLocaleString() + ' books</div>';
       // Stop observing
