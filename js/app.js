@@ -1827,7 +1827,61 @@ async function loadBooks() {
   grid.innerHTML = '<div class="loading">Loading books...</div>';
 
   try {
-    let q = supabase
+    // Fetch both sources in parallel (each is independently fault-tolerant)
+    const [supabaseBooks, appwriteBooks] = await Promise.all([
+      fetchSupabaseBooks(),
+      fetchAppwriteBooks(),
+    ]);
+
+    let merged = [...(supabaseBooks || []), ...(appwriteBooks || [])];
+
+    // Genre filter (matches Supabase `genre` field OR any of the Appwrite tags)
+    if (bookGenreFilter) {
+      const filterLower = bookGenreFilter.toLowerCase();
+      const filterWords = filterLower.replace(/-/g, ' ');
+      merged = merged.filter(b => {
+        if (b.genre === bookGenreFilter) return true;
+        return (b.tags || []).some(t => {
+          const tagLower = (t || '').toLowerCase();
+          return tagLower === filterLower || tagLower === filterWords;
+        });
+      });
+    }
+
+    // Sort across both sources
+    const dateOf = b => new Date(b.published_at || b.created_at || 0);
+    if (bookSortBy === 'recent') {
+      merged.sort((a, b) => dateOf(b) - dateOf(a));
+    } else if (bookSortBy === 'most-liked') {
+      merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
+    } else if (bookSortBy === 'most-read') {
+      merged.sort((a, b) => (b.views_count || 0) - (a.views_count || 0));
+    } else { // trending
+      merged.sort((a, b) => {
+        const diff = (b.likes_count || 0) - (a.likes_count || 0);
+        if (diff !== 0) return diff;
+        return dateOf(b) - dateOf(a);
+      });
+    }
+
+    allBooksCache = merged;
+
+    if (!merged.length) {
+      grid.style.display = 'none';
+      empty.style.display = 'flex';
+    } else {
+      renderBooks();
+    }
+  } catch (err) {
+    console.error('Failed to load books:', err);
+    grid.innerHTML = '<div class="loading">Couldn\'t load books</div>';
+  }
+}
+
+// ── Supabase books ──
+async function fetchSupabaseBooks() {
+  try {
+    const { data, error } = await supabase
       .from('books')
       .select(`
         id, title, description, cover_url, genre, tags,
@@ -1837,43 +1891,109 @@ async function loadBooks() {
         profiles!books_author_id_fkey ( id, username, avatar_url )
       `)
       .eq('is_public', true)
-      .in('status', ['ongoing', 'completed']);
+      .in('status', ['ongoing', 'completed'])
+      .limit(80);
 
-    if (bookGenreFilter) q = q.eq('genre', bookGenreFilter);
-
-    // Sort
-    if (bookSortBy === 'recent')           q = q.order('published_at', { ascending: false, nullsFirst: false });
-    else if (bookSortBy === 'most-liked')  q = q.order('likes_count', { ascending: false });
-    else if (bookSortBy === 'most-read')   q = q.order('views_count', { ascending: false });
-    else /* trending */                    q = q.order('likes_count', { ascending: false }).order('published_at', { ascending: false, nullsFirst: false });
-
-    const { data, error } = await q.limit(60);
     if (error) {
-      // Likely the migration hasn't been run yet. Show a friendly empty state.
-      grid.innerHTML = '';
-      grid.style.display = 'none';
-      empty.style.display = 'flex';
-      const titleEl = empty.querySelector('.page-empty-title');
-      const bodyEl = empty.querySelector('.page-empty-body');
-      if (error.message?.includes('relation') || error.code === '42P01') {
-        if (titleEl) titleEl.textContent = 'Books table not set up yet';
-        if (bodyEl) bodyEl.innerHTML = 'Run <code>migration_books.sql</code> in Supabase SQL Editor first, then refresh this page.';
-      }
       console.error('Supabase books fetch error:', error);
-      return;
+      // Don't break the whole page — return empty so Appwrite still renders
+      if (error.code === '42P01') {
+        // migration not run; show friendly state via the calling page
+      }
+      return [];
     }
 
-    allBooksCache = (data || []).map(b => ({
+    return (data || []).map(b => ({
       ...b,
+      id: b.id,                                    // raw UUID, no prefix needed (FK shape used elsewhere)
+      $id: 'sb_' + b.id,
       _supabase: true,
-      // normalize uploader info similar to fetchSupabaseVideos
       author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
     }));
-
-    renderBooks();
   } catch (err) {
-    console.error('Failed to load books:', err);
-    grid.innerHTML = '<div class="loading">Couldn\'t load books</div>';
+    console.error('fetchSupabaseBooks failed:', err);
+    return [];
+  }
+}
+
+// ── Appwrite books (legacy mobile) ──
+async function fetchAppwriteBooks() {
+  if (!APPWRITE.booksCollection) return [];
+  try {
+    const result = await appwriteList(APPWRITE.booksCollection, [
+      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
+      JSON.stringify({ method: 'limit', values: [80] }),
+    ]);
+    return (result.documents || []).map(mapAppwriteBookToBook);
+  } catch (err) {
+    console.error('Failed to fetch Appwrite books:', err);
+    return [];
+  }
+}
+
+function mapAppwriteBookToBook(b) {
+  const firstTag = (b.tags || [])[0] || '';
+  const genreSlug = firstTag.toLowerCase().replace(/\s+/g, '-');
+  const uploader = b.uploader || null;
+  return {
+    id: 'aw_' + b.$id,
+    $id: 'aw_' + b.$id,
+    _appwrite: true,
+    _appwriteId: b.$id,
+    title: b.title || 'Untitled',
+    description: b.synopsis || '',
+    cover_url: b.thumbnail || null,
+    genre: genreSlug || null,
+    tags: b.tags || [],
+    status: (b.status || 'ongoing').toLowerCase(),
+    is_public: !b.isLocked,
+    isLocked: !!b.isLocked,
+    contentRating: b.contentRating || null,
+    views_count: 0,
+    likes_count: 0,
+    chapters_count: 0,
+    word_count: 0,
+    published_at: b.$createdAt,
+    created_at: b.$createdAt,
+    author_id: uploader?.$id || null,
+    // Match the shape Supabase profiles join produces, so renderBookDetail/renderBookCard work uniformly
+    profiles: uploader ? {
+      id: uploader.$id,
+      username: uploader.username || 'Unknown',
+      avatar_url: uploader.avatar || null,
+    } : null,
+    author: uploader ? {
+      id: uploader.$id,
+      username: uploader.username || 'Unknown',
+      avatar: uploader.avatar || null,
+    } : null,
+  };
+}
+
+async function fetchAppwriteChaptersForBook(appwriteBookId) {
+  if (!APPWRITE.chaptersCollection) return [];
+  try {
+    const result = await appwriteList(APPWRITE.chaptersCollection, [
+      JSON.stringify({ method: 'equal', attribute: 'book', values: [appwriteBookId] }),
+      JSON.stringify({ method: 'orderAsc', attribute: 'order' }),
+      JSON.stringify({ method: 'limit', values: [200] }),
+    ]);
+    return (result.documents || []).map(c => ({
+      id: 'aw_' + c.$id,
+      _appwrite: true,
+      _appwriteId: c.$id,
+      chapter_number: typeof c.order === 'number' ? c.order : 0,
+      title: c.title || `Chapter ${c.order || ''}`.trim(),
+      word_count: 0,
+      views_count: 0,
+      // Treat anything that isn't explicitly a draft as published (mobile typically only stores published ones in this collection)
+      is_published: (c.status || '').toLowerCase() !== 'draft',
+      created_at: c.$createdAt,
+      _content: c.content || '',         // some renderers use it directly without a follow-up GET
+    }));
+  } catch (err) {
+    console.error('Failed to fetch Appwrite chapters:', err);
+    return [];
   }
 }
 
@@ -1952,27 +2072,47 @@ async function openBookDetail(bookId) {
   content.innerHTML = '<div class="loading">Loading book...</div>';
 
   try {
-    const [{ data: book, error: bookErr }, { data: chapters, error: chErr }] = await Promise.all([
-      supabase.from('books')
-        .select(`
-          id, title, description, cover_url, genre, tags,
-          views_count, likes_count, chapters_count, word_count, status,
-          published_at, created_at,
-          author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
-        `)
-        .eq('id', bookId)
-        .single(),
-      supabase.from('chapters')
-        .select('id, chapter_number, title, word_count, views_count, is_published, created_at')
-        .eq('book_id', bookId)
-        .eq('is_published', true)
-        .order('chapter_number', { ascending: true })
-    ]);
+    let book, chapters;
 
-    if (bookErr || !book) throw new Error(bookErr?.message || 'Book not found');
-    if (chErr) console.warn('Failed to load chapters:', chErr);
+    if (bookId.startsWith('aw_')) {
+      // ── Appwrite book ──
+      const appwriteId = bookId.slice(3);
+      const [appwriteBookDoc, awChapters] = await Promise.all([
+        appwriteGet(APPWRITE.booksCollection, appwriteId),
+        fetchAppwriteChaptersForBook(appwriteId),
+      ]);
+      book = mapAppwriteBookToBook(appwriteBookDoc);
+      // For book detail page we want the published-count to match the actual chapters loaded
+      book.chapters_count = awChapters.filter(c => c.is_published).length;
+      chapters = awChapters.filter(c => c.is_published);
+    } else {
+      // ── Supabase book (UUID, possibly bare) ──
+      const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
+      const [{ data: supBook, error: bookErr }, { data: supChapters, error: chErr }] = await Promise.all([
+        supabase.from('books')
+          .select(`
+            id, title, description, cover_url, genre, tags,
+            views_count, likes_count, chapters_count, word_count, status,
+            published_at, created_at,
+            author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
+          `)
+          .eq('id', realId)
+          .single(),
+        supabase.from('chapters')
+          .select('id, chapter_number, title, word_count, views_count, is_published, created_at')
+          .eq('book_id', realId)
+          .eq('is_published', true)
+          .order('chapter_number', { ascending: true })
+      ]);
 
-    currentBookDetail = { book, chapters: chapters || [] };
+      if (bookErr || !supBook) throw new Error(bookErr?.message || 'Book not found');
+      if (chErr) console.warn('Failed to load chapters:', chErr);
+
+      book = supBook;
+      chapters = supChapters || [];
+    }
+
+    currentBookDetail = { book, chapters };
     renderBookDetail();
   } catch (err) {
     content.innerHTML = `<div class="loading">Couldn't load book: ${escHTML(err.message)}</div>`;
@@ -2029,14 +2169,20 @@ function renderBookDetail() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             Start reading
           </button>
-          <button class="btn btn-ghost btn-sm" id="btnLikeBook">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-            Like
-          </button>
-          <button class="btn btn-ghost btn-sm" id="btnBookmarkBook">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-            Bookmark
-          </button>
+          ${book._appwrite ? `
+            <span class="book-cover-badge legacy" style="position:static;display:inline-flex;align-items:center;gap:0.35rem;padding:0.35rem 0.75rem;font-size:0.7rem">
+              📱 From mobile (read-only on web)
+            </span>
+          ` : `
+            <button class="btn btn-ghost btn-sm" id="btnLikeBook">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+              Like
+            </button>
+            <button class="btn btn-ghost btn-sm" id="btnBookmarkBook">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+              Bookmark
+            </button>
+          `}
         </div>
         <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
         <div class="chapter-list">
@@ -2102,26 +2248,59 @@ async function openChapterReader(chapterIndex) {
   const content = document.getElementById('readerContent');
   content.innerHTML = '<div class="loading">Loading chapter...</div>';
 
-  // Fetch full chapter content
-  const { data, error } = await supabase
-    .from('chapters')
-    .select('id, chapter_number, title, content')
-    .eq('id', chapter.id)
-    .single();
-
-  if (error || !data) {
-    content.innerHTML = `<div class="loading">Couldn't load chapter</div>`;
+  // Fetch full chapter content from the right source
+  let chapterContent = '';
+  let resolvedChapterId = chapter.id;
+  try {
+    if (chapter._appwrite) {
+      // Appwrite chapter — we may already have content from the list call
+      if (chapter._content) {
+        chapterContent = chapter._content;
+      } else {
+        const doc = await appwriteGet(APPWRITE.chaptersCollection, chapter._appwriteId);
+        chapterContent = doc?.content || '';
+      }
+    } else {
+      const realChapterId = chapter.id.startsWith('sb_') ? chapter.id.slice(3) : chapter.id;
+      const { data, error } = await supabase
+        .from('chapters')
+        .select('id, chapter_number, title, content')
+        .eq('id', realChapterId)
+        .single();
+      if (error || !data) throw new Error(error?.message || 'Chapter not found');
+      chapterContent = data.content || '';
+      resolvedChapterId = data.id;
+    }
+  } catch (err) {
+    content.innerHTML = `<div class="loading">Couldn't load chapter: ${escHTML(err.message)}</div>`;
     return;
   }
 
-  // Apply current font size and inject HTML content
+  // Apply current font size and inject normalized content (HTML or plain text)
   content.style.fontSize = `${readerFontSize}rem`;
-  content.innerHTML = data.content || '<p><em>(No content)</em></p>';
+  content.innerHTML = normalizeChapterContent(chapterContent);
   content.scrollTop = 0;
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
-  // Save reading progress (best-effort, fire-and-forget)
-  saveReadingProgress(currentBookDetail.book.id, data.id, chapter.chapter_number);
+  // Save reading progress (Supabase only — `book_reads` is a Supabase table)
+  if (!chapter._appwrite && !currentBookDetail.book._appwrite) {
+    saveReadingProgress(currentBookDetail.book.id, resolvedChapterId, chapter.chapter_number);
+  }
+}
+
+// Normalize chapter content: if HTML-ish, render as-is; if plain text, wrap in <p>
+function normalizeChapterContent(content) {
+  if (!content) return '<p><em>(No content)</em></p>';
+  // Detect common HTML tags to decide
+  if (/<\/?(p|div|br|h[1-6]|blockquote|ul|ol|li|strong|em|b|i|a|img|span)\b/i.test(content)) {
+    return content;
+  }
+  // Treat as plain text — split by blank lines into paragraphs, preserve single newlines as <br>
+  return content
+    .split(/\n\s*\n/)
+    .filter(p => p.trim())
+    .map(p => `<p>${escHTML(p).replace(/\n/g, '<br>')}</p>`)
+    .join('');
 }
 
 async function saveReadingProgress(bookId, chapterId, chapterNumber) {
