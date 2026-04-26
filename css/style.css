@@ -455,6 +455,14 @@ body.light .book-sort-select {
   font-size: 0.85rem;
   color: var(--text3);
 }
+
+/* Clickable profile elements inside post cards */
+.profile-link {
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s;
+}
+.profile-link:hover { opacity: 0.85; }
+.post-author.profile-link:hover { color: var(--purple-lt, #a78bfa); }
 @keyframes bookFadeIn {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
