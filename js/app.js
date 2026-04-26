@@ -61,10 +61,19 @@ async function onSignedIn(user) {
     loadFeed();
     openProfile(hash.replace('#profile/', ''));
   } else if (hash === '#videos') {
-  showVideos();
-} else if (hash === '#studio') {
-  showStudio();
-} else if (hash.startsWith('#video/')) {
+    setSidebarActive('btnVideos');
+    showVideos();
+  } else if (hash === '#studio') {
+    setSidebarActive('btnStudio');
+    showStudio();
+  } else if (hash === '#book') {
+    setSidebarActive('btnBook');
+    showBook();
+  } else if (hash === '#author') {
+    setSidebarActive('btnAuthor');
+    showAuthor();
+  } else if (hash.startsWith('#video/')) {
+    setSidebarActive('btnVideos');
     playVideo(hash.replace('#video/', ''));
   } else {
     loadStories();
@@ -849,6 +858,8 @@ function showFeed() {
   profilePage.style.display = 'none';
   videosPage.style.display = 'none';
   studioPage.style.display = 'none';
+  bookPage.style.display = 'none';
+  authorPage.style.display = 'none';
   videoPlayerPage.style.display = 'none';
   document.body.classList.remove('on-videos');
   viewingProfileId = null;
@@ -868,6 +879,8 @@ function showProfileView() {
   profilePage.style.display = 'block';
   videosPage.style.display = 'none';
   studioPage.style.display = 'none';
+  bookPage.style.display = 'none';
+  authorPage.style.display = 'none';
   videoPlayerPage.style.display = 'none';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
@@ -1698,6 +1711,8 @@ function renderUpNextItem(video, uploader, currentTags) {
 const videosPage = document.getElementById('videosPage');
 const videoPlayerPage = document.getElementById('videoPlayerPage');
 const studioPage = document.getElementById('studioPage');
+const bookPage = document.getElementById('bookPage');
+const authorPage = document.getElementById('authorPage');
 let currentHls = null;
 
 // Resume playback storage
@@ -1745,6 +1760,8 @@ function showVideos(forceReload = false) {
   profilePage.style.display = 'none';
   videoPlayerPage.style.display = 'none';
   studioPage.style.display = 'none';
+  bookPage.style.display = 'none';
+  authorPage.style.display = 'none';
   videosPage.style.display = 'block';
   document.body.classList.add('on-videos');
   stopVideoPlayer();
@@ -1767,6 +1784,40 @@ function showStudio() {
   stopVideoPlayer();
   history.pushState(null, '', '#studio');
   loadStudio();
+}
+
+// ── Book (Reader) page ──
+function showBook() {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  videosPage.style.display = 'none';
+  studioPage.style.display = 'none';
+  authorPage.style.display = 'none';
+  bookPage.style.display = 'block';
+  document.body.classList.remove('on-videos');
+  stopVideoPlayer();
+  history.pushState(null, '', '#book');
+  // TODO: load books once schema + reader are in place
+}
+
+// ── Author (Manuscript Studio) page ──
+function showAuthor() {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  videosPage.style.display = 'none';
+  studioPage.style.display = 'none';
+  bookPage.style.display = 'none';
+  authorPage.style.display = 'block';
+  document.body.classList.remove('on-videos');
+  stopVideoPlayer();
+  history.pushState(null, '', '#author');
+  // TODO: load manuscript dashboard once editor is in place
 }
 
 // ════════════════════════════════════════
@@ -2139,6 +2190,8 @@ function showVideoPlayer() {
   profilePage.style.display = 'none';
   videosPage.style.display = 'none';
   studioPage.style.display = 'none';
+  bookPage.style.display = 'none';
+  authorPage.style.display = 'none';
   videoPlayerPage.style.display = 'block';
 }
 
@@ -2156,6 +2209,20 @@ document.getElementById('btnVideos').addEventListener('click', () => {
 document.getElementById('btnStudio').addEventListener('click', () => {
   setSidebarActive('btnStudio');
   showStudio();
+});
+document.getElementById('btnBook')?.addEventListener('click', () => {
+  setSidebarActive('btnBook');
+  showBook();
+});
+document.getElementById('btnAuthor')?.addEventListener('click', () => {
+  setSidebarActive('btnAuthor');
+  showAuthor();
+});
+
+// "Become an author" CTA inside Book empty state
+document.getElementById('btnGoToAuthor')?.addEventListener('click', () => {
+  setSidebarActive('btnAuthor');
+  showAuthor();
 });
 document.getElementById('btnBackVideos').addEventListener('click', () => {
   if (currentHls) { currentHls.destroy(); currentHls = null; }
@@ -2673,6 +2740,12 @@ window.addEventListener('popstate', () => {
   } else if (hash === '#studio') {
     setSidebarActive('btnStudio');
     showStudio();
+  } else if (hash === '#book') {
+    setSidebarActive('btnBook');
+    showBook();
+  } else if (hash === '#author') {
+    setSidebarActive('btnAuthor');
+    showAuthor();
   } else if (hash.startsWith('#video/')) {
     setSidebarActive('btnVideos');
     playVideo(hash.replace('#video/', ''));
