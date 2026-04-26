@@ -1113,13 +1113,19 @@ async function openProfile(userId) {
     editBannerBtn.style.display = 'none';
   }
 
-  // Load user's posts
-  loadProfilePosts(userId);
-
-  // Reset tab
+  // Reset tab to Posts and load
   document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'posts'));
-  document.getElementById('profilePosts').style.display = '';
-  document.getElementById('profileAbout').style.display = 'none';
+  ['profilePosts', 'profileVideos', 'profileBooks', 'profileAbout'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = id === 'profilePosts' ? '' : 'none';
+  });
+  // Reset the lazy-load markers so a fresh openProfile re-fetches
+  ['profileVideos', 'profileBooks'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) delete el.dataset.loadedFor;
+  });
+
+  loadProfilePosts(userId);
 }
 
 async function loadProfilePosts(userId) {
@@ -1127,13 +1133,159 @@ async function loadProfilePosts(userId) {
   wrap.innerHTML = '<div class="loading">Loading posts...</div>';
   const { data } = await supabase
     .from('posts')
-    .select(`*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
+    .select(`*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
     .eq('user_id', userId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(40);
   posts = data || [];
   wrap.innerHTML = '';
-  if (!posts.length) wrap.innerHTML = '<div class="empty"><h3>No posts yet</h3></div>';
-  else posts.forEach(p => wrap.appendChild(renderPost(p)));
+  if (!posts.length) {
+    wrap.innerHTML = `
+      <div class="profile-empty">
+        <div class="profile-empty-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+        </div>
+        <h3>No posts yet</h3>
+        <p>When this user shares something, it will appear here.</p>
+      </div>`;
+    return;
+  }
+  posts.forEach(p => {
+    const el = renderPost(p);
+    wrap.appendChild(el);
+    // Lazy-load reactions/comments for these too
+    if (_feedPostObserver) _feedPostObserver.observe(el);
+    el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
+  });
+  // Fall back: if no observers (first time), load eagerly
+  if (!_feedPostObserver) {
+    wrap.querySelectorAll('.post-card').forEach(c => triggerPostLazyLoad(c));
+    wrap.querySelectorAll('.post-video').forEach(v => attachHlsToPostVideo(v));
+  }
+}
+
+// ── Profile: Videos tab ──
+async function loadProfileVideos(userId) {
+  const wrap = document.getElementById('profileVideos');
+  if (!wrap) return;
+  if (wrap.dataset.loadedFor === userId) return;       // already loaded for this user
+  wrap.innerHTML = '<div class="loading">Loading videos...</div>';
+
+  const isOwn = currentUser && currentUser.id === userId;
+
+  // Supabase videos uploaded by this user
+  let q = supabase
+    .from('videos')
+    .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
+    .eq('uploader_id', userId)
+    .order('created_at', { ascending: false });
+  // Non-owners only see ready videos
+  if (!isOwn) q = q.eq('status', 'ready');
+
+  const { data, error } = await q.limit(60);
+
+  if (error) {
+    wrap.innerHTML = `<div class="profile-empty"><h3>Couldn't load videos</h3><p>${escHTML(error.message || '')}</p></div>`;
+    return;
+  }
+
+  const list = data || [];
+  if (!list.length) {
+    wrap.innerHTML = `
+      <div class="profile-empty">
+        <div class="profile-empty-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="13.5" height="12" rx="2.5"/><path d="M16 10.5l5-2.5v8l-5-2.5z" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <h3>No videos yet</h3>
+        <p>${isOwn ? 'Upload your first video from the home feed or Studio.' : 'When this creator uploads, videos will appear here.'}</p>
+      </div>`;
+    wrap.dataset.loadedFor = userId;
+    return;
+  }
+
+  wrap.innerHTML = '<div class="profile-video-grid"></div>';
+  const grid = wrap.querySelector('.profile-video-grid');
+  list.forEach((v, i) => {
+    // Adapt to the existing renderVideoCard shape (mirrors fetchSupabaseVideos)
+    const formatted = {
+      $id: 'sb_' + v.id,
+      _supabase: true,
+      _supabaseId: v.id,
+      title: v.title,
+      description: v.description || '',
+      tags: v.tags || [],
+      uploader: v.uploader_id,
+      thumbnail: v.thumbnail_url,
+      videoUrl: v.video_url,
+      uri: v.video_url,
+      videoStats: { views: v.views || 0, duration: v.duration || 0 },
+      status: v.status || 'ready',
+      $createdAt: v.created_at,
+      _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
+    };
+    const uploader = v.profiles ? { username: v.profiles.username, avatar: v.profiles.avatar_url } : null;
+    const card = renderVideoCard(formatted, uploader);
+    card.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
+    grid.appendChild(card);
+  });
+  wrap.dataset.loadedFor = userId;
+}
+
+// ── Profile: Books tab ──
+async function loadProfileBooks(userId) {
+  const wrap = document.getElementById('profileBooks');
+  if (!wrap) return;
+  if (wrap.dataset.loadedFor === userId) return;
+  wrap.innerHTML = '<div class="loading">Loading books...</div>';
+
+  const isOwn = currentUser && currentUser.id === userId;
+
+  let q = supabase
+    .from('books')
+    .select(`id, title, description, cover_url, genre, tags, views_count, likes_count, chapters_count, word_count, status, is_public, published_at, created_at, updated_at, author_id, profiles!books_author_id_fkey ( id, username, avatar_url )`)
+    .eq('author_id', userId)
+    .order('updated_at', { ascending: false });
+  // Non-owners only see public, non-draft books
+  if (!isOwn) {
+    q = q.eq('is_public', true).in('status', ['ongoing', 'completed']);
+  }
+
+  const { data, error } = await q.limit(60);
+
+  if (error) {
+    wrap.innerHTML = `<div class="profile-empty"><h3>Couldn't load books</h3><p>${escHTML(error.message || '')}</p></div>`;
+    return;
+  }
+
+  const list = data || [];
+  if (!list.length) {
+    wrap.innerHTML = `
+      <div class="profile-empty">
+        <div class="profile-empty-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+        </div>
+        <h3>No books yet</h3>
+        <p>${isOwn ? 'Head to Author to publish your first manuscript.' : 'When this writer publishes, their books will appear here.'}</p>
+      </div>`;
+    wrap.dataset.loadedFor = userId;
+    return;
+  }
+
+  wrap.innerHTML = '<div class="profile-book-grid"></div>';
+  const grid = wrap.querySelector('.profile-book-grid');
+  list.forEach((b, i) => {
+    const formatted = {
+      ...b,
+      id: b.id,
+      $id: 'sb_' + b.id,
+      _supabase: true,
+      author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
+    };
+    const card = renderBookCard(formatted);
+    card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
+    grid.appendChild(card);
+  });
+  wrap.dataset.loadedFor = userId;
 }
 
 async function toggleFollow(userId, currentlyFollowing) {
@@ -1147,13 +1299,21 @@ async function toggleFollow(userId, currentlyFollowing) {
   openProfile(userId);
 }
 
-// Profile tabs
+// Profile tabs (Posts / Videos / Books / About)
 document.querySelectorAll('.profile-tab').forEach(tab => {
   tab.addEventListener('click', () => {
-    document.querySelectorAll('.profile-tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    document.getElementById('profilePosts').style.display = tab.dataset.tab === 'posts' ? '' : 'none';
-    document.getElementById('profileAbout').style.display = tab.dataset.tab === 'about' ? '' : 'none';
+    const tabName = tab.dataset.tab;
+    document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t === tab));
+
+    const ids = { posts: 'profilePosts', videos: 'profileVideos', books: 'profileBooks', about: 'profileAbout' };
+    Object.entries(ids).forEach(([key, id]) => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = key === tabName ? '' : 'none';
+    });
+
+    // Lazy-load the heavy tabs only when first opened
+    if (tabName === 'videos' && viewingProfileId) loadProfileVideos(viewingProfileId);
+    else if (tabName === 'books' && viewingProfileId) loadProfileBooks(viewingProfileId);
   });
 });
 
