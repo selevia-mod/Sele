@@ -67,11 +67,23 @@
       </span>
       <span class="sidebar-label">Videos</span>
     </button>
+    <button class="sidebar-item" title="Books" id="btnBook">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/><line x1="12" y1="2" x2="12" y2="20"/></svg>
+      </span>
+      <span class="sidebar-label">Book</span>
+    </button>
     <button class="sidebar-item" title="Creator Studio" id="btnStudio">
       <span class="sidebar-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.09 5.26L19.5 9l-4.5 3.27L16.18 18 12 14.77 7.82 18 9 12.27 4.5 9l5.41-.74L12 3z"/></svg>
       </span>
       <span class="sidebar-label">Studio</span>
+    </button>
+    <button class="sidebar-item" title="Author" id="btnAuthor">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+      </span>
+      <span class="sidebar-label">Author</span>
     </button>
     <button class="sidebar-item" title="Profile" id="btnProfile">
       <span class="sidebar-icon">
@@ -151,6 +163,40 @@
       </div>
     </div>
 
+    <!-- Book (Reader) Page -->
+    <div id="bookPage" style="display:none">
+      <div class="page-hero page-hero-book">
+        <div class="page-hero-content">
+          <h1 class="page-hero-title">Books</h1>
+          <p class="page-hero-subtitle">Discover stories. One chapter at a time.</p>
+        </div>
+        <div class="page-hero-decoration" aria-hidden="true">
+          <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 18a6 6 0 0 1 6-6h24v52H16a6 6 0 0 1-6-6V18z"/>
+            <path d="M70 18a6 6 0 0 0-6-6H40v52h24a6 6 0 0 0 6-6V18z"/>
+            <line x1="40" y1="12" x2="40" y2="64"/>
+            <line x1="18" y1="22" x2="34" y2="22"/>
+            <line x1="18" y1="30" x2="34" y2="30"/>
+            <line x1="18" y1="38" x2="30" y2="38"/>
+            <line x1="46" y1="22" x2="62" y2="22"/>
+            <line x1="46" y1="30" x2="62" y2="30"/>
+            <line x1="46" y1="38" x2="58" y2="38"/>
+          </svg>
+        </div>
+      </div>
+      <div class="page-empty">
+        <div class="page-empty-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+        </div>
+        <h2 class="page-empty-title">No books yet</h2>
+        <p class="page-empty-body">Stories from your favorite writers will appear here. Want to be one of them? Head to <strong>Author</strong> and start writing.</p>
+        <button class="btn btn-purple btn-sm" id="btnGoToAuthor">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+          Become an author
+        </button>
+      </div>
+    </div>
+
     <!-- Creator Studio Page -->
     <div id="studioPage" style="display:none">
       <div class="studio-header">
@@ -172,6 +218,34 @@
       </div>
     </div>
     
+    <!-- Author (Manuscript Studio) Page -->
+    <div id="authorPage" style="display:none">
+      <div class="page-hero page-hero-author">
+        <div class="page-hero-content">
+          <h1 class="page-hero-title">Author</h1>
+          <p class="page-hero-subtitle">Write, edit, publish. Your manuscripts in one place.</p>
+        </div>
+        <div class="page-hero-decoration" aria-hidden="true">
+          <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M68 40a20 20 0 0 0-28-28L18 34v28h28z"/>
+            <line x1="54" y1="26" x2="6" y2="74"/>
+            <line x1="58" y1="50" x2="30" y2="50"/>
+          </svg>
+        </div>
+      </div>
+      <div class="page-empty">
+        <div class="page-empty-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+        </div>
+        <h2 class="page-empty-title">No manuscripts yet</h2>
+        <p class="page-empty-body">Start your first story. Add a cover, write chapters, and publish when you're ready — readers will find it on the <strong>Book</strong> page.</p>
+        <button class="btn btn-purple btn-sm" id="btnNewManuscript" disabled style="opacity:0.6;cursor:not-allowed">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Start writing — coming soon
+        </button>
+      </div>
+    </div>
+
     <!-- Video Player Page -->
     <div id="videoPlayerPage" style="display:none">
       <button class="btn btn-ghost btn-sm" id="btnBackVideos" style="margin-bottom:0.75rem">← Back</button>
