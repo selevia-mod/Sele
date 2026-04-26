@@ -2003,41 +2003,51 @@ function closeStudioEditModal() {
 
 async function saveStudioEdit() {
   if (!studioEditingVideoId) return;
-  
+
   const saveBtn = document.getElementById('studioEditSave');
-  saveBtn.disabled = true;
-  saveBtn.textContent = 'Saving...';
-  
+  const originalLabel = saveBtn.textContent;
+
+  const setSaving = (saving) => {
+    if (saving) {
+      saveBtn.classList.add('is-saving');
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving';
+    } else {
+      saveBtn.classList.remove('is-saving');
+      saveBtn.disabled = false;
+      saveBtn.textContent = originalLabel;
+    }
+  };
+
   const title = document.getElementById('studioEditTitle').value.trim();
   const description = document.getElementById('studioEditDescription').value.trim();
   const tagsRaw = document.getElementById('studioEditTags').value;
   const category = document.getElementById('studioEditCategory').value;
-  
+
   if (!title) {
     toast('Title is required', 'error');
-    saveBtn.disabled = false;
-    saveBtn.textContent = 'Save changes';
     return;
   }
-  
+
+  setSaving(true);
+
   const tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t);
-  
+
   const { error } = await supabase
     .from('videos')
     .update({ title, description, tags, category, updated_at: new Date().toISOString() })
     .eq('id', studioEditingVideoId);
-  
-  saveBtn.disabled = false;
-  saveBtn.textContent = 'Save changes';
-  
+
+  setSaving(false);
+
   if (error) {
     toast('Failed to save: ' + error.message, 'error');
     return;
   }
-  
+
   toast('Saved', 'success');
   closeStudioEditModal();
-  
+
   // Invalidate caches and reload
   allVideosCache = [];
   loadStudio();
