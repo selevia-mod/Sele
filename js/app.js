@@ -1959,59 +1959,69 @@ function pluckRefId(value) {
 // Aggregate views (sum of readCount per book) and likes (count, mapped via chapters → book).
 // Strategy: fetch all rows and aggregate locally, because Appwrite's `equal` query on
 // relationship attributes is inconsistent across versions and configurations.
+// All failures are swallowed — a stats failure should NEVER block books from rendering.
 async function fetchAppwriteBookStats(bookIds) {
   const empty = { views: {}, likes: {}, chaptersCount: {} };
   if (!bookIds || !bookIds.length) return empty;
 
-  const wantedBooks = new Set(bookIds);
-  const views = {};
-  const likes = {};
-  const chaptersCount = {};
+  try {
+    const wantedBooks = new Set(bookIds);
+    const views = {};
+    const likes = {};
+    const chaptersCount = {};
 
-  // Fetch reads and chapters in parallel
-  const [readDocs, chapterDocs] = await Promise.all([
-    APPWRITE.chapterReadsCollection ? fetchAllAppwrite(APPWRITE.chapterReadsCollection) : Promise.resolve([]),
-    APPWRITE.chaptersCollection      ? fetchAllAppwrite(APPWRITE.chaptersCollection)     : Promise.resolve([]),
-  ]);
+    // Use allSettled so a single 401/403 doesn't reject the whole batch
+    const settled = await Promise.allSettled([
+      APPWRITE.chapterReadsCollection ? fetchAllAppwrite(APPWRITE.chapterReadsCollection) : Promise.resolve([]),
+      APPWRITE.chaptersCollection      ? fetchAllAppwrite(APPWRITE.chaptersCollection)     : Promise.resolve([]),
+    ]);
+    const readDocs    = settled[0].status === 'fulfilled' ? settled[0].value : [];
+    const chapterDocs = settled[1].status === 'fulfilled' ? settled[1].value : [];
 
-  // Reads → views
-  for (const row of readDocs) {
-    const bookId = pluckRefId(row.book);
-    if (!bookId || !wantedBooks.has(bookId)) continue;
-    views[bookId] = (views[bookId] || 0) + (Number(row.readCount) || 0);
-  }
-
-  // Build chapter → book map (only for our books) + chapter counts
-  const chapterBookMap = {};
-  for (const c of chapterDocs) {
-    const bookId = pluckRefId(c.book);
-    if (!bookId || !wantedBooks.has(bookId)) continue;
-    chapterBookMap[c.$id] = bookId;
-    const isPublished = (c.status || '').toLowerCase() !== 'draft';
-    if (isPublished) chaptersCount[bookId] = (chaptersCount[bookId] || 0) + 1;
-  }
-
-  // Likes → count per chapter → roll up to book
-  if (APPWRITE.chapterLikesCollection && Object.keys(chapterBookMap).length) {
-    const likeDocs = await fetchAllAppwrite(APPWRITE.chapterLikesCollection);
-    for (const l of likeDocs) {
-      const chapterId = pluckRefId(l.booksChapter);
-      if (!chapterId) continue;
-      const bookId = chapterBookMap[chapterId];
-      if (!bookId) continue;
-      likes[bookId] = (likes[bookId] || 0) + 1;
+    // Reads → views
+    for (const row of readDocs) {
+      const bookId = pluckRefId(row.book);
+      if (!bookId || !wantedBooks.has(bookId)) continue;
+      views[bookId] = (views[bookId] || 0) + (Number(row.readCount) || 0);
     }
+
+    // Build chapter → book map (only for our books) + chapter counts
+    const chapterBookMap = {};
+    for (const c of chapterDocs) {
+      const bookId = pluckRefId(c.book);
+      if (!bookId || !wantedBooks.has(bookId)) continue;
+      chapterBookMap[c.$id] = bookId;
+      const isPublished = (c.status || '').toLowerCase() !== 'draft';
+      if (isPublished) chaptersCount[bookId] = (chaptersCount[bookId] || 0) + 1;
+    }
+
+    // Likes → count per chapter → roll up to book
+    if (APPWRITE.chapterLikesCollection && Object.keys(chapterBookMap).length) {
+      let likeDocs = [];
+      try {
+        likeDocs = await fetchAllAppwrite(APPWRITE.chapterLikesCollection);
+      } catch (e) { /* swallowed — see fetchAllAppwrite */ }
+      for (const l of likeDocs) {
+        const chapterId = pluckRefId(l.booksChapter);
+        if (!chapterId) continue;
+        const bookId = chapterBookMap[chapterId];
+        if (!bookId) continue;
+        likes[bookId] = (likes[bookId] || 0) + 1;
+      }
+    }
+
+    // Debug
+    console.log('[appwrite stats]',
+      'reads:', readDocs.length,
+      '· chapters:', chapterDocs.length,
+      '· views keys:', Object.keys(views).length,
+      '· likes keys:', Object.keys(likes).length);
+
+    return { views, likes, chaptersCount };
+  } catch (err) {
+    console.warn('fetchAppwriteBookStats failed:', err);
+    return empty;
   }
-
-  // Debug: log whether anything came back so we can spot empty collections fast
-  // eslint-disable-next-line no-console
-  console.log('[appwrite stats]',
-    'reads:', readDocs.length,
-    '· chapters:', chapterDocs.length,
-    '· views map keys:', Object.keys(views).length,
-    '· likes map keys:', Object.keys(likes).length);
-
-  return { views, likes, chaptersCount };
 }
 
 // Page through an Appwrite collection until empty, returning all documents.
