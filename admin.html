@@ -75,10 +75,32 @@
         </div>
       </section>
 
-      <!-- USERS (placeholder) -->
+      <!-- USERS -->
       <section class="admin-tab-content" data-tab-content="users" style="display:none">
-        <div class="admin-toolbar"><h2>Users</h2></div>
-        <div class="admin-coming-soon">User search and management coming next.</div>
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>Users</h2>
+            <span class="admin-toolbar-sub" id="usersSubtitle">Search by username or email</span>
+          </div>
+          <div class="admin-toolbar-right admin-user-filters">
+            <input type="search" id="usersSearch" class="admin-input" placeholder="Search…" autocomplete="off"/>
+            <select id="usersStatusFilter" class="admin-select">
+              <option value="all">All status</option>
+              <option value="active">Active</option>
+              <option value="suspended">Suspended</option>
+              <option value="banned">Banned</option>
+            </select>
+            <select id="usersRoleFilter" class="admin-select">
+              <option value="all">All roles</option>
+              <option value="user">User</option>
+              <option value="moderator">Moderator</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+        </div>
+        <div id="usersList" class="admin-list">
+          <div class="admin-empty">Loading users…</div>
+        </div>
       </section>
 
       <!-- CONTENT (placeholder) -->
