@@ -1819,63 +1819,155 @@ function showBook() {
   loadBooks();
 }
 
+// ── Pagination state for the public Book browse page ──
+const APPWRITE_BOOKS_PAGE_SIZE = 40;
+let _appwriteOffset = 0;
+let _hasMoreAppwriteBooks = true;
+let _isLoadingMoreBooks = false;
+let _bookScrollObserver = null;
+
 async function loadBooks() {
   const grid = document.getElementById('bookGrid');
   const empty = document.getElementById('bookEmpty');
+  const sentinel = document.getElementById('bookGridSentinel');
   empty.style.display = 'none';
+  sentinel.style.display = 'none';
   grid.style.display = 'grid';
   grid.innerHTML = '<div class="loading">Loading books...</div>';
 
+  // Reset pagination state on every fresh load (filter/sort/page open)
+  _appwriteOffset = 0;
+  _hasMoreAppwriteBooks = true;
+  _isLoadingMoreBooks = false;
+  _allAppwriteStatsFetched = false;
+
   try {
-    // Fetch both sources in parallel (each is independently fault-tolerant)
+    // First-page Appwrite fetch + full Supabase fetch (Supabase is small and shouldn't paginate)
     const [supabaseBooks, appwriteBooks] = await Promise.all([
       fetchSupabaseBooks(),
-      fetchAppwriteBooks(),
+      fetchAppwriteBooks(0),
     ]);
+
+    if (appwriteBooks.length < APPWRITE_BOOKS_PAGE_SIZE) _hasMoreAppwriteBooks = false;
+    _appwriteOffset = appwriteBooks.length;
 
     let merged = [...(supabaseBooks || []), ...(appwriteBooks || [])];
 
-    // Genre filter (matches Supabase `genre` field OR any of the Appwrite tags)
-    if (bookGenreFilter) {
-      const filterLower = bookGenreFilter.toLowerCase();
-      const filterWords = filterLower.replace(/-/g, ' ');
-      merged = merged.filter(b => {
-        if (b.genre === bookGenreFilter) return true;
-        return (b.tags || []).some(t => {
-          const tagLower = (t || '').toLowerCase();
-          return tagLower === filterLower || tagLower === filterWords;
-        });
-      });
-    }
-
-    // Sort across both sources
-    const dateOf = b => new Date(b.published_at || b.created_at || 0);
-    if (bookSortBy === 'recent') {
-      merged.sort((a, b) => dateOf(b) - dateOf(a));
-    } else if (bookSortBy === 'most-liked') {
-      merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
-    } else if (bookSortBy === 'most-read') {
-      merged.sort((a, b) => (b.views_count || 0) - (a.views_count || 0));
-    } else { // trending
-      merged.sort((a, b) => {
-        const diff = (b.likes_count || 0) - (a.likes_count || 0);
-        if (diff !== 0) return diff;
-        return dateOf(b) - dateOf(a);
-      });
-    }
-
+    merged = applyBookFilterAndSort(merged);
     allBooksCache = merged;
 
     if (!merged.length) {
       grid.style.display = 'none';
       empty.style.display = 'flex';
-    } else {
-      renderBooks();
+      return;
     }
+
+    renderBooks();
+    if (_hasMoreAppwriteBooks) setupBooksInfiniteScroll();
   } catch (err) {
     console.error('Failed to load books:', err);
     grid.innerHTML = '<div class="loading">Couldn\'t load books</div>';
   }
+}
+
+// Shared filter+sort so loadMoreBooks can reuse the same predicate
+function applyBookFilterAndSort(list) {
+  let merged = list;
+
+  if (bookGenreFilter) {
+    const filterLower = bookGenreFilter.toLowerCase();
+    const filterWords = filterLower.replace(/-/g, ' ');
+    merged = merged.filter(b => {
+      if (b.genre === bookGenreFilter) return true;
+      return (b.tags || []).some(t => {
+        const tagLower = (t || '').toLowerCase();
+        return tagLower === filterLower || tagLower === filterWords;
+      });
+    });
+  }
+
+  const dateOf = b => new Date(b.published_at || b.created_at || 0);
+  if (bookSortBy === 'recent') {
+    merged.sort((a, b) => dateOf(b) - dateOf(a));
+  } else if (bookSortBy === 'most-liked') {
+    merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
+  } else if (bookSortBy === 'most-read') {
+    merged.sort((a, b) => (b.views_count || 0) - (a.views_count || 0));
+  } else { // trending
+    merged.sort((a, b) => {
+      const diff = (b.likes_count || 0) - (a.likes_count || 0);
+      if (diff !== 0) return diff;
+      return dateOf(b) - dateOf(a);
+    });
+  }
+  return merged;
+}
+
+async function loadMoreBooks() {
+  if (_isLoadingMoreBooks || !_hasMoreAppwriteBooks) return;
+  _isLoadingMoreBooks = true;
+
+  const sentinel = document.getElementById('bookGridSentinel');
+  sentinel.style.display = 'block';
+  sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more books…</div>';
+
+  try {
+    const more = await fetchAppwriteBooks(_appwriteOffset);
+    if (more.length < APPWRITE_BOOKS_PAGE_SIZE) _hasMoreAppwriteBooks = false;
+    _appwriteOffset += more.length;
+
+    if (more.length) {
+      // Merge into cache, re-apply current filter/sort to keep order consistent
+      const allMerged = applyBookFilterAndSort([...allBooksCache, ...more]);
+      allBooksCache = allMerged;
+      // For appended cards we just append rendering — don't re-render entire grid (jank)
+      const grid = document.getElementById('bookGrid');
+      // Only render the cards that aren't already in the DOM
+      const presentIds = new Set(Array.from(grid.querySelectorAll('.book-card')).map(c => c.dataset.bookId));
+      more
+        .filter(b => !presentIds.has(b.id))
+        // Reapply filter to the new batch only (don't show filtered-out cards)
+        .filter(b => allBooksCache.includes(b))
+        .forEach((b, i) => {
+          const card = renderBookCard(b);
+          card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
+          grid.appendChild(card);
+        });
+      // Re-observe new cards for stats
+      setupAppwriteStatsLazyLoad(grid);
+    }
+
+    if (_hasMoreAppwriteBooks) {
+      sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more books…</div>';
+    } else {
+      sentinel.innerHTML = '<div class="book-grid-end-msg">You\'ve reached the end · ' + allBooksCache.length.toLocaleString() + ' books</div>';
+      // Stop observing
+      if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
+    }
+  } catch (err) {
+    console.error('Failed to load more books:', err);
+    sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
+  } finally {
+    _isLoadingMoreBooks = false;
+  }
+}
+
+function setupBooksInfiniteScroll() {
+  const sentinel = document.getElementById('bookGridSentinel');
+  if (!sentinel) return;
+  sentinel.style.display = 'block';
+
+  if (_bookScrollObserver) _bookScrollObserver.disconnect();
+  if (!('IntersectionObserver' in window)) return;
+
+  _bookScrollObserver = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) loadMoreBooks();
+  }, {
+    root: null,
+    rootMargin: '600px 0px',   // pre-fetch a bit before the sentinel reaches the viewport
+    threshold: 0.01,
+  });
+  _bookScrollObserver.observe(sentinel);
 }
 
 // ── Supabase books ──
@@ -1918,12 +2010,14 @@ async function fetchSupabaseBooks() {
 
 // ── Appwrite books (legacy mobile) ──
 // Stats (views/likes/chapter counts) are loaded lazily per-card after render.
-async function fetchAppwriteBooks() {
+// Pagination via offset keeps initial load fast even with thousands of legacy books.
+async function fetchAppwriteBooks(offset = 0) {
   if (!APPWRITE.booksCollection) return [];
   try {
     const result = await appwriteList(APPWRITE.booksCollection, [
       JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit', values: [80] }),
+      JSON.stringify({ method: 'limit',  values: [APPWRITE_BOOKS_PAGE_SIZE] }),
+      JSON.stringify({ method: 'offset', values: [offset] }),
     ]);
     const books = result.documents || [];
     const userMap = await fetchAppwriteUsers(collectAppwriteUploaderIds(books));
@@ -1956,66 +2050,86 @@ function pluckRefId(value) {
   return null;
 }
 
-// Aggregate views (sum of readCount per book) and likes (count, mapped via chapters → book).
-// Strategy: fetch all rows and aggregate locally, because Appwrite's `equal` query on
-// relationship attributes is inconsistent across versions and configurations.
-// All failures are swallowed — a stats failure should NEVER block books from rendering.
+// Aggregate views/likes/chapter counts for a SPECIFIC list of book IDs.
+// Uses Appwrite server-side `equal` filter on the `book` relationship attribute so
+// only relevant rows come back — critical when there are thousands of books.
+// Falls back gracefully (returns zeros) on any error.
 async function fetchAppwriteBookStats(bookIds) {
   const empty = { views: {}, likes: {}, chaptersCount: {} };
   if (!bookIds || !bookIds.length) return empty;
 
+  // Appwrite caps `equal values` at 100. Batch if larger.
+  if (bookIds.length > 100) {
+    const merged = { views: {}, likes: {}, chaptersCount: {} };
+    for (let i = 0; i < bookIds.length; i += 100) {
+      const part = await fetchAppwriteBookStats(bookIds.slice(i, i + 100));
+      Object.assign(merged.views, part.views);
+      Object.assign(merged.likes, part.likes);
+      Object.assign(merged.chaptersCount, part.chaptersCount);
+    }
+    return merged;
+  }
+
   try {
-    const wantedBooks = new Set(bookIds);
     const views = {};
     const likes = {};
     const chaptersCount = {};
 
-    // Use allSettled so a single 401/403 doesn't reject the whole batch
+    // Reads + chapters in parallel, both server-side filtered
     const settled = await Promise.allSettled([
-      APPWRITE.chapterReadsCollection ? fetchAllAppwrite(APPWRITE.chapterReadsCollection) : Promise.resolve([]),
-      APPWRITE.chaptersCollection      ? fetchAllAppwrite(APPWRITE.chaptersCollection)     : Promise.resolve([]),
+      APPWRITE.chapterReadsCollection
+        ? appwriteList(APPWRITE.chapterReadsCollection, [
+            JSON.stringify({ method: 'equal', attribute: 'book', values: bookIds }),
+            JSON.stringify({ method: 'limit', values: [5000] }),
+          ])
+        : Promise.resolve({ documents: [] }),
+      APPWRITE.chaptersCollection
+        ? appwriteList(APPWRITE.chaptersCollection, [
+            JSON.stringify({ method: 'equal', attribute: 'book', values: bookIds }),
+            JSON.stringify({ method: 'limit', values: [2000] }),
+          ])
+        : Promise.resolve({ documents: [] }),
     ]);
-    const readDocs    = settled[0].status === 'fulfilled' ? settled[0].value : [];
-    const chapterDocs = settled[1].status === 'fulfilled' ? settled[1].value : [];
+    const readDocs    = settled[0].status === 'fulfilled' ? (settled[0].value.documents || []) : [];
+    const chapterDocs = settled[1].status === 'fulfilled' ? (settled[1].value.documents || []) : [];
 
-    // Reads → views
+    // Reads → views (sum readCount per book)
     for (const row of readDocs) {
       const bookId = pluckRefId(row.book);
-      if (!bookId || !wantedBooks.has(bookId)) continue;
+      if (!bookId) continue;
       views[bookId] = (views[bookId] || 0) + (Number(row.readCount) || 0);
     }
 
-    // Build chapter → book map (only for our books) + chapter counts
+    // Build chapter → book map + chapter counts
     const chapterBookMap = {};
     for (const c of chapterDocs) {
       const bookId = pluckRefId(c.book);
-      if (!bookId || !wantedBooks.has(bookId)) continue;
+      if (!bookId) continue;
       chapterBookMap[c.$id] = bookId;
       const isPublished = (c.status || '').toLowerCase() !== 'draft';
       if (isPublished) chaptersCount[bookId] = (chaptersCount[bookId] || 0) + 1;
     }
 
-    // Likes → count per chapter → roll up to book
-    if (APPWRITE.chapterLikesCollection && Object.keys(chapterBookMap).length) {
-      let likeDocs = [];
-      try {
-        likeDocs = await fetchAllAppwrite(APPWRITE.chapterLikesCollection);
-      } catch (e) { /* swallowed — see fetchAllAppwrite */ }
-      for (const l of likeDocs) {
-        const chapterId = pluckRefId(l.booksChapter);
-        if (!chapterId) continue;
-        const bookId = chapterBookMap[chapterId];
-        if (!bookId) continue;
-        likes[bookId] = (likes[bookId] || 0) + 1;
+    // Likes → count, mapped chapter → book
+    const chapterIds = Object.keys(chapterBookMap);
+    if (APPWRITE.chapterLikesCollection && chapterIds.length) {
+      // Same 100-id cap on equal values
+      for (let i = 0; i < chapterIds.length; i += 100) {
+        const batch = chapterIds.slice(i, i + 100);
+        try {
+          const r = await appwriteList(APPWRITE.chapterLikesCollection, [
+            JSON.stringify({ method: 'equal', attribute: 'booksChapter', values: batch }),
+            JSON.stringify({ method: 'limit', values: [5000] }),
+          ]);
+          for (const l of (r.documents || [])) {
+            const cid = pluckRefId(l.booksChapter);
+            if (!cid) continue;
+            const bid = chapterBookMap[cid];
+            if (bid) likes[bid] = (likes[bid] || 0) + 1;
+          }
+        } catch (e) { /* swallowed */ }
       }
     }
-
-    // Debug
-    console.log('[appwrite stats]',
-      'reads:', readDocs.length,
-      '· chapters:', chapterDocs.length,
-      '· views keys:', Object.keys(views).length,
-      '· likes keys:', Object.keys(likes).length);
 
     return { views, likes, chaptersCount };
   } catch (err) {
@@ -2268,8 +2382,9 @@ function setupAppwriteStatsLazyLoad(grid) {
   });
 }
 
-// Tracks whether we've done the "fetch everything once" pass for this session
-let _allAppwriteStatsFetched = false;
+// Stats are fetched per visible-card batch — at 4000+ books "fetch all" isn't viable.
+// Used to track session-level state if we want to skip refetching across navigations.
+let _allAppwriteStatsFetched = false;        // kept for compatibility; no longer triggers prefetch
 
 async function flushAppwriteStatsBatch(appwriteBookIds) {
   if (!appwriteBookIds || !appwriteBookIds.length) return;
@@ -2286,23 +2401,12 @@ async function flushAppwriteStatsBatch(appwriteBookIds) {
 
   if (!needsFetch.length) return;
 
-  // First time we hit this code in a session: aggregate stats for ALL Appwrite books at once.
-  // The underlying fetch reads the whole reads/chapters/likes collections regardless, so
-  // it costs the same as fetching for one book — and pre-warms the cache for everything.
-  // After this, scrolling instantly hits the cache for all subsequent cards.
-  let idsToFetch = needsFetch;
-  if (!_allAppwriteStatsFetched) {
-    const everyAppwriteId = allBooksCache.filter(b => b._appwrite).map(b => b._appwriteId);
-    if (everyAppwriteId.length > needsFetch.length) idsToFetch = everyAppwriteId;
-    _allAppwriteStatsFetched = true;
-  }
-
   let stats = { views: {}, likes: {}, chaptersCount: {} };
   try {
-    stats = await fetchAppwriteBookStats(idsToFetch);
+    stats = await fetchAppwriteBookStats(needsFetch);
   } catch (e) { /* swallowed; cards keep dashes */ }
 
-  for (const id of idsToFetch) {
+  for (const id of needsFetch) {
     const s = {
       views: stats.views[id] || 0,
       likes: stats.likes[id] || 0,
