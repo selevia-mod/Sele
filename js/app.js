@@ -856,15 +856,10 @@ const composeEl = document.querySelector('.compose');
 let viewingProfileId = null;
 
 function showFeed() {
+  hideAllMainPages();
   feedEl.style.display = '';
   storiesEl.style.display = '';
   composeEl.style.display = '';
-  profilePage.style.display = 'none';
-  videosPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  bookPage.style.display = 'none';
-  authorPage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
   document.body.classList.remove('on-videos');
   viewingProfileId = null;
   stopVideoPlayer();
@@ -1717,6 +1712,23 @@ const videoPlayerPage = document.getElementById('videoPlayerPage');
 const studioPage = document.getElementById('studioPage');
 const bookPage = document.getElementById('bookPage');
 const authorPage = document.getElementById('authorPage');
+const bookDetailPage = document.getElementById('bookDetailPage');
+const chapterReaderPage = document.getElementById('chapterReaderPage');
+
+// Hide every main content page; show functions call this first then set their own page to block.
+function hideAllMainPages() {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  if (profilePage) profilePage.style.display = 'none';
+  if (videosPage) videosPage.style.display = 'none';
+  if (videoPlayerPage) videoPlayerPage.style.display = 'none';
+  if (studioPage) studioPage.style.display = 'none';
+  if (bookPage) bookPage.style.display = 'none';
+  if (authorPage) authorPage.style.display = 'none';
+  if (bookDetailPage) bookDetailPage.style.display = 'none';
+  if (chapterReaderPage) chapterReaderPage.style.display = 'none';
+}
 let currentHls = null;
 
 // Resume playback storage
@@ -1758,14 +1770,7 @@ function stopVideoPlayer() {
 
 function showVideos(forceReload = false) {
   const wasOnVideosPage = videosPage.style.display === 'block';
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  profilePage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  bookPage.style.display = 'none';
-  authorPage.style.display = 'none';
+  hideAllMainPages();
   videosPage.style.display = 'block';
   document.body.classList.add('on-videos');
   stopVideoPlayer();
@@ -1777,12 +1782,7 @@ function showVideos(forceReload = false) {
 }
 
 function showStudio() {
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  profilePage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
-  videosPage.style.display = 'none';
+  hideAllMainPages();
   studioPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
@@ -1793,9 +1793,6 @@ function showStudio() {
 // ════════════════════════════════════════
 // BOOK / READER
 // ════════════════════════════════════════
-const bookDetailPage = document.getElementById('bookDetailPage');
-const chapterReaderPage = document.getElementById('chapterReaderPage');
-
 let allBooksCache = [];
 let bookGenreFilter = '';
 let bookSortBy = 'trending';
@@ -1805,16 +1802,7 @@ let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '
 
 // ── Book (Reader) page ──
 function showBook() {
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  profilePage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
-  videosPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  authorPage.style.display = 'none';
-  bookDetailPage.style.display = 'none';
-  chapterReaderPage.style.display = 'none';
+  hideAllMainPages();
   bookPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
@@ -1946,16 +1934,7 @@ document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
 
 // ── Book detail page ──
 async function openBookDetail(bookId) {
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  profilePage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
-  videosPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  authorPage.style.display = 'none';
-  bookPage.style.display = 'none';
-  chapterReaderPage.style.display = 'none';
+  hideAllMainPages();
   bookDetailPage.style.display = 'block';
 
   history.pushState(null, '', `#book/${bookId}`);
@@ -2100,16 +2079,7 @@ async function openChapterReader(chapterIndex) {
   currentChapterIndex = chapterIndex;
   const chapter = currentBookDetail.chapters[chapterIndex];
 
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  profilePage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
-  videosPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  authorPage.style.display = 'none';
-  bookPage.style.display = 'none';
-  bookDetailPage.style.display = 'none';
+  hideAllMainPages();
   chapterReaderPage.style.display = 'block';
 
   document.getElementById('readerBookTitle').textContent = currentBookDetail.book.title || 'Book';
@@ -2184,14 +2154,7 @@ document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => 
 
 // ── Author (Manuscript Studio) page ──
 function showAuthor() {
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  profilePage.style.display = 'none';
-  videoPlayerPage.style.display = 'none';
-  videosPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  bookPage.style.display = 'none';
+  hideAllMainPages();
   authorPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
@@ -2563,14 +2526,7 @@ document.getElementById('btnStudioUpload')?.addEventListener('click', () => {
 });
 
 function showVideoPlayer() {
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  profilePage.style.display = 'none';
-  videosPage.style.display = 'none';
-  studioPage.style.display = 'none';
-  bookPage.style.display = 'none';
-  authorPage.style.display = 'none';
+  hideAllMainPages();
   videoPlayerPage.style.display = 'block';
 }
 
