@@ -570,22 +570,165 @@ ACTION_TITLES.unsuspend   = 'Lift suspension';
 ACTION_TITLES.unban       = 'Unban user';
 ACTION_TITLES.role_change = 'Change role';
 
-// Switch tab on Users → load
+// Switch tab on Users / Bans → load
 const _origSwitchTab = switchTab;
 function switchTab2(name) {
   _origSwitchTab(name);
   if (name === 'users') {
-    if (!document.getElementById('usersSearch').dataset.bound) {
+    const searchEl = document.getElementById('usersSearch');
+    if (!searchEl.dataset.bound) {
       initUsersTab();
-      document.getElementById('usersSearch').dataset.bound = '1';
+      searchEl.dataset.bound = '1';
     }
     loadUsers();
+  }
+  if (name === 'bans') {
+    const filterEl = document.getElementById('bansFilter');
+    if (!filterEl.dataset.bound) {
+      initBansTab();
+      filterEl.dataset.bound = '1';
+    }
+    loadBans();
   }
 }
 // Re-bind tab clicks to use the augmented switchTab2
 document.querySelectorAll('.admin-tab').forEach(t => {
   t.onclick = () => switchTab2(t.dataset.tab);
 });
+
+// ─── BANS TAB ────────────────────────────────────────────────────────────────
+
+function initBansTab() {
+  document.getElementById('bansFilter').addEventListener('change', loadBans);
+}
+
+// Pretty relative-time-ago that handles future + past
+function timeRel(date) {
+  const ms = new Date(date) - Date.now();
+  const abs = Math.abs(ms);
+  const sec = Math.floor(abs / 1000);
+  const fmt = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+  let str;
+  if      (sec < 60)        str = fmt(sec, 'sec');
+  else if (sec < 3600)      str = fmt(Math.floor(sec / 60), 'min');
+  else if (sec < 86400)     str = fmt(Math.floor(sec / 3600), 'hr');
+  else if (sec < 86400*30)  str = fmt(Math.floor(sec / 86400), 'day');
+  else if (sec < 86400*365) str = fmt(Math.floor(sec / 86400 / 30), 'month');
+  else                      str = fmt(Math.floor(sec / 86400 / 365), 'year');
+  return ms < 0 ? `${str} ago` : `in ${str}`;
+}
+
+async function loadBans() {
+  const listEl = document.getElementById('bansList');
+  const subEl  = document.getElementById('bansSubtitle');
+  const filter = document.getElementById('bansFilter').value;
+
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+  const nowIso = new Date().toISOString();
+
+  // Fetch banned + suspended in parallel
+  const [bannedRes, suspendedRes] = await Promise.all([
+    (filter === 'suspended') ? Promise.resolve({ data: [] }) : supabase
+      .from('profiles')
+      .select('id, username, email, avatar_url, role, ban_reason, banned_at, banned_by')
+      .eq('is_banned', true)
+      .order('banned_at', { ascending: false })
+      .limit(200),
+    (filter === 'banned') ? Promise.resolve({ data: [] }) : supabase
+      .from('profiles')
+      .select('id, username, email, avatar_url, role, suspended_until')
+      .eq('is_banned', false)
+      .gt('suspended_until', nowIso)
+      .order('suspended_until', { ascending: true })
+      .limit(200),
+  ]);
+
+  if (bannedRes.error)    { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(bannedRes.error.message)}</div>`; return; }
+  if (suspendedRes.error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(suspendedRes.error.message)}</div>`; return; }
+
+  const banned    = bannedRes.data    || [];
+  const suspended = suspendedRes.data || [];
+  const total     = banned.length + suspended.length;
+
+  // Resolve "banned_by" usernames in one query
+  const byIds = [...new Set(banned.map(b => b.banned_by).filter(Boolean))];
+  const { data: actors } = byIds.length
+    ? await supabase.from('profiles').select('id, username').in('id', byIds)
+    : { data: [] };
+  const actorMap = Object.fromEntries((actors || []).map(a => [a.id, a]));
+
+  // For suspended users, look up most-recent suspend admin_action to attribute who did it
+  let suspendActorMap = {};
+  if (suspended.length) {
+    const susIds = suspended.map(s => s.id);
+    const { data: actions } = await supabase
+      .from('admin_actions')
+      .select('admin_id, target_user_id, created_at')
+      .eq('action', 'suspend')
+      .in('target_user_id', susIds)
+      .order('created_at', { ascending: false });
+    for (const a of (actions || [])) {
+      if (!suspendActorMap[a.target_user_id]) suspendActorMap[a.target_user_id] = a.admin_id;
+    }
+    const sIds = [...new Set(Object.values(suspendActorMap))];
+    const newOnes = sIds.filter(id => !actorMap[id]);
+    if (newOnes.length) {
+      const { data: more } = await supabase.from('profiles').select('id, username').in('id', newOnes);
+      for (const u of (more || [])) actorMap[u.id] = u;
+    }
+  }
+
+  subEl.textContent = total
+    ? `${banned.length} banned · ${suspended.length} suspended`
+    : 'No active enforcement';
+
+  if (!total) {
+    listEl.innerHTML = `<div class="admin-empty">Nobody is currently banned or suspended.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = '';
+
+  // Render banned first (more severe), then suspended
+  for (const u of banned) {
+    const who    = actorMap[u.banned_by]?.username || 'a moderator';
+    const detail = `Banned${u.ban_reason ? ` for <b>${esc(REASON_TEXT[u.ban_reason] || u.ban_reason)}</b>` : ''}${u.banned_at ? ` · ${esc(timeRel(u.banned_at))}` : ''} by <b>${esc(who)}</b>`;
+    listEl.appendChild(renderBanRow(u, 'banned', detail));
+  }
+  for (const u of suspended) {
+    const who    = actorMap[suspendActorMap[u.id]]?.username || 'a moderator';
+    const detail = `Suspended · expires <b>${esc(timeRel(u.suspended_until))}</b> (${esc(new Date(u.suspended_until).toLocaleDateString())}) by <b>${esc(who)}</b>`;
+    listEl.appendChild(renderBanRow(u, 'suspended', detail));
+  }
+}
+
+function renderBanRow(u, kind, detail) {
+  const row = document.createElement('div');
+  row.className = 'ban-row';
+  row.innerHTML = `
+    <div class="ban-row-avatar">${u.avatar_url ? `<img src="${esc(u.avatar_url)}" alt=""/>` : esc(initials(u.username))}</div>
+    <div class="ban-row-meta">
+      <div class="ban-row-name">
+        ${esc(u.username || '(no username)')}
+        ${u.role !== 'user' ? `<span class="user-role-badge user-role-${u.role}">${esc(u.role)}</span>` : ''}
+        <span class="user-status-badge user-status-${kind}">${kind === 'banned' ? 'Banned' : 'Suspended'}</span>
+      </div>
+      <div class="ban-row-email">${esc(u.email || '—')}</div>
+      <div class="ban-row-detail">${detail}</div>
+    </div>
+    <div class="ban-row-actions">
+      ${kind === 'banned'    ? '<button class="user-act-btn" data-act="unban">Unban</button>'        : ''}
+      ${kind === 'suspended' ? '<button class="user-act-btn" data-act="unsuspend">Lift</button>'     : ''}
+    </div>
+  `;
+  row.querySelectorAll('[data-act]').forEach(b => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      handleUserAction(b.dataset.act, u);
+    });
+  });
+  return row;
+}
 
 // ─── ACTIVITY LOG ────────────────────────────────────────────────────────────
 
