@@ -137,6 +137,10 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
   Video
 </button>
+          <button class="image-upload-btn" title="Add book" id="btnOpenBookUpload" type="button">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+  Book
+</button>
           <div class="spacer"></div>
           <button class="btn btn-purple btn-sm" id="btnPost">Post</button>
         </div>
@@ -144,6 +148,9 @@
 
     <!-- Feed -->
     <div id="feed"><div class="loading">Loading feed...</div></div>
+    <div id="feedSentinel" class="book-grid-sentinel" style="display:none">
+      <div class="loading book-grid-loadmore">Loading more posts…</div>
+    </div>
 
     <!-- Videos Page -->
     <div id="videosPage" style="display:none">
