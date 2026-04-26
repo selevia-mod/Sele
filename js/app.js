@@ -69,6 +69,10 @@ async function onSignedIn(user) {
   } else if (hash === '#book') {
     setSidebarActive('btnBook');
     showBook();
+  } else if (hash.startsWith('#book/')) {
+    setSidebarActive('btnBook');
+    const bookId = hash.replace('#book/', '').split('/')[0];
+    openBookDetail(bookId);
   } else if (hash === '#author') {
     setSidebarActive('btnAuthor');
     showAuthor();
@@ -1786,6 +1790,19 @@ function showStudio() {
   loadStudio();
 }
 
+// ════════════════════════════════════════
+// BOOK / READER
+// ════════════════════════════════════════
+const bookDetailPage = document.getElementById('bookDetailPage');
+const chapterReaderPage = document.getElementById('chapterReaderPage');
+
+let allBooksCache = [];
+let bookGenreFilter = '';
+let bookSortBy = 'trending';
+let currentBookDetail = null;       // { book, chapters }
+let currentChapterIndex = 0;
+let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
+
 // ── Book (Reader) page ──
 function showBook() {
   feedEl.style.display = 'none';
@@ -1796,12 +1813,374 @@ function showBook() {
   videosPage.style.display = 'none';
   studioPage.style.display = 'none';
   authorPage.style.display = 'none';
+  bookDetailPage.style.display = 'none';
+  chapterReaderPage.style.display = 'none';
   bookPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#book');
-  // TODO: load books once schema + reader are in place
+  loadBooks();
 }
+
+async function loadBooks() {
+  const grid = document.getElementById('bookGrid');
+  const empty = document.getElementById('bookEmpty');
+  empty.style.display = 'none';
+  grid.style.display = 'grid';
+  grid.innerHTML = '<div class="loading">Loading books...</div>';
+
+  try {
+    let q = supabase
+      .from('books')
+      .select(`
+        id, title, description, cover_url, genre, tags,
+        views_count, likes_count, chapters_count, word_count,
+        published_at, created_at,
+        author_id,
+        profiles!books_author_id_fkey ( id, username, avatar_url )
+      `)
+      .eq('is_public', true)
+      .in('status', ['ongoing', 'completed']);
+
+    if (bookGenreFilter) q = q.eq('genre', bookGenreFilter);
+
+    // Sort
+    if (bookSortBy === 'recent')           q = q.order('published_at', { ascending: false, nullsFirst: false });
+    else if (bookSortBy === 'most-liked')  q = q.order('likes_count', { ascending: false });
+    else if (bookSortBy === 'most-read')   q = q.order('views_count', { ascending: false });
+    else /* trending */                    q = q.order('likes_count', { ascending: false }).order('published_at', { ascending: false, nullsFirst: false });
+
+    const { data, error } = await q.limit(60);
+    if (error) {
+      // Likely the migration hasn't been run yet. Show a friendly empty state.
+      grid.innerHTML = '';
+      grid.style.display = 'none';
+      empty.style.display = 'flex';
+      const titleEl = empty.querySelector('.page-empty-title');
+      const bodyEl = empty.querySelector('.page-empty-body');
+      if (error.message?.includes('relation') || error.code === '42P01') {
+        if (titleEl) titleEl.textContent = 'Books table not set up yet';
+        if (bodyEl) bodyEl.innerHTML = 'Run <code>migration_books.sql</code> in Supabase SQL Editor first, then refresh this page.';
+      }
+      console.error('Supabase books fetch error:', error);
+      return;
+    }
+
+    allBooksCache = (data || []).map(b => ({
+      ...b,
+      _supabase: true,
+      // normalize uploader info similar to fetchSupabaseVideos
+      author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
+    }));
+
+    renderBooks();
+  } catch (err) {
+    console.error('Failed to load books:', err);
+    grid.innerHTML = '<div class="loading">Couldn\'t load books</div>';
+  }
+}
+
+function renderBooks() {
+  const grid = document.getElementById('bookGrid');
+  const empty = document.getElementById('bookEmpty');
+
+  if (!allBooksCache.length) {
+    grid.style.display = 'none';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  grid.style.display = 'grid';
+  empty.style.display = 'none';
+
+  grid.innerHTML = '';
+  allBooksCache.forEach((b, i) => {
+    const card = renderBookCard(b);
+    card.style.animationDelay = `${i * 0.025}s`;
+    grid.appendChild(card);
+  });
+}
+
+function renderBookCard(b) {
+  const card = document.createElement('button');
+  card.className = 'book-card';
+  card.onclick = () => openBookDetail(b.id);
+
+  const authorName = b.author?.username || 'Unknown author';
+  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
+  const cover = b.cover_url
+    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=&quot;book-cover-placeholder&quot;>${initialLetter}</div>'"/>`
+    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
+  const legacyBadge = b._appwrite ? '<span class="book-cover-badge legacy">Legacy</span>' : '';
+  const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
+
+  card.innerHTML = `
+    <div class="book-cover">
+      ${cover}
+      ${legacyBadge}
+      <div class="book-stats">
+        <span title="Views">👁 ${(b.views_count || 0).toLocaleString()}</span>
+        <span title="Likes">❤ ${(b.likes_count || 0).toLocaleString()}</span>
+      </div>
+    </div>
+    ${genreLabel ? `<div class="book-card-genre">${escHTML(genreLabel)}</div>` : ''}
+    <h3 class="book-card-title">${escHTML(b.title || 'Untitled')}</h3>
+    <p class="book-card-author">by ${escHTML(authorName)}</p>
+  `;
+  return card;
+}
+
+// Wire up genre chips + sort
+document.getElementById('bookGenreChips')?.addEventListener('click', (e) => {
+  const chip = e.target.closest('.book-chip');
+  if (!chip) return;
+  document.querySelectorAll('#bookGenreChips .book-chip').forEach(c => c.classList.remove('active'));
+  chip.classList.add('active');
+  bookGenreFilter = chip.dataset.genre || '';
+  loadBooks();
+});
+document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
+  bookSortBy = e.target.value;
+  loadBooks();
+});
+
+// ── Book detail page ──
+async function openBookDetail(bookId) {
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  videosPage.style.display = 'none';
+  studioPage.style.display = 'none';
+  authorPage.style.display = 'none';
+  bookPage.style.display = 'none';
+  chapterReaderPage.style.display = 'none';
+  bookDetailPage.style.display = 'block';
+
+  history.pushState(null, '', `#book/${bookId}`);
+
+  const content = document.getElementById('bookDetailContent');
+  content.innerHTML = '<div class="loading">Loading book...</div>';
+
+  try {
+    const [{ data: book, error: bookErr }, { data: chapters, error: chErr }] = await Promise.all([
+      supabase.from('books')
+        .select(`
+          id, title, description, cover_url, genre, tags,
+          views_count, likes_count, chapters_count, word_count, status,
+          published_at, created_at,
+          author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
+        `)
+        .eq('id', bookId)
+        .single(),
+      supabase.from('chapters')
+        .select('id, chapter_number, title, word_count, views_count, is_published, created_at')
+        .eq('book_id', bookId)
+        .eq('is_published', true)
+        .order('chapter_number', { ascending: true })
+    ]);
+
+    if (bookErr || !book) throw new Error(bookErr?.message || 'Book not found');
+    if (chErr) console.warn('Failed to load chapters:', chErr);
+
+    currentBookDetail = { book, chapters: chapters || [] };
+    renderBookDetail();
+  } catch (err) {
+    content.innerHTML = `<div class="loading">Couldn't load book: ${escHTML(err.message)}</div>`;
+  }
+}
+
+function renderBookDetail() {
+  if (!currentBookDetail) return;
+  const { book, chapters } = currentBookDetail;
+  const content = document.getElementById('bookDetailContent');
+
+  const authorName = book.profiles?.username || 'Unknown';
+  const authorAvatar = book.profiles?.avatar_url;
+  const initialLetter = (book.title || '?').trim().charAt(0).toUpperCase();
+  const cover = book.cover_url
+    ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
+    : `<div class="book-cover-placeholder" style="width:100%;height:100%">${initialLetter}</div>`;
+
+  const tagsHtml = (book.tags || []).map(t =>
+    `<button class="book-chip" data-tag="${escHTML(t)}" type="button">${escHTML(t)}</button>`
+  ).join('');
+
+  const chaptersHtml = chapters.length
+    ? chapters.map(c => `
+        <div class="chapter-row" data-chapter-id="${c.id}">
+          <span class="chapter-row-num">Ch ${c.chapter_number}</span>
+          <span class="chapter-row-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
+          <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
+        </div>
+      `).join('')
+    : '<div style="color:var(--text2);padding:1rem 0">No chapters published yet.</div>';
+
+  content.innerHTML = `
+    <div class="book-detail">
+      <div class="book-detail-cover">${cover}</div>
+      <div class="book-detail-info">
+        <h1>${escHTML(book.title || 'Untitled')}</h1>
+        <div class="book-detail-author">
+          <div class="avatar">${authorAvatar ? `<img src="${escHTML(authorAvatar)}"/>` : initials(authorName)}</div>
+          <span>by <strong>${escHTML(authorName)}</strong></span>
+        </div>
+        <div class="book-detail-meta">
+          <span><strong>${(book.chapters_count || chapters.length).toLocaleString()}</strong> chapters</span>
+          <span><strong>${(book.word_count || 0).toLocaleString()}</strong> words</span>
+          <span><strong>${(book.views_count || 0).toLocaleString()}</strong> views</span>
+          <span><strong>${(book.likes_count || 0).toLocaleString()}</strong> likes</span>
+        </div>
+        <div class="book-detail-genre-row">
+          ${book.genre ? `<button class="book-chip active" type="button">${escHTML(book.genre.replace(/-/g, ' '))}</button>` : ''}
+          ${tagsHtml}
+        </div>
+        <div class="book-detail-actions">
+          <button class="btn btn-purple btn-sm" id="btnStartReading" ${chapters.length ? '' : 'disabled style="opacity:0.5;cursor:not-allowed"'}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Start reading
+          </button>
+          <button class="btn btn-ghost btn-sm" id="btnLikeBook">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+            Like
+          </button>
+          <button class="btn btn-ghost btn-sm" id="btnBookmarkBook">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+            Bookmark
+          </button>
+        </div>
+        <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
+        <div class="chapter-list">
+          <div class="chapter-list-title">Chapters</div>
+          ${chaptersHtml}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Wire chapter rows
+  content.querySelectorAll('.chapter-row').forEach((row, i) => {
+    row.addEventListener('click', () => openChapterReader(i));
+  });
+  // Start reading → first unread chapter (or chapter 1)
+  document.getElementById('btnStartReading')?.addEventListener('click', () => openChapterReader(0));
+  document.getElementById('btnLikeBook')?.addEventListener('click', () => toggleBookLike(book.id));
+  document.getElementById('btnBookmarkBook')?.addEventListener('click', () => toggleBookBookmark(book.id));
+}
+
+async function toggleBookLike(bookId) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) { toast('Sign in to like books', 'error'); return; }
+  // Try delete first; if no row, insert.
+  const { count } = await supabase.from('book_likes').delete()
+    .eq('user_id', user.id).eq('book_id', bookId).select('*', { count: 'exact', head: true });
+  if (count) { toast('Removed like', 'success'); return; }
+  const { error } = await supabase.from('book_likes').insert({ user_id: user.id, book_id: bookId });
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  toast('Liked', 'success');
+}
+async function toggleBookBookmark(bookId) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) { toast('Sign in to bookmark books', 'error'); return; }
+  const { count } = await supabase.from('book_bookmarks').delete()
+    .eq('user_id', user.id).eq('book_id', bookId).select('*', { count: 'exact', head: true });
+  if (count) { toast('Removed bookmark', 'success'); return; }
+  const { error } = await supabase.from('book_bookmarks').insert({ user_id: user.id, book_id: bookId });
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  toast('Bookmarked', 'success');
+}
+
+// Back to book list
+document.getElementById('btnBackBooks')?.addEventListener('click', () => showBook());
+
+// ── Chapter reader ──
+async function openChapterReader(chapterIndex) {
+  if (!currentBookDetail || !currentBookDetail.chapters[chapterIndex]) return;
+  currentChapterIndex = chapterIndex;
+  const chapter = currentBookDetail.chapters[chapterIndex];
+
+  feedEl.style.display = 'none';
+  storiesEl.style.display = 'none';
+  composeEl.style.display = 'none';
+  profilePage.style.display = 'none';
+  videoPlayerPage.style.display = 'none';
+  videosPage.style.display = 'none';
+  studioPage.style.display = 'none';
+  authorPage.style.display = 'none';
+  bookPage.style.display = 'none';
+  bookDetailPage.style.display = 'none';
+  chapterReaderPage.style.display = 'block';
+
+  document.getElementById('readerBookTitle').textContent = currentBookDetail.book.title || 'Book';
+  document.getElementById('readerChapterTitle').textContent = chapter.title || `Chapter ${chapter.chapter_number}`;
+  document.getElementById('readerProgress').textContent = `Chapter ${chapter.chapter_number} of ${currentBookDetail.chapters.length}`;
+  document.getElementById('btnReaderPrev').disabled = chapterIndex <= 0;
+  document.getElementById('btnReaderNext').disabled = chapterIndex >= currentBookDetail.chapters.length - 1;
+
+  history.pushState(null, '', `#book/${currentBookDetail.book.id}/chapter/${chapter.chapter_number}`);
+
+  const content = document.getElementById('readerContent');
+  content.innerHTML = '<div class="loading">Loading chapter...</div>';
+
+  // Fetch full chapter content
+  const { data, error } = await supabase
+    .from('chapters')
+    .select('id, chapter_number, title, content')
+    .eq('id', chapter.id)
+    .single();
+
+  if (error || !data) {
+    content.innerHTML = `<div class="loading">Couldn't load chapter</div>`;
+    return;
+  }
+
+  // Apply current font size and inject HTML content
+  content.style.fontSize = `${readerFontSize}rem`;
+  content.innerHTML = data.content || '<p><em>(No content)</em></p>';
+  content.scrollTop = 0;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  // Save reading progress (best-effort, fire-and-forget)
+  saveReadingProgress(currentBookDetail.book.id, data.id, chapter.chapter_number);
+}
+
+async function saveReadingProgress(bookId, chapterId, chapterNumber) {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    await supabase.from('book_reads').upsert({
+      user_id: user.id,
+      book_id: bookId,
+      last_chapter_id: chapterId,
+      last_chapter_number: chapterNumber,
+      last_read_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,book_id' });
+  } catch (e) { /* ignore */ }
+}
+
+// Reader controls
+document.getElementById('btnReaderPrev')?.addEventListener('click', () => {
+  if (currentChapterIndex > 0) openChapterReader(currentChapterIndex - 1);
+});
+document.getElementById('btnReaderNext')?.addEventListener('click', () => {
+  if (currentBookDetail && currentChapterIndex < currentBookDetail.chapters.length - 1) {
+    openChapterReader(currentChapterIndex + 1);
+  }
+});
+document.getElementById('btnBackBookDetail')?.addEventListener('click', () => {
+  if (currentBookDetail) openBookDetail(currentBookDetail.book.id);
+});
+document.getElementById('btnReaderFontSmaller')?.addEventListener('click', () => {
+  readerFontSize = Math.max(0.85, readerFontSize - 0.05);
+  localStorage.setItem('selebox_reader_font', readerFontSize);
+  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
+});
+document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => {
+  readerFontSize = Math.min(1.6, readerFontSize + 0.05);
+  localStorage.setItem('selebox_reader_font', readerFontSize);
+  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
+});
 
 // ── Author (Manuscript Studio) page ──
 function showAuthor() {
@@ -2743,6 +3122,10 @@ window.addEventListener('popstate', () => {
   } else if (hash === '#book') {
     setSidebarActive('btnBook');
     showBook();
+  } else if (hash.startsWith('#book/')) {
+    setSidebarActive('btnBook');
+    const bookId = hash.replace('#book/', '').split('/')[0];
+    openBookDetail(bookId);
   } else if (hash === '#author') {
     setSidebarActive('btnAuthor');
     showAuthor();
