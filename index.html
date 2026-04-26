@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Selebox All-In-One</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css"/>
   <link rel="stylesheet" href="css/style.css"/>
 </head>
 <body>
@@ -289,29 +290,226 @@
     
     <!-- Author (Manuscript Studio) Page -->
     <div id="authorPage" style="display:none">
-      <div class="page-hero page-hero-author">
-        <div class="page-hero-content">
-          <h1 class="page-hero-title">Author</h1>
-          <p class="page-hero-subtitle">Write, edit, publish. Your manuscripts in one place.</p>
+
+      <!-- ─── View A: Dashboard (My Books) ─── -->
+      <div id="authorDashboard">
+        <div class="page-hero page-hero-author">
+          <div class="page-hero-content">
+            <h1 class="page-hero-title">Author</h1>
+            <p class="page-hero-subtitle">Write, edit, publish. Your manuscripts in one place.</p>
+          </div>
+          <div class="page-hero-decoration" aria-hidden="true">
+            <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M68 40a20 20 0 0 0-28-28L18 34v28h28z"/>
+              <line x1="54" y1="26" x2="6" y2="74"/>
+              <line x1="58" y1="50" x2="30" y2="50"/>
+            </svg>
+          </div>
         </div>
-        <div class="page-hero-decoration" aria-hidden="true">
-          <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M68 40a20 20 0 0 0-28-28L18 34v28h28z"/>
-            <line x1="54" y1="26" x2="6" y2="74"/>
-            <line x1="58" y1="50" x2="30" y2="50"/>
-          </svg>
+
+        <!-- Stats row -->
+        <div class="author-stats" id="authorStats">
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyBooks">0</div>
+              <div class="author-stat-label">Books</div>
+            </div>
+          </div>
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyChapters">0</div>
+              <div class="author-stat-label">Chapters</div>
+            </div>
+          </div>
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyReads">0</div>
+              <div class="author-stat-label">Total reads</div>
+            </div>
+          </div>
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#ec4899,#f43f5e)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyLikes">0</div>
+              <div class="author-stat-label">Likes</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="author-toolbar">
+          <h2 class="author-section-title">My books</h2>
+          <button class="btn btn-purple btn-sm" id="btnNewBook">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New book
+          </button>
+        </div>
+
+        <!-- Books table -->
+        <div id="authorBooksContent">
+          <div class="loading">Loading your books...</div>
         </div>
       </div>
-      <div class="page-empty">
-        <div class="page-empty-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+
+      <!-- ─── View B: Book editor (metadata + chapter list) ─── -->
+      <div id="authorBookEditor" style="display:none">
+        <button class="btn btn-ghost btn-sm" id="btnBackToDashboard" style="margin-bottom:0.75rem">← Back to my books</button>
+
+        <div class="book-editor-grid">
+          <!-- Cover -->
+          <div class="book-editor-cover-wrap">
+            <div class="book-editor-cover" id="bookEditorCover">
+              <div class="book-cover-placeholder">?</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="btnUploadCover" style="margin-top:0.6rem;width:100%">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Upload cover
+            </button>
+            <input type="file" accept="image/*" id="bookCoverFile" style="display:none">
+            <div class="book-editor-status" id="bookEditorStatusBadge">Draft</div>
+          </div>
+
+          <!-- Form -->
+          <div class="book-editor-form">
+            <label class="vu-label">Title <span class="vu-required">*</span></label>
+            <input type="text" id="bookEditorTitle" class="vu-input" maxlength="120" placeholder="The book of...">
+
+            <label class="vu-label">Description</label>
+            <textarea id="bookEditorDescription" class="vu-textarea" rows="4" placeholder="What's it about?"></textarea>
+
+            <label class="vu-label">Genre</label>
+            <select id="bookEditorGenre" class="vu-input">
+              <option value="">—</option>
+              <option value="romance">Romance</option>
+              <option value="hot-romance">Hot Romance</option>
+              <option value="thriller">Thriller</option>
+              <option value="horror">Horror</option>
+              <option value="fantasy">Fantasy</option>
+              <option value="comedy">Comedy</option>
+              <option value="anime">Anime</option>
+              <option value="adventure">Adventure</option>
+              <option value="drama">Drama</option>
+              <option value="mystery">Mystery</option>
+            </select>
+
+            <label class="vu-label">Tags <small style="color:#888">comma-separated</small></label>
+            <input type="text" id="bookEditorTags" class="vu-input" placeholder="dark, slowburn, enemies-to-lovers">
+
+            <label class="vu-label">Status</label>
+            <select id="bookEditorBookStatus" class="vu-input">
+              <option value="draft">Draft (not visible to readers)</option>
+              <option value="ongoing">Ongoing</option>
+              <option value="completed">Completed</option>
+              <option value="paused">Paused</option>
+            </select>
+
+            <div class="book-editor-actions">
+              <label class="book-editor-publish-toggle">
+                <input type="checkbox" id="bookEditorPublic">
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Visible to readers</span>
+              </label>
+              <button class="btn btn-purple btn-sm" id="btnSaveBook">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                Save
+              </button>
+            </div>
+          </div>
         </div>
-        <h2 class="page-empty-title">No manuscripts yet</h2>
-        <p class="page-empty-body">Start your first story. Add a cover, write chapters, and publish when you're ready — readers will find it on the <strong>Book</strong> page.</p>
-        <button class="btn btn-purple btn-sm" id="btnNewManuscript" disabled style="opacity:0.6;cursor:not-allowed">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          Start writing — coming soon
-        </button>
+
+        <!-- Chapters list -->
+        <div class="book-editor-chapters">
+          <div class="book-editor-chapters-head">
+            <h3 class="author-section-title">Chapters</h3>
+            <button class="btn btn-purple btn-sm" id="btnNewChapter">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add chapter
+            </button>
+          </div>
+          <div id="bookEditorChapters">
+            <div class="loading">Loading chapters...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── View C: Chapter editor (Quill) ─── -->
+      <div id="authorChapterEditor" style="display:none">
+        <div class="chapter-editor-bar">
+          <button class="reader-back" id="btnBackToBookEditor" title="Back to book">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <div class="chapter-editor-bar-mid">
+            <input type="text" id="chapterEditorTitle" class="chapter-editor-title-input" placeholder="Chapter title…" maxlength="160">
+            <div class="chapter-editor-meta">
+              <span class="chapter-save-status" id="chapterSaveStatus">Idle</span>
+              <span class="chapter-word-count"><span id="chapterWordCount">0</span> words</span>
+            </div>
+          </div>
+          <div class="chapter-editor-actions">
+            <label class="book-editor-publish-toggle">
+              <input type="checkbox" id="chapterEditorPublished">
+              <span class="toggle-slider"></span>
+              <span class="toggle-label" style="font-size:0.78rem">Published</span>
+            </label>
+            <button class="btn btn-purple btn-sm" id="btnSaveChapter">Save</button>
+          </div>
+        </div>
+        <div id="chapterEditorQuill"></div>
+      </div>
+
+    </div>
+
+    <!-- New Book Modal -->
+    <div class="modal-overlay video-upload-overlay" id="newBookModal" style="display:none">
+      <div class="vu-modal" style="max-width:540px">
+        <div class="vu-header">
+          <div class="vu-header-text">
+            <h2 class="vu-title">Create a new book</h2>
+            <p class="vu-subtitle">You can fill in the rest later.</p>
+          </div>
+          <button class="vu-close" id="newBookClose" aria-label="Close">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="vu-body">
+          <div class="vu-form">
+            <label class="vu-label">Title <span class="vu-required">*</span></label>
+            <input type="text" id="newBookTitle" class="vu-input" maxlength="120" placeholder="Untitled novel">
+
+            <label class="vu-label">Genre</label>
+            <select id="newBookGenre" class="vu-input">
+              <option value="">—</option>
+              <option value="romance">Romance</option>
+              <option value="hot-romance">Hot Romance</option>
+              <option value="thriller">Thriller</option>
+              <option value="horror">Horror</option>
+              <option value="fantasy">Fantasy</option>
+              <option value="comedy">Comedy</option>
+              <option value="anime">Anime</option>
+              <option value="adventure">Adventure</option>
+              <option value="drama">Drama</option>
+              <option value="mystery">Mystery</option>
+            </select>
+
+            <label class="vu-label">Short description</label>
+            <textarea id="newBookDescription" class="vu-textarea" rows="3" placeholder="What's it about?"></textarea>
+          </div>
+        </div>
+        <div class="vu-footer">
+          <button class="vu-btn vu-btn-secondary" id="newBookCancel">Cancel</button>
+          <button class="vu-btn vu-btn-primary" id="newBookCreate">Create book</button>
+        </div>
       </div>
     </div>
 
@@ -701,6 +899,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
