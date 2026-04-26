@@ -3996,59 +3996,62 @@ body:not(.light) .post-menu-btn:hover {
   color: #ddd6fe;
 }
 
-/* Floating dropdown menu */
+/* Floating dropdown menu — minimalist, premium */
 .post-action-menu {
   background: white;
-  border: 1px solid rgba(124, 58, 237, 0.15);
-  border-radius: 14px;
-  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.14), 0 4px 12px rgba(124, 58, 237, 0.08);
-  padding: 0.4rem;
-  min-width: 260px;
-  max-width: 320px;
+  border: 1px solid rgba(17, 24, 39, 0.06);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(15, 10, 28, 0.12), 0 2px 6px rgba(15, 10, 28, 0.06);
+  padding: 0.3rem;
+  min-width: 180px;
   z-index: 9999;
-  animation: pamFadeIn 0.16s ease;
+  animation: pamFadeIn 0.14s ease;
 }
 @keyframes pamFadeIn {
-  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
-  to   { opacity: 1; transform: translateY(0)    scale(1);    }
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0);    }
 }
 
 .post-action-menu button {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
+  display: block;
   width: 100%;
-  padding: 0.7rem 0.85rem;
+  padding: 0.55rem 0.85rem;
   background: transparent;
   border: none;
-  border-radius: 9px;
+  border-radius: 8px;
   color: #1f2937;
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   font-weight: 500;
   font-family: inherit;
+  letter-spacing: -0.005em;
   cursor: pointer;
   text-align: left;
   transition: background 0.12s, color 0.12s;
 }
-.post-action-menu button:hover { background: rgba(124, 58, 237, 0.08); }
-.post-action-menu button.pam-danger:hover { background: rgba(239, 68, 68, 0.08); color: #b91c1c; }
+.post-action-menu button:hover { background: rgba(124, 58, 237, 0.06); }
 
-.post-action-menu .pam-icon {
-  font-size: 1rem;
-  width: 1.3rem;
-  text-align: center;
-  flex-shrink: 0;
-  filter: grayscale(0.1);
+/* Subtle hairline separator above the destructive action */
+.post-action-menu button.pam-danger {
+  margin-top: 0.25rem;
+  border-top: 1px solid rgba(17, 24, 39, 0.06);
+  padding-top: 0.7rem;
+  border-radius: 0 0 8px 8px;
+  color: #dc2626;
 }
+.post-action-menu button.pam-danger:hover { background: rgba(239, 68, 68, 0.06); color: #b91c1c; }
 
 body:not(.light) .post-action-menu {
   background: #1a1428;
-  border-color: rgba(167, 139, 250, 0.20);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), 0 4px 14px rgba(124, 58, 237, 0.18);
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 body:not(.light) .post-action-menu button { color: #e5e7eb; }
-body:not(.light) .post-action-menu button:hover { background: rgba(167, 139, 250, 0.12); }
-body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(248, 113, 113, 0.12); color: #fca5a5; }
+body:not(.light) .post-action-menu button:hover { background: rgba(167, 139, 250, 0.10); }
+body:not(.light) .post-action-menu button.pam-danger {
+  border-top-color: rgba(255, 255, 255, 0.06);
+  color: #f87171;
+}
+body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(248, 113, 113, 0.10); color: #fca5a5; }
 
 /* ─── Generic modal (used by Report) ─── */
 .modal-backdrop {
