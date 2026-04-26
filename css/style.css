@@ -694,6 +694,7 @@ body.light .reader-bar { background: rgba(255, 255, 255, 0.85); border-color: #e
 .reader-tool:hover { background: rgba(139, 92, 246, 0.10); border-color: rgba(139, 92, 246, 0.4); color: #c4b5fd; }
 
 .reader-content {
+  position: relative;
   max-width: 720px;
   margin: 0 auto;
   padding: 1rem 0.5rem 2.5rem;
@@ -701,6 +702,24 @@ body.light .reader-bar { background: rgba(255, 255, 255, 0.85); border-color: #e
   line-height: 1.85;
   color: var(--text);
   font-family: 'Georgia', 'Iowan Old Style', 'Palatino', serif;
+  /* Anti-copy: discourage casual selection/copying */
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  -webkit-touch-callout: none;        /* iOS long-press preview */
+  -webkit-tap-highlight-color: transparent;
+  /* Username watermark applied via JS by setting --reader-watermark-bg */
+  background-image: var(--reader-watermark-bg, none);
+  background-repeat: repeat;
+  background-position: 0 0;
+}
+/* Allow selection inside any future input/textarea/comments inside the reader if needed */
+.reader-content input,
+.reader-content textarea,
+.reader-content [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
 }
 body.light .reader-content { color: #1f2937; }
 .reader-content p { margin: 0 0 1.2em; }
