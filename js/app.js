@@ -4802,7 +4802,13 @@ let _notifications = [];
 let _notifUnreadCount = 0;
 let _notifChannel = null;
 let _notifPanelOpen = false;
+let _notifFilter = 'all';      // 'all' | 'you' | 'following'
 const _notifActorCache = {};   // user_id → { username, avatar_url }
+
+// Categorize a notification for the filter tabs
+function notifCategory(n) {
+  return (n?.type || '').startsWith('follow_') ? 'following' : 'you';
+}
 
 async function initNotifications() {
   if (!currentUser) return;
@@ -4892,16 +4898,25 @@ function updateNotifBadge() {
 function renderNotifications() {
   const list = document.getElementById('notificationsList');
   if (!list) return;
-  if (!_notifications.length) {
-    list.innerHTML = `
-      <div class="notifications-empty">
-        <p style="margin:0;font-size:0.85rem">You're all caught up.</p>
-        <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone reacts, comments, or replies, it'll show up here.</p>
-      </div>`;
+
+  const visible = _notifFilter === 'all'
+    ? _notifications
+    : _notifications.filter(n => notifCategory(n) === _notifFilter);
+
+  if (!visible.length) {
+    const msg = _notifications.length === 0
+      ? `<p style="margin:0;font-size:0.85rem">You're all caught up.</p>
+         <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone reacts, comments, replies, or someone you follow posts, it'll show up here.</p>`
+      : (_notifFilter === 'you'
+          ? `<p style="margin:0;font-size:0.85rem">No activity on your content yet.</p>
+             <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">Reactions and comments on your posts/books will appear here.</p>`
+          : `<p style="margin:0;font-size:0.85rem">Nothing from people you follow yet.</p>
+             <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone you follow posts, uploads, or publishes, you'll see it here.</p>`);
+    list.innerHTML = `<div class="notifications-empty">${msg}</div>`;
     return;
   }
 
-  list.innerHTML = _notifications.map(n => {
+  list.innerHTML = visible.map(n => {
     const actor = _notifActorCache[n.actor_id] || {};
     const avatar = actor.avatar_url
       ? `<img src="${escHTML(actor.avatar_url)}"/>`
@@ -4931,16 +4946,25 @@ function renderNotifications() {
 function notificationLabel(n, knownUsername) {
   const username = knownUsername || _notifActorCache[n.actor_id]?.username || 'Someone';
   const actorTag = `<strong>${escHTML(username)}</strong>`;
+  const titleHint = n.metadata?.title ? ` <em style="color:var(--text2)">"${escHTML(n.metadata.title)}"</em>` : '';
   switch (n.type) {
-    case 'like_post':           return `${actorTag} reacted to your post`;
-    case 'like_comment':        return `${actorTag} reacted to your comment`;
-    case 'like_book':           return `${actorTag} liked your book${n.metadata?.title ? ` <em style="color:var(--text2)">"${escHTML(n.metadata.title)}"</em>` : ''}`;
-    case 'comment_post':        return `${actorTag} commented on your post`;
-    case 'reply_comment':       return `${actorTag} replied to your comment`;
-    case 'comment_chapter':     return `${actorTag} commented on your chapter`;
-    case 'reply_chapter_comment': return `${actorTag} replied to your chapter comment`;
-    case 'repost_post':         return `${actorTag} reposted your post`;
-    default:                    return `${actorTag} interacted with your content`;
+    // ── You: engagement on your stuff ──
+    case 'like_post':              return `${actorTag} reacted to your post`;
+    case 'like_comment':           return `${actorTag} reacted to your comment`;
+    case 'like_book':              return `${actorTag} liked your book${titleHint}`;
+    case 'comment_post':           return `${actorTag} commented on your post`;
+    case 'reply_comment':          return `${actorTag} replied to your comment`;
+    case 'comment_chapter':        return `${actorTag} commented on your chapter`;
+    case 'reply_chapter_comment':  return `${actorTag} replied to your chapter comment`;
+    case 'repost_post':            return `${actorTag} reposted your post`;
+
+    // ── Following: people you follow doing things ──
+    case 'follow_new_post':        return `${actorTag} posted something new`;
+    case 'follow_new_video':       return `${actorTag} uploaded a new video`;
+    case 'follow_new_book':        return `${actorTag} published a new book${titleHint}`;
+    case 'follow_repost':          return `${actorTag} shared a post`;
+
+    default:                       return `${actorTag} did something on Selebox`;
   }
 }
 
@@ -5014,6 +5038,15 @@ document.getElementById('btnNotifications')?.addEventListener('click', (e) => {
 document.getElementById('notifMarkAll')?.addEventListener('click', (e) => {
   e.stopPropagation();
   markAllNotificationsRead();
+});
+// Filter tabs
+document.querySelectorAll('.notif-filter-tab').forEach(tab => {
+  tab.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.querySelectorAll('.notif-filter-tab').forEach(t => t.classList.toggle('active', t === tab));
+    _notifFilter = tab.dataset.filter || 'all';
+    renderNotifications();
+  });
 });
 // Click outside the panel → close
 document.addEventListener('click', (e) => {
