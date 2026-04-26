@@ -1946,92 +1946,96 @@ async function fetchAppwriteBooks() {
   }
 }
 
-// Aggregate views (sum of readCount per book) and likes (count, mapped via chapters → book) for a list of book IDs.
+// Helper: get an ID from any possible shape Appwrite returns for a relationship field.
+// Could be a string, an object with $id, an array of strings, or an array of objects.
+function pluckRefId(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return pluckRefId(value[0]);
+  if (typeof value === 'object') return value.$id || null;
+  return null;
+}
+
+// Aggregate views (sum of readCount per book) and likes (count, mapped via chapters → book).
+// Strategy: fetch all rows and aggregate locally, because Appwrite's `equal` query on
+// relationship attributes is inconsistent across versions and configurations.
 async function fetchAppwriteBookStats(bookIds) {
   const empty = { views: {}, likes: {}, chaptersCount: {} };
   if (!bookIds || !bookIds.length) return empty;
-  if (!APPWRITE.chapterReadsCollection && !APPWRITE.chaptersCollection && !APPWRITE.chapterLikesCollection) return empty;
 
+  const wantedBooks = new Set(bookIds);
   const views = {};
   const likes = {};
   const chaptersCount = {};
 
-  try {
-    // ── Reads + chapters in parallel ──
-    const tasks = [];
+  // Fetch reads and chapters in parallel
+  const [readDocs, chapterDocs] = await Promise.all([
+    APPWRITE.chapterReadsCollection ? fetchAllAppwrite(APPWRITE.chapterReadsCollection) : Promise.resolve([]),
+    APPWRITE.chaptersCollection      ? fetchAllAppwrite(APPWRITE.chaptersCollection)     : Promise.resolve([]),
+  ]);
 
-    if (APPWRITE.chapterReadsCollection) {
-      tasks.push((async () => {
-        try {
-          // Batch by 100 IDs (Appwrite equal-array cap)
-          for (let i = 0; i < bookIds.length; i += 100) {
-            const batch = bookIds.slice(i, i + 100);
-            const r = await appwriteList(APPWRITE.chapterReadsCollection, [
-              JSON.stringify({ method: 'equal', attribute: 'book', values: batch }),
-              JSON.stringify({ method: 'limit', values: [5000] }),
-            ]);
-            (r.documents || []).forEach(row => {
-              const bookId = typeof row.book === 'string' ? row.book : row.book?.$id;
-              if (!bookId) return;
-              views[bookId] = (views[bookId] || 0) + (row.readCount || 0);
-            });
-          }
-        } catch (e) { console.warn('Reads aggregate failed:', e); }
-      })());
-    }
-
-    let chapterDocs = [];
-    if (APPWRITE.chaptersCollection) {
-      tasks.push((async () => {
-        try {
-          for (let i = 0; i < bookIds.length; i += 100) {
-            const batch = bookIds.slice(i, i + 100);
-            const r = await appwriteList(APPWRITE.chaptersCollection, [
-              JSON.stringify({ method: 'equal', attribute: 'book', values: batch }),
-              JSON.stringify({ method: 'limit', values: [5000] }),
-            ]);
-            chapterDocs = chapterDocs.concat(r.documents || []);
-          }
-        } catch (e) { console.warn('Chapters aggregate failed:', e); }
-      })());
-    }
-
-    await Promise.all(tasks);
-
-    // Build chapter → book map and chapter count per book (only published chapters)
-    const chapterBookMap = {};
-    chapterDocs.forEach(c => {
-      const bookId = typeof c.book === 'string' ? c.book : c.book?.$id;
-      if (!bookId) return;
-      chapterBookMap[c.$id] = bookId;
-      const isPublished = (c.status || '').toLowerCase() !== 'draft';
-      if (isPublished) chaptersCount[bookId] = (chaptersCount[bookId] || 0) + 1;
-    });
-
-    // ── Likes per chapter, summed up to per-book ──
-    if (APPWRITE.chapterLikesCollection && chapterDocs.length) {
-      const chapterIds = chapterDocs.map(c => c.$id);
-      for (let i = 0; i < chapterIds.length; i += 100) {
-        const batch = chapterIds.slice(i, i + 100);
-        try {
-          const r = await appwriteList(APPWRITE.chapterLikesCollection, [
-            JSON.stringify({ method: 'equal', attribute: 'booksChapter', values: batch }),
-            JSON.stringify({ method: 'limit', values: [5000] }),
-          ]);
-          (r.documents || []).forEach(l => {
-            const chapterId = typeof l.booksChapter === 'string' ? l.booksChapter : l.booksChapter?.$id;
-            if (!chapterId) return;
-            const bookId = chapterBookMap[chapterId];
-            if (bookId) likes[bookId] = (likes[bookId] || 0) + 1;
-          });
-        } catch (e) { console.warn('Likes batch failed:', e); }
-      }
-    }
-  } catch (err) {
-    console.error('fetchAppwriteBookStats failed:', err);
+  // Reads → views
+  for (const row of readDocs) {
+    const bookId = pluckRefId(row.book);
+    if (!bookId || !wantedBooks.has(bookId)) continue;
+    views[bookId] = (views[bookId] || 0) + (Number(row.readCount) || 0);
   }
 
+  // Build chapter → book map (only for our books) + chapter counts
+  const chapterBookMap = {};
+  for (const c of chapterDocs) {
+    const bookId = pluckRefId(c.book);
+    if (!bookId || !wantedBooks.has(bookId)) continue;
+    chapterBookMap[c.$id] = bookId;
+    const isPublished = (c.status || '').toLowerCase() !== 'draft';
+    if (isPublished) chaptersCount[bookId] = (chaptersCount[bookId] || 0) + 1;
+  }
+
+  // Likes → count per chapter → roll up to book
+  if (APPWRITE.chapterLikesCollection && Object.keys(chapterBookMap).length) {
+    const likeDocs = await fetchAllAppwrite(APPWRITE.chapterLikesCollection);
+    for (const l of likeDocs) {
+      const chapterId = pluckRefId(l.booksChapter);
+      if (!chapterId) continue;
+      const bookId = chapterBookMap[chapterId];
+      if (!bookId) continue;
+      likes[bookId] = (likes[bookId] || 0) + 1;
+    }
+  }
+
+  // Debug: log whether anything came back so we can spot empty collections fast
+  // eslint-disable-next-line no-console
+  console.log('[appwrite stats]',
+    'reads:', readDocs.length,
+    '· chapters:', chapterDocs.length,
+    '· views map keys:', Object.keys(views).length,
+    '· likes map keys:', Object.keys(likes).length);
+
   return { views, likes, chaptersCount };
+}
+
+// Page through an Appwrite collection until empty, returning all documents.
+// Caps at ~10k to avoid runaway loops on misconfigured collections.
+async function fetchAllAppwrite(collectionId) {
+  const all = [];
+  const PAGE = 100;
+  let offset = 0;
+  for (let safety = 0; safety < 100; safety++) {  // up to 10000 docs
+    try {
+      const r = await appwriteList(collectionId, [
+        JSON.stringify({ method: 'limit',  values: [PAGE] }),
+        JSON.stringify({ method: 'offset', values: [offset] }),
+      ]);
+      const docs = r.documents || [];
+      all.push(...docs);
+      if (docs.length < PAGE) break;
+      offset += PAGE;
+    } catch (err) {
+      console.warn(`fetchAllAppwrite(${collectionId}) failed at offset ${offset}:`, err);
+      break;
+    }
+  }
+  return all;
 }
 
 // Pull uploader IDs out of an Appwrite books list.
