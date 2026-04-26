@@ -224,19 +224,43 @@ window.filterByUser = async (userId, username) => {
 };
 
 // ── Feed ──
+// ── Feed pagination + lazy loading ──
+const FEED_PAGE_SIZE = 15;
+let _feedOffset = 0;
+let _hasMoreFeedPosts = true;
+let _isLoadingMoreFeed = false;
+let _feedScrollObserver = null;
+let _feedVideoObserver = null;
+let _feedPostObserver = null;
+
+const FEED_SELECT = `*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`;
+
 window.loadFeed = async function() {
   const feed = document.getElementById('feed');
+  const sentinel = document.getElementById('feedSentinel');
   feed.innerHTML = '<div class="loading">Loading feed...</div>';
+  if (sentinel) sentinel.style.display = 'none';
+
+  // Reset pagination state
+  _feedOffset = 0;
+  _hasMoreFeedPosts = true;
+  _isLoadingMoreFeed = false;
+  if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
+  if (_feedVideoObserver)  { _feedVideoObserver.disconnect();  _feedVideoObserver = null; }
+  if (_feedPostObserver)   { _feedPostObserver.disconnect();   _feedPostObserver = null; }
 
   const { data, error } = await supabase
     .from('posts')
-    .select(`*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
+    .select(FEED_SELECT)
     .order('created_at', { ascending: false })
-    .limit(50);
+    .range(0, FEED_PAGE_SIZE - 1);
 
   if (error) { feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`; return; }
 
   posts = data || [];
+  if (posts.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
+  _feedOffset = posts.length;
+
   if (!posts.length) {
     feed.innerHTML = '<div class="empty"><h3>No posts yet</h3><p>Be the first to share something!</p></div>';
     return;
@@ -245,27 +269,135 @@ window.loadFeed = async function() {
   feed.innerHTML = '';
   posts.forEach((post, i) => {
     const el = renderPost(post);
-    el.style.animationDelay = `${i * 0.04}s`;
+    el.style.animationDelay = `${(i * 0.04).toFixed(3)}s`;
     feed.appendChild(el);
   });
-  attachFeedVideoPlayers();
+
+  setupFeedLazyLoaders(feed);
+  if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
 };
 
-function attachFeedVideoPlayers() {
-  document.querySelectorAll('.post-video').forEach(wrap => {
-    const url = wrap.dataset.videoUrl;
-    const video = wrap.querySelector('.post-video-player');
-    if (!url || !video || video.dataset.attached) return;
-    video.dataset.attached = '1';
+async function loadMoreFeed() {
+  if (_isLoadingMoreFeed || !_hasMoreFeedPosts) return;
+  _isLoadingMoreFeed = true;
 
-    if (url.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !video.canPlayType('application/vnd.apple.mpegurl')) {
-      const hls = new Hls();
-      hls.loadSource(url);
-      hls.attachMedia(video);
-    } else {
-      video.src = url;
+  const sentinel = document.getElementById('feedSentinel');
+  sentinel.style.display = 'block';
+  sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more posts…</div>';
+
+  try {
+    const { data, error } = await supabase
+      .from('posts')
+      .select(FEED_SELECT)
+      .order('created_at', { ascending: false })
+      .range(_feedOffset, _feedOffset + FEED_PAGE_SIZE - 1);
+
+    if (error) throw error;
+
+    const more = data || [];
+    if (more.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
+    _feedOffset += more.length;
+
+    if (more.length) {
+      const feed = document.getElementById('feed');
+      const presentIds = new Set(Array.from(feed.querySelectorAll('.post-card')).map(c => c.dataset.postid));
+      more.filter(p => !presentIds.has(p.id)).forEach((post, i) => {
+        const el = renderPost(post);
+        el.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
+        feed.appendChild(el);
+        // Re-observe new card for lazy loaders
+        if (_feedPostObserver) _feedPostObserver.observe(el);
+        el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
+      });
+      posts = posts.concat(more);
     }
-  });
+
+    if (_hasMoreFeedPosts) {
+      sentinel.innerHTML = '<div class="loading book-grid-loadmore">Loading more posts…</div>';
+    } else {
+      sentinel.innerHTML = `<div class="book-grid-end-msg">You\'re all caught up · ${posts.length.toLocaleString()} posts</div>`;
+      if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
+    }
+  } catch (err) {
+    console.error('Failed to load more feed:', err);
+    sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
+  } finally {
+    _isLoadingMoreFeed = false;
+  }
+}
+
+function setupFeedInfiniteScroll() {
+  const sentinel = document.getElementById('feedSentinel');
+  if (!sentinel) return;
+  sentinel.style.display = 'block';
+
+  if (_feedScrollObserver) _feedScrollObserver.disconnect();
+  if (!('IntersectionObserver' in window)) return;
+
+  _feedScrollObserver = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) loadMoreFeed();
+  }, { root: null, rootMargin: '600px 0px', threshold: 0.01 });
+  _feedScrollObserver.observe(sentinel);
+}
+
+// One-shot lazy loaders: HLS for videos, reactions/comments per post-card.
+// Posts/videos that never scroll into view never trigger an extra query.
+function setupFeedLazyLoaders(container) {
+  if (!('IntersectionObserver' in window)) {
+    // Fallback: load everything eagerly
+    container.querySelectorAll('.post-video').forEach(attachHlsToPostVideo);
+    container.querySelectorAll('.post-card').forEach(triggerPostLazyLoad);
+    return;
+  }
+
+  if (_feedVideoObserver) _feedVideoObserver.disconnect();
+  _feedVideoObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      attachHlsToPostVideo(e.target);
+      _feedVideoObserver.unobserve(e.target);
+    }
+  }, { root: null, rootMargin: '300px 0px', threshold: 0.01 });
+
+  if (_feedPostObserver) _feedPostObserver.disconnect();
+  _feedPostObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      triggerPostLazyLoad(e.target);
+      _feedPostObserver.unobserve(e.target);
+    }
+  }, { root: null, rootMargin: '500px 0px', threshold: 0.01 });
+
+  container.querySelectorAll('.post-video').forEach(v => _feedVideoObserver.observe(v));
+  container.querySelectorAll('.post-card').forEach(c => _feedPostObserver.observe(c));
+}
+
+function attachHlsToPostVideo(wrap) {
+  const url = wrap.dataset.videoUrl;
+  const video = wrap.querySelector('.post-video-player');
+  if (!url || !video || video.dataset.attached) return;
+  video.dataset.attached = '1';
+  if (url.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !video.canPlayType('application/vnd.apple.mpegurl')) {
+    const hls = new Hls();
+    hls.loadSource(url);
+    hls.attachMedia(video);
+  } else {
+    video.src = url;
+  }
+}
+
+function triggerPostLazyLoad(card) {
+  if (card.dataset.lazyLoaded === '1') return;
+  card.dataset.lazyLoaded = '1';
+  const id = card.dataset.postid;
+  if (!id) return;
+  loadReactions(id, 'post');
+  loadCommentCount(id);
+}
+
+// Backwards-compatibility shim — older code still calls this.
+function attachFeedVideoPlayers() {
+  document.querySelectorAll('.post-video').forEach(attachHlsToPostVideo);
 }
 
 function renderPost(post) {
@@ -280,10 +412,10 @@ function renderPost(post) {
 
   div.innerHTML = `
     <div class="post-header">
-      <div class="avatar">${avatarHTML}</div>
+      <div class="avatar profile-link" data-user-id="${post.user_id}" title="View profile">${avatarHTML}</div>
       <div style="flex:1">
         <div style="display:flex;align-items:center">
-          <span class="post-author">${escHTML(name)}</span>
+          <span class="post-author profile-link" data-user-id="${post.user_id}" title="View profile">${escHTML(name)}</span>
           ${isGuest ? '<span class="post-guest">Guest</span>' : ''}
         </div>
         <div class="post-time">${timeAgo(post.created_at)}</div>
@@ -311,9 +443,9 @@ function renderPost(post) {
     ${post.reposted_from && post.original ? `
       <div class="reposted-card">
         <div class="post-header">
-          <div class="avatar">${post.original.profiles?.avatar_url ? `<img src="${post.original.profiles.avatar_url}"/>` : initials(post.original.profiles?.username || 'U')}</div>
+          <div class="avatar profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${post.original.profiles?.avatar_url ? `<img src="${post.original.profiles.avatar_url}"/>` : initials(post.original.profiles?.username || 'U')}</div>
           <div>
-            <span class="post-author">${escHTML(post.original.profiles?.username || 'Unknown')}</span>
+            <span class="post-author profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${escHTML(post.original.profiles?.username || 'Unknown')}</span>
             <div class="post-time">${timeAgo(post.original.created_at)}</div>
           </div>
         </div>
@@ -376,9 +508,8 @@ function renderPost(post) {
 
     <div class="comments-section" id="comments-${post.id}" style="display:none"></div>
   `;
-
-  loadReactions(post.id, 'post');
-  loadCommentCount(post.id);
+  // Reactions and comment count are now loaded lazily by setupFeedLazyLoaders
+  // when the post-card scrolls into view (saves ~2 queries per off-screen post)
   return div;
 }
 
@@ -1285,6 +1416,18 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
     searchResultsEl.classList.remove('open');
   }
+});
+
+// Document-level delegation: clicking any profile avatar/name in the feed
+// (or future cards) opens that user's profile.
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('.profile-link');
+  if (!link) return;
+  const uid = link.dataset.userId;
+  if (!uid) return;
+  e.stopPropagation();
+  e.preventDefault();
+  openProfile(uid);
 });
 
 async function runFeedSearch(query) {
@@ -3203,6 +3346,10 @@ async function createNewBook() {
 }
 
 document.getElementById('btnNewBook')?.addEventListener('click', openNewBookModal);
+// Compose-area Book button (opens the same New Book modal)
+document.getElementById('btnOpenBookUpload')?.addEventListener('click', () => {
+  openNewBookModal();
+});
 document.getElementById('newBookClose')?.addEventListener('click', closeNewBookModal);
 document.getElementById('newBookCancel')?.addEventListener('click', closeNewBookModal);
 document.getElementById('newBookCreate')?.addEventListener('click', createNewBook);
