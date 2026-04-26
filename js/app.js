@@ -1924,17 +1924,72 @@ async function fetchAppwriteBooks() {
       JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
       JSON.stringify({ method: 'limit', values: [80] }),
     ]);
-    return (result.documents || []).map(mapAppwriteBookToBook);
+    const books = result.documents || [];
+
+    // Appwrite listDocuments doesn't expand relationships, so we batch-fetch the uploaders
+    const uploaderIds = collectAppwriteUploaderIds(books);
+    const userMap = await fetchAppwriteUsers(uploaderIds);
+
+    return books.map(b => mapAppwriteBookToBook(b, userMap));
   } catch (err) {
     console.error('Failed to fetch Appwrite books:', err);
     return [];
   }
 }
 
-function mapAppwriteBookToBook(b) {
+// Pull uploader IDs out of an Appwrite books list.
+// `uploader` may come back as: a string ID, an object with $id, or already-embedded with username.
+function collectAppwriteUploaderIds(items) {
+  const ids = new Set();
+  for (const item of items) {
+    const u = item?.uploader;
+    if (!u) continue;
+    if (typeof u === 'string') {
+      ids.add(u);
+    } else if (typeof u === 'object') {
+      // Already-embedded (has username) → no fetch needed
+      if (u.username) continue;
+      if (u.$id) ids.add(u.$id);
+    }
+  }
+  return ids;
+}
+
+async function fetchAppwriteUsers(idSet) {
+  if (!idSet || !idSet.size) return {};
+  const out = {};
+  const ids = [...idSet];
+  // Appwrite caps `equal $id values` at 100 per query; batch just in case.
+  for (let i = 0; i < ids.length; i += 100) {
+    const batch = ids.slice(i, i + 100);
+    try {
+      const userResult = await appwriteList(APPWRITE.usersCollection, [
+        JSON.stringify({ method: 'equal', attribute: '$id', values: batch }),
+        JSON.stringify({ method: 'limit', values: [100] }),
+      ]);
+      (userResult.documents || []).forEach(u => { out[u.$id] = u; });
+    } catch (err) {
+      console.warn('User batch lookup failed:', err);
+    }
+  }
+  return out;
+}
+
+// Resolve the uploader from any of: embedded object, just-ID string, or partial object
+function resolveAppwriteUploader(rawUploader, userMap = {}) {
+  if (!rawUploader) return null;
+  if (typeof rawUploader === 'string') return userMap[rawUploader] || null;
+  if (typeof rawUploader === 'object') {
+    if (rawUploader.username) return rawUploader;       // already expanded
+    if (rawUploader.$id) return userMap[rawUploader.$id] || rawUploader;
+  }
+  return null;
+}
+
+function mapAppwriteBookToBook(b, userMap = {}) {
   const firstTag = (b.tags || [])[0] || '';
   const genreSlug = firstTag.toLowerCase().replace(/\s+/g, '-');
-  const uploader = b.uploader || null;
+  const uploader = resolveAppwriteUploader(b.uploader, userMap);
   return {
     id: 'aw_' + b.$id,
     $id: 'aw_' + b.$id,
@@ -2081,7 +2136,10 @@ async function openBookDetail(bookId) {
         appwriteGet(APPWRITE.booksCollection, appwriteId),
         fetchAppwriteChaptersForBook(appwriteId),
       ]);
-      book = mapAppwriteBookToBook(appwriteBookDoc);
+      // If the uploader didn't come back expanded, fetch the user record
+      const uploaderIds = collectAppwriteUploaderIds([appwriteBookDoc]);
+      const userMap = await fetchAppwriteUsers(uploaderIds);
+      book = mapAppwriteBookToBook(appwriteBookDoc, userMap);
       // For book detail page we want the published-count to match the actual chapters loaded
       book.chapters_count = awChapters.filter(c => c.is_published).length;
       chapters = awChapters.filter(c => c.is_published);
