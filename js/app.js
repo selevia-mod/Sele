@@ -701,10 +701,10 @@ window.openPostActionMenu = (e, btn) => {
   _postActionMenuEl = document.createElement('div');
   _postActionMenuEl.className = 'post-action-menu';
   _postActionMenuEl.innerHTML = `
-    <button data-pam-action="report"><span class="pam-icon">⚐</span><span>Report post</span></button>
-    <button data-pam-action="hide"><span class="pam-icon">🙈</span><span>Hide this post</span></button>
-    <button data-pam-action="snooze"><span class="pam-icon">🔕</span><span>Snooze ${escHTML(authorName)} · 30 days</span></button>
-    <button data-pam-action="block" class="pam-danger"><span class="pam-icon">🚫</span><span>Block ${escHTML(authorName)}</span></button>
+    <button data-pam-action="report">Report</button>
+    <button data-pam-action="hide">Hide post</button>
+    <button data-pam-action="snooze">Snooze · 30 days</button>
+    <button data-pam-action="block" class="pam-danger">Block</button>
   `;
   document.body.appendChild(_postActionMenuEl);
 
