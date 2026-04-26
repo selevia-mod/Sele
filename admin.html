@@ -109,10 +109,24 @@
         <div class="admin-coming-soon">List of hidden posts and unhide actions coming next.</div>
       </section>
 
-      <!-- BANS (placeholder) -->
+      <!-- BANS -->
       <section class="admin-tab-content" data-tab-content="bans" style="display:none">
-        <div class="admin-toolbar"><h2>Banned &amp; suspended</h2></div>
-        <div class="admin-coming-soon">Suspended and banned user list coming next.</div>
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>Banned &amp; suspended</h2>
+            <span class="admin-toolbar-sub" id="bansSubtitle">Loading…</span>
+          </div>
+          <div class="admin-toolbar-right">
+            <select id="bansFilter" class="admin-select">
+              <option value="all">All enforcement</option>
+              <option value="banned">Banned only</option>
+              <option value="suspended">Suspended only</option>
+            </select>
+          </div>
+        </div>
+        <div id="bansList" class="admin-list">
+          <div class="admin-empty">Loading…</div>
+        </div>
       </section>
 
       <!-- ACTIVITY -->
