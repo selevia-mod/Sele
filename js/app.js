@@ -1,5228 +1,3828 @@
-import { supabase, REACTIONS, timeAgo, initials, appwriteList, appwriteGet, APPWRITE, callEdgeFunction } from './supabase.js';
-
-let currentUser = null;
-let currentProfile = null;
-let posts = [];
-
-function toast(msg, type = '') {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'toast' + (type ? ' ' + type : '');
-  el.style.display = 'block';
-  setTimeout(() => el.style.display = 'none', 3000);
-}
-
-async function uploadImage(file) {
-  if (!file) return null;
-  if (!file.type.startsWith('image/')) { toast('Please select an image file', 'error'); return null; }
-  if (file.size > 5 * 1024 * 1024) { toast('Image must be smaller than 5MB', 'error'); return null; }
-  const ext = file.name.split('.').pop().toLowerCase();
-  const filename = `${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
-  const { error } = await supabase.storage.from('images').upload(filename, file, { cacheControl: '3600', upsert: false });
-  if (error) { toast('Upload failed: ' + error.message, 'error'); return null; }
-  const { data } = supabase.storage.from('images').getPublicUrl(filename);
-  return data.publicUrl;
-}
-
-window.openLightbox = (url) => {
-  document.getElementById('lightboxImg').src = url;
-  document.getElementById('lightbox').classList.add('open');
-};
-document.getElementById('lightbox').addEventListener('click', (e) => {
-  if (e.target.id === 'lightbox' || e.target.id === 'lightboxClose') document.getElementById('lightbox').classList.remove('open');
-});
-
-// ── Auth ──
-async function initAuth() {
-  const { data: { session } } = await supabase.auth.getSession();
-  if (session) await onSignedIn(session.user);
-  else showAuth();
-
-  let isFirstAuthEvent = true;
-  supabase.auth.onAuthStateChange(async (event, session) => {
-    // Skip the initial event — we already handled the session above
-    if (isFirstAuthEvent) { isFirstAuthEvent = false; return; }
-    if (session) await onSignedIn(session.user);
-    else showAuth();
-  });
-}
-
-async function onSignedIn(user) {
-  currentUser = user;
-  const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).single();
-  currentProfile = profile;
-  updateTopbarUser();
-  showApp();
-
-  // Notifications — fetch initial batch + start realtime subscription
-  initNotifications();
-
-  // Check URL hash for routing
-  const hash = window.location.hash;
-  if (hash.startsWith('#profile/')) {
-    loadStories();
-    loadFeed();
-    openProfile(hash.replace('#profile/', ''));
-  } else if (hash === '#videos') {
-    setSidebarActive('btnVideos');
-    showVideos();
-  } else if (hash === '#studio') {
-    setSidebarActive('btnStudio');
-    showStudio();
-  } else if (hash === '#book') {
-    setSidebarActive('btnBook');
-    showBook();
-  } else if (hash.startsWith('#book/')) {
-    setSidebarActive('btnBook');
-    const bookId = hash.replace('#book/', '').split('/')[0];
-    openBookDetail(bookId);
-  } else if (hash === '#author') {
-    setSidebarActive('btnAuthor');
-    showAuthor();
-  } else if (hash.startsWith('#author/book/')) {
-    setSidebarActive('btnAuthor');
-    const parts = hash.replace('#author/book/', '').split('/');
-    const bookId = parts[0];
-    if (parts[2]) {
-      openAuthorChapterEditor(bookId, parts[2] === 'new' ? null : parts[2]);
-    } else {
-      openAuthorBookEditor(bookId);
-    }
-  } else if (hash.startsWith('#video/')) {
-    setSidebarActive('btnVideos');
-    playVideo(hash.replace('#video/', ''));
-  } else {
-    loadStories();
-    loadFeed();
-  }
-}
-
-function showAuth() {
-  document.getElementById('authScreen').style.display = 'flex';
-  document.getElementById('appScreen').style.display = 'none';
-}
-function showApp() {
-  document.getElementById('authScreen').style.display = 'none';
-  document.getElementById('appScreen').style.display = 'block';
-}
-
-function updateTopbarUser() {
-  if (!currentProfile) return;
-  const name = currentProfile.username || 'User';
-  const avatarEl = document.getElementById('topbarAvatar');
-  const composeAvatarEl = document.getElementById('composeAvatar');
-  const avatarHTML = currentProfile.avatar_url ? `<img src="${currentProfile.avatar_url}" alt="${name}"/>` : initials(name);
-  avatarEl.innerHTML = avatarHTML;
-  composeAvatarEl.innerHTML = avatarHTML;
-}
-
-document.getElementById('btnGoogle').addEventListener('click', async () => {
-  const { error } = await supabase.auth.signInWithOAuth({
-    provider: 'google',
-    options: { redirectTo: window.location.origin }
-  });
-  if (error) toast(error.message, 'error');
-});
-document.getElementById('btnGuest').addEventListener('click', async () => {
-  const { error } = await supabase.auth.signInAnonymously();
-  if (error) toast(error.message, 'error');
-});
-
-async function signOut() {
-  await supabase.auth.signOut();
-  currentUser = null; currentProfile = null; posts = [];
-}
-document.getElementById('btnSignOut').addEventListener('click', signOut);
-
-// ── Compose ──
-const composeText = document.getElementById('composeText');
-const charCount = document.getElementById('charCount');
-const composeImageInput = document.getElementById('composeImageInput');
-const composeImagePreview = document.getElementById('composeImagePreview');
-let composeImageFile = null;
-
-composeText.addEventListener('input', () => {
-  const len = composeText.value.length;
-  charCount.textContent = `${len} / 5000`;
-  charCount.className = 'char-count' + (len > 4500 ? ' warn' : '') + (len >= 5000 ? ' over' : '');
-  composeText.style.height = 'auto';
-  composeText.style.height = composeText.scrollHeight + 'px';
-});
-
-composeImageInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  composeImageFile = file;
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    composeImagePreview.innerHTML = `
-      <div class="image-preview">
-        <img src="${ev.target.result}" alt="preview"/>
-        <button class="image-preview-remove" id="removeComposeImage">×</button>
-      </div>`;
-    document.getElementById('removeComposeImage').addEventListener('click', () => {
-      composeImageFile = null;
-      composeImagePreview.innerHTML = '';
-      composeImageInput.value = '';
-    });
-  };
-  reader.readAsDataURL(file);
-});
-
-document.getElementById('btnPost').addEventListener('click', async () => {
-  const body = composeText.value.trim();
-  if (!body && !composeImageFile) return;
-  if (!currentUser) return toast('Please sign in first', 'error');
-
-  const btn = document.getElementById('btnPost');
-  btn.disabled = true;
-  btn.textContent = composeImageFile ? 'Uploading...' : 'Posting...';
-
-  let imageUrl = null;
-  if (composeImageFile) {
-    imageUrl = await uploadImage(composeImageFile);
-    if (!imageUrl) { btn.disabled = false; btn.textContent = 'Post'; return; }
-  }
-
-  btn.textContent = 'Posting...';
-  const { error } = await supabase.from('posts').insert({ user_id: currentUser.id, body: body || '', image_url: imageUrl });
-  btn.disabled = false;
-  btn.textContent = 'Post';
-
-  if (error) { toast(error.message, 'error'); return; }
-  composeText.value = '';
-  composeImageFile = null;
-  composeImagePreview.innerHTML = '';
-  composeImageInput.value = '';
-  charCount.textContent = '0 / 5000';
-  toast('Posted!', 'success');
-  loadFeed();
-});
-
-// ── Stories row (users) ──
-async function loadStories() {
-  const row = document.getElementById('storiesRow');
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, username, avatar_url, is_guest')
-    .order('created_at', { ascending: false })
-    .limit(20);
-
-  if (error || !data) { row.innerHTML = ''; return; }
-
-  row.innerHTML = data.map(p => {
-    const avatarHTML = p.avatar_url ? `<img src="${p.avatar_url}" alt="${p.username}"/>` : initials(p.username);
-    return `
-      <div class="story-item" onclick="filterByUser('${p.id}','${escHTML(p.username)}')">
-        <div class="story-avatar">${avatarHTML}</div>
-        <div class="story-name">${escHTML(p.username)}</div>
-      </div>
-    `;
-  }).join('');
-}
-
-// ── Filter by user ──
-window.filterByUser = async (userId, username) => {
-  openProfile(userId);
-};
-
-// ── Feed ──
-// ── Feed pagination + lazy loading ──
-const FEED_PAGE_SIZE = 15;
-let _feedOffset = 0;
-let _hasMoreFeedPosts = true;
-let _isLoadingMoreFeed = false;
-let _feedScrollObserver = null;
-let _feedVideoObserver = null;
-let _feedPostObserver = null;
-
-const FEED_SELECT = `*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`;
-
-window.loadFeed = async function() {
-  const feed = document.getElementById('feed');
-  const sentinel = document.getElementById('feedSentinel');
-  feed.innerHTML = '<div class="loading">Loading feed...</div>';
-  if (sentinel) sentinel.style.display = 'none';
-
-  // Reset pagination state
-  _feedOffset = 0;
-  _hasMoreFeedPosts = true;
-  _isLoadingMoreFeed = false;
-  if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
-  if (_feedVideoObserver)  { _feedVideoObserver.disconnect();  _feedVideoObserver = null; }
-  if (_feedPostObserver)   { _feedPostObserver.disconnect();   _feedPostObserver = null; }
-
-  const { data, error } = await supabase
-    .from('posts')
-    .select(FEED_SELECT)
-    .order('created_at', { ascending: false })
-    .range(0, FEED_PAGE_SIZE - 1);
-
-  if (error) { feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`; return; }
-
-  posts = data || [];
-  if (posts.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
-  _feedOffset = posts.length;
-
-  if (!posts.length) {
-    feed.innerHTML = '<div class="empty"><h3>No posts yet</h3><p>Be the first to share something!</p></div>';
-    return;
-  }
-
-  feed.innerHTML = '';
-  posts.forEach((post, i) => {
-    const el = renderPost(post);
-    el.style.animationDelay = `${(i * 0.04).toFixed(3)}s`;
-    feed.appendChild(el);
-  });
-
-  setupFeedLazyLoaders(feed);
-  if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
-};
-
-async function loadMoreFeed() {
-  if (_isLoadingMoreFeed || !_hasMoreFeedPosts) return;
-  _isLoadingMoreFeed = true;
-
-  const sentinel = document.getElementById('feedSentinel');
-  sentinel.style.display = 'block';
-  sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
-
-  try {
-    const { data, error } = await supabase
-      .from('posts')
-      .select(FEED_SELECT)
-      .order('created_at', { ascending: false })
-      .range(_feedOffset, _feedOffset + FEED_PAGE_SIZE - 1);
-
-    if (error) throw error;
-
-    const more = data || [];
-    if (more.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
-    _feedOffset += more.length;
-
-    if (more.length) {
-      const feed = document.getElementById('feed');
-      const presentIds = new Set(Array.from(feed.querySelectorAll('.post-card')).map(c => c.dataset.postid));
-      more.filter(p => !presentIds.has(p.id)).forEach((post, i) => {
-        const el = renderPost(post);
-        el.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
-        feed.appendChild(el);
-        // Re-observe new card for lazy loaders
-        if (_feedPostObserver) _feedPostObserver.observe(el);
-        el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
-      });
-      posts = posts.concat(more);
-    }
-
-    if (_hasMoreFeedPosts) {
-      sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
-    } else {
-      sentinel.innerHTML = `<div class="book-grid-end-msg">You\'re all caught up · ${posts.length.toLocaleString()} posts</div>`;
-      if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
-    }
-  } catch (err) {
-    console.error('Failed to load more feed:', err);
-    sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
-  } finally {
-    _isLoadingMoreFeed = false;
-  }
-}
-
-function setupFeedInfiniteScroll() {
-  const sentinel = document.getElementById('feedSentinel');
-  if (!sentinel) return;
-  sentinel.style.display = 'block';
-
-  if (_feedScrollObserver) _feedScrollObserver.disconnect();
-  if (!('IntersectionObserver' in window)) return;
-
-  _feedScrollObserver = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting) loadMoreFeed();
-  }, { root: null, rootMargin: '600px 0px', threshold: 0.01 });
-  _feedScrollObserver.observe(sentinel);
-}
-
-// One-shot lazy loaders: HLS for videos, reactions/comments per post-card.
-// Posts/videos that never scroll into view never trigger an extra query.
-function setupFeedLazyLoaders(container) {
-  if (!('IntersectionObserver' in window)) {
-    // Fallback: load everything eagerly
-    container.querySelectorAll('.post-video').forEach(attachHlsToPostVideo);
-    container.querySelectorAll('.post-card').forEach(triggerPostLazyLoad);
-    return;
-  }
-
-  if (_feedVideoObserver) _feedVideoObserver.disconnect();
-  _feedVideoObserver = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting) continue;
-      attachHlsToPostVideo(e.target);
-      _feedVideoObserver.unobserve(e.target);
-    }
-  }, { root: null, rootMargin: '300px 0px', threshold: 0.01 });
-
-  if (_feedPostObserver) _feedPostObserver.disconnect();
-  _feedPostObserver = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting) continue;
-      triggerPostLazyLoad(e.target);
-      _feedPostObserver.unobserve(e.target);
-    }
-  }, { root: null, rootMargin: '500px 0px', threshold: 0.01 });
-
-  container.querySelectorAll('.post-video').forEach(v => _feedVideoObserver.observe(v));
-  container.querySelectorAll('.post-card').forEach(c => _feedPostObserver.observe(c));
-}
-
-function attachHlsToPostVideo(wrap) {
-  const url = wrap.dataset.videoUrl;
-  const video = wrap.querySelector('.post-video-player');
-  if (!url || !video || video.dataset.attached) return;
-  video.dataset.attached = '1';
-  if (url.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !video.canPlayType('application/vnd.apple.mpegurl')) {
-    const hls = new Hls();
-    hls.loadSource(url);
-    hls.attachMedia(video);
-  } else {
-    video.src = url;
-  }
-}
-
-function triggerPostLazyLoad(card) {
-  if (card.dataset.lazyLoaded === '1') return;
-  card.dataset.lazyLoaded = '1';
-  const id = card.dataset.postid;
-  if (!id) return;
-  loadReactions(id, 'post');
-  loadCommentCount(id);
-}
-
-// Backwards-compatibility shim — older code still calls this.
-function attachFeedVideoPlayers() {
-  document.querySelectorAll('.post-video').forEach(attachHlsToPostVideo);
-}
-
-function renderPost(post) {
-  const div = document.createElement('div');
-  div.className = 'post-card';
-  div.dataset.postid = post.id;
-
-  const profile = post.profiles || {};
-  const name = profile.username || 'Unknown';
-  const isGuest = profile.is_guest;
-  const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}" alt="${name}"/>` : initials(name);
-
-  div.innerHTML = `
-    <div class="post-header">
-      <div class="avatar profile-link" data-user-id="${post.user_id}" title="View profile">${avatarHTML}</div>
-      <div style="flex:1">
-        <div style="display:flex;align-items:center">
-          <span class="post-author profile-link" data-user-id="${post.user_id}" title="View profile">${escHTML(name)}</span>
-          ${isGuest ? '<span class="post-guest">Guest</span>' : ''}
-        </div>
-        <div class="post-time">${timeAgo(post.created_at)}</div>
-      </div>
-      ${currentUser && currentUser.id === post.user_id ? `
-        <button class="comment-action-btn" onclick="deletePost('${post.id}')" style="font-size:0.8rem">✕ Delete</button>
-      ` : ''}
-    </div>
-
-    ${post.reposted_from && post.original ? `
-      <div class="reposted-banner">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-        Reposted
-      </div>
-    ` : ''}
-
-    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
-    ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
-    ${post.videos ? `
-      <div class="post-video" data-video-url="${escHTML(post.videos.video_url || '')}" data-video-id="${escHTML(post.videos.id || '')}">
-        <video class="post-video-player" poster="${escHTML(post.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
-      </div>
-    ` : ''}
-
-    ${post.reposted_from && post.original ? `
-      <div class="reposted-card">
-        <div class="post-header">
-          <div class="avatar profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${post.original.profiles?.avatar_url ? `<img src="${post.original.profiles.avatar_url}"/>` : initials(post.original.profiles?.username || 'U')}</div>
-          <div>
-            <span class="post-author profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${escHTML(post.original.profiles?.username || 'Unknown')}</span>
-            <div class="post-time">${timeAgo(post.original.created_at)}</div>
-          </div>
-        </div>
-        ${post.original.body ? `<div class="post-body">${linkify(post.original.body)}</div>` : ''}
-        ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
-        ${post.original.videos ? `
-          <div class="post-video" data-video-url="${escHTML(post.original.videos.video_url || '')}" data-video-id="${escHTML(post.original.videos.id || '')}">
-            <video class="post-video-player" poster="${escHTML(post.original.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
-          </div>
-        ` : ''}
-       </div>
-      ` : ''}
-
-    <div class="post-stats">
-      <div class="rcount" id="rsummary-${post.id}"></div>
-      <div id="ccount-${post.id}"></div>
-    </div>
-
-    <div class="post-actions">
-      <div class="reaction-wrap" data-target="${post.id}" data-type="post">
-        <button class="action-btn reaction-trigger" data-target="${post.id}" data-type="post">
-          <span class="r-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-          </span>
-          <span class="r-label-text">Like</span>
-        </button>
-        <div class="reaction-picker">
-          ${REACTIONS.map(r => `
-            <button class="reaction-option" data-key="${r.key}" data-target="${post.id}" data-type="post" title="${r.label}">
-              <span class="r-emoji">${r.emoji}</span>
-              <span class="r-label">${r.label}</span>
-            </button>
-          `).join('')}
-        </div>
-      </div>
-
-      <button class="action-btn comment-toggle" data-postid="${post.id}">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-        <span>Comments</span>
-      </button>
-
-      <button class="action-btn" onclick="repostPost('${post.id}')" title="Repost">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-        <span>Repost</span>
-      </button>
-
-      <div class="reaction-wrap" style="position:relative">
-        <button class="action-btn" onclick="toggleShareMenu(event, '${post.id}')" title="Share">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
-          <span>Share</span>
-        </button>
-        <div class="share-menu" id="sharemenu-${post.id}">
-          <button class="share-option" onclick="shareTo('facebook','${post.id}')">📘 Facebook</button>
-          <button class="share-option" onclick="shareTo('twitter','${post.id}')">🐦 Twitter / X</button>
-          <button class="share-option" onclick="shareTo('whatsapp','${post.id}')">💬 WhatsApp</button>
-          <button class="share-option" onclick="shareTo('copy','${post.id}')">🔗 Copy link</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="comments-section" id="comments-${post.id}" style="display:none"></div>
-  `;
-  // Reactions and comment count are now loaded lazily by setupFeedLazyLoaders
-  // when the post-card scrolls into view (saves ~2 queries per off-screen post)
-  return div;
-}
-
-function escHTML(str) {
-  const d = document.createElement('div');
-  d.textContent = str || '';
-  return d.innerHTML;
-}
-function linkify(str) {
-  const escaped = escHTML(str);
-  return escaped.replace(/(https?:\/\/[^\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
-}
-
-// ── Premium confirmation dialog (replaces native confirm()) ──
-// Usage: const ok = await confirmDialog({ title, body, confirmLabel, danger });
-function confirmDialog({ title = 'Are you sure?', body = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = true } = {}) {
-  return new Promise((resolve) => {
-    const overlay = document.getElementById('confirmModal');
-    const titleEl = document.getElementById('confirmTitle');
-    const bodyEl  = document.getElementById('confirmBody');
-    const okBtn   = document.getElementById('confirmOk');
-    const okLabel = document.getElementById('confirmOkLabel');
-    const cancelBtn = document.getElementById('confirmCancel');
-    if (!overlay) { resolve(window.confirm(`${title}\n\n${body}`)); return; }
-
-    titleEl.textContent = title;
-    bodyEl.textContent  = body;
-    okLabel.textContent = confirmLabel;
-    cancelBtn.textContent = cancelLabel;
-    okBtn.classList.toggle('confirm-btn-danger', !!danger);
-
-    overlay.style.display = 'flex';
-    requestAnimationFrame(() => overlay.classList.add('open'));
-
-    const cleanup = () => {
-      overlay.classList.remove('open');
-      overlay.style.display = 'none';
-      okBtn.removeEventListener('click', onOk);
-      cancelBtn.removeEventListener('click', onCancel);
-      overlay.removeEventListener('click', onBackdrop);
-      document.removeEventListener('keydown', onKey);
-    };
-    const onOk = () => { cleanup(); resolve(true); };
-    const onCancel = () => { cleanup(); resolve(false); };
-    const onBackdrop = (e) => { if (e.target === overlay) onCancel(); };
-    const onKey = (e) => {
-      if (e.key === 'Escape') onCancel();
-      else if (e.key === 'Enter') onOk();
-    };
-
-    okBtn.addEventListener('click', onOk);
-    cancelBtn.addEventListener('click', onCancel);
-    overlay.addEventListener('click', onBackdrop);
-    document.addEventListener('keydown', onKey);
-
-    // Focus the cancel button by default for safer UX
-    setTimeout(() => cancelBtn.focus(), 50);
-  });
-}
-// Expose globally so any onclick="..." handlers can use it too
-window.confirmDialog = confirmDialog;
-
-window.deletePost = async (postId) => {
-  const ok = await confirmDialog({
-    title: 'Delete this post?',
-    body: 'This permanently removes the post from your feed. If it includes a video, the video file will also be deleted from storage. This can\'t be undone.',
-    confirmLabel: 'Delete forever',
-  });
-  if (!ok) return;
-
-  // Check if this post has a video — if so, also delete the video & Bunny file
-  const { data: post, error: lookupError } = await supabase
-    .from('posts')
-    .select('video_id')
-    .eq('id', postId)
-    .single();
-
-  if (lookupError) {
-    toast('Failed to find post: ' + lookupError.message, 'error');
-    return;
-  }
-
-  if (post?.video_id) {
-    try {
-      await callEdgeFunction('bunny-delete', { videoId: post.video_id });
-    } catch (err) {
-      toast('Failed to delete video file: ' + err.message, 'error');
-      return;
-    }
-  }
-
-  const { error } = await supabase.from('posts').delete().eq('id', postId);
-  if (error) {
-    toast(error.message, 'error');
-    return;
-  }
-
-  toast('Deleted', 'success');
-  loadFeed();
-
-  // Always invalidate videos cache so next visit to videos page is fresh
-  allVideosCache = [];
-  if (videosPage.style.display === 'block') {
-    loadVideos();
-  }
-};
-
-async function loadCommentCount(postId) {
-  const { count } = await supabase.from('comments').select('*', { count: 'exact', head: true }).eq('post_id', postId);
-  const el = document.getElementById(`ccount-${postId}`);
-  if (el) el.textContent = count > 0 ? `${count} comment${count !== 1 ? 's' : ''}` : '';
-}
-
-// ── Reactions ──
-async function loadReactions(targetId, targetType) {
-  const { data } = await supabase.from('reactions').select('emoji, user_id').eq('target_id', targetId).eq('target_type', targetType);
-  if (!data) return;
-  const counts = {};
-  let userReaction = null;
-  data.forEach(r => {
-    counts[r.emoji] = (counts[r.emoji] || 0) + 1;
-    if (currentUser && r.user_id === currentUser.id) userReaction = r.emoji;
-  });
-  updateReactionUI(targetId, targetType, counts, userReaction);
-}
-
-function updateReactionUI(targetId, targetType, counts, userReaction) {
-  const wrap = document.querySelector(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
-  if (!wrap) return;
-  const trigger = wrap.querySelector('.reaction-trigger');
-  if (!trigger) return;
-
-  const total = Object.values(counts).reduce((a,b) => a+b, 0);
-  const activeR = userReaction ? REACTIONS.find(r => r.key === userReaction) : null;
-
-  const iconEl = trigger.querySelector('.r-icon');
-  const labelEl = trigger.querySelector('.r-label-text');
-
-  if (activeR) {
-    // Sizing comes from CSS (.action-btn .r-icon vs .comment-action-btn .r-icon)
-    // — no inline font-size, so liking a comment/reply doesn't grow the row.
-    iconEl.innerHTML = `<span>${activeR.emoji}</span>`;
-    if (labelEl) labelEl.textContent = activeR.label;
-    trigger.classList.add('reacted');
-  } else {
-    iconEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
-    if (labelEl) labelEl.textContent = 'Like';
-    trigger.classList.remove('reacted');
-  }
-
-  wrap.querySelectorAll('.reaction-option').forEach(btn => btn.classList.toggle('active', btn.dataset.key === userReaction));
-
-  // Summary stats above action bar
-  const summary = document.getElementById(`rsummary-${targetId}`);
-  if (summary && targetType === 'post') {
-    const sortedEmojis = REACTIONS.filter(r => counts[r.key] > 0).sort((a,b) => counts[b.key] - counts[a.key]);
-    if (sortedEmojis.length === 0) { summary.innerHTML = ''; }
-    else {
-      summary.innerHTML = `<span class="rcount-emojis">${sortedEmojis.map(r => r.emoji).join('')}</span> ${total}`;
-    }
-  }
-}
-
-async function handleReaction(targetId, targetType, emojiKey) {
-  if (!currentUser) return toast('Sign in to react', 'error');
-  const { data: existing } = await supabase.from('reactions').select('id, emoji').eq('user_id', currentUser.id).eq('target_id', targetId).eq('target_type', targetType).maybeSingle();
-  if (existing) {
-    if (existing.emoji === emojiKey) await supabase.from('reactions').delete().eq('id', existing.id);
-    else await supabase.from('reactions').update({ emoji: emojiKey }).eq('id', existing.id);
-  } else {
-    await supabase.from('reactions').insert({ user_id: currentUser.id, target_id: targetId, target_type: targetType, emoji: emojiKey });
-  }
-  loadReactions(targetId, targetType);
-}
-
-// ── Comments ──
-async function loadComments(postId) {
-  const section = document.getElementById(`comments-${postId}`);
-  section.innerHTML = '<div class="loading" style="padding:1rem">Loading...</div>';
-  const { data, error } = await supabase.from('comments').select(`*, profiles(username, avatar_url, is_guest)`).eq('post_id', postId).is('parent_id', null).order('created_at', { ascending: true });
-  if (error) { section.innerHTML = `<p style="color:var(--text3);font-size:0.85rem">${error.message}</p>`; return; }
-  section.innerHTML = '';
-  const comments = data || [];
-  for (const c of comments) section.appendChild(await renderComment(c, postId));
-
-  const inputWrap = document.createElement('div');
-  inputWrap.className = 'comment-input-wrap';
-  inputWrap.style.flexDirection = 'column';
-  inputWrap.style.gap = '0.5rem';
-  inputWrap.innerHTML = `
-    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
-      <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
-      <textarea class="comment-input" placeholder="Write a comment…" rows="1"></textarea>
-      <button class="btn-send">Send</button>
-    </div>
-    <div id="cimgpreview-${postId}" style="margin-left:40px"></div>
-    <div style="margin-left:40px;margin-top:-4px">
-      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        Add photo
-        <input type="file" accept="image/*" class="cimg-input"/>
-      </label>
-    </div>
-  `;
-  section.appendChild(inputWrap);
-
-  const ta = inputWrap.querySelector('textarea');
-  ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, null, ta, `cimgpreview-${postId}`); }});
-  inputWrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, null, ta, `cimgpreview-${postId}`));
-  inputWrap.querySelector('.cimg-input').addEventListener('change', (e) => handleCommentImageSelect(e.target, `cimgpreview-${postId}`));
-}
-
-async function renderComment(comment, postId, isReply = false, topLevelId = null) {
-  const div = document.createElement('div');
-  div.className = isReply ? 'reply-item' : 'comment-item';
-  const profile = comment.profiles || {};
-  const name = profile.username || 'Unknown';
-  const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
-  const replyTargetId = isReply ? topLevelId : comment.id;
-  const replyToName = isReply ? name : null;
-
-  div.innerHTML = `
-    <div class="avatar sm">${avatarHTML}</div>
-    <div class="comment-body">
-      <div class="comment-meta">
-        <span class="comment-author">${escHTML(name)}</span>
-        <span class="comment-time">${timeAgo(comment.created_at)}</span>
-        ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
-      </div>
-      ${comment.body ? `<div class="comment-bubble">${linkify(comment.body)}</div>` : ''}
-      ${comment.image_url ? `<div class="comment-image" onclick="openLightbox('${comment.image_url}')"><img src="${comment.image_url}" loading="lazy"/></div>` : ''}
-      <div class="comment-actions">
-        <div class="reaction-wrap" data-target="${comment.id}" data-type="comment" style="position:relative">
-          <button class="reaction-trigger comment-action-btn" data-target="${comment.id}" data-type="comment">
-            <span class="r-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></span>
-            <span class="r-label-text">Like</span>
-          </button>
-          <div class="reaction-picker">
-            ${REACTIONS.map(r => `
-              <button class="reaction-option" data-key="${r.key}" data-target="${comment.id}" data-type="comment" title="${r.label}">
-                <span class="r-emoji">${r.emoji}</span>
-                <span class="r-label">${r.label}</span>
-              </button>
-            `).join('')}
-          </div>
-        </div>
-        <button class="comment-action-btn reply-btn" data-commentid="${replyTargetId}" data-postid="${postId}" data-replyto="${escHTML(replyToName || '')}">Reply</button>
-        ${currentUser && currentUser.id === comment.user_id ? `<button class="comment-action-btn" onclick="deleteComment('${comment.id}','${postId}')">Delete</button>` : ''}
-      </div>
-      ${!isReply ? `<div class="replies" id="replies-${comment.id}"></div>` : ''}
-    </div>
-  `;
-
-  loadReactions(comment.id, 'comment');
-  if (!isReply) {
-    const { data } = await supabase.from('comments').select(`*, profiles(username, avatar_url, is_guest)`).eq('parent_id', comment.id).order('created_at', { ascending: true });
-    if (data && data.length) {
-      const container = div.querySelector(`#replies-${comment.id}`);
-      for (const r of data) container.appendChild(await renderComment(r, postId, true, comment.id));
-    }
-  }
-  return div;
-}
-
-const pendingCommentImages = {};
-function handleCommentImageSelect(input, previewId) {
-  const file = input.files[0];
-  if (!file) return;
-  if (!file.type.startsWith('image/')) { toast('Please select an image', 'error'); return; }
-  if (file.size > 5 * 1024 * 1024) { toast('Image must be smaller than 5MB', 'error'); return; }
-  pendingCommentImages[previewId] = file;
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    const preview = document.getElementById(previewId);
-    if (!preview) return;
-    preview.innerHTML = `<div class="image-preview" style="max-width:240px"><img src="${ev.target.result}"/><button class="image-preview-remove">×</button></div>`;
-    preview.querySelector('.image-preview-remove').addEventListener('click', () => {
-      delete pendingCommentImages[previewId];
-      preview.innerHTML = '';
-      input.value = '';
-    });
-  };
-  reader.readAsDataURL(file);
-}
-
-async function submitComment(postId, parentId, textarea, previewId) {
-  const body = textarea.value.trim();
-  const file = previewId ? pendingCommentImages[previewId] : null;
-  if (!body && !file) return;
-  if (!currentUser) return toast('Sign in to comment', 'error');
-  let imageUrl = null;
-  if (file) {
-    textarea.disabled = true;
-    imageUrl = await uploadImage(file);
-    textarea.disabled = false;
-    if (!imageUrl) return;
-  }
-  const { error } = await supabase.from('comments').insert({ post_id: postId, user_id: currentUser.id, parent_id: parentId || null, body: body || '', image_url: imageUrl });
-  if (error) { toast(error.message, 'error'); return; }
-  textarea.value = '';
-  textarea.style.height = 'auto';
-  if (previewId) {
-    delete pendingCommentImages[previewId];
-    const preview = document.getElementById(previewId);
-    if (preview) preview.innerHTML = '';
-  }
-  loadComments(postId);
-  loadCommentCount(postId);
-}
-
-window.deleteComment = async (commentId, postId) => {
-  const ok = await confirmDialog({
-    title: 'Delete this comment?',
-    body: 'This comment will be removed permanently and can\'t be recovered.',
-    confirmLabel: 'Delete',
-  });
-  if (!ok) return;
-  await supabase.from('comments').delete().eq('id', commentId);
-  loadComments(postId);
-  loadCommentCount(postId);
-};
-
-function showReplyInput(commentId, postId, replyToName = '') {
-  document.querySelectorAll('.reply-input-wrap').forEach(el => el.remove());
-  const container = document.getElementById(`replies-${commentId}`);
-  if (!container) return;
-  const previewId = `rimgpreview-${commentId}-${Date.now()}`;
-  const wrap = document.createElement('div');
-  wrap.className = 'comment-input-wrap reply-input-wrap';
-  wrap.style.marginTop = '0.5rem';
-  wrap.style.flexDirection = 'column';
-  wrap.style.gap = '0.5rem';
-  const placeholder = replyToName ? `Reply to ${replyToName}…` : 'Write a reply…';
-  wrap.innerHTML = `
-    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
-      <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
-      <textarea class="comment-input" placeholder="${placeholder}" rows="1"></textarea>
-      <button class="btn-send">Reply</button>
-    </div>
-    <div id="${previewId}" style="margin-left:40px"></div>
-    <div style="margin-left:40px;margin-top:-4px">
-      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        Add photo
-        <input type="file" accept="image/*" class="rimg-input"/>
-      </label>
-    </div>
-  `;
-  const ta = wrap.querySelector('textarea');
-  if (replyToName) ta.value = `@${replyToName} `;
-  ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, commentId, ta, previewId); }});
-  wrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, commentId, ta, previewId));
-  wrap.querySelector('.rimg-input').addEventListener('change', (e) => handleCommentImageSelect(e.target, previewId));
-  container.appendChild(wrap);
-  ta.focus();
-  ta.setSelectionRange(ta.value.length, ta.value.length);
-}
-
-// ── Global delegated click handlers ──
-document.addEventListener('click', (e) => {
-  const option = e.target.closest('.reaction-option');
-  if (option) {
-    e.preventDefault(); e.stopPropagation();
-    option.closest('.reaction-picker')?.classList.remove('visible');
-    handleReaction(option.dataset.target, option.dataset.type, option.dataset.key);
-    return;
-  }
-  const trigger = e.target.closest('.reaction-trigger');
-  if (trigger) {
-    e.preventDefault(); e.stopPropagation();
-    const picker = trigger.closest('.reaction-wrap')?.querySelector('.reaction-picker');
-    document.querySelectorAll('.reaction-picker.visible').forEach(p => { if (p !== picker) p.classList.remove('visible'); });
-    picker?.classList.toggle('visible');
-    return;
-  }
-  const ct = e.target.closest('.comment-toggle');
-  if (ct) {
-    const postId = ct.dataset.postid;
-    const section = document.getElementById(`comments-${postId}`);
-    if (section.style.display === 'none') { section.style.display = 'block'; loadComments(postId); }
-    else section.style.display = 'none';
-    return;
-  }
-  const replyBtn = e.target.closest('.reply-btn');
-  if (replyBtn) {
-    showReplyInput(replyBtn.dataset.commentid, replyBtn.dataset.postid, replyBtn.dataset.replyto);
-    return;
-  }
-  if (!e.target.closest('.reaction-wrap')) {
-    document.querySelectorAll('.reaction-picker.visible').forEach(p => p.classList.remove('visible'));
-  }
-  if (!e.target.closest('.share-wrap') && !e.target.closest('[onclick*="toggleShareMenu"]')) {
-    document.querySelectorAll('.share-menu.visible').forEach(m => m.classList.remove('visible'));
-  }
-  if (!e.target.closest('.topbar-search')) {
-    document.getElementById('searchResults').classList.remove('visible');
-  }
-});
-
-document.addEventListener('mouseover', (e) => {
-  const trigger = e.target.closest('.reaction-trigger');
-  if (trigger) trigger.closest('.reaction-wrap')?.querySelector('.reaction-picker')?.classList.add('visible');
-});
-document.addEventListener('mouseout', (e) => {
-  const wrap = e.target.closest('.reaction-wrap');
-  if (!wrap || wrap.contains(e.relatedTarget)) return;
-  setTimeout(() => { if (!wrap.matches(':hover')) wrap.querySelector('.reaction-picker')?.classList.remove('visible'); }, 200);
-});
-
-// ── Repost modal ──
-let repostTargetId = null;
-window.repostPost = (postId) => {
-  if (!currentUser) return toast('Sign in to repost', 'error');
-  const post = posts.find(p => p.id === postId);
-  if (!post) return;
-  repostTargetId = postId;
-  const profile = post.profiles || {};
-  const name = profile.username || 'Unknown';
-  const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
-  document.getElementById('repostPreview').innerHTML = `
-    <div class="post-header">
-      <div class="avatar">${avatarHTML}</div>
-      <div><span class="post-author">${escHTML(name)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
-    </div>
-    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
-    ${post.image_url ? `<div style="border-radius:8px;overflow:hidden;margin-top:0.5rem"><img src="${post.image_url}"/></div>` : ''}
-  `;
-  document.getElementById('repostCaption').value = '';
-  document.getElementById('repostModal').classList.add('open');
-  document.body.style.overflow = 'hidden';
-  setTimeout(() => document.getElementById('repostCaption').focus(), 100);
-};
-function closeRepostModal() {
-  document.getElementById('repostModal').classList.remove('open');
-  document.body.style.overflow = '';
-  repostTargetId = null;
-}
-document.getElementById('repostClose').addEventListener('click', closeRepostModal);
-document.getElementById('repostCancel').addEventListener('click', closeRepostModal);
-document.getElementById('repostModal').addEventListener('click', (e) => { if (e.target.id === 'repostModal') closeRepostModal(); });
-document.getElementById('repostSubmit').addEventListener('click', async () => {
-  if (!repostTargetId) return;
-  const caption = document.getElementById('repostCaption').value.trim();
-  const btn = document.getElementById('repostSubmit');
-  btn.disabled = true; btn.textContent = 'Posting...';
-  const { error } = await supabase.from('posts').insert({ user_id: currentUser.id, body: caption, reposted_from: repostTargetId });
-  btn.disabled = false; btn.textContent = 'Repost';
-  if (error) { toast(error.message, 'error'); return; }
-  closeRepostModal();
-  toast('Reposted!', 'success');
-  loadFeed();
-});
-
-// ── Share menu ──
-window.toggleShareMenu = (e, postId) => {
-  e.stopPropagation();
-  document.querySelectorAll('.share-menu.visible').forEach(m => { if (m.id !== `sharemenu-${postId}`) m.classList.remove('visible'); });
-  document.getElementById(`sharemenu-${postId}`).classList.toggle('visible');
-};
-window.shareTo = (platform, postId) => {
-  const url = `${window.location.origin}?post=${postId}`;
-  const text = 'Check out this post on Selebox';
-  const urls = {
-    facebook: `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`,
-    twitter: `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
-    whatsapp: `https://wa.me/?text=${encodeURIComponent(text + ' ' + url)}`
-  };
-  if (platform === 'copy') navigator.clipboard.writeText(url).then(() => toast('Link copied!', 'success'));
-  else if (urls[platform]) window.open(urls[platform], '_blank');
-  document.getElementById(`sharemenu-${postId}`).classList.remove('visible');
-};
-
-// ── Realtime ──
-supabase.channel('public-feed')
-  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, () => loadFeed())
-  .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'posts' }, () => loadFeed())
-  .subscribe();
-
-// ── Profile page ──
-const profilePage = document.getElementById('profilePage');
-const feedEl = document.getElementById('feed');
-const storiesEl = document.getElementById('storiesRow');
-const composeEl = document.querySelector('.compose');
-let viewingProfileId = null;
-
-function showFeed() {
-  hideAllMainPages();
-  feedEl.style.display = '';
-  storiesEl.style.display = '';
-  composeEl.style.display = '';
-  // Restore the feed sentinel only when there's actually more to load and posts already rendered
-  const feedSentinel = document.getElementById('feedSentinel');
-  if (feedSentinel && _hasMoreFeedPosts && feedEl.querySelector('.post-card')) {
-    feedSentinel.style.display = 'block';
-  }
-  document.body.classList.remove('on-videos');
-  viewingProfileId = null;
-  stopVideoPlayer();
-  if (window.location.hash) history.pushState(null, '', window.location.pathname);
-
-  // Reload feed if it's empty or stuck
-  if (!feedEl.querySelector('.post-card') || feedEl.querySelector('.loading')) {
-    loadFeed();
-  }
-}
-
-function showProfileView() {
-  hideAllMainPages();   // also hides feedSentinel (and any future sibling overlays)
-  profilePage.style.display = 'block';
-  document.body.classList.remove('on-videos');
-  stopVideoPlayer();
-}
-
-async function openProfile(userId) {
-  showProfileView();
-  viewingProfileId = userId;
-  // Set URL hash so refresh keeps user on profile
-  if (window.location.hash !== `#profile/${userId}`) {
-    history.pushState(null, '', `#profile/${userId}`);
-  }
-
-  // Retry up to 3 times in case profile isn't ready yet
-  let profile = null;
-  for (let i = 0; i < 3; i++) {
-    const result = await supabase.from('profiles').select('*').eq('id', userId).single();
-    if (result.data) { profile = result.data; break; }
-    await new Promise(r => setTimeout(r, 300));
-  }
-  if (!profile) {
-    toast('Could not load profile', 'error');
-    return;
-  }
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:         #0a0a1f;
+  --bg2:        #141433;
+  --bg3:        #1c1c42;
+  --bg4:        #252554;
+  --border:     rgba(255,255,255,0.05);
+  --border2:    rgba(255,255,255,0.1);
+  --purple:     #8b5cf6;
+  --purple-dk:  #5b21b6;
+  --purple-lt:  #a78bfa;
+  --purple-grad: linear-gradient(135deg, #7c3aed 0%, #4c1d95 100%);
+  --pink:       #ec4899;
+  --red:        #ef4444;
+  --text:       #ffffff;
+  --text2:      #b8b8d4;
+  --text3:      #6b6b8f;
+  --accent:     #fbbf24;
+  --success:    #10b981;
+  --info:       #3b82f6;
+  --font:       'Poppins', sans-serif;
+  --radius:     14px;
+  --radius-sm:  10px;
+  --radius-lg:  20px;
+  --sidebar-w:  220px;
+  --header-h:   70px;
   
-  // Banner (preserve the edit button!)
-  const banner = document.getElementById('profileBanner');
-  const existingBtn = document.getElementById('editBannerBtn');
-  banner.innerHTML = profile.banner_url ? `<img src="${profile.banner_url}" alt="banner"/>` : '';
-  if (existingBtn) banner.appendChild(existingBtn);
-  
-  // Avatar
-  const avatarBig = document.getElementById('profileAvatarBig');
-  avatarBig.innerHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(profile.username);
-
-  // Name / badge / bio
-  document.getElementById('profileName').textContent = profile.username;
-  const badge = document.getElementById('profileBadge');
-  badge.textContent = profile.is_guest ? 'Guest' : 'Member';
-  badge.className = 'profile-badge' + (profile.is_guest ? ' guest' : '');
-  document.getElementById('profileBio').textContent = profile.bio || '';
-
-  // Joined date
-  const joined = new Date(profile.created_at);
-  const joinedStr = joined.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-  document.getElementById('profileJoined').textContent = joinedStr;
-
-  // Counts
-  const [{ count: followers }, { count: following }, { count: postCount }] = await Promise.all([
-    supabase.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', userId),
-    supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId),
-    supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId)
-  ]);
-  document.getElementById('statFollowers').innerHTML = `<strong>${followers || 0}</strong> followers`;
-  document.getElementById('statFollowing').innerHTML = `<strong>${following || 0}</strong> following`;
-  document.getElementById('statPosts').innerHTML = `<strong>${postCount || 0}</strong> posts`;
-
-  // About tab
-  document.getElementById('aboutUsername').textContent = profile.username;
-  document.getElementById('aboutBio').textContent = profile.bio || '—';
-  document.getElementById('aboutLocation').textContent = profile.location || '—';
-  document.getElementById('aboutWebsite').innerHTML = profile.website ? `<a href="${profile.website}" target="_blank">${profile.website}</a>` : '—';
-  document.getElementById('aboutJoined').textContent = joined.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-  document.getElementById('aboutType').textContent = profile.is_guest ? 'Guest account' : 'Member';
-
-  // Action button + edit controls
-  const isOwn = currentUser && currentUser.id === userId;
-  const actionBtn = document.getElementById('profileActionBtn');
-  const editAvatarBtn = document.getElementById('editAvatarBtn');
-  const editBannerBtn = document.getElementById('editBannerBtn');
-
-  if (isOwn) {
-    actionBtn.textContent = '⚙️ Edit profile';
-    actionBtn.onclick = () => openEditProfile(profile);
-    editAvatarBtn.style.display = 'flex';
-    editAvatarBtn.style.visibility = 'visible';
-    editBannerBtn.style.display = 'flex';
-    editBannerBtn.style.visibility = 'visible';
-  } else {
-    const { data: existing } = await supabase.from('follows').select('*').eq('follower_id', currentUser.id).eq('following_id', userId).maybeSingle();
-    actionBtn.textContent = existing ? 'Unfollow' : 'Follow';
-    actionBtn.onclick = () => toggleFollow(userId, !!existing);
-    editAvatarBtn.style.display = 'none';
-    editBannerBtn.style.display = 'none';
-  }
-
-  // Reset tab to Posts and load
-  document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'posts'));
-  ['profilePosts', 'profileVideos', 'profileBooks', 'profileAbout'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = id === 'profilePosts' ? '' : 'none';
-  });
-  // Reset the lazy-load markers so a fresh openProfile re-fetches
-  ['profileVideos', 'profileBooks'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) delete el.dataset.loadedFor;
-  });
-
-  loadProfilePosts(userId);
-}
-
-async function loadProfilePosts(userId) {
-  const wrap = document.getElementById('profilePosts');
-  wrap.innerHTML = '<div class="loading">Loading posts...</div>';
-  const { data } = await supabase
-    .from('posts')
-    .select(`*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(40);
-  posts = data || [];
-  wrap.innerHTML = '';
-  if (!posts.length) {
-    wrap.innerHTML = `
-      <div class="profile-empty">
-        <div class="profile-empty-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
-        </div>
-        <h3>No posts yet</h3>
-        <p>When this user shares something, it will appear here.</p>
-      </div>`;
-    return;
-  }
-  posts.forEach(p => {
-    const el = renderPost(p);
-    wrap.appendChild(el);
-    // Lazy-load reactions/comments for these too
-    if (_feedPostObserver) _feedPostObserver.observe(el);
-    el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
-  });
-  // Fall back: if no observers (first time), load eagerly
-  if (!_feedPostObserver) {
-    wrap.querySelectorAll('.post-card').forEach(c => triggerPostLazyLoad(c));
-    wrap.querySelectorAll('.post-video').forEach(v => attachHlsToPostVideo(v));
-  }
-}
-
-// ── Profile: Videos tab ──
-async function loadProfileVideos(userId) {
-  const wrap = document.getElementById('profileVideos');
-  if (!wrap) return;
-  if (wrap.dataset.loadedFor === userId) return;       // already loaded for this user
-  wrap.innerHTML = '<div class="loading">Loading videos...</div>';
-
-  const isOwn = currentUser && currentUser.id === userId;
-
-  // Supabase videos uploaded by this user
-  let q = supabase
-    .from('videos')
-    .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
-    .eq('uploader_id', userId)
-    .order('created_at', { ascending: false });
-  // Non-owners only see ready videos
-  if (!isOwn) q = q.eq('status', 'ready');
-
-  const { data, error } = await q.limit(60);
-
-  if (error) {
-    wrap.innerHTML = `<div class="profile-empty"><h3>Couldn't load videos</h3><p>${escHTML(error.message || '')}</p></div>`;
-    return;
-  }
-
-  const list = data || [];
-  if (!list.length) {
-    wrap.innerHTML = `
-      <div class="profile-empty">
-        <div class="profile-empty-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="13.5" height="12" rx="2.5"/><path d="M16 10.5l5-2.5v8l-5-2.5z" fill="currentColor" stroke="none"/></svg>
-        </div>
-        <h3>No videos yet</h3>
-        <p>${isOwn ? 'Upload your first video from the home feed or Studio.' : 'When this creator uploads, videos will appear here.'}</p>
-      </div>`;
-    wrap.dataset.loadedFor = userId;
-    return;
-  }
-
-  wrap.innerHTML = '<div class="profile-video-grid"></div>';
-  const grid = wrap.querySelector('.profile-video-grid');
-  list.forEach((v, i) => {
-    // Adapt to the existing renderVideoCard shape (mirrors fetchSupabaseVideos)
-    const formatted = {
-      $id: 'sb_' + v.id,
-      _supabase: true,
-      _supabaseId: v.id,
-      title: v.title,
-      description: v.description || '',
-      tags: v.tags || [],
-      uploader: v.uploader_id,
-      thumbnail: v.thumbnail_url,
-      videoUrl: v.video_url,
-      uri: v.video_url,
-      videoStats: { views: v.views || 0, duration: v.duration || 0 },
-      status: v.status || 'ready',
-      $createdAt: v.created_at,
-      _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
-    };
-    const uploader = v.profiles ? { username: v.profiles.username, avatar: v.profiles.avatar_url } : null;
-    const card = renderVideoCard(formatted, uploader);
-    card.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
-    grid.appendChild(card);
-  });
-  wrap.dataset.loadedFor = userId;
-}
-
-// ── Profile: Books tab ──
-async function loadProfileBooks(userId) {
-  const wrap = document.getElementById('profileBooks');
-  if (!wrap) return;
-  if (wrap.dataset.loadedFor === userId) return;
-  wrap.innerHTML = '<div class="loading">Loading books...</div>';
-
-  const isOwn = currentUser && currentUser.id === userId;
-
-  let q = supabase
-    .from('books')
-    .select(`id, title, description, cover_url, genre, tags, views_count, likes_count, chapters_count, word_count, status, is_public, published_at, created_at, updated_at, author_id, profiles!books_author_id_fkey ( id, username, avatar_url )`)
-    .eq('author_id', userId)
-    .order('updated_at', { ascending: false });
-  // Non-owners only see public, non-draft books
-  if (!isOwn) {
-    q = q.eq('is_public', true).in('status', ['ongoing', 'completed']);
-  }
-
-  const { data, error } = await q.limit(60);
-
-  if (error) {
-    wrap.innerHTML = `<div class="profile-empty"><h3>Couldn't load books</h3><p>${escHTML(error.message || '')}</p></div>`;
-    return;
-  }
-
-  const list = data || [];
-  if (!list.length) {
-    wrap.innerHTML = `
-      <div class="profile-empty">
-        <div class="profile-empty-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
-        </div>
-        <h3>No books yet</h3>
-        <p>${isOwn ? 'Head to Author to publish your first manuscript.' : 'When this writer publishes, their books will appear here.'}</p>
-      </div>`;
-    wrap.dataset.loadedFor = userId;
-    return;
-  }
-
-  wrap.innerHTML = '<div class="profile-book-grid"></div>';
-  const grid = wrap.querySelector('.profile-book-grid');
-  list.forEach((b, i) => {
-    const formatted = {
-      ...b,
-      id: b.id,
-      $id: 'sb_' + b.id,
-      _supabase: true,
-      author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
-    };
-    const card = renderBookCard(formatted);
-    card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
-    grid.appendChild(card);
-  });
-  wrap.dataset.loadedFor = userId;
-}
-
-async function toggleFollow(userId, currentlyFollowing) {
-  if (currentlyFollowing) {
-    await supabase.from('follows').delete().eq('follower_id', currentUser.id).eq('following_id', userId);
-    toast('Unfollowed', 'success');
-  } else {
-    await supabase.from('follows').insert({ follower_id: currentUser.id, following_id: userId });
-    toast('Following!', 'success');
-  }
-  openProfile(userId);
-}
-
-// Profile tabs (Posts / Videos / Books / About)
-document.querySelectorAll('.profile-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    const tabName = tab.dataset.tab;
-    document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t === tab));
-
-    const ids = { posts: 'profilePosts', videos: 'profileVideos', books: 'profileBooks', about: 'profileAbout' };
-    Object.entries(ids).forEach(([key, id]) => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = key === tabName ? '' : 'none';
-    });
-
-    // Lazy-load the heavy tabs only when first opened
-    if (tabName === 'videos' && viewingProfileId) loadProfileVideos(viewingProfileId);
-    else if (tabName === 'books' && viewingProfileId) loadProfileBooks(viewingProfileId);
-  });
-});
-
-// Edit profile modal
-function openEditProfile(profile) {
-  document.getElementById('editUsername').value = profile.username || '';
-  document.getElementById('editBio').value = profile.bio || '';
-  document.getElementById('editLocation').value = profile.location || '';
-  document.getElementById('editWebsite').value = profile.website || '';
-  document.getElementById('editProfileModal').classList.add('open');
-  document.body.style.overflow = 'hidden';
-}
-function closeEditProfile() {
-  document.getElementById('editProfileModal').classList.remove('open');
-  document.body.style.overflow = '';
-}
-document.getElementById('editProfileClose').addEventListener('click', closeEditProfile);
-document.getElementById('editProfileCancel').addEventListener('click', closeEditProfile);
-document.getElementById('editProfileModal').addEventListener('click', (e) => { if (e.target.id === 'editProfileModal') closeEditProfile(); });
-
-document.getElementById('editProfileSave').addEventListener('click', async () => {
-  const btn = document.getElementById('editProfileSave');
-  btn.disabled = true; btn.textContent = 'Saving...';
-  const { error } = await supabase.from('profiles').update({
-    username: document.getElementById('editUsername').value.trim() || 'User',
-    bio: document.getElementById('editBio').value.trim(),
-    location: document.getElementById('editLocation').value.trim(),
-    website: document.getElementById('editWebsite').value.trim()
-  }).eq('id', currentUser.id);
-  btn.disabled = false; btn.textContent = 'Save';
-  if (error) { toast(error.message, 'error'); return; }
-  toast('Profile updated!', 'success');
-  closeEditProfile();
-  const { data: updated } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
-  currentProfile = updated;
-  updateTopbarUser();
-  openProfile(currentUser.id);
-});
-
-// ── Image cropper ──
-let cropperInstance = null;
-let cropField = null; // 'avatar_url' or 'banner_url'
-
-function openCropModal(file, aspectRatio, field, title) {
-  cropField = field;
-  document.getElementById('cropTitle').textContent = title;
-
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    const img = document.getElementById('cropImage');
-    img.src = ev.target.result;
-    document.getElementById('cropModal').classList.add('open');
-    document.body.style.overflow = 'hidden';
-
-    setTimeout(() => {
-      if (cropperInstance) cropperInstance.destroy();
-      cropperInstance = new Cropper(img, {
-        aspectRatio: aspectRatio,
-        viewMode: 1,
-        autoCropArea: 1,
-        background: false,
-        movable: true,
-        zoomable: true,
-        scalable: false,
-        rotatable: true
-      });
-    }, 150);
-  };
-  reader.readAsDataURL(file);
-}
-
-function closeCropModal() {
-  document.getElementById('cropModal').classList.remove('open');
-  document.body.style.overflow = '';
-  if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
-}
-
-document.getElementById('cropClose').addEventListener('click', closeCropModal);
-document.getElementById('cropCancel').addEventListener('click', closeCropModal);
-
-document.getElementById('cropSave').addEventListener('click', async () => {
-  if (!cropperInstance) return;
-  const btn = document.getElementById('cropSave');
-  btn.disabled = true; btn.textContent = 'Saving...';
-
-  const canvas = cropperInstance.getCroppedCanvas({
-    maxWidth: 1600, maxHeight: 1600,
-    imageSmoothingQuality: 'high'
-  });
-
-  canvas.toBlob(async (blob) => {
-    const file = new File([blob], `crop-${Date.now()}.jpg`, { type: 'image/jpeg' });
-    const url = await uploadImage(file);
-    if (!url) { btn.disabled = false; btn.textContent = 'Save'; return; }
-
-    await supabase.from('profiles').update({ [cropField]: url }).eq('id', currentUser.id);
-    if (cropField === 'avatar_url') {
-      currentProfile.avatar_url = url;
-      updateTopbarUser();
-      toast('Avatar updated!', 'success');
-    } else {
-      toast('Cover updated!', 'success');
-    }
-    btn.disabled = false; btn.textContent = 'Save';
-    closeCropModal();
-    openProfile(currentUser.id);
-  }, 'image/jpeg', 0.92);
-});
-
-// Avatar upload
-document.getElementById('editAvatarBtn').addEventListener('click', () => document.getElementById('avatarInput').click());
-document.getElementById('avatarInput').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  openCropModal(file, 1, 'avatar_url', 'Crop your avatar');
-  e.target.value = '';
-});
-
-// Banner upload
-document.getElementById('editBannerBtn').addEventListener('click', () => document.getElementById('bannerInput').click());
-document.getElementById('bannerInput').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  openCropModal(file, 3, 'banner_url', 'Crop your cover photo');
-  e.target.value = '';
-});
-// Open own profile from sidebar
-async function openMyProfile() {
-  if (!currentUser) {
-    toast('Loading your profile...', '');
-    return;
-  }
-  // Make sure profile is loaded before opening
-  if (!currentProfile) {
-    const { data: profile } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
-    currentProfile = profile;
-  }
-  openProfile(currentUser.id);
-}
-document.getElementById('btnProfile').addEventListener('click', () => {
-  setSidebarActive('btnProfile');
-  openMyProfile();
-});
-document.getElementById('topbarAvatar').addEventListener('click', () => {
-  setSidebarActive('btnProfile');
-  openMyProfile();
-});
-
-// ── Sidebar active state syncing ──
-function setSidebarActive(buttonId) {
-  document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
-  const btn = document.getElementById(buttonId);
-  if (btn) btn.classList.add('active');
-}
-
-// Wire Home button → goes to feed + sets active
-document.getElementById('btnHome')?.addEventListener('click', () => {
-  setSidebarActive('btnHome');
-  showFeed();
-});
-
-// Handle browser back/forward
-window.addEventListener('popstate', () => {
-  const hash = window.location.hash;
-  if (hash.startsWith('#profile/')) {
-    const userId = hash.replace('#profile/', '');
-    openProfile(userId);
-  } else {
-    showFeed();
-    loadFeed();
-  }
-});
-
-// ── Smart context-aware search ──
-const searchInput = document.getElementById('searchInput');
-const searchResultsEl = document.getElementById('searchResults');
-const topbarSearchClear = document.getElementById('topbarSearchClear');
-let searchDebounce = null;
-
-function getSearchContext() {
-  const hash = window.location.hash;
-  if (hash === '#videos' || hash.startsWith('#video/')) return 'videos';
-  if (hash === '#book'   || hash.startsWith('#book/'))   return 'books';
-  return 'feed';
-}
-
-let _lastSearchContext = null;
-function updateSearchPlaceholder() {
-  const ctx = getSearchContext();
-  if (ctx === 'videos')      searchInput.placeholder = 'Search videos · creator · tags · category…';
-  else if (ctx === 'books')  searchInput.placeholder = 'Search books · author · tags · genre…';
-  else                       searchInput.placeholder = 'Search posts and people…';
-
-  // Reset any active query when moving between contexts (videos ↔ books ↔ feed)
-  if (_lastSearchContext && _lastSearchContext !== ctx) {
-    searchInput.value = '';
-    if (topbarSearchClear) topbarSearchClear.style.display = 'none';
-    activeSearchQuery = '';
-    activeBookSearchQuery = '';
-    searchResultsEl.classList.remove('open');
-  }
-  _lastSearchContext = ctx;
-}
-
-searchInput.addEventListener('input', (e) => {
-  const value = e.target.value;
-  if (topbarSearchClear) topbarSearchClear.style.display = value ? 'flex' : 'none';
-
-  const ctx = getSearchContext();
-
-  if (ctx === 'videos') {
-    activeSearchQuery = value;
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => runSearch(), 200);
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-
-  if (ctx === 'books') {
-    activeBookSearchQuery = value;
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => runBookSearch(), 200);
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-
-  // Feed (default): show dropdown of matching people + posts
-  clearTimeout(searchDebounce);
-  if (!value.trim()) {
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-  searchDebounce = setTimeout(() => runFeedSearch(value), 250);
-});
-
-if (topbarSearchClear) {
-  topbarSearchClear.addEventListener('click', () => {
-    searchInput.value = '';
-    topbarSearchClear.style.display = 'none';
-    searchResultsEl.classList.remove('open');
-    const ctx = getSearchContext();
-    if (ctx === 'videos') {
-      activeSearchQuery = '';
-      runSearch();
-    } else if (ctx === 'books') {
-      activeBookSearchQuery = '';
-      // Restore the original (filter+sort) view
-      const grid = document.getElementById('bookGrid');
-      grid.innerHTML = '';
-      allBooksCache.forEach((b, i) => {
-        const card = renderBookCard(b);
-        card.style.animationDelay = `${i * 0.025}s`;
-        grid.appendChild(card);
-      });
-      setupAppwriteStatsLazyLoad(grid);
-      // Resume infinite scroll if there's more to load
-      const sentinel = document.getElementById('bookGridSentinel');
-      if (sentinel && _hasMoreAppwriteBooks) {
-        sentinel.style.display = 'block';
-        setupBooksInfiniteScroll();
-      }
-    }
-  });
-}
-
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
-    searchResultsEl.classList.remove('open');
-  }
-});
-
-// Document-level delegation: clicking any profile avatar/name in the feed
-// (or future cards) opens that user's profile.
-document.addEventListener('click', (e) => {
-  const link = e.target.closest('.profile-link');
-  if (!link) return;
-  const uid = link.dataset.userId;
-  if (!uid) return;
-  e.stopPropagation();
-  e.preventDefault();
-  openProfile(uid);
-});
-
-async function runFeedSearch(query) {
-  query = query.trim().toLowerCase();
-  if (!query) { searchResultsEl.classList.remove('open'); return; }
-
-  searchResultsEl.classList.add('open');
-  searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
-
-  const [{ data: profiles }, { data: posts }] = await Promise.all([
-    supabase.from('profiles').select('*').ilike('username', `%${query}%`).limit(5),
-    supabase.from('posts').select('*, profiles(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
-  ]);
-
-  let html = '';
-  if (profiles?.length) {
-    html += `<div class="search-result-section">People</div>`;
-    profiles.forEach(p => {
-      const avatar = p.avatar_url ? `<img src="${p.avatar_url}"/>` : initials(p.username);
-      html += `
-        <div class="search-result-item" data-type="profile" data-id="${p.id}">
-          <div class="avatar">${avatar}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(p.username)}</div>
-            <div class="search-result-meta">${p.is_guest ? 'Guest' : 'Member'}</div>
-          </div>
-        </div>
-      `;
-    });
-  }
-  if (posts?.length) {
-    html += `<div class="search-result-section">Posts</div>`;
-    posts.forEach(p => {
-      const author = p.profiles || {};
-      const avatar = author.avatar_url ? `<img src="${author.avatar_url}"/>` : initials(author.username || 'U');
-      const snippet = (p.body || '').slice(0, 80);
-      html += `
-        <div class="search-result-item" data-type="post" data-id="${p.id}">
-          <div class="avatar">${avatar}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(snippet)}${p.body && p.body.length > 80 ? '...' : ''}</div>
-            <div class="search-result-meta">by ${escHTML(author.username || 'Unknown')}</div>
-          </div>
-        </div>
-      `;
-    });
-  }
-  if (!html) html = '<div style="padding:1rem;color:var(--text3);text-align:center">No results found</div>';
-
-  searchResultsEl.innerHTML = html;
-
-  searchResultsEl.querySelectorAll('.search-result-item').forEach(item => {
-    item.onclick = () => {
-      const type = item.dataset.type;
-      const id = item.dataset.id;
-      searchResultsEl.classList.remove('open');
-      searchInput.value = '';
-      
-      if (type === 'profile') openProfile(id);
-    };
-  });
-}
-
-window.addEventListener('hashchange', updateSearchPlaceholder);
-updateSearchPlaceholder();
-
-// ── Videos title click behavior ──
-const videosTitle = document.querySelector('.videos-title');
-if (videosTitle) {
-  videosTitle.style.cursor = 'pointer';
-  videosTitle.title = 'Click to scroll top • Double-click to refresh';
-
-  let clickTimer = null;
-  videosTitle.addEventListener('click', (e) => {
-    if (clickTimer) {
-      // Double click detected
-      clearTimeout(clickTimer);
-      clickTimer = null;
-      // Refresh: clear cache and reload
-      allVideosCache = [];
-      allUploadersCache = {};
-      activeSearchQuery = '';
-      activeTagFilter = null;
-      const searchInput = document.getElementById('searchInput');
-      if (searchInput) searchInput.value = '';
-      loadVideos();
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      toast('Videos refreshed', 'success');
-    } else {
-      // Single click: wait to confirm it's not a double click
-      clickTimer = setTimeout(() => {
-        clickTimer = null;
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      }, 250);
-    }
-  });
-}
-
-// ════════════════════════════════════════
-// VIDEO UPLOAD
-// ════════════════════════════════════════
-
-let pendingVideoFile = null;
-
-// Open modal when "Video" button clicked
-document.getElementById('btnOpenVideoUpload')?.addEventListener('click', () => {
-  if (!currentUser) {
-    toast('Please log in to upload videos', 'error');
-    return;
-  }
-  document.getElementById('videoUploadModal').style.display = 'flex';
-  resetVideoUploadModal();
-});
-
-// Videos page Upload button → opens same modal
-document.getElementById('btnUploadVideo')?.addEventListener('click', () => {
-  if (!currentUser) {
-    toast('Please log in to upload videos', 'error');
-    return;
-  }
-  document.getElementById('videoUploadModal').style.display = 'flex';
-  resetVideoUploadModal();
-});
-
-// Close modal
-document.getElementById('closeVideoUploadModal')?.addEventListener('click', closeVideoUploadModal);
-document.getElementById('cancelVideoUpload')?.addEventListener('click', closeVideoUploadModal);
-
-function closeVideoUploadModal() {
-  document.getElementById('videoUploadModal').style.display = 'none';
-  resetVideoUploadModal();
-}
-
-function resetVideoUploadModal() {
-  pendingVideoFile = null;
-  document.getElementById('videoUploadStep1').style.display = 'block';
-  document.getElementById('videoUploadStep2').style.display = 'none';
-  document.getElementById('videoUploadFile').value = '';
-  document.getElementById('videoUploadTitle').value = '';
-  document.getElementById('videoUploadDescription').value = '';
-  document.getElementById('videoUploadTags').value = '';
-  document.getElementById('videoUploadCategory').value = 'general';
-  document.getElementById('videoUploadProgress').classList.remove('active');
-  document.getElementById('videoUploadFill').style.width = '0%';
-  document.getElementById('confirmVideoUpload').disabled = true;
-  document.getElementById('confirmVideoUpload').textContent = 'Upload';
-  document.getElementById('titleCharCount').textContent = '0';
-  document.getElementById('descCharCount').textContent = '0';
-}
-
-// Handle file selection
-document.getElementById('videoUploadFile')?.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  
-  // 2GB limit
-  if (file.size > 2 * 1024 * 1024 * 1024) {
-    toast('Video too large (max 2GB)', 'error');
-    return;
-  }
-  
-  pendingVideoFile = file;
-  
-  // Show preview + form
-  const preview = document.getElementById('videoUploadPreview');
-  preview.src = URL.createObjectURL(file);
-  
-  document.getElementById('videoUploadStep1').style.display = 'none';
-  document.getElementById('videoUploadStep2').style.display = 'block';
-  
-  // Auto-fill title with filename (without extension)
-  const titleInput = document.getElementById('videoUploadTitle');
-  titleInput.value = file.name.replace(/\.[^.]+$/, '').slice(0, 100);
-  document.getElementById('titleCharCount').textContent = titleInput.value.length;
-  document.getElementById('confirmVideoUpload').disabled = false;
-});
-
-// Char counters
-document.getElementById('videoUploadTitle')?.addEventListener('input', (e) => {
-  document.getElementById('titleCharCount').textContent = e.target.value.length;
-  document.getElementById('confirmVideoUpload').disabled = !e.target.value.trim();
-});
-document.getElementById('videoUploadDescription')?.addEventListener('input', (e) => {
-  document.getElementById('descCharCount').textContent = e.target.value.length;
-});
-
-// Handle upload
-document.getElementById('confirmVideoUpload')?.addEventListener('click', async () => {
-  if (!pendingVideoFile) return;
-  
-  const title = document.getElementById('videoUploadTitle').value.trim();
-  if (!title) {
-    toast('Please add a title', 'error');
-    return;
-  }
-  
-  const description = document.getElementById('videoUploadDescription').value.trim();
-  const tagsRaw = document.getElementById('videoUploadTags').value.trim();
-  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const category = document.getElementById('videoUploadCategory').value;
-  
-  const confirmBtn = document.getElementById('confirmVideoUpload');
-  const cancelBtn = document.getElementById('cancelVideoUpload');
-  const progress = document.getElementById('videoUploadProgress');
-  const fill = document.getElementById('videoUploadFill');
-  const percent = document.getElementById('videoUploadPercent');
-  const status = document.getElementById('videoUploadStatus');
-  
-  confirmBtn.disabled = true;
-  cancelBtn.disabled = true;
-  confirmBtn.textContent = 'Uploading...';
-  progress.classList.add('active');
-  
-  try {
-    // 1. Get upload URL from Edge Function
-    status.textContent = 'Preparing upload...';
-    const uploadInfo = await callEdgeFunction('bunny-upload', { title });
-    
-    // 2. Upload file to Bunny via PUT with progress tracking
-    status.textContent = 'Uploading video...';
-    await uploadFileToBunny(pendingVideoFile, uploadInfo, (pct) => {
-      fill.style.width = pct + '%';
-      percent.textContent = pct + '%';
-    });
-    
-    // 3. Save metadata to Supabase (return the new row so we can link a post to it)
-    status.textContent = 'Saving...';
-    const { data: newVideo, error } = await supabase.from('videos').insert({
-      bunny_video_id: uploadInfo.videoId,
-      bunny_library_id: uploadInfo.libraryId,
-      video_url: uploadInfo.videoUrl,
-      thumbnail_url: uploadInfo.thumbnailUrl,
-      title,
-      description,
-      tags,
-      category,
-      uploader_id: currentUser.id,
-      status: 'processing',
-    }).select().single();
-    
-    if (error) throw error;
-    
-    // 4. Also create a post in the home feed linking to this video
-    const postBody = description?.trim() || title;
-    const { error: postError } = await supabase.from('posts').insert({
-      user_id: currentUser.id,
-      body: postBody,
-      video_id: newVideo.id,
-    });
-    if (postError) console.error('Failed to create feed post:', postError);
-    
-    status.textContent = 'Done!';
-    fill.style.width = '100%';
-    percent.textContent = '100%';
-    
-    toast('Video uploaded! Processing in the background...', 'success');
-    setTimeout(() => {
-      closeVideoUploadModal();
-      // Refresh video page if open
-      if (videosPage.style.display === 'block') {
-        allVideosCache = [];
-        loadVideos();
-      }
-      // Refresh home feed if open
-      if (feedEl.style.display !== 'none') {
-        window.loadFeed();
-      }
-    }, 1500);
-    
-  } catch (err) {
-    console.error('Upload failed:', err);
-    toast('Upload failed: ' + err.message, 'error');
-    confirmBtn.disabled = false;
-    cancelBtn.disabled = false;
-    confirmBtn.textContent = 'Try again';
-    progress.classList.remove('active');
-  }
-});
-
-// Helper: Upload file to Bunny with progress
-function uploadFileToBunny(file, info, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', info.uploadUrl);
-    xhr.setRequestHeader('AccessKey', info.accessKey);
-    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-    
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100);
-        onProgress(pct);
-      }
-    });
-    
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
-      } else {
-        reject(new Error('Bunny upload failed: ' + xhr.status));
-      }
-    });
-    xhr.addEventListener('error', () => reject(new Error('Network error')));
-    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
-    
-    xhr.send(file);
-  });
-}
-
-initAuth();
-
-// ── Watch history & smart recommendations ──
-const WATCH_HISTORY_KEY = 'selebox_watch_history';
-
-function getWatchHistory() {
-  try {
-    const raw = localStorage.getItem(WATCH_HISTORY_KEY);
-    if (!raw) return [];
-    const history = JSON.parse(raw);
-    // Filter out entries older than 30 days
-    const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
-    return history.filter(h => h.timestamp > cutoff);
-  } catch { return []; }
-}
-
-function addToWatchHistory(video, uploader) {
-  const history = getWatchHistory();
-  // Remove if already exists (we'll add to top)
-  const filtered = history.filter(h => h.id !== video.$id);
-  filtered.unshift({
-    id: video.$id,
-    tags: video.tags || [],
-    uploader: video.uploader,
-    uploaderName: uploader?.username || '',
-    timestamp: Date.now()
-  });
-  // Keep only last 50
-  const trimmed = filtered.slice(0, 50);
-  try { localStorage.setItem(WATCH_HISTORY_KEY, JSON.stringify(trimmed)); } catch {}
-}
-
-function getInterestProfile() {
-  const history = getWatchHistory();
-  const recent = history.slice(0, 5); // last 5 videos
-
-  // Weight tags: most recent = highest weight
-  const tagWeights = {};
-  const weights = [0.4, 0.25, 0.15, 0.1, 0.1];
-  recent.forEach((entry, idx) => {
-    const w = weights[idx] || 0.05;
-    (entry.tags || []).forEach(tag => {
-      tagWeights[tag] = (tagWeights[tag] || 0) + w;
-    });
-  });
-
-  const watchedIds = new Set(history.map(h => h.id));
-  const recentUploaders = [...new Set(recent.map(h => h.uploader).filter(Boolean))];
-
-  return { tagWeights, watchedIds, recentUploaders };
-}
-
-async function loadUpNext(currentVideo) {
-  const list = document.getElementById('upNextList');
-  list.innerHTML = '<div class="loading" style="padding:0.5rem">Loading...</div>';
-
-  const { tagWeights, watchedIds, recentUploaders } = getInterestProfile();
-  const currentTags = currentVideo.tags || [];
-
-  try {
-    // Fetch a larger pool to pick from
-    const result = await appwriteList(APPWRITE.videosCollection, [
-      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit', values: [200] })
-    ]);
-
-    let pool = result.documents.filter(v =>
-      v.$id !== currentVideo.$id && !watchedIds.has(v.$id)
-    );
-
-    // Score each video
-    pool.forEach(v => {
-      let score = 0;
-
-      // Tag matching (40% from interest profile + boost for current video tags)
-      (v.tags || []).forEach(tag => {
-        if (tagWeights[tag]) score += tagWeights[tag] * 100;
-        if (currentTags.includes(tag)) score += 30;
-      });
-
-      // Same uploader bonus
-      if (v.uploader === currentVideo.uploader) score += 25;
-      if (recentUploaders.includes(v.uploader)) score += 15;
-
-      // Engagement boost (views)
-      const views = v.videoStats?.views || 0;
-      score += Math.log10(views + 1) * 2;
-
-      // Small randomness so it doesn't feel static
-      score += Math.random() * 5;
-
-      v._score = score;
-    });
-
-    // Sort by score, take top 10
-    pool.sort((a, b) => b._score - a._score);
-    const suggestions = pool.slice(0, 10);
-
-    // Fetch uploaders for these
-    const uploaderIds = [...new Set(suggestions.map(v => v.uploader).filter(Boolean))];
-    const uploaders = {};
-    if (uploaderIds.length) {
-      try {
-        const userResult = await appwriteList(APPWRITE.usersCollection, [
-          JSON.stringify({ method: 'equal', attribute: '$id', values: uploaderIds }),
-          JSON.stringify({ method: 'limit', values: [100] })
-        ]);
-        userResult.documents.forEach(u => { uploaders[u.$id] = u; });
-      } catch {}
-    }
-
-    // Render
-    list.innerHTML = '';
-    if (!suggestions.length) {
-      list.innerHTML = '<div style="color:var(--text3);font-size:0.85rem;padding:0.5rem">No suggestions yet</div>';
-      return;
-    }
-
-    suggestions.forEach(v => {
-      const uploader = uploaders[v.uploader];
-      const item = renderUpNextItem(v, uploader, currentTags);
-      list.appendChild(item);
-    });
-  } catch (e) {
-    list.innerHTML = `<div style="color:var(--text3);font-size:0.85rem;padding:0.5rem">Couldn't load: ${e.message}</div>`;
-  }
-}
-
-function renderUpNextItem(video, uploader, currentTags) {
-  const div = document.createElement('div');
-  div.className = 'upnext-item';
-  div.onclick = () => playVideo(video.$id);
-
-  const name = uploader?.username || 'Unknown';
-  const views = (video.videoStats?.views || 0).toLocaleString();
-  const matchingTag = (video.tags || []).find(t => currentTags.includes(t));
-
-  div.innerHTML = `
-    <div class="upnext-thumb">
-      ${video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : ''}
-      <span class="upnext-thumb-duration" data-duration></span>
-    </div>
-    <div class="upnext-info">
-      <div class="upnext-title-text">${escHTML(video.title || 'Untitled')}</div>
-      <div class="upnext-meta">
-        ${escHTML(name)}<br>
-        ${views} views • ${timeAgo(video.$createdAt)}
-      </div>
-      ${matchingTag ? `<span class="upnext-tag">${escHTML(matchingTag)}</span>` : ''}
-    </div>
-  `;
-
-  // Lazy-load duration
-  const durationEl = div.querySelector('[data-duration]');
-  const videoDuration = video.videoStats?.duration;
-  if (videoDuration) {
-    durationEl.textContent = formatDuration(videoDuration);
-  }
-
-  return div;
-}
-
-// ── Videos (from Appwrite) ──
-const videosPage = document.getElementById('videosPage');
-const videoPlayerPage = document.getElementById('videoPlayerPage');
-const studioPage = document.getElementById('studioPage');
-const bookPage = document.getElementById('bookPage');
-const authorPage = document.getElementById('authorPage');
-const bookDetailPage = document.getElementById('bookDetailPage');
-const chapterReaderPage = document.getElementById('chapterReaderPage');
-
-// Hide every main content page; show functions call this first then set their own page to block.
-function hideAllMainPages() {
-  feedEl.style.display = 'none';
-  storiesEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  if (profilePage) profilePage.style.display = 'none';
-  if (videosPage) videosPage.style.display = 'none';
-  if (videoPlayerPage) videoPlayerPage.style.display = 'none';
-  if (studioPage) studioPage.style.display = 'none';
-  if (bookPage) bookPage.style.display = 'none';
-  if (authorPage) authorPage.style.display = 'none';
-  if (bookDetailPage) bookDetailPage.style.display = 'none';
-  if (chapterReaderPage) chapterReaderPage.style.display = 'none';
-  // Sibling sentinels (live outside the page divs) — also hide
-  const feedSentinel = document.getElementById('feedSentinel');
-  if (feedSentinel) feedSentinel.style.display = 'none';
-}
-let currentHls = null;
-
-// Resume playback storage
-function getResumeKey(videoId) { return `video_resume_${videoId}`; }
-function getResumeTime(videoId) {
-  const t = localStorage.getItem(getResumeKey(videoId));
-  return t ? parseFloat(t) : 0;
-}
-function saveResumeTime(videoId, time, duration) {
-  if (!time || time < 5) return; // ignore very early
-  if (duration && time > duration - 10) {
-    localStorage.removeItem(getResumeKey(videoId));
-    return;
-  }
-  localStorage.setItem(getResumeKey(videoId), time);
-}
-function formatDuration(seconds) {
-  if (!seconds || isNaN(seconds)) return '';
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
-  return `${m}:${s.toString().padStart(2,'0')}`;
-}
-
-function stopVideoPlayer() {
-  const player = document.getElementById('videoPlayer');
-  if (player) {
-    if (player._saveInterval) { clearInterval(player._saveInterval); player._saveInterval = null; }
-    player.pause();
-    player.removeAttribute('src');
-    player.load();
-  }
-  if (currentHls) {
-    currentHls.destroy();
-    currentHls = null;
-  }
-}
-
-function showVideos(forceReload = false) {
-  const wasOnVideosPage = videosPage.style.display === 'block';
-  hideAllMainPages();
-  videosPage.style.display = 'block';
-  document.body.classList.add('on-videos');
-  stopVideoPlayer();
-  history.pushState(null, '', '#videos');
-  // Only reload if cache is empty or forced
-  if (forceReload || !allVideosCache.length) {
-    loadVideos();
-  }
-}
-
-function showStudio() {
-  hideAllMainPages();
-  studioPage.style.display = 'block';
-  document.body.classList.remove('on-videos');
-  stopVideoPlayer();
-  history.pushState(null, '', '#studio');
-  loadStudio();
-}
-
-// ════════════════════════════════════════
-// BOOK / READER
-// ════════════════════════════════════════
-let allBooksCache = [];
-let bookGenreFilter = '';
-let bookSortBy = 'trending';
-let activeBookSearchQuery = '';
-let currentBookDetail = null;       // { book, chapters }
-let currentChapterIndex = 0;
-let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
-
-// ── Book (Reader) page ──
-function showBook() {
-  hideAllMainPages();
-  bookPage.style.display = 'block';
-  document.body.classList.remove('on-videos');
-  stopVideoPlayer();
-  history.pushState(null, '', '#book');
-  loadBooks();
-}
-
-// ── Pagination state for the public Book browse page ──
-const APPWRITE_BOOKS_PAGE_SIZE = 40;
-let _appwriteOffset = 0;
-let _hasMoreAppwriteBooks = true;
-let _isLoadingMoreBooks = false;
-let _bookScrollObserver = null;
-
-async function loadBooks() {
-  const grid = document.getElementById('bookGrid');
-  const empty = document.getElementById('bookEmpty');
-  const sentinel = document.getElementById('bookGridSentinel');
-  empty.style.display = 'none';
-  sentinel.style.display = 'none';
-  grid.style.display = 'grid';
-  grid.innerHTML = '<div class="loading">Loading books...</div>';
-
-  // Reset pagination state on every fresh load (filter/sort/page open)
-  _appwriteOffset = 0;
-  _hasMoreAppwriteBooks = true;
-  _isLoadingMoreBooks = false;
-  _allAppwriteStatsFetched = false;
-
-  try {
-    // First-page Appwrite fetch + full Supabase fetch (Supabase is small and shouldn't paginate)
-    const [supabaseBooks, appwriteBooks] = await Promise.all([
-      fetchSupabaseBooks(),
-      fetchAppwriteBooks(0),
-    ]);
-
-    if (appwriteBooks.length < APPWRITE_BOOKS_PAGE_SIZE) _hasMoreAppwriteBooks = false;
-    _appwriteOffset = appwriteBooks.length;
-
-    let merged = [...(supabaseBooks || []), ...(appwriteBooks || [])];
-
-    merged = applyBookFilterAndSort(merged);
-    allBooksCache = merged;
-
-    if (!merged.length) {
-      grid.style.display = 'none';
-      empty.style.display = 'flex';
-      return;
-    }
-
-    renderBooks();
-    if (_hasMoreAppwriteBooks) setupBooksInfiniteScroll();
-  } catch (err) {
-    console.error('Failed to load books:', err);
-    grid.innerHTML = '<div class="loading">Couldn\'t load books</div>';
-  }
-}
-
-// Shared filter+sort so loadMoreBooks can reuse the same predicate
-function applyBookFilterAndSort(list) {
-  let merged = list;
-
-  if (bookGenreFilter) {
-    const filterLower = bookGenreFilter.toLowerCase();
-    const filterWords = filterLower.replace(/-/g, ' ');
-    merged = merged.filter(b => {
-      if (b.genre === bookGenreFilter) return true;
-      return (b.tags || []).some(t => {
-        const tagLower = (t || '').toLowerCase();
-        return tagLower === filterLower || tagLower === filterWords;
-      });
-    });
-  }
-
-  const dateOf = b => new Date(b.published_at || b.created_at || 0);
-  if (bookSortBy === 'recent') {
-    merged.sort((a, b) => dateOf(b) - dateOf(a));
-  } else if (bookSortBy === 'most-liked') {
-    merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
-  } else if (bookSortBy === 'most-read') {
-    merged.sort((a, b) => (b.views_count || 0) - (a.views_count || 0));
-  } else { // trending
-    merged.sort((a, b) => {
-      const diff = (b.likes_count || 0) - (a.likes_count || 0);
-      if (diff !== 0) return diff;
-      return dateOf(b) - dateOf(a);
-    });
-  }
-  return merged;
-}
-
-async function loadMoreBooks() {
-  if (_isLoadingMoreBooks || !_hasMoreAppwriteBooks) return;
-  _isLoadingMoreBooks = true;
-
-  const sentinel = document.getElementById('bookGridSentinel');
-  sentinel.style.display = 'block';
-  sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
-
-  try {
-    const more = await fetchAppwriteBooks(_appwriteOffset);
-    if (more.length < APPWRITE_BOOKS_PAGE_SIZE) _hasMoreAppwriteBooks = false;
-    _appwriteOffset += more.length;
-
-    if (more.length) {
-      // Merge into cache, re-apply current filter/sort to keep order consistent
-      const allMerged = applyBookFilterAndSort([...allBooksCache, ...more]);
-      allBooksCache = allMerged;
-      // For appended cards we just append rendering — don't re-render entire grid (jank)
-      const grid = document.getElementById('bookGrid');
-      // Only render the cards that aren't already in the DOM
-      const presentIds = new Set(Array.from(grid.querySelectorAll('.book-card')).map(c => c.dataset.bookId));
-      more
-        .filter(b => !presentIds.has(b.id))
-        // Reapply filter to the new batch only (don't show filtered-out cards)
-        .filter(b => allBooksCache.includes(b))
-        .forEach((b, i) => {
-          const card = renderBookCard(b);
-          card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
-          grid.appendChild(card);
-        });
-      // Re-observe new cards for stats
-      setupAppwriteStatsLazyLoad(grid);
-    }
-
-    if (_hasMoreAppwriteBooks) {
-      sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
-    } else {
-      sentinel.innerHTML = '<div class="book-grid-end-msg">You\'ve reached the end · ' + allBooksCache.length.toLocaleString() + ' books</div>';
-      // Stop observing
-      if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
-    }
-  } catch (err) {
-    console.error('Failed to load more books:', err);
-    sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
-  } finally {
-    _isLoadingMoreBooks = false;
-  }
-}
-
-// ── Book search (filters the currently-loaded book cache) ──
-// Searches: title, description, tags, genre, author/uploader name.
-// `#tag` prefix restricts to tag-only matches. Suspends infinite scroll while active.
-function searchBooks(query) {
-  query = (query || '').trim().toLowerCase();
-  if (!query) return allBooksCache;
-
-  const hashtagMatch = query.match(/^#(\w+)/);
-  const isHashtag = !!hashtagMatch;
-  const cleanQuery = isHashtag ? hashtagMatch[1].toLowerCase() : query;
-
-  return allBooksCache.filter(b => {
-    if (isHashtag) {
-      return (b.tags || []).some(t => (t || '').toLowerCase().includes(cleanQuery));
-    }
-
-    const title  = (b.title || '').toLowerCase();
-    const desc   = (b.description || '').toLowerCase();
-    const tags   = (b.tags || []).join(' ').toLowerCase();
-    const genre  = (b.genre || '').replace(/-/g, ' ').toLowerCase();
-    const author = (b.profiles?.username || b.author?.username || '').toLowerCase();
-
-    return title.includes(cleanQuery)
-        || desc.includes(cleanQuery)
-        || tags.includes(cleanQuery)
-        || genre.includes(cleanQuery)
-        || author.includes(cleanQuery);
-  });
-}
-
-function runBookSearch() {
-  const grid = document.getElementById('bookGrid');
-  const sentinel = document.getElementById('bookGridSentinel');
-  const empty = document.getElementById('bookEmpty');
-
-  // While search is active, hide the infinite-scroll sentinel so we don't
-  // append off-results books underneath.
-  if (sentinel) sentinel.style.display = 'none';
-  if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
-
-  if (!activeBookSearchQuery.trim()) {
-    // Empty query → restore full view
-    empty.style.display = 'none';
-    grid.style.display = 'grid';
-    grid.innerHTML = '';
-    allBooksCache.forEach((b, i) => {
-      const card = renderBookCard(b);
-      card.style.animationDelay = `${i * 0.025}s`;
-      grid.appendChild(card);
-    });
-    setupAppwriteStatsLazyLoad(grid);
-    if (sentinel && _hasMoreAppwriteBooks) {
-      sentinel.style.display = 'block';
-      setupBooksInfiniteScroll();
-    }
-    return;
-  }
-
-  const filtered = searchBooks(activeBookSearchQuery);
-  empty.style.display = 'none';
-  grid.style.display = 'grid';
-
-  if (!filtered.length) {
-    grid.innerHTML = `
-      <div class="video-search-empty" style="grid-column:1/-1">
-        <h3>No books found</h3>
-        <p>Try a different keyword, author, or #tag — or scroll the full list to load more books first.</p>
-      </div>
-    `;
-    return;
-  }
-
-  grid.innerHTML = '';
-  filtered.forEach((b, i) => {
-    const card = renderBookCard(b);
-    card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
-    grid.appendChild(card);
-  });
-  setupAppwriteStatsLazyLoad(grid);
-}
-
-function setupBooksInfiniteScroll() {
-  const sentinel = document.getElementById('bookGridSentinel');
-  if (!sentinel) return;
-  sentinel.style.display = 'block';
-
-  if (_bookScrollObserver) _bookScrollObserver.disconnect();
-  if (!('IntersectionObserver' in window)) return;
-
-  _bookScrollObserver = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting) loadMoreBooks();
-  }, {
-    root: null,
-    rootMargin: '600px 0px',   // pre-fetch a bit before the sentinel reaches the viewport
-    threshold: 0.01,
-  });
-  _bookScrollObserver.observe(sentinel);
-}
-
-// ── Supabase books ──
-async function fetchSupabaseBooks() {
-  try {
-    const { data, error } = await supabase
-      .from('books')
-      .select(`
-        id, title, description, cover_url, genre, tags,
-        views_count, likes_count, chapters_count, word_count,
-        published_at, created_at,
-        author_id,
-        profiles!books_author_id_fkey ( id, username, avatar_url )
-      `)
-      .eq('is_public', true)
-      .in('status', ['ongoing', 'completed'])
-      .limit(80);
-
-    if (error) {
-      console.error('Supabase books fetch error:', error);
-      // Don't break the whole page — return empty so Appwrite still renders
-      if (error.code === '42P01') {
-        // migration not run; show friendly state via the calling page
-      }
-      return [];
-    }
-
-    return (data || []).map(b => ({
-      ...b,
-      id: b.id,                                    // raw UUID, no prefix needed (FK shape used elsewhere)
-      $id: 'sb_' + b.id,
-      _supabase: true,
-      author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
-    }));
-  } catch (err) {
-    console.error('fetchSupabaseBooks failed:', err);
-    return [];
-  }
-}
-
-// ── Appwrite books (legacy mobile) ──
-// Stats (views/likes/chapter counts) are loaded lazily per-card after render.
-// Pagination via offset keeps initial load fast even with thousands of legacy books.
-async function fetchAppwriteBooks(offset = 0) {
-  if (!APPWRITE.booksCollection) return [];
-  try {
-    const result = await appwriteList(APPWRITE.booksCollection, [
-      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit',  values: [APPWRITE_BOOKS_PAGE_SIZE] }),
-      JSON.stringify({ method: 'offset', values: [offset] }),
-    ]);
-    const books = result.documents || [];
-    const userMap = await fetchAppwriteUsers(collectAppwriteUploaderIds(books));
-
-    return books.map(b => {
-      const mapped = mapAppwriteBookToBook(b, userMap);
-      // Pre-fill from cache if available (otherwise stays 0; lazy fetch will update later)
-      const cached = getCachedAppwriteStats(b.$id);
-      if (cached) {
-        mapped.views_count    = cached.views;
-        mapped.likes_count    = cached.likes;
-        mapped.chapters_count = cached.chaptersCount;
-        mapped._statsLoaded   = true;     // skip lazy fetch for this one
-      }
-      return mapped;
-    });
-  } catch (err) {
-    console.error('Failed to fetch Appwrite books:', err);
-    return [];
-  }
-}
-
-// Helper: get an ID from any possible shape Appwrite returns for a relationship field.
-// Could be a string, an object with $id, an array of strings, or an array of objects.
-function pluckRefId(value) {
-  if (!value) return null;
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return pluckRefId(value[0]);
-  if (typeof value === 'object') return value.$id || null;
-  return null;
-}
-
-// Aggregate views/likes/chapter counts for a SPECIFIC list of book IDs.
-// Uses Appwrite server-side `equal` filter on the `book` relationship attribute so
-// only relevant rows come back — critical when there are thousands of books.
-// Falls back gracefully (returns zeros) on any error.
-async function fetchAppwriteBookStats(bookIds) {
-  const empty = { views: {}, likes: {}, chaptersCount: {} };
-  if (!bookIds || !bookIds.length) return empty;
-
-  // Appwrite caps `equal values` at 100. Batch if larger.
-  if (bookIds.length > 100) {
-    const merged = { views: {}, likes: {}, chaptersCount: {} };
-    for (let i = 0; i < bookIds.length; i += 100) {
-      const part = await fetchAppwriteBookStats(bookIds.slice(i, i + 100));
-      Object.assign(merged.views, part.views);
-      Object.assign(merged.likes, part.likes);
-      Object.assign(merged.chaptersCount, part.chaptersCount);
-    }
-    return merged;
-  }
-
-  try {
-    const views = {};
-    const likes = {};
-    const chaptersCount = {};
-
-    // Reads + chapters in parallel, both server-side filtered
-    const settled = await Promise.allSettled([
-      APPWRITE.chapterReadsCollection
-        ? appwriteList(APPWRITE.chapterReadsCollection, [
-            JSON.stringify({ method: 'equal', attribute: 'book', values: bookIds }),
-            JSON.stringify({ method: 'limit', values: [5000] }),
-          ])
-        : Promise.resolve({ documents: [] }),
-      APPWRITE.chaptersCollection
-        ? appwriteList(APPWRITE.chaptersCollection, [
-            JSON.stringify({ method: 'equal', attribute: 'book', values: bookIds }),
-            JSON.stringify({ method: 'limit', values: [2000] }),
-          ])
-        : Promise.resolve({ documents: [] }),
-    ]);
-    const readDocs    = settled[0].status === 'fulfilled' ? (settled[0].value.documents || []) : [];
-    const chapterDocs = settled[1].status === 'fulfilled' ? (settled[1].value.documents || []) : [];
-
-    // Reads → views (sum readCount per book)
-    for (const row of readDocs) {
-      const bookId = pluckRefId(row.book);
-      if (!bookId) continue;
-      views[bookId] = (views[bookId] || 0) + (Number(row.readCount) || 0);
-    }
-
-    // Build chapter → book map + chapter counts
-    const chapterBookMap = {};
-    for (const c of chapterDocs) {
-      const bookId = pluckRefId(c.book);
-      if (!bookId) continue;
-      chapterBookMap[c.$id] = bookId;
-      const isPublished = (c.status || '').toLowerCase() !== 'draft';
-      if (isPublished) chaptersCount[bookId] = (chaptersCount[bookId] || 0) + 1;
-    }
-
-    // Likes → count, mapped chapter → book
-    const chapterIds = Object.keys(chapterBookMap);
-    if (APPWRITE.chapterLikesCollection && chapterIds.length) {
-      // Same 100-id cap on equal values
-      for (let i = 0; i < chapterIds.length; i += 100) {
-        const batch = chapterIds.slice(i, i + 100);
-        try {
-          const r = await appwriteList(APPWRITE.chapterLikesCollection, [
-            JSON.stringify({ method: 'equal', attribute: 'booksChapter', values: batch }),
-            JSON.stringify({ method: 'limit', values: [5000] }),
-          ]);
-          for (const l of (r.documents || [])) {
-            const cid = pluckRefId(l.booksChapter);
-            if (!cid) continue;
-            const bid = chapterBookMap[cid];
-            if (bid) likes[bid] = (likes[bid] || 0) + 1;
-          }
-        } catch (e) { /* swallowed */ }
-      }
-    }
-
-    return { views, likes, chaptersCount };
-  } catch (err) {
-    console.warn('fetchAppwriteBookStats failed:', err);
-    return empty;
-  }
-}
-
-// Page through an Appwrite collection until empty, returning all documents.
-// Caps at ~10k to avoid runaway loops on misconfigured collections.
-async function fetchAllAppwrite(collectionId) {
-  const all = [];
-  const PAGE = 100;
-  let offset = 0;
-  for (let safety = 0; safety < 100; safety++) {  // up to 10000 docs
-    try {
-      const r = await appwriteList(collectionId, [
-        JSON.stringify({ method: 'limit',  values: [PAGE] }),
-        JSON.stringify({ method: 'offset', values: [offset] }),
-      ]);
-      const docs = r.documents || [];
-      all.push(...docs);
-      if (docs.length < PAGE) break;
-      offset += PAGE;
-    } catch (err) {
-      console.warn(`fetchAllAppwrite(${collectionId}) failed at offset ${offset}:`, err);
-      break;
-    }
-  }
-  return all;
-}
-
-// Pull uploader IDs out of an Appwrite books list.
-// `uploader` may come back as: a string ID, an object with $id, or already-embedded with username.
-function collectAppwriteUploaderIds(items) {
-  const ids = new Set();
-  for (const item of items) {
-    const u = item?.uploader;
-    if (!u) continue;
-    if (typeof u === 'string') {
-      ids.add(u);
-    } else if (typeof u === 'object') {
-      // Already-embedded (has username) → no fetch needed
-      if (u.username) continue;
-      if (u.$id) ids.add(u.$id);
-    }
-  }
-  return ids;
-}
-
-async function fetchAppwriteUsers(idSet) {
-  if (!idSet || !idSet.size) return {};
-  const out = {};
-  const ids = [...idSet];
-  // Appwrite caps `equal $id values` at 100 per query; batch just in case.
-  for (let i = 0; i < ids.length; i += 100) {
-    const batch = ids.slice(i, i + 100);
-    try {
-      const userResult = await appwriteList(APPWRITE.usersCollection, [
-        JSON.stringify({ method: 'equal', attribute: '$id', values: batch }),
-        JSON.stringify({ method: 'limit', values: [100] }),
-      ]);
-      (userResult.documents || []).forEach(u => { out[u.$id] = u; });
-    } catch (err) {
-      console.warn('User batch lookup failed:', err);
-    }
-  }
-  return out;
-}
-
-// Resolve the uploader from any of: embedded object, just-ID string, or partial object
-function resolveAppwriteUploader(rawUploader, userMap = {}) {
-  if (!rawUploader) return null;
-  if (typeof rawUploader === 'string') return userMap[rawUploader] || null;
-  if (typeof rawUploader === 'object') {
-    if (rawUploader.username) return rawUploader;       // already expanded
-    if (rawUploader.$id) return userMap[rawUploader.$id] || rawUploader;
-  }
-  return null;
-}
-
-function mapAppwriteBookToBook(b, userMap = {}) {
-  const firstTag = (b.tags || [])[0] || '';
-  const genreSlug = firstTag.toLowerCase().replace(/\s+/g, '-');
-  const uploader = resolveAppwriteUploader(b.uploader, userMap);
-  return {
-    id: 'aw_' + b.$id,
-    $id: 'aw_' + b.$id,
-    _appwrite: true,
-    _appwriteId: b.$id,
-    title: b.title || 'Untitled',
-    description: b.synopsis || '',
-    cover_url: b.thumbnail || null,
-    genre: genreSlug || null,
-    tags: b.tags || [],
-    status: (b.status || 'ongoing').toLowerCase(),
-    is_public: !b.isLocked,
-    isLocked: !!b.isLocked,
-    contentRating: b.contentRating || null,
-    views_count: 0,
-    likes_count: 0,
-    chapters_count: 0,
-    word_count: 0,
-    published_at: b.$createdAt,
-    created_at: b.$createdAt,
-    author_id: uploader?.$id || null,
-    // Match the shape Supabase profiles join produces, so renderBookDetail/renderBookCard work uniformly
-    profiles: uploader ? {
-      id: uploader.$id,
-      username: uploader.username || 'Unknown',
-      avatar_url: uploader.avatar || null,
-    } : null,
-    author: uploader ? {
-      id: uploader.$id,
-      username: uploader.username || 'Unknown',
-      avatar: uploader.avatar || null,
-    } : null,
-  };
-}
-
-async function fetchAppwriteChaptersForBook(appwriteBookId) {
-  if (!APPWRITE.chaptersCollection) return [];
-  try {
-    const result = await appwriteList(APPWRITE.chaptersCollection, [
-      JSON.stringify({ method: 'equal', attribute: 'book', values: [appwriteBookId] }),
-      JSON.stringify({ method: 'orderAsc', attribute: 'order' }),
-      JSON.stringify({ method: 'limit', values: [200] }),
-    ]);
-    return (result.documents || []).map(c => ({
-      id: 'aw_' + c.$id,
-      _appwrite: true,
-      _appwriteId: c.$id,
-      chapter_number: typeof c.order === 'number' ? c.order : 0,
-      title: c.title || `Chapter ${c.order || ''}`.trim(),
-      word_count: 0,
-      views_count: 0,
-      // Treat anything that isn't explicitly a draft as published (mobile typically only stores published ones in this collection)
-      is_published: (c.status || '').toLowerCase() !== 'draft',
-      created_at: c.$createdAt,
-      _content: c.content || '',         // some renderers use it directly without a follow-up GET
-    }));
-  } catch (err) {
-    console.error('Failed to fetch Appwrite chapters:', err);
-    return [];
-  }
-}
-
-function renderBooks() {
-  const grid = document.getElementById('bookGrid');
-  const empty = document.getElementById('bookEmpty');
-
-  if (!allBooksCache.length) {
-    grid.style.display = 'none';
-    empty.style.display = 'flex';
-    return;
-  }
-
-  grid.style.display = 'grid';
-  empty.style.display = 'none';
-
-  grid.innerHTML = '';
-  allBooksCache.forEach((b, i) => {
-    const card = renderBookCard(b);
-    card.style.animationDelay = `${i * 0.025}s`;
-    grid.appendChild(card);
-  });
-
-  // Set up lazy stats loading for Appwrite cards that don't have cached values yet
-  setupAppwriteStatsLazyLoad(grid);
-}
-
-// ════════════════════════════════════════
-// LAZY STATS LOADING (Appwrite books)
-// ════════════════════════════════════════
-
-const STATS_CACHE_KEY = 'selebox_book_stats_v1';
-const STATS_CACHE_TTL_MS = 5 * 60 * 1000;   // 5 minutes
-
-function getCachedAppwriteStats(appwriteBookId) {
-  try {
-    const raw = localStorage.getItem(STATS_CACHE_KEY);
-    if (!raw) return null;
-    const cache = JSON.parse(raw);
-    const e = cache[appwriteBookId];
-    if (!e) return null;
-    if (Date.now() - (e.ts || 0) > STATS_CACHE_TTL_MS) return null;
-    return { views: e.views || 0, likes: e.likes || 0, chaptersCount: e.chaptersCount || 0 };
-  } catch { return null; }
-}
-
-function setCachedAppwriteStats(appwriteBookId, stats) {
-  try {
-    const raw = localStorage.getItem(STATS_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    // Light pruning: drop entries older than 1 hour to bound size
-    const cutoff = Date.now() - 60 * 60 * 1000;
-    for (const k of Object.keys(cache)) {
-      if ((cache[k]?.ts || 0) < cutoff) delete cache[k];
-    }
-    cache[appwriteBookId] = { ...stats, ts: Date.now() };
-    localStorage.setItem(STATS_CACHE_KEY, JSON.stringify(cache));
-  } catch { /* localStorage full or disabled */ }
-}
-
-let _statsObserver = null;
-let _statsBatchQueue = new Set();
-let _statsBatchTimer = null;
-
-function setupAppwriteStatsLazyLoad(grid) {
-  // Tear down any previous observer (e.g. when filter changes)
-  if (_statsObserver) _statsObserver.disconnect();
-  _statsObserver = null;
-  _statsBatchQueue.clear();
-  if (_statsBatchTimer) { clearTimeout(_statsBatchTimer); _statsBatchTimer = null; }
-
-  if (!('IntersectionObserver' in window)) {
-    // Old browser: just kick off all pending stats at once
-    const ids = Array.from(grid.querySelectorAll('.book-card[data-appwrite-id]:not([data-stats-loaded="true"])'))
-      .map(el => el.dataset.appwriteId);
-    if (ids.length) flushAppwriteStatsBatch(ids);
-    return;
-  }
-
-  _statsObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const card = entry.target;
-      const awId = card.dataset.appwriteId;
-      if (!awId || card.dataset.statsLoaded === 'true' || card.dataset.statsPending === 'true') continue;
-      card.dataset.statsPending = 'true';
-      _statsBatchQueue.add(awId);
-      _statsObserver.unobserve(card);
-    }
-    if (_statsBatchTimer) clearTimeout(_statsBatchTimer);
-    // Coalesce IDs that show up in the same scroll burst
-    _statsBatchTimer = setTimeout(() => {
-      const ids = Array.from(_statsBatchQueue);
-      _statsBatchQueue.clear();
-      _statsBatchTimer = null;
-      if (ids.length) flushAppwriteStatsBatch(ids);
-    }, 120);
-  }, {
-    root: null,
-    rootMargin: '200px 0px',           // start fetching slightly before card enters viewport
-    threshold: 0.01,
-  });
-
-  grid.querySelectorAll('.book-card[data-appwrite-id]:not([data-stats-loaded="true"])').forEach(c => {
-    _statsObserver.observe(c);
-  });
-}
-
-// Stats are fetched per visible-card batch — at 4000+ books "fetch all" isn't viable.
-// Used to track session-level state if we want to skip refetching across navigations.
-let _allAppwriteStatsFetched = false;        // kept for compatibility; no longer triggers prefetch
-
-async function flushAppwriteStatsBatch(appwriteBookIds) {
-  if (!appwriteBookIds || !appwriteBookIds.length) return;
-
-  // Cache check first — pull anything fresh from cache so we don't refetch
-  const fromCache = {};
-  const needsFetch = [];
-  for (const id of appwriteBookIds) {
-    const c = getCachedAppwriteStats(id);
-    if (c) fromCache[id] = c;
-    else needsFetch.push(id);
-  }
-  Object.entries(fromCache).forEach(([id, s]) => updateBookCardStats(id, s));
-
-  if (!needsFetch.length) return;
-
-  let stats = { views: {}, likes: {}, chaptersCount: {} };
-  try {
-    stats = await fetchAppwriteBookStats(needsFetch);
-  } catch (e) { /* swallowed; cards keep dashes */ }
-
-  for (const id of needsFetch) {
-    const s = {
-      views: stats.views[id] || 0,
-      likes: stats.likes[id] || 0,
-      chaptersCount: stats.chaptersCount[id] || 0,
-    };
-    setCachedAppwriteStats(id, s);
-    updateBookCardStats(id, s);
-  }
-}
-
-function updateBookCardStats(appwriteBookId, stats) {
-  const card = document.querySelector(`.book-card[data-appwrite-id="${appwriteBookId}"]`);
-  if (!card) return;
-  const v = card.querySelector('[data-stat="views"]');
-  const l = card.querySelector('[data-stat="likes"]');
-  if (v) v.textContent = `👁 ${formatCompact(stats.views || 0)}`;
-  if (l) l.textContent = `❤ ${formatCompact(stats.likes || 0)}`;
-  card.dataset.statsLoaded = 'true';
-  card.dataset.statsPending = '';
-  // Keep the in-memory book object in sync so sorting / detail page reflects the truth
-  const cached = allBooksCache.find(b => b._appwriteId === appwriteBookId);
-  if (cached) {
-    cached.views_count = stats.views || 0;
-    cached.likes_count = stats.likes || 0;
-    cached.chapters_count = stats.chaptersCount || 0;
-    cached._statsLoaded = true;
-  }
-}
-
-function renderBookCard(b) {
-  const card = document.createElement('button');
-  card.className = 'book-card';
-  card.dataset.bookId = b.id;                // for IntersectionObserver lookup
-  if (b._appwrite) card.dataset.appwriteId = b._appwriteId;
-  if (b._statsLoaded) card.dataset.statsLoaded = 'true';
-  card.onclick = () => openBookDetail(b.id);
-
-  const authorName = b.author?.username || 'Unknown author';
-  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
-  const cover = b.cover_url
-    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=&quot;book-cover-placeholder&quot;>${initialLetter}</div>'"/>`
-    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
-  const legacyBadge = b._appwrite ? '<span class="book-cover-badge legacy">Legacy</span>' : '';
-  const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
-
-  // For Appwrite books without cached stats, show a dash placeholder
-  // (Supabase books already have correct inline counts on the row)
-  const statsLoaded = !b._appwrite || b._statsLoaded;
-  const viewsText = statsLoaded ? formatCompact(b.views_count || 0) : '—';
-  const likesText = statsLoaded ? formatCompact(b.likes_count || 0) : '—';
-
-  card.innerHTML = `
-    <div class="book-cover">
-      ${cover}
-      ${legacyBadge}
-      <div class="book-stats">
-        <span title="Views" data-stat="views">👁 ${viewsText}</span>
-        <span title="Likes" data-stat="likes">❤ ${likesText}</span>
-      </div>
-    </div>
-    ${genreLabel ? `<div class="book-card-genre">${escHTML(genreLabel)}</div>` : ''}
-    <h3 class="book-card-title">${escHTML(b.title || 'Untitled')}</h3>
-    <p class="book-card-author">by ${escHTML(authorName)}</p>
-  `;
-  return card;
-}
-
-// Format a number compactly: 1234 → "1.2k", 1500000 → "1.5M"
-function formatCompact(n) {
-  if (n == null) return '0';
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return (n / 1000).toFixed(n < 10000 ? 1 : 0).replace(/\.0$/, '') + 'k';
-  return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
-}
-
-// Wire up genre chips + sort
-document.getElementById('bookGenreChips')?.addEventListener('click', (e) => {
-  const chip = e.target.closest('.book-chip');
-  if (!chip) return;
-  document.querySelectorAll('#bookGenreChips .book-chip').forEach(c => c.classList.remove('active'));
-  chip.classList.add('active');
-  bookGenreFilter = chip.dataset.genre || '';
-  loadBooks();
-});
-document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
-  bookSortBy = e.target.value;
-  loadBooks();
-});
-
-// ── Book detail page ──
-async function openBookDetail(bookId) {
-  hideAllMainPages();
-  bookDetailPage.style.display = 'block';
-
-  history.pushState(null, '', `#book/${bookId}`);
-
-  const content = document.getElementById('bookDetailContent');
-  content.innerHTML = '<div class="loading">Loading book...</div>';
-
-  try {
-    let book, chapters;
-
-    if (bookId.startsWith('aw_')) {
-      // ── Appwrite book ──
-      const appwriteId = bookId.slice(3);
-      // Always need book doc + chapters; stats come from cache if fresh, else aggregated
-      const cachedStats = getCachedAppwriteStats(appwriteId);
-      const [appwriteBookDoc, awChapters, statsResult] = await Promise.all([
-        appwriteGet(APPWRITE.booksCollection, appwriteId),
-        fetchAppwriteChaptersForBook(appwriteId),
-        cachedStats ? Promise.resolve(null) : fetchAppwriteBookStats([appwriteId]),
-      ]);
-      // If the uploader didn't come back expanded, fetch the user record
-      const uploaderIds = collectAppwriteUploaderIds([appwriteBookDoc]);
-      const userMap = await fetchAppwriteUsers(uploaderIds);
-      book = mapAppwriteBookToBook(appwriteBookDoc, userMap);
-
-      const resolvedStats = cachedStats || {
-        views: statsResult?.views?.[appwriteId] || 0,
-        likes: statsResult?.likes?.[appwriteId] || 0,
-        chaptersCount: awChapters.filter(c => c.is_published).length,
-      };
-      // Persist to cache when fresh
-      if (!cachedStats) setCachedAppwriteStats(appwriteId, resolvedStats);
-
-      book.views_count    = resolvedStats.views;
-      book.likes_count    = resolvedStats.likes;
-      book.chapters_count = awChapters.filter(c => c.is_published).length;
-      chapters = awChapters.filter(c => c.is_published);
-    } else {
-      // ── Supabase book (UUID, possibly bare) ──
-      const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
-      const [{ data: supBook, error: bookErr }, { data: supChapters, error: chErr }] = await Promise.all([
-        supabase.from('books')
-          .select(`
-            id, title, description, cover_url, genre, tags,
-            views_count, likes_count, chapters_count, word_count, status,
-            published_at, created_at,
-            author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
-          `)
-          .eq('id', realId)
-          .single(),
-        supabase.from('chapters')
-          .select('id, chapter_number, title, word_count, views_count, is_published, created_at')
-          .eq('book_id', realId)
-          .eq('is_published', true)
-          .order('chapter_number', { ascending: true })
-      ]);
-
-      if (bookErr || !supBook) throw new Error(bookErr?.message || 'Book not found');
-      if (chErr) console.warn('Failed to load chapters:', chErr);
-
-      book = supBook;
-      chapters = supChapters || [];
-    }
-
-    currentBookDetail = { book, chapters };
-    renderBookDetail();
-  } catch (err) {
-    content.innerHTML = `<div class="loading">Couldn't load book: ${escHTML(err.message)}</div>`;
-  }
-}
-
-function renderBookDetail() {
-  if (!currentBookDetail) return;
-  const { book, chapters } = currentBookDetail;
-  const content = document.getElementById('bookDetailContent');
-
-  const authorName = book.profiles?.username || 'Unknown';
-  const authorAvatar = book.profiles?.avatar_url;
-  const initialLetter = (book.title || '?').trim().charAt(0).toUpperCase();
-  const cover = book.cover_url
-    ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
-    : `<div class="book-cover-placeholder" style="width:100%;height:100%">${initialLetter}</div>`;
-
-  const tagsHtml = (book.tags || []).map(t =>
-    `<button class="book-chip" data-tag="${escHTML(t)}" type="button">${escHTML(t)}</button>`
-  ).join('');
-
-  const chaptersHtml = chapters.length
-    ? chapters.map(c => `
-        <div class="chapter-row" data-chapter-id="${c.id}">
-          <span class="chapter-row-num">Ch ${c.chapter_number}</span>
-          <span class="chapter-row-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
-          <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
-        </div>
-      `).join('')
-    : '<div style="color:var(--text2);padding:1rem 0">No chapters published yet.</div>';
-
-  content.innerHTML = `
-    <div class="book-detail">
-      <div class="book-detail-cover">${cover}</div>
-      <div class="book-detail-info">
-        <h1>${escHTML(book.title || 'Untitled')}</h1>
-        <div class="book-detail-author">
-          <div class="avatar">${authorAvatar ? `<img src="${escHTML(authorAvatar)}"/>` : initials(authorName)}</div>
-          <span>by <strong>${escHTML(authorName)}</strong></span>
-        </div>
-        <div class="book-detail-meta">
-          <span><strong>${(book.chapters_count || chapters.length).toLocaleString()}</strong> chapters</span>
-          <span><strong>${(book.word_count || 0).toLocaleString()}</strong> words</span>
-          <span><strong>${(book.views_count || 0).toLocaleString()}</strong> views</span>
-          <span><strong>${(book.likes_count || 0).toLocaleString()}</strong> likes</span>
-        </div>
-        <div class="book-detail-genre-row">
-          ${book.genre ? `<button class="book-chip active" type="button">${escHTML(book.genre.replace(/-/g, ' '))}</button>` : ''}
-          ${tagsHtml}
-        </div>
-        <div class="book-detail-actions">
-          <button class="btn btn-purple btn-sm" id="btnStartReading" ${chapters.length ? '' : 'disabled style="opacity:0.5;cursor:not-allowed"'}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            Start reading
-          </button>
-          ${book._appwrite ? `
-            <span class="book-cover-badge legacy" style="position:static;display:inline-flex;align-items:center;gap:0.35rem;padding:0.35rem 0.75rem;font-size:0.7rem">
-              📱 From mobile (read-only on web)
-            </span>
-          ` : `
-            <button class="btn btn-ghost btn-sm" id="btnLikeBook">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-              Like
-            </button>
-            <button class="btn btn-ghost btn-sm" id="btnBookmarkBook">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-              Bookmark
-            </button>
-          `}
-        </div>
-        <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
-        <div class="chapter-list">
-          <div class="chapter-list-title">Chapters</div>
-          ${chaptersHtml}
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Wire chapter rows
-  content.querySelectorAll('.chapter-row').forEach((row, i) => {
-    row.addEventListener('click', () => openChapterReader(i));
-  });
-  // Start reading → first unread chapter (or chapter 1)
-  document.getElementById('btnStartReading')?.addEventListener('click', () => openChapterReader(0));
-  document.getElementById('btnLikeBook')?.addEventListener('click', () => toggleBookLike(book.id));
-  document.getElementById('btnBookmarkBook')?.addEventListener('click', () => toggleBookBookmark(book.id));
-}
-
-async function toggleBookLike(bookId) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) { toast('Sign in to like books', 'error'); return; }
-  // Try delete first; if no row, insert.
-  const { count } = await supabase.from('book_likes').delete()
-    .eq('user_id', user.id).eq('book_id', bookId).select('*', { count: 'exact', head: true });
-  if (count) { toast('Removed like', 'success'); return; }
-  const { error } = await supabase.from('book_likes').insert({ user_id: user.id, book_id: bookId });
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  toast('Liked', 'success');
-}
-async function toggleBookBookmark(bookId) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) { toast('Sign in to bookmark books', 'error'); return; }
-  const { count } = await supabase.from('book_bookmarks').delete()
-    .eq('user_id', user.id).eq('book_id', bookId).select('*', { count: 'exact', head: true });
-  if (count) { toast('Removed bookmark', 'success'); return; }
-  const { error } = await supabase.from('book_bookmarks').insert({ user_id: user.id, book_id: bookId });
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  toast('Bookmarked', 'success');
-}
-
-// Back to book list
-document.getElementById('btnBackBooks')?.addEventListener('click', () => showBook());
-
-// ── Chapter reader ──
-async function openChapterReader(chapterIndex) {
-  if (!currentBookDetail || !currentBookDetail.chapters[chapterIndex]) return;
-  currentChapterIndex = chapterIndex;
-  const chapter = currentBookDetail.chapters[chapterIndex];
-
-  hideAllMainPages();
-  chapterReaderPage.style.display = 'block';
-
-  document.getElementById('readerBookTitle').textContent = currentBookDetail.book.title || 'Book';
-  document.getElementById('readerChapterTitle').textContent = chapter.title || `Chapter ${chapter.chapter_number}`;
-  document.getElementById('readerProgress').textContent = `Chapter ${chapter.chapter_number} of ${currentBookDetail.chapters.length}`;
-  document.getElementById('btnReaderPrev').disabled = chapterIndex <= 0;
-  document.getElementById('btnReaderNext').disabled = chapterIndex >= currentBookDetail.chapters.length - 1;
-
-  history.pushState(null, '', `#book/${currentBookDetail.book.id}/chapter/${chapter.chapter_number}`);
-
-  const content = document.getElementById('readerContent');
-  content.innerHTML = '<div class="loading">Loading chapter...</div>';
-
-  // Fetch full chapter content from the right source
-  let chapterContent = '';
-  let resolvedChapterId = chapter.id;
-  try {
-    if (chapter._appwrite) {
-      // Appwrite chapter — we may already have content from the list call
-      if (chapter._content) {
-        chapterContent = chapter._content;
-      } else {
-        const doc = await appwriteGet(APPWRITE.chaptersCollection, chapter._appwriteId);
-        chapterContent = doc?.content || '';
-      }
-    } else {
-      const realChapterId = chapter.id.startsWith('sb_') ? chapter.id.slice(3) : chapter.id;
-      const { data, error } = await supabase
-        .from('chapters')
-        .select('id, chapter_number, title, content')
-        .eq('id', realChapterId)
-        .single();
-      if (error || !data) throw new Error(error?.message || 'Chapter not found');
-      chapterContent = data.content || '';
-      resolvedChapterId = data.id;
-    }
-  } catch (err) {
-    content.innerHTML = `<div class="loading">Couldn't load chapter: ${escHTML(err.message)}</div>`;
-    return;
-  }
-
-  // Apply current font size and inject normalized content (HTML or plain text)
-  content.style.fontSize = `${readerFontSize}rem`;
-  content.innerHTML = normalizeChapterContent(chapterContent);
-  content.scrollTop = 0;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-
-  // Apply username watermark (re-run in case the user logged in/out since last read)
-  applyReaderWatermark();
-
-  // Save reading progress (Supabase only — `book_reads` is a Supabase table)
-  if (!chapter._appwrite && !currentBookDetail.book._appwrite) {
-    saveReadingProgress(currentBookDetail.book.id, resolvedChapterId, chapter.chapter_number);
-  }
-}
-
-// Normalize chapter content: if HTML-ish, render as-is; if plain text, wrap in <p>
-function normalizeChapterContent(content) {
-  if (!content) return '<p><em>(No content)</em></p>';
-  // Detect common HTML tags to decide
-  if (/<\/?(p|div|br|h[1-6]|blockquote|ul|ol|li|strong|em|b|i|a|img|span)\b/i.test(content)) {
-    return content;
-  }
-  // Treat as plain text — split by blank lines into paragraphs, preserve single newlines as <br>
-  return content
-    .split(/\n\s*\n/)
-    .filter(p => p.trim())
-    .map(p => `<p>${escHTML(p).replace(/\n/g, '<br>')}</p>`)
-    .join('');
-}
-
-async function saveReadingProgress(bookId, chapterId, chapterNumber) {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-    await supabase.from('book_reads').upsert({
-      user_id: user.id,
-      book_id: bookId,
-      last_chapter_id: chapterId,
-      last_chapter_number: chapterNumber,
-      last_read_at: new Date().toISOString(),
-    }, { onConflict: 'user_id,book_id' });
-  } catch (e) { /* ignore */ }
-}
-
-// ── Reader watermark (deterrent: leaked screenshots reveal the source) ──
-let _watermarkLabelCache = null;
-async function getReaderWatermarkLabel() {
-  if (_watermarkLabelCache) return _watermarkLabelCache;
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { _watermarkLabelCache = 'Guest'; return _watermarkLabelCache; }
-    // Try profile.username, then email local part, then user id prefix
-    const { data: profile } = await supabase
-      .from('profiles').select('username').eq('id', user.id).maybeSingle();
-    const username = profile?.username
-      || (user.email ? user.email.split('@')[0] : null)
-      || (user.id ? user.id.slice(0, 8) : 'User');
-    _watermarkLabelCache = `${username} · ${(user.id || '').slice(0, 6)}`;
-  } catch {
-    _watermarkLabelCache = 'Reader';
-  }
-  return _watermarkLabelCache;
-}
-
-async function applyReaderWatermark() {
-  const el = document.getElementById('readerContent');
-  if (!el) return;
-  const label = await getReaderWatermarkLabel();
-  const isLight = document.body.classList.contains('light');
-  const fillColor = isLight ? '%237c3aed' : '%23a78bfa'; // %23 = encoded "#"
-  // Encode for safe data URI use
-  const safeLabel = String(label).replace(/[<>&'"]/g, c =>
-    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&#39;', '"': '&quot;' }[c]));
-  const svg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200">' +
-      '<text x="160" y="100" text-anchor="middle"' +
-        ' transform="rotate(-25 160 100)"' +
-        ` fill="${isLight ? '#7c3aed' : '#a78bfa'}" fill-opacity="0.09"` +
-        ' font-family="system-ui, -apple-system, sans-serif"' +
-        ' font-size="13" font-weight="500" letter-spacing="0.04em">' +
-        safeLabel +
-      '</text>' +
-    '</svg>';
-  const dataUri = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
-  el.style.setProperty('--reader-watermark-bg', dataUri);
-}
-
-// Re-render watermark when theme toggles (so colour matches background)
-document.getElementById('btnTheme')?.addEventListener('click', () => {
-  // Run after the body class actually flips
-  setTimeout(() => {
-    if (chapterReaderPage?.style.display === 'block') applyReaderWatermark();
-  }, 50);
-});
-
-// ── Anti-copy protection on the reader ──
-// Discourages casual copy-paste. Not bulletproof against DevTools/view-source,
-// but blocks selection, right-click, and Cmd/Ctrl+C / Cmd/Ctrl+A inside the reader.
-(function setupReaderAntiCopy() {
-  const el = document.getElementById('readerContent');
-  if (!el) return;
-
-  const isReaderVisible = () =>
-    chapterReaderPage && chapterReaderPage.style.display === 'block';
-
-  let antiCopyToastTimer = null;
-  const showAntiCopyToast = () => {
-    if (antiCopyToastTimer) return;          // throttle so we don't spam
-    toast('Copying is disabled to protect the author\'s work', 'error');
-    antiCopyToastTimer = setTimeout(() => { antiCopyToastTimer = null; }, 1500);
-  };
-
-  // Block selection-start (covers click-and-drag)
-  el.addEventListener('selectstart', (e) => {
-    e.preventDefault();
-    return false;
-  });
-
-  // Block native copy (Cmd/Ctrl+C, right-click → Copy)
-  el.addEventListener('copy', (e) => {
-    e.preventDefault();
-    e.clipboardData?.setData('text/plain', '');
-    showAntiCopyToast();
-    return false;
-  });
-
-  // Block cut + paste too, just in case the reader ever becomes editable somehow
-  el.addEventListener('cut', (e) => { e.preventDefault(); return false; });
-
-  // Block right-click context menu inside the reader
-  el.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showAntiCopyToast();
-    return false;
-  });
-
-  // Block drag (so users can't drag-out a text fragment)
-  el.addEventListener('dragstart', (e) => { e.preventDefault(); return false; });
-
-  // Block Cmd/Ctrl+A so a user can't quickly select-all then copy
-  document.addEventListener('keydown', (e) => {
-    if (!isReaderVisible()) return;
-    const isMod = e.metaKey || e.ctrlKey;
-    if (!isMod) return;
-    const k = e.key.toLowerCase();
-    if (k === 'a' || k === 'c' || k === 'x') {
-      // Only block if the focus is in/over the reader content, not in form inputs
-      const tag = (e.target?.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
-      e.preventDefault();
-      showAntiCopyToast();
-    }
-  });
-})();
-
-// Reader controls
-document.getElementById('btnReaderPrev')?.addEventListener('click', () => {
-  if (currentChapterIndex > 0) openChapterReader(currentChapterIndex - 1);
-});
-document.getElementById('btnReaderNext')?.addEventListener('click', () => {
-  if (currentBookDetail && currentChapterIndex < currentBookDetail.chapters.length - 1) {
-    openChapterReader(currentChapterIndex + 1);
-  }
-});
-document.getElementById('btnBackBookDetail')?.addEventListener('click', () => {
-  if (currentBookDetail) openBookDetail(currentBookDetail.book.id);
-});
-document.getElementById('btnReaderFontSmaller')?.addEventListener('click', () => {
-  readerFontSize = Math.max(0.85, readerFontSize - 0.05);
-  localStorage.setItem('selebox_reader_font', readerFontSize);
-  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
-});
-document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => {
-  readerFontSize = Math.min(1.6, readerFontSize + 0.05);
-  localStorage.setItem('selebox_reader_font', readerFontSize);
-  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
-});
-
-// ── Author (Manuscript Studio) page ──
-function showAuthor() {
-  hideAllMainPages();
-  authorPage.style.display = 'block';
-  setAuthorView('dashboard');
-  document.body.classList.remove('on-videos');
-  stopVideoPlayer();
-  history.pushState(null, '', '#author');
-  loadAuthorDashboard();
-}
-
-// ════════════════════════════════════════
-// AUTHOR — DASHBOARD + BOOK EDITOR + CHAPTER EDITOR
-// ════════════════════════════════════════
-const authorDashboard       = document.getElementById('authorDashboard');
-const authorBookEditor      = document.getElementById('authorBookEditor');
-const authorChapterEditor   = document.getElementById('authorChapterEditor');
-
-let authorBooksCache = [];
-let editingBookId = null;        // null = new book in editor
-let editingChapterId = null;     // null = new chapter
-let chapterQuill = null;
-let chapterAutosaveTimer = null;
-let chapterDirty = false;
-
-function setAuthorView(view) {
-  authorDashboard.style.display     = view === 'dashboard' ? 'block' : 'none';
-  authorBookEditor.style.display    = view === 'book'      ? 'block' : 'none';
-  authorChapterEditor.style.display = view === 'chapter'   ? 'block' : 'none';
-}
-
-// ── Dashboard ──
-async function loadAuthorDashboard() {
-  const content = document.getElementById('authorBooksContent');
-  content.innerHTML = '<div class="loading">Loading your books...</div>';
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    content.innerHTML = '<div class="loading">Sign in to start writing.</div>';
-    return;
-  }
-
-  const { data, error } = await supabase
-    .from('books')
-    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, created_at, updated_at, published_at')
-    .eq('author_id', user.id)
-    .order('updated_at', { ascending: false });
-
-  if (error) {
-    content.innerHTML = `<div class="loading">Couldn't load books: ${escHTML(error.message)}</div>`;
-    return;
-  }
-
-  authorBooksCache = data || [];
-
-  // Stats
-  document.getElementById('statMyBooks').textContent = authorBooksCache.length.toLocaleString();
-  document.getElementById('statMyChapters').textContent = authorBooksCache.reduce((s, b) => s + (b.chapters_count || 0), 0).toLocaleString();
-  document.getElementById('statMyReads').textContent = authorBooksCache.reduce((s, b) => s + (b.views_count || 0), 0).toLocaleString();
-  document.getElementById('statMyLikes').textContent = authorBooksCache.reduce((s, b) => s + (b.likes_count || 0), 0).toLocaleString();
-
-  if (!authorBooksCache.length) {
-    content.innerHTML = `
-      <div class="page-empty">
-        <div class="page-empty-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
-        </div>
-        <h2 class="page-empty-title">No manuscripts yet</h2>
-        <p class="page-empty-body">Click <strong>New book</strong> above to start your first story.</p>
-      </div>
-    `;
-    return;
-  }
-
-  content.innerHTML = `
-    <div class="author-books-table">
-      ${authorBooksCache.map(b => renderAuthorBookRow(b)).join('')}
-    </div>
-  `;
-
-  content.querySelectorAll('[data-author-action]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const action = btn.dataset.authorAction;
-      const id = btn.dataset.id;
-      if (action === 'edit')   openAuthorBookEditor(id);
-      else if (action === 'delete') deleteAuthorBook(id);
-    });
-  });
-  content.querySelectorAll('.author-book-row').forEach(row => {
-    row.addEventListener('click', () => openAuthorBookEditor(row.dataset.id));
-  });
-}
-
-function renderAuthorBookRow(b) {
-  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
-  const cover = b.cover_url
-    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
-    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
-  const statusClass = `author-book-status-${b.status || 'draft'}`;
-  const visBadge = b.is_public ? '' : ' • Hidden';
-  return `
-    <div class="author-book-row" data-id="${b.id}">
-      <div class="author-book-row-cover">${cover}</div>
-      <div class="author-book-row-text">
-        <div class="author-book-row-title">${escHTML(b.title || 'Untitled')}</div>
-        <div class="author-book-row-genre">${escHTML((b.genre || '—').replace(/-/g, ' '))}${visBadge}</div>
-      </div>
-      <div><span class="author-book-status-badge ${statusClass}">${b.status || 'draft'}</span></div>
-      <div class="author-book-row-stat">${(b.chapters_count || 0)} ch</div>
-      <div class="author-book-row-stat">${(b.views_count || 0).toLocaleString()} 👁</div>
-      <div class="author-book-row-actions">
-        <button class="author-book-action-btn" data-author-action="edit" data-id="${b.id}" title="Edit">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-        </button>
-        <button class="author-book-action-btn author-book-action-btn-danger" data-author-action="delete" data-id="${b.id}" title="Delete">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-async function deleteAuthorBook(bookId) {
-  const b = authorBooksCache.find(x => x.id === bookId);
-  if (!b) return;
-  const ok = await confirmDialog({
-    title: `Delete "${b.title || 'this book'}"?`,
-    body: 'This permanently removes the book and all its chapters. This can\'t be undone.',
-    confirmLabel: 'Delete forever',
-  });
-  if (!ok) return;
-  const { error } = await supabase.from('books').delete().eq('id', bookId);
-  if (error) { toast('Failed to delete: ' + error.message, 'error'); return; }
-  toast('Book deleted', 'success');
-  loadAuthorDashboard();
-}
-
-// ── New book modal ──
-const newBookModal = document.getElementById('newBookModal');
-function openNewBookModal() {
-  document.getElementById('newBookTitle').value = '';
-  document.getElementById('newBookGenre').value = '';
-  document.getElementById('newBookDescription').value = '';
-  newBookModal.style.display = 'flex';
-  setTimeout(() => document.getElementById('newBookTitle').focus(), 50);
-}
-function closeNewBookModal() { newBookModal.style.display = 'none'; }
-async function createNewBook() {
-  const title = document.getElementById('newBookTitle').value.trim();
-  if (!title) { toast('Title is required', 'error'); return; }
-  const genre = document.getElementById('newBookGenre').value || null;
-  const description = document.getElementById('newBookDescription').value.trim();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) { toast('Sign in first', 'error'); return; }
-
-  const btn = document.getElementById('newBookCreate');
-  btn.disabled = true; btn.textContent = 'Creating…';
-
-  const { data, error } = await supabase.from('books').insert({
-    author_id: user.id,
-    title, description, genre,
-    status: 'draft',
-    is_public: false,
-  }).select().single();
-
-  btn.disabled = false; btn.textContent = 'Create book';
-
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  closeNewBookModal();
-  toast('Book created', 'success');
-  openAuthorBookEditor(data.id);
-}
-
-document.getElementById('btnNewBook')?.addEventListener('click', openNewBookModal);
-// Compose-area Book button (opens the same New Book modal)
-document.getElementById('btnOpenBookUpload')?.addEventListener('click', () => {
-  openNewBookModal();
-});
-document.getElementById('newBookClose')?.addEventListener('click', closeNewBookModal);
-document.getElementById('newBookCancel')?.addEventListener('click', closeNewBookModal);
-document.getElementById('newBookCreate')?.addEventListener('click', createNewBook);
-newBookModal?.addEventListener('click', (e) => { if (e.target === newBookModal) closeNewBookModal(); });
-
-// ── Book editor (metadata + chapter list) ──
-async function openAuthorBookEditor(bookId) {
-  editingBookId = bookId;
-  hideAllMainPages();
-  authorPage.style.display = 'block';
-  setAuthorView('book');
-  history.pushState(null, '', `#author/book/${bookId}`);
-  await loadBookEditor(bookId);
-}
-
-async function loadBookEditor(bookId) {
-  const { data: book, error } = await supabase
-    .from('books')
-    .select('*')
-    .eq('id', bookId)
-    .single();
-  if (error || !book) { toast('Book not found', 'error'); showAuthor(); return; }
-
-  document.getElementById('bookEditorTitle').value = book.title || '';
-  document.getElementById('bookEditorDescription').value = book.description || '';
-  document.getElementById('bookEditorGenre').value = book.genre || '';
-  document.getElementById('bookEditorTags').value = (book.tags || []).join(', ');
-  document.getElementById('bookEditorBookStatus').value = book.status || 'draft';
-  document.getElementById('bookEditorPublic').checked = !!book.is_public;
-  document.getElementById('bookEditorStatusBadge').textContent = book.is_public ? 'Visible to readers' : 'Hidden draft';
-
-  const coverWrap = document.getElementById('bookEditorCover');
-  const initialLetter = (book.title || '?').trim().charAt(0).toUpperCase();
-  coverWrap.innerHTML = book.cover_url
-    ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
-    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
-
-  // Load chapters
-  const { data: chapters, error: chErr } = await supabase
-    .from('chapters')
-    .select('id, chapter_number, title, word_count, is_published, updated_at')
-    .eq('book_id', bookId)
-    .order('chapter_number', { ascending: true });
-
-  const chList = document.getElementById('bookEditorChapters');
-  if (chErr) {
-    chList.innerHTML = `<div class="loading">Couldn't load chapters: ${escHTML(chErr.message)}</div>`;
-    return;
-  }
-  if (!chapters?.length) {
-    chList.innerHTML = '<div style="color:var(--text2);padding:1rem 0">No chapters yet. Click <strong>Add chapter</strong> to write the first one.</div>';
-    return;
-  }
-  chList.innerHTML = chapters.map(c => `
-    <div class="author-chapter-row" data-chapter-id="${c.id}">
-      <span class="author-chapter-num">Ch ${c.chapter_number}</span>
-      <span class="author-chapter-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
-      <span class="author-chapter-meta">${(c.word_count || 0).toLocaleString()} words</span>
-      <span class="author-chapter-pub-pill ${c.is_published ? 'author-chapter-pub-published' : 'author-chapter-pub-draft'}">${c.is_published ? 'Published' : 'Draft'}</span>
-      <div class="author-chapter-actions">
-        <button class="author-book-action-btn" data-chapter-action="edit" data-id="${c.id}" title="Edit">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-        </button>
-        <button class="author-book-action-btn author-book-action-btn-danger" data-chapter-action="delete" data-id="${c.id}" title="Delete">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
-        </button>
-      </div>
-    </div>
-  `).join('');
-
-  chList.querySelectorAll('[data-chapter-action]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const action = btn.dataset.chapterAction;
-      const chapterId = btn.dataset.id;
-      if (action === 'edit') openAuthorChapterEditor(bookId, chapterId);
-      else if (action === 'delete') deleteAuthorChapter(chapterId, bookId);
-    });
-  });
-  chList.querySelectorAll('.author-chapter-row').forEach(row => {
-    row.addEventListener('click', () => openAuthorChapterEditor(bookId, row.dataset.chapterId));
-  });
-}
-
-async function saveBookMetadata() {
-  if (!editingBookId) return;
-  const btn = document.getElementById('btnSaveBook');
-  const title = document.getElementById('bookEditorTitle').value.trim();
-  if (!title) { toast('Title is required', 'error'); return; }
-
-  btn.disabled = true; btn.textContent = 'Saving…';
-
-  const tags = document.getElementById('bookEditorTags').value.split(',').map(t => t.trim()).filter(Boolean);
-  const description = document.getElementById('bookEditorDescription').value.trim();
-  const genre = document.getElementById('bookEditorGenre').value || null;
-  const status = document.getElementById('bookEditorBookStatus').value;
-  const isPublic = document.getElementById('bookEditorPublic').checked;
-
-  const update = {
-    title, description, genre, tags, status, is_public: isPublic,
-    updated_at: new Date().toISOString(),
-  };
-  // Set published_at the first time the book becomes public
-  if (isPublic) {
-    const { data: existing } = await supabase.from('books').select('published_at').eq('id', editingBookId).single();
-    if (!existing?.published_at) update.published_at = new Date().toISOString();
-  }
-
-  const { error } = await supabase.from('books').update(update).eq('id', editingBookId);
-  btn.disabled = false; btn.textContent = 'Save';
-
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  toast('Saved', 'success');
-  document.getElementById('bookEditorStatusBadge').textContent = isPublic ? 'Visible to readers' : 'Hidden draft';
-}
-document.getElementById('btnSaveBook')?.addEventListener('click', saveBookMetadata);
-document.getElementById('btnBackToDashboard')?.addEventListener('click', showAuthor);
-
-// Cover upload
-document.getElementById('btnUploadCover')?.addEventListener('click', () => {
-  document.getElementById('bookCoverFile').click();
-});
-document.getElementById('bookCoverFile')?.addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  e.target.value = '';
-  if (!file || !editingBookId) return;
-  if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
-  if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
-
-  toast('Uploading cover…', '');
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) { toast('Sign in first', 'error'); return; }
-
-  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
-  const path = `${user.id}/${editingBookId}-${Date.now()}.${ext}`;
-  const { error: upErr } = await supabase.storage.from('book-covers').upload(path, file, { upsert: true, contentType: file.type });
-  if (upErr) { toast('Upload failed: ' + upErr.message, 'error'); return; }
-
-  const { data: { publicUrl } } = supabase.storage.from('book-covers').getPublicUrl(path);
-  const { error: updErr } = await supabase.from('books').update({ cover_url: publicUrl, updated_at: new Date().toISOString() }).eq('id', editingBookId);
-  if (updErr) { toast('Saved file but DB update failed: ' + updErr.message, 'error'); return; }
-
-  document.getElementById('bookEditorCover').innerHTML = `<img src="${escHTML(publicUrl)}" alt=""/>`;
-  toast('Cover updated', 'success');
-});
-
-// New chapter
-document.getElementById('btnNewChapter')?.addEventListener('click', () => {
-  if (!editingBookId) return;
-  openAuthorChapterEditor(editingBookId, null);
-});
-
-async function deleteAuthorChapter(chapterId, bookId) {
-  const ok = await confirmDialog({
-    title: 'Delete this chapter?',
-    body: 'The chapter and its content will be permanently removed. This can\'t be undone.',
-    confirmLabel: 'Delete forever',
-  });
-  if (!ok) return;
-  const { error } = await supabase.from('chapters').delete().eq('id', chapterId);
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  // Recompute denormalized counts
-  await recomputeBookCounts(bookId);
-  toast('Chapter deleted', 'success');
-  loadBookEditor(bookId);
-}
-
-async function recomputeBookCounts(bookId) {
-  const { data: rows } = await supabase
-    .from('chapters')
-    .select('word_count, is_published')
-    .eq('book_id', bookId);
-  if (!rows) return;
-  const chaptersCount = rows.filter(r => r.is_published).length;
-  const wordCount = rows.reduce((s, r) => s + (r.word_count || 0), 0);
-  await supabase.from('books').update({ chapters_count: chaptersCount, word_count: wordCount, updated_at: new Date().toISOString() }).eq('id', bookId);
-}
-
-// ── Chapter editor (Quill) ──
-async function openAuthorChapterEditor(bookId, chapterId) {
-  editingBookId = bookId;
-  editingChapterId = chapterId;
-  hideAllMainPages();
-  authorPage.style.display = 'block';
-  setAuthorView('chapter');
-  history.pushState(null, '', `#author/book/${bookId}/chapter/${chapterId || 'new'}`);
-
-  // Init Quill on first use
-  if (!chapterQuill) {
-    chapterQuill = new Quill('#chapterEditorQuill', {
-      theme: 'snow',
-      placeholder: 'Start writing your chapter…',
-      modules: {
-        toolbar: [
-          [{ header: [1, 2, 3, false] }],
-          ['bold', 'italic', 'underline', 'strike'],
-          [{ list: 'ordered' }, { list: 'bullet' }],
-          ['blockquote', 'link'],
-          [{ align: [] }],
-          ['clean'],
-        ],
-      },
-    });
-    chapterQuill.on('text-change', () => {
-      chapterDirty = true;
-      updateChapterWordCount();
-      scheduleChapterAutosave();
-    });
-    document.getElementById('chapterEditorTitle').addEventListener('input', () => {
-      chapterDirty = true;
-      scheduleChapterAutosave();
-    });
-    document.getElementById('chapterEditorPublished').addEventListener('change', () => {
-      chapterDirty = true;
-      scheduleChapterAutosave();
-    });
-  }
-
-  // Reset state
-  chapterQuill.setText('');
-  document.getElementById('chapterEditorTitle').value = '';
-  document.getElementById('chapterEditorPublished').checked = false;
-  setChapterSaveStatus('idle');
-  chapterDirty = false;
-
-  if (chapterId) {
-    const { data, error } = await supabase
-      .from('chapters')
-      .select('id, chapter_number, title, content, is_published')
-      .eq('id', chapterId)
-      .single();
-    if (error || !data) { toast('Chapter not found', 'error'); openAuthorBookEditor(bookId); return; }
-    document.getElementById('chapterEditorTitle').value = data.title || '';
-    document.getElementById('chapterEditorPublished').checked = !!data.is_published;
-    if (data.content) chapterQuill.clipboard.dangerouslyPasteHTML(data.content);
-    chapterDirty = false;
-  }
-
-  updateChapterWordCount();
-  setTimeout(() => chapterQuill.focus(), 100);
-}
-
-function updateChapterWordCount() {
-  if (!chapterQuill) return;
-  const text = chapterQuill.getText().trim();
-  const words = text.length ? text.split(/\s+/).length : 0;
-  document.getElementById('chapterWordCount').textContent = words.toLocaleString();
-}
-
-function setChapterSaveStatus(state) {
-  const el = document.getElementById('chapterSaveStatus');
-  el.classList.remove('saving', 'saved', 'error');
-  if (state === 'saving')      { el.classList.add('saving'); el.textContent = 'Saving…'; }
-  else if (state === 'saved')  { el.classList.add('saved');  el.textContent = 'Saved'; }
-  else if (state === 'error')  { el.classList.add('error');  el.textContent = 'Save failed'; }
-  else                          el.textContent = 'Idle';
-}
-
-function scheduleChapterAutosave() {
-  if (chapterAutosaveTimer) clearTimeout(chapterAutosaveTimer);
-  chapterAutosaveTimer = setTimeout(saveChapter, 1500);
-}
-
-async function saveChapter() {
-  if (!editingBookId || !chapterQuill) return;
-  setChapterSaveStatus('saving');
-  const title = document.getElementById('chapterEditorTitle').value.trim();
-  const isPublished = document.getElementById('chapterEditorPublished').checked;
-  const content = chapterQuill.root.innerHTML;
-  const text = chapterQuill.getText().trim();
-  const wordCount = text.length ? text.split(/\s+/).length : 0;
-
-  let result;
-  if (editingChapterId) {
-    result = await supabase.from('chapters').update({
-      title, content, word_count: wordCount,
-      is_published: isPublished,
-      updated_at: new Date().toISOString(),
-    }).eq('id', editingChapterId).select().single();
-  } else {
-    // Determine next chapter number
-    const { data: existing } = await supabase.from('chapters').select('chapter_number').eq('book_id', editingBookId).order('chapter_number', { ascending: false }).limit(1);
-    const nextNum = (existing?.[0]?.chapter_number || 0) + 1;
-    result = await supabase.from('chapters').insert({
-      book_id: editingBookId,
-      chapter_number: nextNum,
-      title, content, word_count: wordCount,
-      is_published: isPublished,
-    }).select().single();
-    if (result.data) {
-      editingChapterId = result.data.id;
-      // Update URL with the real chapter id
-      history.replaceState(null, '', `#author/book/${editingBookId}/chapter/${editingChapterId}`);
-    }
-  }
-
-  if (result.error) {
-    setChapterSaveStatus('error');
-    return;
-  }
-  await recomputeBookCounts(editingBookId);
-  setChapterSaveStatus('saved');
-  chapterDirty = false;
-}
-
-document.getElementById('btnSaveChapter')?.addEventListener('click', saveChapter);
-document.getElementById('btnBackToBookEditor')?.addEventListener('click', () => {
-  if (editingBookId) openAuthorBookEditor(editingBookId);
-  else showAuthor();
-});
-
-// Warn before leaving while dirty
-window.addEventListener('beforeunload', (e) => {
-  if (chapterDirty) {
-    e.preventDefault();
-    e.returnValue = '';
-  }
-});
-
-// ════════════════════════════════════════
-// CREATOR STUDIO
-// ════════════════════════════════════════
-
-let studioVideosCache = [];
-let studioSearchQuery = '';
-let studioEditingVideoId = null;
-
-async function loadStudio() {
-  const content = document.getElementById('studioContent');
-  content.innerHTML = '<div class="empty"><h3>Loading your videos...</h3></div>';
-  
-  if (!currentUser) {
-    content.innerHTML = '<div class="empty"><h3>Please sign in</h3></div>';
-    return;
-  }
-  
-  const { data: videos, error } = await supabase
-    .from('videos')
-    .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id')
-    .eq('uploader_id', currentUser.id)
-    .order('created_at', { ascending: false });
-  
-  if (error) {
-    content.innerHTML = `<div class="empty"><h3>Error loading videos</h3><p>${escHTML(error.message)}</p></div>`;
-    return;
-  }
-  
-  studioVideosCache = videos || [];
-  renderStudio();
-}
-
-function renderStudio() {
-  const content = document.getElementById('studioContent');
-  const videos = studioVideosCache;
-  
-  if (!videos.length) {
-    content.innerHTML = `
-      <div class="studio-empty">
-        <div class="studio-empty-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <polygon points="23 7 16 12 23 17 23 7"/>
-            <rect x="1" y="5" width="15" height="14" rx="2"/>
-          </svg>
-        </div>
-        <h3>No videos yet</h3>
-        <p>Upload your first video to get started</p>
-        <button class="vu-btn vu-btn-primary" onclick="document.getElementById('btnStudioUpload').click()" style="margin-top:1rem">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          Upload your first video
-        </button>
-      </div>
-    `;
-    return;
-  }
-  
-  const totalVideos = videos.length;
-  const totalViews = videos.reduce((sum, v) => sum + (v.views || 0), 0);
-  const totalLikes = videos.reduce((sum, v) => sum + (v.likes || 0), 0);
-  const publishedCount = videos.filter(v => v.status === 'ready').length;
-  
-  // Filter by search
-  const q = studioSearchQuery.trim().toLowerCase();
-  const filtered = q
-    ? videos.filter(v => 
-        (v.title || '').toLowerCase().includes(q) ||
-        (v.description || '').toLowerCase().includes(q) ||
-        (v.tags || []).some(t => t.toLowerCase().includes(q))
-      )
-    : videos;
-  
-  content.innerHTML = `
-    <div class="studio-stats">
-      <div class="studio-stat">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-        </div>
-        <div>
-          <div class="studio-stat-value">${totalVideos.toLocaleString()}</div>
-          <div class="studio-stat-label">Total videos</div>
-        </div>
-      </div>
-      <div class="studio-stat">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-        </div>
-        <div>
-          <div class="studio-stat-value">${totalViews.toLocaleString()}</div>
-          <div class="studio-stat-label">Total views</div>
-        </div>
-      </div>
-      <div class="studio-stat">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#ec4899,#f43f5e)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-        </div>
-        <div>
-          <div class="studio-stat-value">${totalLikes.toLocaleString()}</div>
-          <div class="studio-stat-label">Total likes</div>
-        </div>
-      </div>
-      <div class="studio-stat">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        </div>
-        <div>
-          <div class="studio-stat-value">${publishedCount.toLocaleString()}</div>
-          <div class="studio-stat-label">Published</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="studio-toolbar">
-      <div class="studio-search">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="studioSearchInput" placeholder="Search your videos..." value="${escHTML(studioSearchQuery)}"/>
-      </div>
-      <div class="studio-toolbar-info">${filtered.length} of ${totalVideos} ${totalVideos === 1 ? 'video' : 'videos'}</div>
-    </div>
-
-    <div class="studio-table-wrap">
-      ${filtered.length === 0 ? `
-        <div class="studio-empty" style="padding:3rem 1rem">
-          <h3>No matches</h3>
-          <p>Try a different search term</p>
-        </div>
-      ` : `
-        <table class="studio-table">
-          <thead>
-            <tr>
-              <th class="studio-col-video">Video</th>
-              <th class="studio-col-status">Visibility</th>
-              <th class="studio-col-date">Date</th>
-              <th class="studio-col-views">Views</th>
-              <th class="studio-col-likes">Likes</th>
-              <th class="studio-col-actions">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${filtered.map(v => renderStudioRow(v)).join('')}
-          </tbody>
-        </table>
-      `}
-    </div>
-  `;
-  
-  // Wire up search input
-  const searchInput = document.getElementById('studioSearchInput');
-  if (searchInput) {
-    searchInput.addEventListener('input', (e) => {
-      studioSearchQuery = e.target.value;
-      renderStudio();
-      // Re-focus the input after re-render
-      const newInput = document.getElementById('studioSearchInput');
-      if (newInput) {
-        newInput.focus();
-        newInput.setSelectionRange(studioSearchQuery.length, studioSearchQuery.length);
-      }
-    });
-  }
-  
-  // Wire up edit/delete buttons via delegation
-  content.querySelectorAll('[data-studio-action]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const action = btn.dataset.studioAction;
-      const id = btn.dataset.id;
-      if (action === 'edit') openStudioEditModal(id);
-      else if (action === 'delete') deleteStudioVideo(id);
-    });
-  });
-}
-
-function renderStudioRow(v) {
-  const thumb = v.thumbnail_url 
-    ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>` 
-    : '<div class="studio-thumb-placeholder"></div>';
-  const date = new Date(v.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-  const desc = v.description 
-    ? `<div class="studio-row-desc">${escHTML(v.description.slice(0, 100))}${v.description.length > 100 ? '…' : ''}</div>` 
-    : '<div class="studio-row-desc" style="color:#aaa;font-style:italic">No description</div>';
-  const statusBadge = v.status === 'ready' 
-    ? '<span class="studio-badge studio-badge-ready"><span class="studio-dot studio-dot-green"></span>Public</span>' 
-    : `<span class="studio-badge studio-badge-processing"><span class="studio-dot studio-dot-yellow"></span>Processing</span>`;
-  const duration = v.duration ? formatDuration(v.duration) : '';
-  
-  return `
-    <tr data-video-id="${v.id}">
-      <td>
-        <div class="studio-row-video">
-          <div class="studio-thumb">
-            ${thumb}
-            ${duration ? `<span class="studio-thumb-duration">${duration}</span>` : ''}
-          </div>
-          <div class="studio-row-text">
-            <div class="studio-row-title">${escHTML(v.title || 'Untitled')}</div>
-            ${desc}
-          </div>
-        </div>
-      </td>
-      <td>${statusBadge}</td>
-      <td><span class="studio-cell-muted">${date}</span></td>
-      <td>${(v.views || 0).toLocaleString()}</td>
-      <td>${(v.likes || 0).toLocaleString()}</td>
-      <td>
-        <div class="studio-actions">
-          <button class="studio-btn" data-studio-action="edit" data-id="${v.id}" title="Edit details">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-          </button>
-          <button class="studio-btn studio-btn-danger" data-studio-action="delete" data-id="${v.id}" title="Delete forever">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-          </button>
-        </div>
-      </td>
-    </tr>
-  `;
-}
-
-function openStudioEditModal(videoId) {
-  const v = studioVideosCache.find(x => x.id === videoId);
-  if (!v) return;
-  
-  studioEditingVideoId = videoId;
-  
-  document.getElementById('studioEditTitle').value = v.title || '';
-  document.getElementById('studioEditDescription').value = v.description || '';
-  document.getElementById('studioEditTags').value = (v.tags || []).join(', ');
-  document.getElementById('studioEditCategory').value = v.category || 'general';
-  
-  const preview = document.getElementById('studioEditPreview');
-  const thumb = document.getElementById('studioEditThumb');
-  if (v.thumbnail_url) {
-    thumb.src = v.thumbnail_url;
-    preview.style.display = '';
-  } else {
-    preview.style.display = 'none';
-  }
-  
-  document.getElementById('studioEditTitleCount').textContent = `${(v.title || '').length} / 100`;
-  document.getElementById('studioEditDescCount').textContent = `${(v.description || '').length} / 2000`;
-  
-  document.getElementById('studioEditModal').style.display = 'flex';
-}
-
-function closeStudioEditModal() {
-  document.getElementById('studioEditModal').style.display = 'none';
-  studioEditingVideoId = null;
-}
-
-async function saveStudioEdit() {
-  if (!studioEditingVideoId) return;
-
-  const saveBtn = document.getElementById('studioEditSave');
-  const originalLabel = saveBtn.textContent;
-
-  const setSaving = (saving) => {
-    if (saving) {
-      saveBtn.classList.add('is-saving');
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving';
-    } else {
-      saveBtn.classList.remove('is-saving');
-      saveBtn.disabled = false;
-      saveBtn.textContent = originalLabel;
-    }
-  };
-
-  const title = document.getElementById('studioEditTitle').value.trim();
-  const description = document.getElementById('studioEditDescription').value.trim();
-  const tagsRaw = document.getElementById('studioEditTags').value;
-  const category = document.getElementById('studioEditCategory').value;
-
-  if (!title) {
-    toast('Title is required', 'error');
-    return;
-  }
-
-  setSaving(true);
-
-  const tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t);
-
-  const { error } = await supabase
-    .from('videos')
-    .update({ title, description, tags, category, updated_at: new Date().toISOString() })
-    .eq('id', studioEditingVideoId);
-
-  setSaving(false);
-
-  if (error) {
-    toast('Failed to save: ' + error.message, 'error');
-    return;
-  }
-
-  toast('Saved', 'success');
-  closeStudioEditModal();
-
-  // Invalidate caches and reload
-  allVideosCache = [];
-  loadStudio();
-}
-
-async function deleteStudioVideo(videoId) {
-  const v = studioVideosCache.find(x => x.id === videoId);
-  if (!v) return;
-
-  const ok = await confirmDialog({
-    title: `Delete "${v.title || 'this video'}"?`,
-    body: 'This permanently removes the video from your feed and Bunny storage. This can\'t be undone.',
-    confirmLabel: 'Delete forever',
-  });
-  if (!ok) return;
-  
-  // Show loading state on the row
-  const row = document.querySelector(`tr[data-video-id="${videoId}"]`);
-  if (row) row.style.opacity = '0.4';
-  
-  try {
-    // 1. Call Edge Function to delete from Bunny + Supabase videos table
-    await callEdgeFunction('bunny-delete', { videoId });
-    
-    // 2. Also delete any post that links to this video
-    await supabase.from('posts').delete().eq('video_id', videoId);
-    
-    // 3. Update local cache
-    studioVideosCache = studioVideosCache.filter(x => x.id !== videoId);
-    
-    // 4. Invalidate other caches
-    allVideosCache = [];
-    
-    toast('Video deleted', 'success');
-    renderStudio();
-    
-    // 5. Refresh feed if it's open
-    if (feedEl.style.display !== 'none') {
-      loadFeed();
-    }
-  } catch (err) {
-    console.error('Delete failed:', err);
-    toast('Failed to delete: ' + err.message, 'error');
-    if (row) row.style.opacity = '1';
-  }
 }
 
-// Wire up edit modal events
-document.getElementById('studioEditClose')?.addEventListener('click', closeStudioEditModal);
-document.getElementById('studioEditCancel')?.addEventListener('click', closeStudioEditModal);
-document.getElementById('studioEditSave')?.addEventListener('click', saveStudioEdit);
-document.getElementById('studioEditModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'studioEditModal') closeStudioEditModal();
-});
-
-// Live char counters in edit modal
-document.getElementById('studioEditTitle')?.addEventListener('input', (e) => {
-  document.getElementById('studioEditTitleCount').textContent = `${e.target.value.length} / 100`;
-});
-document.getElementById('studioEditDescription')?.addEventListener('input', (e) => {
-  document.getElementById('studioEditDescCount').textContent = `${e.target.value.length} / 2000`;
-});
-
-// Studio upload button → trigger same upload modal as Videos page
-document.getElementById('btnStudioUpload')?.addEventListener('click', () => {
-  document.getElementById('btnUploadVideo')?.click();
-});
-
-function showVideoPlayer() {
-  hideAllMainPages();
-  videoPlayerPage.style.display = 'block';
-}
-
-document.getElementById('btnVideos').addEventListener('click', () => {
-  setSidebarActive('btnVideos');
-  if (videosPage.style.display === 'block') {
-    // Scroll the actual scrolling element to the very top
-    document.documentElement.scrollTop = 0;
-    document.body.scrollTop = 0;
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    return;
-  }
-  showVideos();
-});
-document.getElementById('btnStudio').addEventListener('click', () => {
-  setSidebarActive('btnStudio');
-  showStudio();
-});
-document.getElementById('btnBook')?.addEventListener('click', () => {
-  setSidebarActive('btnBook');
-  showBook();
-});
-document.getElementById('btnAuthor')?.addEventListener('click', () => {
-  setSidebarActive('btnAuthor');
-  showAuthor();
-});
-
-// "Become an author" CTA inside Book empty state
-document.getElementById('btnGoToAuthor')?.addEventListener('click', () => {
-  setSidebarActive('btnAuthor');
-  showAuthor();
-});
-document.getElementById('btnBackVideos').addEventListener('click', () => {
-  if (currentHls) { currentHls.destroy(); currentHls = null; }
-  document.getElementById('videoPlayer').pause();
-  showVideos();
-});
-
-// Fetch new videos uploaded via web (from Supabase)
-async function fetchSupabaseVideos() {
-  try {
-    const { data, error } = await supabase
-      .from('videos')
-      .select(`
-        id,
-        bunny_video_id,
-        title,
-        description,
-        tags,
-        category,
-        video_url,
-        thumbnail_url,
-        views,
-        duration,
-        created_at,
-        uploader_id,
-        profiles!videos_uploader_id_fkey (
-          id,
-          username,
-          avatar_url
-        )
-      `)
-      .order('created_at', { ascending: false })
-      .limit(100);
-    
-    if (error) {
-      console.error('Supabase videos fetch error:', error);
-      return [];
-    }
-    
-    // Transform to match Appwrite video format so the rest of the code works
-    return (data || []).map(v => ({
-      $id: 'sb_' + v.id, // prefix so we can tell Supabase videos apart
-      _supabase: true,    // flag for special handling
-      _supabaseId: v.id,
-      title: v.title,
-      description: v.description || '',
-      tags: v.tags || [],
-      uploader: v.uploader_id,
-      thumbnail: v.thumbnail_url,
-      videoUrl: v.video_url,
-      uri: v.video_url,
-      videoStats: { views: v.views || 0, duration: v.duration || 0 },
-      status: 'ready',
-      $createdAt: v.created_at,
-      // Pre-populated uploader info (saves an extra fetch)
-      _uploaderInfo: v.profiles ? {
-        $id: v.profiles.id,
-        username: v.profiles.username,
-        avatar: v.profiles.avatar_url,
-      } : null,
-    }));
-  } catch (err) {
-    console.error('Failed to fetch Supabase videos:', err);
-    return [];
-  }
-}
-
-async function loadVideos() {
-  const grid = document.getElementById('videoGrid');
-  grid.innerHTML = '<div class="loading">Loading videos...</div>';
-
-  await ensureVideoCache();
-
-// Merge in new Supabase uploads
-const supabaseVideos = await fetchSupabaseVideos();
-if (supabaseVideos.length) {
-  supabaseVideos.forEach(v => {
-    if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
-      allUploadersCache[v.uploader] = v._uploaderInfo;
-    }
-  });
-  const existingIds = new Set(allVideosCache.map(v => v.$id));
-  const newOnes = supabaseVideos.filter(v => !existingIds.has(v.$id));
-  allVideosCache = [...newOnes, ...allVideosCache];
-}
-window._cache = allVideosCache; // expose for debugging
-
-  if (!allVideosCache.length) {
-    grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
-    return;
-  }
-
-  renderTagPills();
-
-  // If no search/tag filter, show personalized feed
-  if (!activeSearchQuery && !activeTagFilter) {
-    const personalized = getPersonalizedFeed();
-    renderVideoResults(personalized);
-  } else {
-    runSearch();
-  }
-}
-
-function getPersonalizedFeed() {
-  const { tagWeights, watchedIds, recentUploaders } = getInterestProfile();
-  const hasHistory = Object.keys(tagWeights).length > 0;
-  const myId = currentUser?.id;
-
-  // Filter out already-watched (last 30 days), but always show user's own uploads
-  let pool = allVideosCache.filter(v => v.uploader === myId || !watchedIds.has(v.$id));
-
-  // Pin user's own recent uploads (last 7 days) at the top
-  const myRecent = pool.filter(v =>
-    v.uploader === myId &&
-    v.$createdAt &&
-    (Date.now() - new Date(v.$createdAt).getTime()) < 7 * 24 * 3600 * 1000
-  );
-  const myRecentIds = new Set(myRecent.map(v => v.$id));
-  const others = pool.filter(v => !myRecentIds.has(v.$id));
-
-  if (!hasHistory) {
-    // No watch history → my recent uploads first, then by recency
-    return [...myRecent, ...others];
-  }
-
-  // Score each remaining video
-  others.forEach(v => {
-    let score = 0;
-
-    // Tag matching (interest profile)
-    (v.tags || []).forEach(tag => {
-      if (tagWeights[tag]) score += tagWeights[tag] * 100;
-    });
-
-    // Same uploader bonus (creators you've watched before)
-    if (recentUploaders.includes(v.uploader)) score += 15;
-
-    // Engagement boost
-    const views = v.videoStats?.views || 0;
-    score += Math.log10(views + 1) * 2;
-
-    // Recency boost (newer videos slightly preferred)
-    const ageHours = (Date.now() - new Date(v.$createdAt).getTime()) / 3600000;
-    if (ageHours < 24) score += 8;
-    else if (ageHours < 168) score += 4;
-
-    // Random spice (30% chance to boost a random video)
-    if (Math.random() < 0.3) score += Math.random() * 20;
-
-    v._feedScore = score;
-  });
-
-  // Sort: 70% personalized + 30% trending mixed in
-  others.sort((a, b) => b._feedScore - a._feedScore);
-
-  // Take top 70 personalized
-  const personalized = others.slice(0, 70);
-  // Take 30 trending (high views, not in personalized)
-  const personalizedIds = new Set(personalized.map(v => v.$id));
-  const trending = others
-    .filter(v => !personalizedIds.has(v.$id))
-    .sort((a, b) => (b.videoStats?.views || 0) - (a.videoStats?.views || 0))
-    .slice(0, 30);
-
-  // Interleave them (every 3rd is trending)
-  const result = [];
-  const maxLen = Math.max(personalized.length, trending.length);
-  for (let i = 0; i < maxLen; i++) {
-    if (personalized[i]) result.push(personalized[i]);
-    if (i % 2 === 1 && trending[Math.floor(i/2)]) {
-      result.push(trending[Math.floor(i/2)]);
-    }
-  }
-
-  // Pin my recent uploads at the top
-  return [...myRecent, ...result];
-}
-
-// ── Video search ──
-let allVideosCache = [];
-let allUploadersCache = {};
-let activeSearchQuery = '';
-let activeTagFilter = null;
-
-async function ensureVideoCache() {
-  if (allVideosCache.length) return;
-  try {
-    const result = await appwriteList(APPWRITE.videosCollection, [
-      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit', values: [200] })
-    ]);
-    allVideosCache = result.documents || [];
-
-    // Fetch all unique uploaders
-    const uploaderIds = [...new Set(allVideosCache.map(v => v.uploader).filter(Boolean))];
-    if (uploaderIds.length) {
-      // Appwrite has a 100 limit on equal() values, so we batch
-      for (let i = 0; i < uploaderIds.length; i += 100) {
-        const batch = uploaderIds.slice(i, i + 100);
-        try {
-          const res = await appwriteList(APPWRITE.usersCollection, [
-            JSON.stringify({ method: 'equal', attribute: '$id', values: batch }),
-            JSON.stringify({ method: 'limit', values: [100] })
-          ]);
-          res.documents.forEach(u => { allUploadersCache[u.$id] = u; });
-        } catch {}
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load video cache:', e);
-  }
-}
-
-function searchVideos(query, tagFilter) {
-  query = (query || '').trim().toLowerCase();
-  if (!query && !tagFilter) return allVideosCache;
-
-  // Detect hashtag search (e.g. "#music")
-  const hashtagMatch = query.match(/^#(\w+)/);
-  const isHashtag = !!hashtagMatch;
-  const cleanQuery = isHashtag ? hashtagMatch[1].toLowerCase() : query;
-
-  return allVideosCache.filter(v => {
-    // Tag filter (when user clicks a tag pill)
-    if (tagFilter) {
-      const hasTag = (v.tags || []).some(t => t.toLowerCase() === tagFilter.toLowerCase());
-      if (!hasTag) return false;
-    }
-    if (!cleanQuery) return true;
-
-    // Hashtag mode: ONLY match tags
-    if (isHashtag) {
-      return (v.tags || []).some(t => t.toLowerCase().includes(cleanQuery));
-    }
-
-    // Normal search: match title, description, tags, category, uploader
-    const title    = (v.title || '').toLowerCase();
-    const desc     = (v.description || '').toLowerCase();
-    const tags     = (v.tags || []).join(' ').toLowerCase();
-    const category = (v.category || '').replace(/-/g, ' ').toLowerCase();
-    const uploader = allUploadersCache[v.uploader];
-    const uploaderName = (uploader?.username || v._uploaderInfo?.username || '').toLowerCase();
-
-    return title.includes(cleanQuery)
-        || desc.includes(cleanQuery)
-        || tags.includes(cleanQuery)
-        || category.includes(cleanQuery)
-        || uploaderName.includes(cleanQuery);
-  });
-}
-
-function getTopTags(limit = 12) {
-  const tagCounts = {};
-  allVideosCache.forEach(v => {
-    (v.tags || []).forEach(t => {
-      tagCounts[t] = (tagCounts[t] || 0) + 1;
-    });
-  });
-  return Object.entries(tagCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([tag]) => tag);
-}
-
-function renderTagPills() {
-  const wrap = document.getElementById('videoSearchTags');
-  const tags = getTopTags(12);
-  wrap.innerHTML = tags.map(tag => 
-    `<button class="search-tag-pill ${tag === activeTagFilter ? 'active' : ''}" data-tag="${escHTML(tag)}">${escHTML(tag)}</button>`
-  ).join('');
-
-  wrap.querySelectorAll('.search-tag-pill').forEach(pill => {
-    pill.onclick = () => {
-      const tag = pill.dataset.tag;
-      activeTagFilter = (activeTagFilter === tag) ? null : tag;
-      renderTagPills();
-      // If no tag selected, show personalized feed; else show filtered
-      if (!activeTagFilter && !activeSearchQuery) {
-        renderVideoResults(getPersonalizedFeed());
-      } else {
-        runSearch();
-      }
-    };
-  });
-}
-
-function runSearch() {
-  const filtered = searchVideos(activeSearchQuery, activeTagFilter);
-  renderVideoResults(filtered);
-}
-
-function renderVideoResults(videos) {
-  const grid = document.getElementById('videoGrid');
-  if (!videos.length) {
-    grid.innerHTML = `
-      <div class="video-search-empty">
-        <h3>No videos found</h3>
-        <p>Try a different keyword or tag</p>
-      </div>
-    `;
-    return;
-  }
-
-  grid.innerHTML = '';
-  videos.slice(0, 100).forEach((v, i) => {
-    const card = renderVideoCard(v, allUploadersCache[v.uploader]);
-    card.style.animationDelay = `${i * 0.03}s`;
-    grid.appendChild(card);
-  });
-}
-
-function renderVideoCard(video, uploader) {
-  const div = document.createElement('div');
-  div.className = 'video-card';
-  div.onclick = () => playVideo(video.$id);
-
-  const name = uploader?.username || 'Unknown';
-  const avatarHTML = uploader?.avatar ? `<img src="${uploader.avatar}" alt="${name}"/>` : initials(name);
-
-  const thumbHTML = video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : '';
-  const resumeTime = getResumeTime(video.$id);
-  const videoDuration = video.videoStats?.duration || 0;
-  const progressPct = (resumeTime && videoDuration) ? Math.min(100, (resumeTime / videoDuration) * 100) : 0;
-
-  div.innerHTML = `
-    <div class="video-thumb">
-      ${thumbHTML}
-      <video class="preview" muted playsinline preload="none"></video>
-      <span class="video-thumb-duration" data-duration></span>
-      ${progressPct > 0 ? `<div class="video-thumb-progress"><div class="video-thumb-progress-fill" style="width:${progressPct}%"></div></div>` : ''}
-    </div>
-    <div class="video-card-info">
-      <div class="avatar">${avatarHTML}</div>
-      <div class="video-card-text">
-        <div class="video-card-title">${escHTML(video.title || 'Untitled')}</div>
-        <div class="video-card-meta">
-          ${escHTML(name)}<br>
-          ${(video.videoStats?.views || 0).toLocaleString()} views • ${timeAgo(video.$createdAt)}
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Show duration if available, otherwise fetch from video metadata
-  const durationEl = div.querySelector('[data-duration]');
-  if (videoDuration) {
-    durationEl.textContent = formatDuration(videoDuration);
-  } else if (video.videoUrl) {
-    const tempVid = document.createElement('video');
-    tempVid.preload = 'metadata';
-    tempVid.muted = true;
-    if (video.videoUrl.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !tempVid.canPlayType('application/vnd.apple.mpegurl')) {
-      const tempHls = new Hls();
-      tempHls.loadSource(video.videoUrl);
-      tempHls.attachMedia(tempVid);
-      tempHls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (tempVid.duration && !isNaN(tempVid.duration)) {
-          durationEl.textContent = formatDuration(tempVid.duration);
-        }
-        setTimeout(() => tempHls.destroy(), 500);
-      });
-    } else {
-      tempVid.src = video.videoUrl;
-      tempVid.addEventListener('loadedmetadata', () => {
-        durationEl.textContent = formatDuration(tempVid.duration);
-        tempVid.removeAttribute('src');
-      });
-    }
-  }
-
-  // Hover to play preview
-  const previewEl = div.querySelector('video.preview');
-  let hoverHls = null;
-  let hoverTimeout = null;
-
-  div.addEventListener('mouseenter', () => {
-    hoverTimeout = setTimeout(() => {
-      if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
-        if (previewEl.canPlayType('application/vnd.apple.mpegurl')) {
-          previewEl.src = video.videoUrl;
-        } else if (window.Hls && Hls.isSupported()) {
-          hoverHls = new Hls();
-          hoverHls.loadSource(video.videoUrl);
-          hoverHls.attachMedia(previewEl);
-        }
-      } else {
-        previewEl.src = video.videoUrl;
-      }
-      previewEl.play().then(() => {
-        previewEl.classList.add('playing');
-      }).catch(() => {});
-    }, 600); // 600ms delay before preview starts (like YouTube)
-  });
-
-  div.addEventListener('mouseleave', () => {
-    clearTimeout(hoverTimeout);
-    previewEl.classList.remove('playing');
-    previewEl.pause();
-    previewEl.currentTime = 0;
-    if (hoverHls) { hoverHls.destroy(); hoverHls = null; }
-    previewEl.removeAttribute('src');
-    previewEl.load();
-  });
-
-  return div;
-}
-
-async function playVideo(videoId) {
-  console.log('[playVideo] called with videoId:', videoId, '| starts with sb_?', videoId?.startsWith('sb_'));
-  try {
-    let video = null;
-    let uploader = null;
-
-    // Supabase videos are prefixed with 'sb_' and live in allVideosCache
-    // — never call Appwrite for them, that's why we were getting 400s.
-    if (videoId && videoId.startsWith('sb_')) {
-      console.log('[playVideo] taking SUPABASE branch — no Appwrite call');
-      // Make sure the cache is populated (in case the user navigated directly to #video/sb_...)
-      if (!allVideosCache.length) {
-        await ensureVideoCache();
-        const fresh = await fetchSupabaseVideos();
-        const existingIds = new Set(allVideosCache.map(v => v.$id));
-        fresh.forEach(v => { if (!existingIds.has(v.$id)) allVideosCache.push(v); });
-      }
-      const cached = allVideosCache.find(v => v.$id === videoId);
-      if (!cached) {
-        toast('Video not found', 'error');
-        return;
-      }
-      video = cached;
-      uploader = cached._uploaderInfo || null;
-    } else {
-      // Appwrite (mobile) video — fetch from Appwrite as before
-      console.log('[playVideo] taking APPWRITE branch for videoId:', videoId);
-      video = await appwriteGet(APPWRITE.videosCollection, videoId);
-      if (!video) return;
-      if (video.uploader) {
-        try { uploader = await appwriteGet(APPWRITE.usersCollection, video.uploader); } catch {}
-      }
-    }
-
-    showVideoPlayer();
-    history.pushState(null, '', `#video/${videoId}`);
-
-    const player = document.getElementById('videoPlayer');
-    if (currentHls) { currentHls.destroy(); currentHls = null; }
-
-    const resumeFrom = getResumeTime(videoId);
-
-    const startPlayback = () => {
-      if (resumeFrom > 0) {
-        player.currentTime = resumeFrom;
-        toast(`Resumed at ${formatDuration(resumeFrom)}`, '');
-      }
-      player.play().catch(() => {});
-    };
-
-    if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
-      if (player.canPlayType('application/vnd.apple.mpegurl')) {
-        player.src = video.videoUrl;
-        player.addEventListener('loadedmetadata', startPlayback, { once: true });
-      } else if (window.Hls && Hls.isSupported()) {
-        currentHls = new Hls();
-        currentHls.loadSource(video.videoUrl);
-        currentHls.attachMedia(player);
-        currentHls.on(Hls.Events.MANIFEST_PARSED, startPlayback);
-      } else {
-        toast('HLS not supported in this browser', 'error');
-      }
-    } else {
-      player.src = video.videoUrl || '';
-      player.addEventListener('loadedmetadata', startPlayback, { once: true });
-    }
-
-    // Save position every 3 seconds
-    let saveInterval = setInterval(() => {
-      if (!player.paused && player.currentTime > 0) {
-        saveResumeTime(videoId, player.currentTime, player.duration);
-      }
-    }, 3000);
-
-    // Clean up interval when video changes
-    player._saveInterval && clearInterval(player._saveInterval);
-    player._saveInterval = saveInterval;
-
-    // Save when paused
-    player.onpause = () => saveResumeTime(videoId, player.currentTime, player.duration);
-
-    document.getElementById('videoTitle').textContent = video.title || 'Untitled';
-    document.getElementById('videoViews').textContent = '';
-    document.getElementById('videoDate').textContent = timeAgo(video.$createdAt);
-    document.getElementById('videoDescription').textContent = video.description || '';
-
-    const name = uploader?.username || 'Unknown';
-    const avatarEl = document.getElementById('videoUploaderAvatar');
-    avatarEl.innerHTML = uploader?.avatar ? `<img src="${uploader.avatar}"/>` : initials(name);
-    document.getElementById('videoUploaderName').textContent = name;
-    document.getElementById('videoUploaderBadge').textContent = video.tags?.length ? video.tags.join(' • ') : '';
-    
-    // Track watch history & load suggestions
-    addToWatchHistory(video, uploader);
-    loadUpNext(video);
-  } catch (error) {
-    toast('Couldn\'t load video: ' + error.message, 'error');
-  }
-}
-
-// Update popstate to handle videos
-window.addEventListener('popstate', () => {
-  const hash = window.location.hash;
-  if (hash.startsWith('#profile/')) {
-    setSidebarActive('btnProfile');
-    openProfile(hash.replace('#profile/', ''));
-  } else if (hash === '#videos') {
-    setSidebarActive('btnVideos');
-    showVideos();
-  } else if (hash === '#studio') {
-    setSidebarActive('btnStudio');
-    showStudio();
-  } else if (hash === '#book') {
-    setSidebarActive('btnBook');
-    showBook();
-  } else if (hash.startsWith('#book/')) {
-    setSidebarActive('btnBook');
-    const bookId = hash.replace('#book/', '').split('/')[0];
-    openBookDetail(bookId);
-  } else if (hash === '#author') {
-    setSidebarActive('btnAuthor');
-    showAuthor();
-  } else if (hash.startsWith('#author/book/')) {
-    setSidebarActive('btnAuthor');
-    const parts = hash.replace('#author/book/', '').split('/');
-    const bookId = parts[0];
-    if (parts[2]) {
-      // chapter editor — parts[1] === 'chapter', parts[2] === id or 'new'
-      openAuthorChapterEditor(bookId, parts[2] === 'new' ? null : parts[2]);
-    } else {
-      openAuthorBookEditor(bookId);
-    }
-  } else if (hash.startsWith('#video/')) {
-    setSidebarActive('btnVideos');
-    playVideo(hash.replace('#video/', ''));
-  } else {
-    setSidebarActive('btnHome');
-    showFeed();
-    loadFeed();
-  }
-});
-
-// ── Theme toggle ──
-function applyTheme(theme) {
-  if (theme === 'light') document.body.classList.add('light');
-  else document.body.classList.remove('light');
-}
-applyTheme(localStorage.getItem('selebox_theme') || 'dark');
-
-document.getElementById('btnTheme').addEventListener('click', () => {
-  const isLight = document.body.classList.contains('light');
-  const newTheme = isLight ? 'dark' : 'light';
-  applyTheme(newTheme);
-  localStorage.setItem('selebox_theme', newTheme);
-});
-
-// ════════════════════════════════════════
-// NOTIFICATIONS
-// ════════════════════════════════════════
-const NOTIF_PAGE_SIZE = 25;
-let _notifications = [];
-let _notifUnreadCount = 0;
-let _notifChannel = null;
-let _notifPanelOpen = false;
-let _notifFilter = 'all';      // 'all' | 'you' | 'following'
-const _notifActorCache = {};   // user_id → { username, avatar_url }
-
-// Categorize a notification for the filter tabs
-function notifCategory(n) {
-  return (n?.type || '').startsWith('follow_') ? 'following' : 'you';
-}
-
-async function initNotifications() {
-  if (!currentUser) return;
-
-  await loadNotifications();
-
-  // Realtime — subscribe to new notifications for this user only
-  if (_notifChannel) {
-    try { supabase.removeChannel(_notifChannel); } catch {}
-    _notifChannel = null;
-  }
-  try {
-    _notifChannel = supabase
-      .channel(`notif:${currentUser.id}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'notifications',
-        filter: `recipient_id=eq.${currentUser.id}`,
-      }, async (payload) => {
-        const n = payload.new;
-        // Fetch the actor profile for nicer rendering
-        await hydrateActorProfiles([n]);
-        _notifications.unshift(n);
-        if (_notifications.length > 100) _notifications.length = 100;
-        _notifUnreadCount += 1;
-        updateNotifBadge();
-        renderNotifications();
-        // Subtle toast so the user knows something happened
-        toast(notificationLabel(n), 'success');
-      })
-      .subscribe();
-  } catch (err) {
-    console.warn('Notifications realtime subscribe failed:', err);
-  }
-}
-
-async function loadNotifications() {
-  const list = document.getElementById('notificationsList');
-  if (list) list.innerHTML = '<div class="notifications-empty">Loading…</div>';
-
-  const { data, error } = await supabase
-    .from('notifications')
-    .select('*')
-    .eq('recipient_id', currentUser.id)
-    .order('created_at', { ascending: false })
-    .limit(NOTIF_PAGE_SIZE);
-
-  if (error) {
-    if (list) list.innerHTML = `<div class="notifications-empty">Couldn't load notifications</div>`;
-    console.warn('Notifications fetch error:', error);
-    return;
-  }
-  _notifications = data || [];
-  await hydrateActorProfiles(_notifications);
-
-  _notifUnreadCount = _notifications.filter(n => !n.is_read).length;
-  updateNotifBadge();
-  renderNotifications();
-}
-
-async function hydrateActorProfiles(items) {
-  const ids = [...new Set(items.map(n => n.actor_id).filter(Boolean).filter(id => !_notifActorCache[id]))];
-  if (!ids.length) return;
-  const { data } = await supabase.from('profiles').select('id, username, avatar_url').in('id', ids);
-  (data || []).forEach(p => { _notifActorCache[p.id] = p; });
-}
-
-function updateNotifBadge() {
-  const badge = document.getElementById('notifBadge');
-  const bell  = document.getElementById('btnNotifications');
-  if (!badge || !bell) return;
-  if (_notifUnreadCount > 0) {
-    badge.style.display = 'flex';
-    badge.textContent = _notifUnreadCount > 99 ? '99+' : String(_notifUnreadCount);
-    bell.classList.add('has-unread');
-    // Re-trigger animation
-    bell.classList.remove('has-unread');
-    void bell.offsetWidth;
-    bell.classList.add('has-unread');
-  } else {
-    badge.style.display = 'none';
-    bell.classList.remove('has-unread');
-  }
-}
-
-function renderNotifications() {
-  const list = document.getElementById('notificationsList');
-  if (!list) return;
-
-  const visible = _notifFilter === 'all'
-    ? _notifications
-    : _notifications.filter(n => notifCategory(n) === _notifFilter);
-
-  if (!visible.length) {
-    const msg = _notifications.length === 0
-      ? `<p style="margin:0;font-size:0.85rem">You're all caught up.</p>
-         <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone reacts, comments, replies, or someone you follow posts, it'll show up here.</p>`
-      : (_notifFilter === 'you'
-          ? `<p style="margin:0;font-size:0.85rem">No activity on your content yet.</p>
-             <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">Reactions and comments on your posts/books will appear here.</p>`
-          : `<p style="margin:0;font-size:0.85rem">Nothing from people you follow yet.</p>
-             <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone you follow posts, uploads, or publishes, you'll see it here.</p>`);
-    list.innerHTML = `<div class="notifications-empty">${msg}</div>`;
-    return;
-  }
-
-  list.innerHTML = visible.map(n => {
-    const actor = _notifActorCache[n.actor_id] || {};
-    const avatar = actor.avatar_url
-      ? `<img src="${escHTML(actor.avatar_url)}"/>`
-      : (actor.username ? initials(actor.username) : '?');
-    const text = notificationLabel(n, actor.username);
-    const snippet = n.metadata?.snippet || n.metadata?.caption || '';
-    const snippetHTML = snippet
-      ? `<div class="notification-snippet">"${escHTML(snippet)}"</div>`
-      : '';
-    return `
-      <div class="notification-item ${n.is_read ? '' : 'unread'}" data-id="${n.id}">
-        <div class="notification-avatar">${avatar}</div>
-        <div class="notification-body">
-          <div class="notification-text">${text}</div>
-          ${snippetHTML}
-          <div class="notification-time">${timeAgo(n.created_at)}</div>
-        </div>
-        <span class="notification-dot"></span>
-      </div>`;
-  }).join('');
-
-  list.querySelectorAll('.notification-item').forEach(item => {
-    item.addEventListener('click', () => onNotificationClick(item.dataset.id));
-  });
-}
-
-function notificationLabel(n, knownUsername) {
-  const username = knownUsername || _notifActorCache[n.actor_id]?.username || 'Someone';
-  const actorTag = `<strong>${escHTML(username)}</strong>`;
-  const titleHint = n.metadata?.title ? ` <em style="color:var(--text2)">"${escHTML(n.metadata.title)}"</em>` : '';
-  switch (n.type) {
-    // ── You: engagement on your stuff ──
-    case 'like_post':              return `${actorTag} reacted to your post`;
-    case 'like_comment':           return `${actorTag} reacted to your comment`;
-    case 'like_book':              return `${actorTag} liked your book${titleHint}`;
-    case 'comment_post':           return `${actorTag} commented on your post`;
-    case 'reply_comment':          return `${actorTag} replied to your comment`;
-    case 'comment_chapter':        return `${actorTag} commented on your chapter`;
-    case 'reply_chapter_comment':  return `${actorTag} replied to your chapter comment`;
-    case 'repost_post':            return `${actorTag} reposted your post`;
-
-    // ── Following: people you follow doing things ──
-    case 'follow_new_post':        return `${actorTag} posted something new`;
-    case 'follow_new_video':       return `${actorTag} uploaded a new video`;
-    case 'follow_new_book':        return `${actorTag} published a new book${titleHint}`;
-    case 'follow_repost':          return `${actorTag} shared a post`;
-
-    // ── Mentions ──
-    case 'mention_comment':        return `${actorTag} mentioned you in a comment`;
-    case 'mention_chapter_comment':return `${actorTag} mentioned you in a chapter comment`;
-
-    default:                       return `${actorTag} did something on Selebox`;
-  }
+body.light {
+  --bg:         #f7f8fc;
+  --bg2:        #ffffff;
+  --bg3:        #f1f2f7;
+  --bg4:        #e8eaf2;
+  --border:     rgba(0,0,0,0.06);
+  --border2:    rgba(0,0,0,0.12);
+  --text:       #1a1a2e;
+  --text2:      #4a4a6a;
+  --text3:      #8b8ba8;
+}
+body.light .post-card,
+body.light .compose,
+body.light .stories-row,
+body.light .auth-card {
+  box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+}
+body.light .topbar-search input {
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+body.light .comment-bubble {
+  background: var(--bg3);
+  color: var(--text);
+}
+body.light .topbar-avatar,
+body.light .topbar-icon-btn {
+  background: rgba(255,255,255,0.2);
+}
+body.light .topbar-icon-btn:hover {
+  background: rgba(255,255,255,0.3);
+}
+
+html { scroll-behavior: smooth; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; -webkit-font-smoothing: antialiased; }
+a { text-decoration: none; color: inherit; }
+button { font-family: var(--font); cursor: pointer; }
+
+/* ── TOP HEADER ── */
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
+  background: var(--purple-grad);
+  display: flex; align-items: center; padding: 0 1.5rem;
+  z-index: 100; gap: 1.5rem;
+}
+.topbar-logo { display: flex; flex-direction: column; color: #fff; font-weight: 800; font-size: 1.4rem; letter-spacing: 0.02em; line-height: 1; min-width: 200px; }
+.topbar-logo .brand { display: flex; align-items: center; gap: 6px; }
+.topbar-logo .brand::before { content: ''; width: 28px; height: 28px; background: #fff; border-radius: 6px; display: inline-block; mask: linear-gradient(135deg, transparent 48%, #000 50%, #000 52%, transparent 54%); -webkit-mask: linear-gradient(135deg, transparent 48%, #000 50%, #000 52%, transparent 54%); }
+.topbar-logo .sub { font-size: 0.65rem; font-weight: 400; color: rgba(255,255,255,0.85); margin-top: 3px; letter-spacing: 0.08em; text-transform: uppercase; margin-left: 36px; }
+
+.topbar-search { flex: 1; max-width: 560px; position: relative; }
+.topbar-search input {
+  width: 100%; background: #fff; border: none; border-radius: 99px;
+  padding: 0.7rem 3rem 0.7rem 1.4rem; font-family: var(--font); font-size: 0.9rem;
+  color: #333; outline: none;
+}
+.topbar-search input::placeholder { color: #9ca3af; }
+.topbar-search-btn {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  background: var(--purple-dk); border: none; color: #fff;
+  width: 38px; height: 38px; border-radius: 50%; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.topbar-search-btn:hover { background: var(--purple); }
+.topbar-search-btn svg { width: 16px; height: 16px; }
+
+.topbar-results {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius);
+  max-height: 400px; overflow-y: auto; box-shadow: 0 12px 36px rgba(0,0,0,0.5);
+  z-index: 200; display: none;
+}
+.topbar-results.visible { display: block; }
+.search-section-title { font-size: 0.7rem; text-transform: uppercase; color: var(--text3); padding: 0.75rem 1rem 0.4rem; letter-spacing: 0.08em; font-weight: 600; }
+.search-result-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.65rem 1rem; cursor: pointer; transition: background 0.15s; }
+.search-result-item:hover { background: var(--bg3); }
+.search-result-item .avatar { width: 36px; height: 36px; }
+.search-result-item .srtext { flex: 1; min-width: 0; }
+.search-result-item .srtitle { font-size: 0.85rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-result-item .srsub { font-size: 0.72rem; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.topbar-actions { display: flex; align-items: center; gap: 1rem; margin-left: auto; }
+.topbar-icon-btn {
+  width: 42px; height: 42px; border-radius: 50%;
+  background: rgba(255,255,255,0.15); border: none; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; position: relative; transition: background 0.15s;
+}
+.topbar-icon-btn:hover { background: rgba(255,255,255,0.25); }
+.topbar-icon-btn svg { width: 18px; height: 18px; }
+
+/* ── NOTIFICATION BELL ── */
+.topbar-bell-wrap { position: relative; }
+.topbar-bell { position: relative; }
+.topbar-bell.has-unread svg {
+  animation: bellShake 0.6s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+  transform-origin: top center;
+}
+@keyframes bellShake {
+  0%, 100% { transform: rotate(0); }
+  10%, 30%, 50%, 70%, 90% { transform: rotate(-8deg); }
+  20%, 40%, 60%, 80% { transform: rotate(8deg); }
+}
+.topbar-bell-badge {
+  position: absolute;
+  top: -3px; right: -3px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ec4899, #db2777);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg2, #1a1428);
+  box-shadow: 0 4px 12px rgba(236, 72, 153, 0.45);
+  animation: badgePop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+body.light .topbar-bell-badge { border-color: #ffffff; }
+@keyframes badgePop {
+  0%   { transform: scale(0.4); opacity: 0; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+/* ── NOTIFICATIONS DROPDOWN ── */
+.notifications-panel {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: -8px;
+  width: 380px;
+  max-width: calc(100vw - 24px);
+  max-height: 70vh;
+  background: linear-gradient(180deg, var(--bg2, #1a1428) 0%, #120c20 100%);
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  border-radius: 16px;
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(167, 139, 250, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  z-index: 600;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: notifPanelIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+body.light .notifications-panel {
+  background: #ffffff;
+  border-color: rgba(124, 58, 237, 0.18);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(124, 58, 237, 0.08);
+}
+@keyframes notifPanelIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.notifications-panel::before {
+  /* Glow accent on top */
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(167, 139, 250, 0.7), rgba(124, 58, 237, 0.7), rgba(167, 139, 250, 0.7), transparent);
+  pointer-events: none;
+}
+
+.notifications-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1rem 0.75rem;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.10);
+  flex-shrink: 0;
+}
+.notifications-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, #c4b5fd, #ffffff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+body.light .notifications-header h3 {
+  background: linear-gradient(135deg, #4c1d95, #1f2937);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.notifications-mark-all {
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.32rem 0.65rem;
+  border-radius: 999px;
+  transition: background 0.15s, color 0.15s;
+}
+.notifications-mark-all:hover {
+  background: rgba(139, 92, 246, 0.10);
+  color: #c4b5fd;
+}
+
+.notif-filter-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.55rem 0.85rem 0.4rem;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.10);
+  flex-shrink: 0;
+}
+.notif-filter-tab {
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text2);
+  padding: 0.32rem 0.85rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, transform 0.12s ease;
+  letter-spacing: 0.01em;
+}
+.notif-filter-tab:hover {
+  background: rgba(139, 92, 246, 0.10);
+  color: var(--text);
+}
+.notif-filter-tab:active { transform: scale(0.96); }
+.notif-filter-tab.active {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.20), rgba(167, 139, 250, 0.10));
+  color: #c4b5fd;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.25);
+}
+body.light .notif-filter-tab.active {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.12), rgba(167, 139, 250, 0.06));
+  color: #7c3aed;
+  box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.20);
+}
+
+.notifications-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.35rem 0;
+}
+.notifications-empty {
+  text-align: center;
+  padding: 2.5rem 1.25rem;
+  color: var(--text3);
+  font-size: 0.85rem;
+}
+
+.notification-item {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  position: relative;
+  border-left: 2px solid transparent;
+}
+.notification-item:hover { background: rgba(139, 92, 246, 0.08); }
+body.light .notification-item:hover { background: rgba(124, 58, 237, 0.06); }
+.notification-item.unread {
+  background: rgba(139, 92, 246, 0.06);
+  border-left-color: #a78bfa;
+}
+.notification-item.unread:hover {
+  background: rgba(139, 92, 246, 0.13);
+}
+.notification-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--purple, #7c3aed), #4c1d95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.78rem;
+}
+.notification-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.notification-body { flex: 1; min-width: 0; }
+.notification-text {
+  font-size: 0.84rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+.notification-text strong { font-weight: 600; color: var(--text); }
+.notification-snippet {
+  font-size: 0.78rem;
+  color: var(--text2);
+  margin-top: 0.2rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.notification-time {
+  font-size: 0.72rem;
+  color: var(--text3);
+  margin-top: 0.25rem;
+}
+.notification-dot {
+  position: absolute;
+  top: 50%;
+  right: 0.85rem;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  box-shadow: 0 0 8px rgba(167, 139, 250, 0.6);
+  transform: translateY(-50%);
+  display: none;
+}
+.notification-item.unread .notification-dot { display: block; }
+
+/* ── @MENTION AUTOCOMPLETE ── */
+.mention-dropdown {
+  position: fixed;
+  z-index: 700;
+  min-width: 240px;
+  max-width: 320px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg2, #1a1428);
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  border-radius: 12px;
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(167, 139, 250, 0.10);
+  padding: 4px;
+  animation: mentionIn 0.15s ease both;
+}
+body.light .mention-dropdown {
+  background: #ffffff;
+  border-color: rgba(124, 58, 237, 0.18);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(124, 58, 237, 0.10);
+}
+@keyframes mentionIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.mention-item:hover,
+.mention-item.active {
+  background: rgba(139, 92, 246, 0.14);
+}
+body.light .mention-item:hover,
+body.light .mention-item.active {
+  background: rgba(124, 58, 237, 0.10);
+}
+.mention-avatar {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--purple, #7c3aed), #4c1d95);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 0.72rem; font-weight: 600;
+  flex-shrink: 0;
+}
+.mention-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.mention-name {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+  letter-spacing: 0.005em;
+}
+.mention-name strong { color: #c4b5fd; font-weight: 600; }
+body.light .mention-name strong { color: #7c3aed; }
+
+/* ── VIDEO COMMENTS SECTION ── */
+.video-comments-wrap {
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.4rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border, rgba(255,255,255,0.06));
+  border-radius: 16px;
+}
+body.light .video-comments-wrap {
+  background: #ffffff;
+  border-color: #e5e7eb;
+}
+.video-comments-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.85rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.10);
+}
+.video-comments-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.video-comments-count {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text2);
+  background: rgba(139, 92, 246, 0.10);
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  margin-left: 0.4rem;
+}
+
+/* Subtle styling for @mentions inside rendered comments */
+.mention-token {
+  color: #c4b5fd;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.mention-token:hover { color: #a78bfa; text-decoration: underline; }
+body.light .mention-token { color: #7c3aed; }
+body.light .mention-token:hover { color: #4c1d95; }
+.topbar-avatar {
+  width: 44px; height: 44px; border-radius: 50%; overflow: hidden; cursor: pointer;
+  background: var(--purple-dk); display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 600; font-size: 0.8rem; border: 2px solid rgba(255,255,255,0.3);
+}
+.topbar-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+/* ── LEFT SIDEBAR (premium) ── */
+.sidebar {
+  position: fixed; top: var(--header-h); left: 0; bottom: 0; width: var(--sidebar-w);
+  background: linear-gradient(180deg, var(--bg) 0%, rgba(15, 8, 30, 0.65) 100%);
+  border-right: 1px solid rgba(139, 92, 246, 0.10);
+  display: flex; flex-direction: column; align-items: stretch;
+  padding: 1.25rem 0.75rem; gap: 0.2rem; z-index: 90;
+}
+body.light .sidebar {
+  background: linear-gradient(180deg, #ffffff 0%, #faf8ff 100%);
+  border-right-color: rgba(124, 58, 237, 0.12);
+}
+.sidebar-item {
+  position: relative;
+  width: 100%; height: 44px;
+  border-radius: 12px;
+  background: transparent; border: none;
+  color: var(--text2);
+  display: flex; align-items: center; justify-content: flex-start;
+  gap: 0.85rem; padding: 0 0.95rem;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.12s ease;
+  font-family: inherit;
+  text-align: left;
+  overflow: hidden;
+}
+.sidebar-item:hover {
+  background: rgba(139, 92, 246, 0.10);
+  color: var(--text);
+}
+.sidebar-item:active { transform: scale(0.98); }
+
+.sidebar-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  flex-shrink: 0;
+  color: inherit;
+  transition: color 0.18s ease, transform 0.18s ease;
+}
+.sidebar-icon svg { width: 20px; height: 20px; }
+
+.sidebar-label {
+  font-size: 0.92rem;
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Active state — purple gradient + glowing left-edge stripe */
+.sidebar-item.active {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.22) 0%, rgba(167, 139, 250, 0.10) 100%);
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.20);
+}
+body.light .sidebar-item.active {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.14) 0%, rgba(167, 139, 250, 0.06) 100%);
+  color: #4c1d95;
+  box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.20);
+}
+.sidebar-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 9px; bottom: 9px;
+  width: 3px;
+  border-radius: 0 4px 4px 0;
+  background: linear-gradient(180deg, #c4b5fd 0%, #8b5cf6 50%, #7c3aed 100%);
+  box-shadow: 0 0 12px rgba(167, 139, 250, 0.7), 0 0 4px rgba(167, 139, 250, 0.9);
+}
+.sidebar-item.active .sidebar-icon {
+  color: #c4b5fd;
+}
+body.light .sidebar-item.active .sidebar-icon {
+  color: #7c3aed;
+}
+.sidebar-item.active .sidebar-label {
+  font-weight: 600;
+}
+
+/* Logout — red hover (destructive cue) */
+.sidebar-item-logout:hover {
+  background: rgba(239, 68, 68, 0.10);
+  color: #fca5a5;
+}
+.sidebar-item-logout:hover .sidebar-icon {
+  color: #fca5a5;
+}
+body.light .sidebar-item-logout:hover {
+  background: rgba(239, 68, 68, 0.08);
+  color: #b91c1c;
+}
+body.light .sidebar-item-logout:hover .sidebar-icon {
+  color: #b91c1c;
+}
+
+.sidebar-divider {
+  width: calc(100% - 1.5rem);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.18), transparent);
+  margin: 0.55rem auto;
+  border: 0;
+}
+
+/* ── BOOK / AUTHOR PAGE HERO ── */
+.page-hero {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.75rem 1.75rem;
+  margin-bottom: 1.5rem;
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  background:
+    radial-gradient(120% 200% at 0% 0%, rgba(124, 58, 237, 0.22) 0%, transparent 55%),
+    linear-gradient(180deg, rgba(15, 8, 30, 0.95), rgba(15, 8, 30, 0.65));
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.page-hero::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, rgba(167, 139, 250, 0.65), rgba(124, 58, 237, 0.65), rgba(167, 139, 250, 0.65), transparent);
+  pointer-events: none;
+}
+body.light .page-hero {
+  background:
+    radial-gradient(120% 200% at 0% 0%, rgba(124, 58, 237, 0.10) 0%, transparent 55%),
+    linear-gradient(180deg, #ffffff, #faf8ff);
+  border-color: rgba(124, 58, 237, 0.18);
+}
+.page-hero-content {
+  position: relative;
+  z-index: 2;
+  max-width: 65%;
+}
+.page-hero-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.95rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #c4b5fd 0%, #ffffff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+body.light .page-hero-title {
+  background: linear-gradient(135deg, #4c1d95 0%, #1f2937 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.page-hero-subtitle {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text2, #c5c4cf);
+  line-height: 1.5;
+  max-width: 480px;
+}
+.page-hero-decoration {
+  position: relative;
+  z-index: 1;
+  color: rgba(167, 139, 250, 0.55);
+  filter: drop-shadow(0 6px 24px rgba(124, 58, 237, 0.4));
+}
+
+/* Empty-state body shared by Book + Author */
+.page-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 3.5rem 1.5rem;
+  background: linear-gradient(180deg, rgba(15, 8, 30, 0.4), rgba(15, 8, 30, 0.05));
+  border: 1px dashed rgba(139, 92, 246, 0.25);
+  border-radius: 22px;
+}
+body.light .page-empty {
+  background: linear-gradient(180deg, #faf8ff, #ffffff);
+  border-color: rgba(124, 58, 237, 0.20);
+}
+.page-empty-icon {
+  width: 96px;
+  height: 96px;
+  border-radius: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.18), rgba(167, 139, 250, 0.06));
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  color: #c4b5fd;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 12px 30px rgba(124, 58, 237, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+body.light .page-empty-icon { color: #7c3aed; }
+.page-empty-title {
+  margin: 0 0 0.4rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.page-empty-body {
+  margin: 0 0 1.4rem;
+  max-width: 420px;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--text2);
+}
+.page-empty-body strong {
+  color: #c4b5fd;
+  font-weight: 600;
+}
+body.light .page-empty-body strong { color: #7c3aed; }
+
+/* ── BOOK BROWSE TOOLBAR ── */
+.book-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+.book-genre-chips {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+.book-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.10));
+  color: var(--text2);
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 0.42rem 0.95rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+  white-space: nowrap;
+}
+body.light .book-chip {
+  background: #ffffff;
+  border-color: #e5e7eb;
+  color: #4b5563;
+}
+.book-chip:hover {
+  background: rgba(139, 92, 246, 0.10);
+  border-color: rgba(139, 92, 246, 0.45);
+  color: var(--text);
+}
+.book-chip.active {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  border-color: transparent;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.35);
+}
+.book-sort-select {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.10));
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.42rem 2.4rem 0.42rem 0.95rem;
+  border-radius: 12px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23a78bfa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.85rem center;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+body.light .book-sort-select {
+  background-color: #f9fafb;
+  border-color: #e5e7eb;
+  color: #1f2937;
+}
+.book-sort-select:hover { border-color: rgba(139, 92, 246, 0.45); }
+.book-sort-select:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.15); }
+
+/* ── BOOK GRID ── */
+.book-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1.5rem;
+}
+.book-card {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0;
+  font-family: inherit;
+  text-align: left;
+  animation: bookFadeIn 0.35s ease both;
+}
+.book-grid-sentinel {
+  display: flex;
+  justify-content: center;
+  margin: 1.25rem 0 0.25rem;
+}
+.book-grid-loadmore {
+  /* Reset .loading defaults — minimalist pill */
+  display: inline-flex !important;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.95rem !important;
+  border-radius: 999px;
+  font-size: 0.76rem !important;
+  font-weight: 500;
+  letter-spacing: 0.015em;
+  color: var(--text2) !important;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+  text-align: left !important;
+}
+body.light .book-grid-loadmore {
+  background: rgba(0, 0, 0, 0.02);
+  border-color: #e5e7eb;
+}
+.book-grid-loadmore::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(167, 139, 250, 0.30);
+  border-top-color: #a78bfa;
+  animation: vuSpin 0.85s linear infinite;
+  flex-shrink: 0;
+}
+.book-grid-end-msg {
+  margin: 1.25rem 0 0.25rem;
+  text-align: center;
+  font-size: 0.76rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text3);
+}
+
+/* Clickable profile elements inside post cards */
+.profile-link {
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s;
+}
+.profile-link:hover { opacity: 0.85; }
+.post-author.profile-link:hover { color: var(--purple-lt, #a78bfa); }
+@keyframes bookFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.book-cover {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  border-radius: 12px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #1a1428, #0f0a1c);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(139, 92, 246, 0.10);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.book-card:hover .book-cover {
+  transform: translateY(-3px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(167, 139, 250, 0.30);
+}
+.book-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.book-cover-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(167, 139, 250, 0.4);
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+.book-cover-badge {
+  position: absolute;
+  top: 0.55rem;
+  left: 0.55rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  color: #c4b5fd;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+}
+.book-cover-badge.legacy {
+  color: #fcd34d;
+  border-color: rgba(252, 211, 77, 0.4);
+}
+.book-stats {
+  position: absolute;
+  bottom: 0.55rem;
+  left: 0.55rem;
+  right: 0.55rem;
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #fff;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+.book-stats span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  backdrop-filter: blur(4px);
+}
+.book-card-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--text);
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.book-card:hover .book-card-title { color: #c4b5fd; }
+body.light .book-card:hover .book-card-title { color: #7c3aed; }
+.book-card-author {
+  font-size: 0.78rem;
+  color: var(--text2);
+  margin: 0;
+}
+.book-card-genre {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a78bfa;
+  margin: 0;
+}
+
+/* ── BOOK DETAIL PAGE ── */
+.book-detail {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+@media (max-width: 720px) {
+  .book-detail { grid-template-columns: 1fr; }
+  .book-detail-cover { max-width: 240px; margin: 0 auto; }
+}
+.book-detail-cover {
+  aspect-ratio: 3 / 4;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(139, 92, 246, 0.15);
+  background: linear-gradient(135deg, #1a1428, #0f0a1c);
+}
+.book-detail-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.book-detail-info h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.book-detail-author {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+  font-size: 0.92rem;
+  color: var(--text2);
+}
+.book-detail-author .avatar { width: 32px; height: 32px; }
+.book-detail-meta {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.85rem;
+  color: var(--text2);
+}
+.book-detail-meta strong { color: var(--text); margin-right: 0.25rem; }
+.book-detail-genre-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1.5rem;
+}
+.book-detail-genre-row .book-chip { cursor: default; }
+.book-detail-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+.book-detail-description {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 14px;
+  padding: 1.25rem 1.4rem;
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: var(--text2);
+  white-space: pre-wrap;
+  margin-bottom: 1.75rem;
+}
+body.light .book-detail-description {
+  background: #faf8ff;
+  border-color: #e5e7eb;
+}
+
+/* Chapter list */
+.chapter-list {
+  margin-top: 1rem;
+}
+.chapter-list-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text2);
+  margin-bottom: 0.85rem;
+}
+.chapter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1.1rem;
+  border-radius: 12px;
+  border: 1px solid var(--border, rgba(255,255,255,0.06));
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+  margin-bottom: 0.5rem;
+}
+body.light .chapter-row {
+  background: #ffffff;
+  border-color: #e5e7eb;
+}
+.chapter-row:hover {
+  background: rgba(139, 92, 246, 0.08);
+  border-color: rgba(139, 92, 246, 0.35);
+  transform: translateX(2px);
+}
+.chapter-row-num {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #a78bfa;
+  min-width: 70px;
+}
+.chapter-row-title { flex: 1; font-size: 0.92rem; font-weight: 500; color: var(--text); margin: 0 1rem; }
+.chapter-row-meta { font-size: 0.78rem; color: var(--text2); }
+
+/* ── CHAPTER READER ── */
+.reader-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  background: rgba(15, 8, 30, 0.6);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 14px;
+  margin-bottom: 1.25rem;
+  position: sticky;
+  top: var(--header-h);
+  z-index: 50;
+  backdrop-filter: blur(8px);
+}
+body.light .reader-bar { background: rgba(255, 255, 255, 0.85); border-color: #e5e7eb; }
+.reader-back {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  width: 36px; height: 36px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text); cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.reader-back:hover { background: rgba(139, 92, 246, 0.15); border-color: rgba(139, 92, 246, 0.45); }
+.reader-bar-info { flex: 1; min-width: 0; }
+.reader-bar-title { font-size: 0.78rem; color: var(--text2); margin: 0; text-transform: uppercase; letter-spacing: 0.06em; }
+.reader-bar-chapter { font-size: 1rem; font-weight: 700; color: var(--text); margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reader-bar-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
+.reader-tool {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  color: var(--text);
+  font-size: 0.78rem; font-weight: 700;
+  padding: 0.42rem 0.7rem; border-radius: 10px;
+  cursor: pointer; font-family: inherit;
+  transition: all 0.15s;
+}
+.reader-tool:hover { background: rgba(139, 92, 246, 0.10); border-color: rgba(139, 92, 246, 0.4); color: #c4b5fd; }
+
+.reader-content {
+  position: relative;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1rem 0.5rem 2.5rem;
+  font-size: var(--reader-font-size, 1.05rem);
+  line-height: 1.85;
+  color: var(--text);
+  font-family: 'Georgia', 'Iowan Old Style', 'Palatino', serif;
+  /* Anti-copy: discourage casual selection/copying */
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  -webkit-touch-callout: none;        /* iOS long-press preview */
+  -webkit-tap-highlight-color: transparent;
+  /* Username watermark applied via JS by setting --reader-watermark-bg */
+  background-image: var(--reader-watermark-bg, none);
+  background-repeat: repeat;
+  background-position: 0 0;
+}
+/* Allow selection inside any future input/textarea/comments inside the reader if needed */
+.reader-content input,
+.reader-content textarea,
+.reader-content [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+body.light .reader-content { color: #1f2937; }
+.reader-content p { margin: 0 0 1.2em; }
+.reader-content h1, .reader-content h2, .reader-content h3 {
+  margin: 1.6em 0 0.6em;
+  font-family: var(--font);
+  letter-spacing: -0.01em;
+}
+.reader-content blockquote {
+  margin: 1.5em 0;
+  padding: 0.5em 1.1em;
+  border-left: 3px solid #7c3aed;
+  background: rgba(139, 92, 246, 0.06);
+  border-radius: 0 8px 8px 0;
+  font-style: italic;
+  color: var(--text2);
+}
+.reader-content em { font-style: italic; }
+.reader-content strong { font-weight: 700; color: var(--text); }
+
+.reader-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  border-top: 1px solid var(--border, rgba(255,255,255,0.08));
+  max-width: 720px;
+  margin: 0 auto;
+}
+.reader-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.72rem 1.2rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.10));
+  border-radius: 12px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.reader-nav-btn:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.4);
+  color: #c4b5fd;
+}
+.reader-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.reader-progress { font-size: 0.82rem; color: var(--text2); font-variant-numeric: tabular-nums; }
+
+/* ── AUTHOR DASHBOARD ── */
+.author-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+@media (max-width: 800px) {
+  .author-stats { grid-template-columns: repeat(2, 1fr); }
+}
+.author-stat {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1rem 1.1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 16px;
+  transition: border-color 0.18s, background 0.18s;
+}
+body.light .author-stat { background: #ffffff; border-color: #e5e7eb; }
+.author-stat:hover { border-color: rgba(139, 92, 246, 0.35); }
+.author-stat-icon {
+  width: 44px; height: 44px;
+  border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+.author-stat-text { display: flex; flex-direction: column; }
+.author-stat-value {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.author-stat-label {
+  font-size: 0.78rem;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.author-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  gap: 1rem;
+}
+.author-section-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+/* My books table */
+.author-books-table {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 16px;
+  overflow: hidden;
+}
+body.light .author-books-table { background: #ffffff; border-color: #e5e7eb; }
+.author-book-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 100px 90px 90px 100px;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+  align-items: center;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+body.light .author-book-row { border-bottom-color: #e5e7eb; }
+.author-book-row:last-child { border-bottom: none; }
+.author-book-row:hover { background: rgba(139, 92, 246, 0.06); }
+.author-book-row-cover {
+  width: 50px;
+  aspect-ratio: 3/4;
+  border-radius: 6px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #1a1428, #0f0a1c);
+}
+.author-book-row-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.author-book-row-cover .book-cover-placeholder { width:100%; height:100%; font-size:1.2rem; }
+.author-book-row-text { min-width: 0; }
+.author-book-row-title { font-size: 0.93rem; font-weight: 600; color: var(--text); margin: 0 0 0.18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.author-book-row-genre { font-size: 0.74rem; color: var(--text2); text-transform: uppercase; letter-spacing: 0.04em; }
+.author-book-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.author-book-status-draft     { background: rgba(156, 163, 175, 0.15); color: #c4b5fd; border: 1px solid rgba(156,163,175,0.3); }
+.author-book-status-ongoing   { background: rgba(34, 197, 94, 0.10); color: #6ee7b7; border: 1px solid rgba(34,197,94,0.3); }
+.author-book-status-completed { background: rgba(124, 58, 237, 0.12); color: #c4b5fd; border: 1px solid rgba(124,58,237,0.35); }
+.author-book-status-paused    { background: rgba(251, 191, 36, 0.12); color: #fcd34d; border: 1px solid rgba(251,191,36,0.35); }
+.author-book-row-stat {
+  font-size: 0.85rem;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.author-book-row-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+.author-book-action-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  color: var(--text2);
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.author-book-action-btn:hover { background: rgba(139, 92, 246, 0.12); border-color: rgba(139, 92, 246, 0.4); color: #c4b5fd; }
+.author-book-action-btn-danger:hover { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.4); color: #fca5a5; }
+
+/* ── BOOK EDITOR (metadata + chapter list) ── */
+.book-editor-grid {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.75rem;
+}
+@media (max-width: 700px) {
+  .book-editor-grid { grid-template-columns: 1fr; }
+  .book-editor-cover-wrap { max-width: 200px; }
+}
+.book-editor-cover {
+  aspect-ratio: 3/4;
+  border-radius: 14px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #1a1428, #0f0a1c);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+}
+.book-editor-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.book-editor-status {
+  margin-top: 0.6rem;
+  text-align: center;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text2);
+}
+.book-editor-form { display: flex; flex-direction: column; }
+.book-editor-actions {
+  margin-top: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.book-editor-publish-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  cursor: pointer;
+  user-select: none;
+}
+.book-editor-publish-toggle input { display: none; }
+.toggle-slider {
+  width: 38px; height: 22px;
+  background: rgba(156, 163, 175, 0.3);
+  border-radius: 999px;
+  position: relative;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+.book-editor-publish-toggle input:checked + .toggle-slider {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+}
+.book-editor-publish-toggle input:checked + .toggle-slider::before {
+  transform: translateX(16px);
+}
+.toggle-label { font-size: 0.85rem; color: var(--text); font-weight: 500; }
+
+.book-editor-chapters-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+.author-chapter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1.1rem;
+  border-radius: 12px;
+  border: 1px solid var(--border, rgba(255,255,255,0.06));
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+body.light .author-chapter-row { background: #ffffff; border-color: #e5e7eb; }
+.author-chapter-row:hover {
+  background: rgba(139, 92, 246, 0.08);
+  border-color: rgba(139, 92, 246, 0.35);
+}
+.author-chapter-num { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #a78bfa; min-width: 70px; }
+.author-chapter-title { flex: 1; font-size: 0.92rem; font-weight: 500; color: var(--text); margin: 0 1rem; }
+.author-chapter-meta { font-size: 0.78rem; color: var(--text2); margin-right: 0.75rem; }
+.author-chapter-pub-pill {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  margin-right: 0.6rem;
+}
+.author-chapter-pub-published { background: rgba(34, 197, 94, 0.12); color: #6ee7b7; border: 1px solid rgba(34,197,94,0.3); }
+.author-chapter-pub-draft     { background: rgba(156, 163, 175, 0.12); color: var(--text2); border: 1px solid rgba(156,163,175,0.3); }
+.author-chapter-actions { display: flex; gap: 0.3rem; }
+
+/* ── CHAPTER EDITOR (Quill) ── */
+.chapter-editor-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  background: rgba(15, 8, 30, 0.6);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 14px;
+  margin-bottom: 1rem;
+  position: sticky;
+  top: var(--header-h);
+  z-index: 50;
+  backdrop-filter: blur(8px);
+}
+body.light .chapter-editor-bar { background: rgba(255, 255, 255, 0.85); border-color: #e5e7eb; }
+.chapter-editor-bar-mid { flex: 1; min-width: 0; }
+.chapter-editor-title-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  outline: none;
+}
+.chapter-editor-title-input::placeholder { color: var(--text3); font-weight: 500; }
+.chapter-editor-meta {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--text2);
+}
+.chapter-save-status {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+.chapter-save-status.saving { color: #fcd34d; border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.08); }
+.chapter-save-status.saved  { color: #6ee7b7; border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
+.chapter-save-status.error  { color: #fca5a5; border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
+.chapter-word-count { color: var(--text2); }
+.chapter-editor-actions {
+  display: flex; align-items: center; gap: 0.85rem;
+  flex-shrink: 0;
+}
+
+/* Quill theme overrides */
+#chapterEditorQuill {
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  overflow: hidden;
+  min-height: 60vh;
+}
+body.light #chapterEditorQuill { background: #ffffff; border-color: #e5e7eb; }
+.ql-toolbar.ql-snow {
+  border: none !important;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.08)) !important;
+  background: rgba(15, 8, 30, 0.4);
+  padding: 0.7rem 0.85rem !important;
+  position: sticky;
+  top: calc(var(--header-h) + 80px);
+  z-index: 40;
+  backdrop-filter: blur(8px);
+}
+body.light .ql-toolbar.ql-snow { background: #faf8ff; border-bottom-color: #e5e7eb !important; }
+.ql-toolbar.ql-snow .ql-stroke { stroke: var(--text2) !important; }
+.ql-toolbar.ql-snow .ql-fill { fill: var(--text2) !important; }
+.ql-toolbar.ql-snow .ql-picker-label { color: var(--text2) !important; }
+.ql-toolbar.ql-snow button:hover .ql-stroke,
+.ql-toolbar.ql-snow button.ql-active .ql-stroke { stroke: #a78bfa !important; }
+.ql-toolbar.ql-snow button:hover .ql-fill,
+.ql-toolbar.ql-snow button.ql-active .ql-fill { fill: #a78bfa !important; }
+.ql-container.ql-snow { border: none !important; font-family: 'Georgia', 'Iowan Old Style', 'Palatino', serif !important; font-size: 1.02rem; }
+.ql-editor {
+  padding: 1.5rem 1.5rem 3rem !important;
+  color: var(--text);
+  line-height: 1.75;
+  min-height: 50vh;
+}
+body.light .ql-editor { color: #1f2937; }
+.ql-editor.ql-blank::before { color: var(--text3) !important; font-style: normal !important; }
+.ql-editor h1, .ql-editor h2, .ql-editor h3 { font-family: var(--font); }
+.ql-editor blockquote {
+  border-left: 3px solid #7c3aed !important;
+  background: rgba(139, 92, 246, 0.06);
+  border-radius: 0 8px 8px 0;
+  padding: 0.4em 1em !important;
+  margin: 1em 0 !important;
+  color: var(--text2);
+}
+
+/* ── MAIN LAYOUT ── */
+.main-wrap {
+  margin-top: var(--header-h); margin-left: var(--sidebar-w);
+  min-height: calc(100vh - var(--header-h));
+  padding: 0.4rem 1.5rem 1.5rem;
+  max-width: 900px; margin-left: calc(var(--sidebar-w) + max(1.5rem, (100vw - var(--sidebar-w) - 900px) / 2));
+  margin-right: auto;
+}
+
+/* Videos page uses wider layout */
+#videosPage, #videoPlayerPage {
+  margin: 0 -1rem;
+}
+@media (max-width: 800px) {
+  #videosPage, #videoPlayerPage { margin: 0; }
+}
+
+/* ── STORIES ROW (user avatars) ── */
+.stories-row {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 0.75rem; margin-bottom: 0.4rem;
+  display: flex; gap: 0.75rem; overflow-x: auto; position: relative;
+}
+.stories-row::-webkit-scrollbar { height: 4px; }
+.story-item { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; cursor: pointer; flex-shrink: 0; }
+.story-avatar {
+  width: 60px; height: 60px; border-radius: var(--radius-sm); overflow: hidden;
+  border: 2px solid transparent; transition: all 0.15s;
+  background: var(--purple); display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 600; font-size: 1.2rem;
+}
+.story-item:hover .story-avatar { border-color: var(--pink); transform: scale(1.03); }
+.story-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.story-name { font-size: 0.72rem; color: var(--text2); max-width: 80px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.stories-scroll-btn {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  width: 34px; height: 34px; border-radius: 50%;
+  background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  z-index: 5; transition: all 0.15s;
+}
+.stories-scroll-btn:hover { background: var(--purple); }
+.stories-scroll-btn svg { width: 16px; height: 16px; }
+
+/* ── COMPOSE BOX ── */
+.compose {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 0.9rem 1rem; margin-bottom: 0.4rem;
+}
+.compose-footer { margin-top: 0.5rem; }
+.compose-top { display: flex; gap: 0.75rem; align-items: flex-start; }
+.compose-text-wrap { flex: 1; position: relative; }
+.compose textarea {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 0.7rem 3.5rem 0.7rem 0.9rem;
+  color: var(--text); font-family: var(--font); font-size: 0.9rem;
+  resize: none; min-height: 48px; line-height: 1.5; transition: border-color 0.15s;
+  display: block;
+}
+.compose-text-wrap .char-count {
+  position: absolute; bottom: 8px; right: 12px;
+  font-size: 0.7rem; color: var(--text3);
+  pointer-events: none; background: var(--bg3); padding: 0 4px;
+}
+.compose textarea:focus { outline: none; border-color: var(--purple); }
+.compose textarea::placeholder { color: var(--text3); }
+.compose-footer { display: flex; align-items: center; margin-top: 0.75rem; gap: 0.5rem; }
+.compose-footer .spacer { flex: 1; }
+.char-count { font-size: 0.75rem; color: var(--text3); }
+.char-count.warn { color: #f59e0b; } .char-count.over { color: var(--red); }
+
+/* ── BUTTONS ── */
+.btn {
+  padding: 0.7rem 1.5rem; border-radius: 99px; font-size: 0.85rem; font-weight: 600;
+  border: none; transition: all 0.15s; display: inline-flex; align-items: center;
+  justify-content: center; gap: 0.5rem;
+}
+.btn-purple { background: var(--purple-grad); color: #fff; box-shadow: 0 4px 16px rgba(124,58,237,0.3); }
+.btn-purple:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(124,58,237,0.5); }
+.btn-purple:active { transform: scale(0.97); }
+.btn-ghost { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); }
+.btn-ghost:hover { background: var(--bg4); border-color: var(--purple); }
+.btn-google { background: #fff; color: #1a1a1a; font-weight: 600; }
+.btn-google:hover { background: #f0f0f0; }
+.btn-sm { padding: 0.5rem 1.1rem; font-size: 0.8rem; }
+
+/* ── AVATAR ── */
+.avatar {
+  width: 42px; height: 42px; border-radius: 50%;
+  background: var(--purple); color: #fff; font-weight: 600; font-size: 0.8rem;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; overflow: hidden;
+}
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar.sm { width: 32px; height: 32px; font-size: 0.65rem; }
+.avatar.xs { width: 26px; height: 26px; font-size: 0.6rem; }
+
+/* ── POST CARD ── */
+.post-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 1rem 1.1rem; margin-bottom: 0.4rem; animation: fadeUp 0.3s ease both;
+}
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+.post-header { display: flex; align-items: center; gap: 0.65rem; margin-bottom: 0.65rem; }
+.post-author { font-size: 0.95rem; font-weight: 600; }
+.post-time { font-size: 0.75rem; color: var(--text3); margin-top: 2px; }
+.post-guest { font-size: 0.67rem; background: var(--bg3); color: var(--text3); padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); margin-left: 0.4rem; }
+.post-body { font-size: 0.925rem; line-height: 1.65; color: var(--text); white-space: pre-wrap; word-break: break-word; margin-bottom: 0.75rem; }
+.post-body a { color: var(--purple-lt); text-decoration: underline; word-break: break-all; }
+.post-image { border-radius: var(--radius); overflow: hidden; margin-bottom: 0.75rem; cursor: pointer; border: 1px solid var(--border); }
+.post-image img { width: 100%; max-height: 500px; object-fit: cover; display: block; transition: transform 0.2s; }
+.post-image:hover img { transform: scale(1.01); }
+
+/* ── REPOSTED ── */
+.reposted-banner { display: flex; align-items: center; gap: 6px; color: var(--text3); font-size: 0.75rem; margin-bottom: 0.75rem; }
+.reposted-banner svg { width: 12px; height: 12px; }
+.reposted-card { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: 0.75rem; }
+.reposted-card .post-header { margin-bottom: 0.5rem; }
+.reposted-card .avatar { width: 34px; height: 34px; font-size: 0.7rem; }
+.reposted-card .post-body { font-size: 0.85rem; margin-bottom: 0.5rem; }
+
+/* ── REACTION COUNTS (above action bar) ── */
+.post-stats { display: flex; align-items: center; justify-content: space-between; padding: 0.25rem 0 0.5rem; font-size: 0.8rem; color: var(--text3); min-height: 20px; }
+.post-stats:empty { display: none; }
+.post-stats .rcount { display: flex; align-items: center; gap: 4px; }
+.post-stats .rcount-emojis { display: inline-flex; font-size: 15px; letter-spacing: -2px; margin-right: 4px; }
+
+/* ── ACTION BAR (premium flat) ── */
+.post-actions {
+  display: flex; gap: 0.35rem; align-items: center;
+  padding-top: 0.55rem; border-top: 1px solid var(--border);
+  position: relative;
+}
+.post-actions .reaction-wrap { display: inline-flex; }
+.post-actions > *:first-child { margin-right: auto; }
+.action-btn {
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  font-size: 0.92rem;
+  font-weight: 500;
+  padding: 0.55rem 1rem;
+  border-radius: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, transform 0.12s ease;
+}
+.action-btn:hover {
+  background: rgba(139, 92, 246, 0.10);
+  color: var(--text);
+}
+.action-btn:active { transform: scale(0.97); }
+.action-btn.reacted {
+  color: #f472b6;
+  background: rgba(236, 72, 153, 0.10);
+  font-weight: 600;
+}
+body.light .action-btn:hover  { background: rgba(124, 58, 237, 0.08); }
+body.light .action-btn.reacted { color: #db2777; background: rgba(219, 39, 119, 0.08); }
+
+/* Universal reaction icon container — fixed size so emoji ↔ svg swap never resizes the row */
+.r-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.r-icon > * { line-height: 1; }
+.r-icon > svg { width: 100%; height: 100%; }
+/* Sizing per context */
+.action-btn .r-icon          { width: 20px; height: 20px; font-size: 18px; }
+.comment-action-btn .r-icon  { width: 16px; height: 16px; font-size: 14px; }
+.action-btn svg              { width: 18px; height: 18px; }
+
+/* ── REACTION PICKER (premium flat) ── */
+.reaction-wrap { position: relative; }
+.reaction-picker {
+  position: absolute; bottom: calc(100% + 10px); left: 50%;
+  transform: translateX(-50%) translateY(6px) scale(0.95);
+  display: flex; gap: 4px;
+  background: var(--bg2);
+  border: 1px solid rgba(139, 92, 246, 0.20);
+  border-radius: 999px;
+  padding: 8px 12px;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(167, 139, 250, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: 50; white-space: nowrap;
+}
+body.light .reaction-picker {
+  background: #ffffff;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.12),
+    0 0 0 1px rgba(124, 58, 237, 0.08);
+  border-color: rgba(124, 58, 237, 0.16);
+}
+.reaction-picker.visible { opacity: 1; pointer-events: all; transform: translateX(-50%) translateY(0) scale(1); }
+.reaction-option {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: transparent; border: none; cursor: pointer;
+  border-radius: 10px; padding: 5px 7px;
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.reaction-option:hover  { transform: scale(1.4) translateY(-3px); }
+.reaction-option.active { background: rgba(167, 139, 250, 0.14); }
+.r-emoji { font-size: 24px; line-height: 1; display: block; }
+.r-label { font-size: 9px; color: var(--text3); letter-spacing: 0.02em; }
+
+/* ── SHARE MENU ── */
+.share-menu {
+  position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-sm);
+  padding: 0.5rem; box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 50;
+  min-width: 200px; display: none;
+}
+.share-menu.visible { display: block; }
+.share-option {
+  display: flex; align-items: center; gap: 10px; padding: 0.55rem 0.85rem;
+  border-radius: 6px; color: var(--text); font-size: 0.85rem; cursor: pointer;
+  background: none; border: none; width: 100%; text-align: left; transition: background 0.15s;
+}
+.share-option:hover { background: var(--bg3); }
+
+/* ── COMMENTS ── */
+.comments-section { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+.comment-item { display: flex; gap: 0.6rem; margin-bottom: 0.85rem; }
+.comment-body { flex: 1; min-width: 0; }
+.comment-bubble { background: var(--bg3); border-radius: 4px 16px 16px 16px; padding: 0.65rem 0.85rem; font-size: 0.87rem; line-height: 1.6; color: var(--text); word-break: break-word; }
+.comment-bubble a { color: var(--purple-lt); text-decoration: underline; }
+.comment-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 3px; }
+.comment-author { font-size: 0.78rem; font-weight: 600; color: var(--purple-lt); }
+.comment-time { font-size: 0.68rem; color: var(--text3); }
+.comment-actions { display: flex; align-items: center; gap: 0.15rem; margin-top: 6px; }
+.comment-action-btn {
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--text2);
+  background: transparent;
+  border: none;
+  padding: 0.32rem 0.6rem;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, transform 0.12s ease;
+  /* Fixed line-height so emoji swap can't push the row taller */
+  line-height: 1.4;
+}
+.comment-action-btn:hover {
+  background: rgba(139, 92, 246, 0.10);
+  color: var(--text);
+}
+.comment-action-btn:active { transform: scale(0.96); }
+.comment-action-btn.reaction-trigger.reacted {
+  color: #f472b6;
+  background: rgba(236, 72, 153, 0.10);
+  font-weight: 600;
+}
+body.light .comment-action-btn:hover { background: rgba(124, 58, 237, 0.08); }
+body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; background: rgba(219, 39, 119, 0.08); }
+.replies { margin-left: 2.75rem; margin-top: 0.5rem; }
+.reply-item { display: flex; gap: 0.5rem; margin-bottom: 0.65rem; }
+.comment-image { margin-top: 0.4rem; border-radius: 10px; overflow: hidden; max-width: 240px; cursor: pointer; border: 1px solid var(--border); }
+.comment-image img { width: 100%; max-height: 200px; object-fit: cover; display: block; }
+
+.comment-input-wrap { display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: flex-start; }
+.comment-input {
+  flex: 1; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 0.6rem 0.9rem;
+  color: var(--text); font-family: var(--font); font-size: 0.85rem;
+  resize: none; min-height: 38px; max-height: 120px; line-height: 1.5;
+}
+.comment-input:focus { outline: none; border-color: var(--purple); }
+.comment-input::placeholder { color: var(--text3); }
+.btn-send {
+  background: var(--purple); border: none; color: #fff; border-radius: var(--radius-sm);
+  padding: 0.6rem 1.1rem; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+  transition: background 0.15s; white-space: nowrap;
+}
+.btn-send:hover { background: var(--purple-lt); }
+
+/* ── IMAGE UPLOAD ── */
+.image-upload-btn {
+  background: none; border: none; color: var(--text2); cursor: pointer;
+  padding: 6px 10px; border-radius: var(--radius-sm);
+  display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; font-weight: 500;
+  transition: all 0.15s;
+}
+.image-upload-btn:hover { background: var(--bg3); color: var(--purple-lt); }
+.image-upload-btn svg { width: 16px; height: 16px; }
+.image-upload-btn input { display: none; }
+
+.image-preview { position: relative; margin-top: 0.75rem; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); max-width: 100%; }
+.image-preview img { width: 100%; max-height: 400px; object-fit: cover; display: block; }
+.image-preview-remove {
+  position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(0,0,0,0.75); color: #fff; border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; font-size: 16px;
+}
+
+/* ── AUTH SCREEN ── */
+.auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem;
+  background: radial-gradient(ellipse at top, rgba(124,58,237,0.2) 0%, transparent 60%), var(--bg); }
+.auth-card {
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-lg);
+  padding: 3rem 2.5rem; max-width: 440px; width: 100%; text-align: center;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.auth-logo { font-weight: 800; font-size: 2.2rem; color: #fff; margin-bottom: 0.5rem; background: var(--purple-grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.auth-tagline { color: var(--text2); font-size: 0.9rem; margin-bottom: 2.5rem; font-weight: 300; }
+.auth-divider { display: flex; align-items: center; gap: 1rem; margin: 1.25rem 0; color: var(--text3); font-size: 0.75rem; }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: var(--border2); }
+
+/* ── MODAL ── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 1500; display: none; align-items: center; justify-content: center; padding: 1rem; }
+.modal-overlay.open { display: flex; animation: fadeIn 0.2s; }
+.modal-box { background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-lg); padding: 1.5rem; max-width: 520px; width: 100%; max-height: 90vh; overflow-y: auto; animation: slideUp 0.2s ease; }
+@keyframes slideUp { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+.modal-title { font-size: 1.2rem; font-weight: 700; }
+.modal-close-btn { background: var(--bg3); border: none; color: var(--text2); width: 32px; height: 32px; border-radius: 50%; font-size: 1.1rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.modal-close-btn:hover { background: var(--bg4); color: var(--text); }
+.repost-caption { width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.85rem 1rem; color: var(--text); font-family: var(--font); font-size: 0.9rem; resize: none; min-height: 80px; line-height: 1.6; margin-bottom: 1rem; }
+.repost-caption:focus { outline: none; border-color: var(--purple); }
+.repost-preview { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem; margin-bottom: 1rem; max-height: 300px; overflow-y: auto; }
+.repost-preview .avatar { width: 32px; height: 32px; }
+.repost-preview img { max-height: 180px; border-radius: 8px; width: 100%; object-fit: cover; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 0.5rem; }
+
+/* ── PREMIUM CONFIRM MODAL ── */
+.confirm-modal-overlay { position: fixed; inset: 0; background: rgba(8, 4, 20, 0.78); backdrop-filter: blur(6px); z-index: 2200; align-items: center; justify-content: center; padding: 1rem; }
+.confirm-modal-overlay.open { display: flex; animation: fadeIn 0.18s ease; }
+.confirm-modal {
+  position: relative;
+  background: linear-gradient(180deg, var(--bg2) 0%, #0f0a1c 100%);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 20px;
+  padding: 1.75rem 1.75rem 1.5rem;
+  max-width: 440px;
+  width: 100%;
+  text-align: center;
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(139, 92, 246, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  animation: confirmPop 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.confirm-modal::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.6), rgba(124, 58, 237, 0.05) 40%, transparent 70%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+}
+@keyframes confirmPop {
+  0%   { opacity: 0; transform: translateY(14px) scale(0.96); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+.confirm-icon-wrap {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 1rem;
+  border-radius: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.18), rgba(124, 58, 237, 0.22));
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+  box-shadow: 0 8px 24px rgba(239, 68, 68, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+.confirm-title {
+  font-size: 1.18rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.4rem;
+  color: var(--text);
+}
+.confirm-body {
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: var(--text2);
+  margin: 0 0 1.4rem;
+}
+.confirm-actions {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+}
+.confirm-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border: none;
+  border-radius: 12px;
+  padding: 0.78rem 1.1rem;
+  font-family: var(--font);
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.18s ease, background 0.18s ease, opacity 0.18s ease;
+  user-select: none;
+}
+.confirm-btn-cancel {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border2);
+  color: var(--text);
+}
+.confirm-btn-cancel:hover { background: rgba(139, 92, 246, 0.10); border-color: var(--purple); color: var(--text); }
+.confirm-btn-cancel:active { transform: scale(0.98); }
+.confirm-btn-danger {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  color: #fff;
+  box-shadow: 0 6px 18px rgba(220, 38, 38, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.confirm-btn-danger:hover { transform: translateY(-1px); box-shadow: 0 10px 26px rgba(220, 38, 38, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
+.confirm-btn-danger:active { transform: scale(0.98); }
+.confirm-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+/* ── LIGHTBOX ── */
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 2000; display: none; align-items: center; justify-content: center; padding: 2rem; cursor: pointer; }
+.lightbox.open { display: flex; animation: fadeIn 0.2s; }
+.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--radius-sm); }
+.lightbox-close { position: absolute; top: 1rem; right: 1rem; width: 40px; height: 40px; border-radius: 50%; background: rgba(255,255,255,0.1); border: none; color: #fff; font-size: 1.5rem; cursor: pointer; }
+
+/* ── TOAST ── */
+.toast { position: fixed; bottom: 2rem; right: 2rem; background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius); padding: 0.85rem 1.25rem; font-size: 0.85rem; color: var(--text); box-shadow: 0 12px 32px rgba(0,0,0,0.5); z-index: 2500; animation: slideIn 0.2s ease; }
+.toast.success { border-color: var(--success); color: #6ee7b7; }
+.toast.error { border-color: var(--red); color: #fca5a5; }
+@keyframes slideIn { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+.loading { text-align: center; padding: 3rem; color: var(--text3); font-size: 0.9rem; }
+.empty { text-align: center; padding: 4rem 2rem; color: var(--text3); }
+.empty h3 { font-size: 1.3rem; color: var(--text2); margin-bottom: 0.5rem; font-weight: 600; }
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--purple); }
+
+/* ── RESPONSIVE ── */
+@media (max-width: 768px) {
+  .sidebar { display: none; }
+  .main-wrap { margin-left: 0; padding: 1rem; }
+  .topbar-logo .sub { display: none; }
+  .topbar-logo { min-width: auto; font-size: 1.1rem; }
+  .topbar-search { max-width: none; }
+  .stories-row { padding: 0.75rem; gap: 0.75rem; }
+  .story-avatar { width: 60px; height: 60px; font-size: 1.2rem; }
+  .post-actions { grid-template-columns: repeat(4, 1fr); font-size: 0.7rem; }
+  .action-btn span { display: none; }
+}
+
+/* ── PROFILE PAGE ── */
+.profile-banner {
+  height: 220px; border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, #5b21b6 0%, #7c3aed 50%, #ec4899 100%);
+  margin-bottom: -50px; position: relative; overflow: hidden;
+}
+.profile-banner img { width: 100%; height: 100%; object-fit: cover; }
+.profile-banner-edit {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background 0.18s ease, transform 0.12s ease, border-color 0.18s ease;
+}
+.profile-banner-edit:hover {
+  background: rgba(124, 58, 237, 0.55);
+  border-color: rgba(167, 139, 250, 0.6);
+  transform: translateY(-1px);
+}
+.profile-banner-edit:active { transform: scale(0.98); }
+.profile-banner-edit svg { width: 14px; height: 14px; }
+
+.profile-head {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 1.25rem 1.25rem 1rem;
+  display: flex; gap: 1.25rem; align-items: flex-start;
+  position: relative;
+}
+.profile-avatar-wrap { position: relative; flex-shrink: 0; margin-top: -60px; }
+.profile-avatar {
+  width: 130px; height: 130px; border-radius: var(--radius);
+  border: 4px solid var(--purple); background: var(--purple-dk);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 3rem; overflow: hidden;
+}
+.profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.profile-avatar-edit {
+  position: absolute; bottom: 4px; right: 4px;
+  width: 34px; height: 34px; border-radius: 50%;
+  background: var(--purple); color: #fff; border: 2px solid var(--bg2);
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.profile-avatar-edit svg { width: 14px; height: 14px; }
+
+.profile-info { flex: 1; min-width: 0; }
+.profile-name-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
+.profile-name { font-size: 1.6rem; font-weight: 700; }
+.profile-badge { font-size: 0.72rem; background: var(--bg3); color: var(--text2); padding: 3px 10px; border-radius: 99px; border: 1px solid var(--border); }
+.profile-badge.guest { background: rgba(251,191,36,0.1); color: var(--accent); border-color: rgba(251,191,36,0.3); }
+
+.profile-stats { display: flex; gap: 1.25rem; margin-bottom: 0.75rem; flex-wrap: wrap; font-size: 0.85rem; }
+.profile-stat { background: none; border: none; color: var(--text2); cursor: pointer; padding: 0; font-size: 0.85rem; font-family: var(--font); transition: color 0.15s; }
+.profile-stat:hover { color: var(--purple-lt); }
+.profile-stat strong { color: var(--text); font-weight: 700; margin-right: 3px; }
+.profile-joined { color: var(--text3); font-size: 0.82rem; }
+
+.profile-bio { font-size: 0.9rem; color: var(--text2); line-height: 1.55; margin-bottom: 0.85rem; white-space: pre-wrap; }
+.profile-bio:empty { display: none; }
+
+.profile-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+
+/* Profile tabs */
+/* ── PREMIUM PROFILE TABS ── */
+.profile-tabs {
+  display: flex;
+  gap: 0.15rem;
+  margin: 1rem 0 1.25rem;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  position: relative;
+}
+.profile-tabs::-webkit-scrollbar { display: none; }
+.profile-tab {
+  position: relative;
+  background: none;
+  border: none;
+  padding: 0.85rem 1.15rem;
+  margin-bottom: -1px;
+  color: var(--text2);
+  font-size: 0.92rem;
+  font-weight: 500;
+  font-family: var(--font);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.18s ease, background 0.18s ease, transform 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+.profile-tab svg { width: 18px; height: 18px; flex-shrink: 0; }
+.profile-tab:hover {
+  color: var(--text);
+  background: rgba(139, 92, 246, 0.06);
+  border-radius: 10px 10px 0 0;
+}
+.profile-tab:active { transform: scale(0.98); }
+.profile-tab.active {
+  color: #c4b5fd;
+  font-weight: 600;
+}
+.profile-tab.active::before {
+  /* Glowing underline accent */
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #a78bfa 30%, #7c3aed 50%, #a78bfa 70%, transparent);
+  border-radius: 2px;
+  box-shadow: 0 0 10px rgba(167, 139, 250, 0.6);
+}
+body.light .profile-tab:hover { background: rgba(124, 58, 237, 0.06); }
+body.light .profile-tab.active { color: #7c3aed; }
+body.light .profile-tab.active::before {
+  background: linear-gradient(90deg, transparent, #7c3aed 30%, #4c1d95 50%, #7c3aed 70%, transparent);
+}
+
+.profile-tab-content { animation: profileTabFade 0.25s ease both; }
+@keyframes profileTabFade {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Reuse video-grid + book-grid for the profile tabs */
+.profile-video-grid,
+.profile-book-grid {
+  display: grid;
+  gap: 1.5rem;
+  margin-top: 0.5rem;
+}
+.profile-video-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.profile-book-grid  { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+
+/* Inline empty state for profile tabs */
+.profile-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 3rem 1.5rem;
+  background: rgba(139, 92, 246, 0.03);
+  border: 1px dashed rgba(139, 92, 246, 0.20);
+  border-radius: 18px;
+  margin-top: 0.5rem;
+}
+body.light .profile-empty { background: #faf8ff; border-color: rgba(124, 58, 237, 0.18); }
+.profile-empty-icon {
+  width: 64px; height: 64px;
+  border-radius: 18px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.18), rgba(167, 139, 250, 0.06));
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  color: #c4b5fd;
+  margin-bottom: 1rem;
+}
+body.light .profile-empty-icon { color: #7c3aed; }
+.profile-empty h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.profile-empty p {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text2);
+  max-width: 360px;
+  line-height: 1.55;
+}
+
+/* About cards */
+.about-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+@media (max-width: 600px) { .about-grid { grid-template-columns: 1fr; } }
+.about-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; }
+.about-card-title { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: var(--text); }
+.about-row { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; gap: 1rem; }
+.about-row:last-child { border-bottom: none; }
+.about-label { color: var(--text3); font-weight: 500; flex-shrink: 0; }
+.about-value { color: var(--text); text-align: right; word-break: break-word; }
+.about-value a { color: var(--purple-lt); }
+.about-pill { font-size: 0.72rem; padding: 3px 10px; border-radius: 99px; font-weight: 500; }
+.about-pill.success { background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); }
+
+/* Profile form */
+.form-label { display: block; font-size: 0.8rem; color: var(--text2); margin: 0.75rem 0 0.4rem; font-weight: 500; }
+.form-input {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 0.65rem 0.85rem;
+  color: var(--text); font-family: var(--font); font-size: 0.9rem;
+  outline: none; transition: border-color 0.15s;
+}
+.form-input:focus { border-color: var(--purple); }
+
+/* Light mode tweaks */
+body.light .profile-banner { background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 50%, #f472b6 100%); }
+body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d97706; }
+
+/* ── Image cropper ── */
+.crop-container { max-height: 500px; background: #000; border-radius: var(--radius-sm); overflow: hidden; }
+.crop-container img { display: block; max-width: 100%; }
+
+/* ── VIDEO GRID (Premium) ── */
+.videos-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 1.5rem;
+}
+.videos-title {
+  font-size: 1.75rem; font-weight: 800; letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--purple-lt), var(--pink));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+
+.video-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 2.25rem 0.75rem;
+}
+@media (max-width: 1100px) { .video-grid { grid-template-columns: repeat(2, 1fr); gap: 1.75rem 0.75rem; } }
+@media (max-width: 700px)  { .video-grid { grid-template-columns: 1fr; gap: 1.5rem; } }
+
+.video-card {
+  background: transparent; border: none;
+  cursor: pointer;
+  transition: transform 0.2s;
+  animation: fadeUp 0.3s ease both;
+}
+.video-card:hover { transform: translateY(-2px); }
+.video-card:hover .video-thumb {
+  box-shadow: 0 12px 30px rgba(124,58,237,0.35);
+  outline: 2px solid var(--purple);
+}
+
+.video-thumb {
+  position: relative; aspect-ratio: 16 / 9;
+  background: linear-gradient(135deg, var(--purple-dk), var(--purple));
+  overflow: hidden; border-radius: 14px;
+  transition: all 0.2s; outline: 2px solid transparent;
+}
+.video-thumb video.preview {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; opacity: 0; transition: opacity 0.3s;
+  z-index: 1;
+}
+.video-thumb video.preview.playing { opacity: 1; }
+.video-thumb img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain; display: block;
+  background: #000;
+}
+.video-thumb video {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+
+/* Gradient overlay at bottom for premium look */
+.video-thumb::after {
+  content: ''; position: absolute; inset: auto 0 0 0; height: 40%;
+  background: linear-gradient(180deg, transparent, rgba(0,0,0,0.5));
+  pointer-events: none; opacity: 0; transition: opacity 0.2s;
+}
+.video-card:hover .video-thumb::after { opacity: 1; }
+
+.video-thumb-play { display: none; }
+
+.video-card-info {
+  padding: 0.75rem 0.25rem 0; display: flex; gap: 0.65rem; align-items: flex-start;
+}
+.video-card-info .avatar {
+  width: 36px; height: 36px; font-size: 0.7rem; flex-shrink: 0;
+  border: 2px solid var(--purple); margin-top: 2px;
+}
+.video-card-text { flex: 1; min-width: 0; }
+.video-card-title {
+  font-size: 0.82rem; font-weight: 600; line-height: 1.35;
+  margin-bottom: 0.25rem; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.video-card-meta {
+  font-size: 0.78rem; color: var(--text3); line-height: 1.45;
+}
+.video-card-meta strong { color: var(--text2); font-weight: 500; }
+
+.video-card:hover .video-card-title { color: var(--purple-lt); }
+
+/* Video player page (keep premium look) */
+.video-player-wrap {
+  background: #000; border-radius: 12px; overflow: hidden;
+  margin-bottom: 1rem; aspect-ratio: 16 / 9; max-height: 70vh;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+.video-player-wrap video { width: 100%; height: 100%; display: block; }
+
+.video-info { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
+.video-title-big { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.5rem; }
+.video-meta { display: flex; gap: 0.5rem; color: var(--text3); font-size: 0.85rem; margin-bottom: 1rem; }
+.video-uploader { display: flex; align-items: center; gap: 0.75rem; padding: 0.85rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+.video-uploader-name { font-size: 0.95rem; font-weight: 600; }
+.video-uploader-badge { font-size: 0.72rem; color: var(--text3); }
+.video-description {
+  background: var(--bg3); border-radius: 10px; padding: 0.85rem 1rem;
+  font-size: 0.88rem; line-height: 1.65; color: var(--text2); white-space: pre-wrap;
+}
+.video-description:empty { display: none; }
+
+body.on-videos .main-wrap {
+  max-width: none !important;
+  width: calc(100vw - var(--sidebar-w)) !important;
+  margin-left: var(--sidebar-w) !important;
+  margin-right: 0 !important;
+  padding: 1rem 1.5rem !important;
+}
+
+.video-thumb-duration {
+  position: absolute; bottom: 8px; right: 8px;
+  background: rgba(0,0,0,0.85); color: #fff;
+  padding: 2px 6px; border-radius: 4px;
+  font-size: 0.72rem; font-weight: 600;
+  z-index: 2; line-height: 1.3;
+}
+.video-thumb-progress {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  height: 3px; background: rgba(255,255,255,0.2);
+  z-index: 2;
+}
+.video-thumb-progress-fill {
+  height: 100%; background: var(--purple-lt);
+}
+
+/* Video player layout (with Up Next sidebar) */
+.video-player-layout {
+  display: grid; grid-template-columns: 1fr 380px; gap: 1.5rem;
+  align-items: flex-start;
+}
+@media (max-width: 1100px) { .video-player-layout { grid-template-columns: 1fr; } }
+.video-player-main { min-width: 0; }
+
+.video-upnext {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 1rem;
+}
+.upnext-title {
+  font-size: 1rem; font-weight: 700; margin-bottom: 0.85rem;
+  color: var(--text);
+}
+.upnext-list { display: flex; flex-direction: column; gap: 0.65rem; }
+
+.upnext-item {
+  display: flex; gap: 0.65rem; cursor: pointer;
+  padding: 0.4rem; border-radius: 8px;
+  transition: background 0.15s;
+}
+.upnext-item:hover { background: var(--bg3); }
+
+.upnext-thumb {
+  width: 168px; aspect-ratio: 16/9; border-radius: 8px;
+  background: var(--bg3); overflow: hidden; flex-shrink: 0;
+  position: relative;
+}
+.upnext-thumb img {
+  width: 100%; height: 100%; object-fit: contain;
+  background: #000; display: block;
+}
+.upnext-thumb-duration {
+  position: absolute; bottom: 4px; right: 4px;
+  background: rgba(0,0,0,0.85); color: #fff;
+  padding: 1px 5px; border-radius: 3px;
+  font-size: 0.65rem; font-weight: 600;
+}
+.upnext-info { flex: 1; min-width: 0; }
+.upnext-title-text {
+  font-size: 0.82rem; font-weight: 600; line-height: 1.3;
+  margin-bottom: 0.2rem; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.upnext-item:hover .upnext-title-text { color: var(--purple-lt); }
+.upnext-meta {
+  font-size: 0.7rem; color: var(--text3); line-height: 1.35;
+}
+.upnext-tag {
+  display: inline-block; background: rgba(124,58,237,0.15); color: var(--purple-lt);
+  font-size: 0.62rem; padding: 1px 6px; border-radius: 99px;
+  margin-top: 0.2rem; font-weight: 500;
+}
+
+/* Video search */
+.videos-header {
+  display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.video-search-wrap {
+  flex: 1; min-width: 280px; position: relative;
+  max-width: 600px;
+}
+.video-search-icon {
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; color: var(--text3);
+  pointer-events: none;
+}
+.video-search-input {
+  width: 100%; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 99px; padding: 0.65rem 2.5rem 0.65rem 2.5rem;
+  color: var(--text); font-family: var(--font); font-size: 0.9rem;
+  outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+}
+.video-search-input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px rgba(124,58,237,0.15); }
+.video-search-input::placeholder { color: var(--text3); }
+.video-search-clear {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; border-radius: 50%; border: none;
+  background: var(--bg3); color: var(--text2); cursor: pointer;
+  font-size: 1rem; line-height: 1; display: flex; align-items: center; justify-content: center;
+}
+.video-search-clear:hover { background: var(--purple); color: #fff; }
+
+.video-search-tags {
+  display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem;
+}
+.video-search-tags:empty { display: none; }
+.search-tag-pill {
+  background: var(--bg2); border: 1px solid var(--border);
+  color: var(--text2); padding: 4px 12px; border-radius: 99px;
+  font-size: 0.78rem; cursor: pointer; transition: all 0.15s;
+}
+.search-tag-pill:hover { border-color: var(--purple); color: var(--purple-lt); }
+.search-tag-pill.active {
+  background: var(--purple); border-color: var(--purple); color: #fff; font-weight: 600;
+}
+
+.video-search-empty {
+  text-align: center; padding: 3rem 1rem; color: var(--text3);
+  grid-column: 1 / -1;
+}
+.video-search-empty h3 { color: var(--text); margin-bottom: 0.5rem; }
+
+/* ── Premium Topbar Search ── */
+.topbar {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 0 1.25rem;
+}
+
+/* Center the search bar */
+.topbar-search {
+  flex: 1; max-width: 640px; min-width: 200px;
+  margin: 0 auto;
+  position: relative;
+  background: rgba(255,255,255,0.95);
+  border-radius: 99px;
+  display: flex; align-items: center;
+  height: 44px;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08), inset 0 0 0 1px rgba(124,58,237,0.1);
+}
+.topbar-search:focus-within {
+  background: #fff;
+  box-shadow: 0 4px 16px rgba(124,58,237,0.25), inset 0 0 0 2px var(--purple);
+  transform: translateY(-1px);
+}
+
+.topbar-search-icon {
+  width: 18px; height: 18px;
+  color: var(--purple);
+  flex-shrink: 0; margin-left: 18px;
+  pointer-events: none;
+}
+
+.topbar-search input {
+  flex: 1; background: transparent; border: none; outline: none;
+  font-family: var(--font); font-size: 0.95rem;
+  color: #1a1a1a;
+  padding: 0 14px;
+  height: 100%;
+  min-width: 0;
+}
+.topbar-search input::placeholder { color: #888; font-weight: 400; }
+
+.topbar-search-clear {
+  width: 28px; height: 28px;
+  background: var(--bg3); color: var(--text2);
+  border: none; border-radius: 50%;
+  cursor: pointer; font-size: 1.2rem; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  margin-right: 8px; flex-shrink: 0;
+  transition: all 0.15s;
+}
+.topbar-search-clear:hover {
+  background: var(--purple); color: #fff;
+  transform: scale(1.1);
+}
+
+/* Light mode tweaks */
+body.light .topbar-search {
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06), inset 0 0 0 1px var(--border);
+}
+body.light .topbar-search input { color: #111; }
+
+/* Dropdown results */
+.search-results {
+  position: absolute; top: calc(var(--header-h) + 4px);
+  left: 50%; transform: translateX(-50%);
+  width: min(640px, calc(100vw - 2rem));
+  max-height: 70vh; overflow-y: auto;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.5rem;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.3);
+  z-index: 100;
+  display: none;
+}
+.search-results.open { display: block; }
+.search-result-item {
+  display: flex; gap: 0.75rem; align-items: center;
+  padding: 0.6rem 0.75rem; border-radius: 8px;
+  cursor: pointer; transition: background 0.15s;
+}
+.search-result-item:hover { background: var(--bg3); }
+.search-result-item .avatar { width: 36px; height: 36px; flex-shrink: 0; font-size: 0.7rem; }
+.search-result-thumb {
+  width: 80px; aspect-ratio: 16/9; border-radius: 6px;
+  background: #000; overflow: hidden; flex-shrink: 0;
+}
+.search-result-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.search-result-info { flex: 1; min-width: 0; }
+.search-result-title {
+  font-size: 0.9rem; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.search-result-meta {
+  font-size: 0.75rem; color: var(--text3); margin-top: 0.15rem;
+}
+.search-result-section {
+  font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+  color: var(--text3); letter-spacing: 0.05em;
+  padding: 0.5rem 0.75rem 0.25rem;
+}
+
+.videos-title {
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s;
+  user-select: none;
+}
+.videos-title:hover { opacity: 0.85; }
+.videos-title:active { transform: scale(0.98); }
+
+/* Video preview in compose */
+#composeVideoPreview {
+  margin-top: 0.75rem;
+}
+#composeVideoPreview video {
+  width: 100%;
+  max-height: 400px;
+  border-radius: 12px;
+  background: #000;
+}
+#composeVideoPreview .video-preview-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--card-bg);
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+#composeVideoPreview .remove-video-btn {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: none;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+#composeVideoPreview .remove-video-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+/* Upload progress UI */
+.upload-progress {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: none;
+}
+.upload-progress.active { display: block; }
+.upload-progress-label {
+  font-size: 0.875rem;
+  color: var(--text);
+  margin-bottom: 0.5rem;
+  display: flex;
+  justify-content: space-between;
+}
+.upload-progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.upload-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent, #7c3aed), #a78bfa);
+  width: 0%;
+  transition: width 0.3s;
+}
+
+/* ═══════════════════════════════════════════
+   PREMIUM VIDEO UPLOAD MODAL
+   ═══════════════════════════════════════════ */
+
+.video-upload-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 8, 30, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  animation: vuFadeIn 0.2s ease-out;
+}
+
+@keyframes vuFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.video-upload-modal-premium {
+  background: var(--card-bg, #1a1428);
+  width: 100%;
+  max-width: 640px;
+  max-height: 92vh;
+  border-radius: 24px;
+  box-shadow: 0 25px 70px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: vuSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body.light .video-upload-modal-premium {
+  background: #ffffff;
+  box-shadow: 0 25px 70px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+@keyframes vuSlideIn {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Header */
+.vu-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.5rem 1.75rem 1rem;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+
+.vu-header-text h2 {
+  margin: 0 0 0.2rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #c4b5fd, #ffffff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+body.light .vu-header-text h2 {
+  background: linear-gradient(135deg, #7c3aed, #1f2937);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.vu-subtitle {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vu-close {
+  background: rgba(255, 255, 255, 0.06);
+  border: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text, #e5e7eb);
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+body.light .vu-close {
+  background: rgba(0, 0, 0, 0.04);
+  color: #1f2937;
+}
+
+.vu-close:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  transform: rotate(90deg);
+}
+
+/* Body */
+.vu-body {
+  padding: 1.5rem 1.75rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* Dropzone */
+.vu-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  padding: 3.5rem 2rem;
+  border: 2px dashed var(--border, rgba(255,255,255,0.15));
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.25s;
+  text-align: center;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.05), rgba(167, 139, 250, 0.02));
+}
+
+.vu-dropzone:hover {
+  border-color: #7c3aed;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.12), rgba(167, 139, 250, 0.05));
+  transform: translateY(-2px);
+}
+
+.vu-dropzone-icon {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  box-shadow: 0 10px 30px rgba(124, 58, 237, 0.4);
+  margin-bottom: 0.5rem;
+}
+
+.vu-dropzone h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text, #e5e7eb);
+}
+
+.vu-dropzone p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vu-cta-pill {
+  margin-top: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.55rem 1.4rem;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border-radius: 999px;
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
+}
+
+/* Preview */
+.vu-preview-box {
+  border-radius: 16px;
+  overflow: hidden;
+  background: #000;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.vu-preview-box video {
+  width: 100%;
+  max-height: 280px;
+  display: block;
+}
+
+/* Form */
+.vu-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.vu-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.vu-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.vu-field label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text, #e5e7eb);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vu-required {
+  color: #ef4444;
+  margin-left: 0.2rem;
+}
+
+.vu-counter,
+.vu-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted, #9ca3af);
+  font-weight: 500;
+}
+
+.vu-field input[type="text"],
+.vu-field textarea,
+.vu-field select {
+  width: 100%;
+  padding: 0.75rem 0.95rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1.5px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  color: var(--text, #e5e7eb);
+  font-size: 0.92rem;
+  font-family: inherit;
+  transition: all 0.15s;
+  box-sizing: border-box;
+}
+
+body.light .vu-field input[type="text"],
+body.light .vu-field textarea,
+body.light .vu-field select {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #1f2937;
+}
+
+.vu-field textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.vu-field input[type="text"]:focus,
+.vu-field textarea:focus,
+.vu-field select:focus {
+  outline: none;
+  border-color: #7c3aed;
+  background: rgba(124, 58, 237, 0.05);
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+}
+
+/* Progress */
+.vu-progress {
+  margin-top: 1.25rem;
+  padding: 1rem 1.1rem;
+  background: rgba(124, 58, 237, 0.08);
+  border: 1px solid rgba(124, 58, 237, 0.2);
+  border-radius: 14px;
+  display: none;
+}
+
+.vu-progress.active { display: block; }
+
+.vu-progress-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.55rem;
+  font-size: 0.85rem;
+}
+
+.vu-progress-status {
+  color: var(--text, #e5e7eb);
+  font-weight: 500;
+}
+
+.vu-progress-percent {
+  color: #a78bfa;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.vu-progress-bar {
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+body.light .vu-progress-bar {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.vu-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #7c3aed, #a78bfa, #c4b5fd);
+  background-size: 200% 100%;
+  width: 0%;
+  transition: width 0.3s;
+  animation: vuShimmer 2s linear infinite;
+  border-radius: 999px;
+}
+
+@keyframes vuShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Footer */
+.vu-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1.25rem 1.75rem;
+  border-top: 1px solid var(--border, rgba(255,255,255,0.08));
+  background: rgba(0, 0, 0, 0.15);
+}
+
+body.light .vu-footer {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.vu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.4rem;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.vu-btn-ghost {
+  background: transparent;
+  color: var(--text-muted, #9ca3af);
+}
+
+.vu-btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text, #e5e7eb);
+}
+
+body.light .vu-btn-ghost:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: #1f2937;
+}
+
+.vu-btn-primary {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.4);
+}
+
+.vu-btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(124, 58, 237, 0.5);
+}
+
+.vu-btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ═══════════════════════════════════════════
+   PREMIUM STUDIO EDIT MODAL
+   (uses .vu-modal / .vu-label / .vu-input / .vu-textarea / .vu-btn-secondary)
+   ═══════════════════════════════════════════ */
+
+.vu-modal {
+  position: relative;
+  background: linear-gradient(180deg, #1a1428 0%, #120c20 100%);
+  width: 100%;
+  max-width: 600px;
+  max-height: 92vh;
+  border-radius: 24px;
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(139, 92, 246, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: vuSlideIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Top accent ribbon — subtle purple glow stripe */
+.vu-modal::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent 0%, #7c3aed 25%, #a78bfa 50%, #7c3aed 75%, transparent 100%);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+body.light .vu-modal {
+  background: linear-gradient(180deg, #ffffff 0%, #faf8ff 100%);
+  border-color: rgba(124, 58, 237, 0.18);
+  box-shadow:
+    0 25px 70px rgba(0, 0, 0, 0.12),
+    0 0 0 1px rgba(124, 58, 237, 0.10);
+}
+
+.vu-title {
+  margin: 0 0 0.2rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, #c4b5fd, #ffffff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+body.light .vu-title {
+  background: linear-gradient(135deg, #7c3aed, #1f2937);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Labels (used by .vu-form > label.vu-label pattern) */
+.vu-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text, #e5e7eb);
+  margin: 0 0 0.45rem;
+}
+
+body.light .vu-label { color: #1f2937; }
+
+.vu-label small {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 0.72rem;
+}
+
+.vu-label + .vu-label { margin-top: 1.1rem; }
+
+/* Inputs */
+.vu-input,
+.vu-textarea,
+select.vu-input {
+  width: 100%;
+  padding: 0.78rem 1rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1.5px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  color: var(--text, #e5e7eb);
+  font-size: 0.93rem;
+  font-family: inherit;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+  outline: none;
+}
+
+body.light .vu-input,
+body.light .vu-textarea,
+body.light select.vu-input {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #1f2937;
+}
+
+.vu-textarea {
+  resize: vertical;
+  min-height: 90px;
+  line-height: 1.55;
+}
+
+.vu-input:hover:not(:focus),
+.vu-textarea:hover:not(:focus) {
+  border-color: rgba(139, 92, 246, 0.35);
+}
+
+.vu-input:focus,
+.vu-textarea:focus,
+select.vu-input:focus {
+  border-color: #7c3aed;
+  background: rgba(124, 58, 237, 0.06);
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.14);
+}
+
+body.light .vu-input:focus,
+body.light .vu-textarea:focus,
+body.light select.vu-input:focus {
+  background: #fefcff;
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+}
+
+/* Custom select chevron */
+select.vu-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23a78bfa' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 1rem center;
+  padding-right: 2.5rem;
+  cursor: pointer;
+}
+
+/* Spacing between vu-hint after vu-input */
+.vu-input + .vu-hint,
+.vu-textarea + .vu-hint {
+  margin-top: 0.35rem;
+  display: block;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Studio edit thumbnail preview — refined frame */
+#studioEditModal .vu-preview-box {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  border-radius: 16px;
+  overflow: hidden;
+  margin-bottom: 1.25rem;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#studioEditModal .vu-preview-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Secondary button (Cancel) — used in studio edit modal footer */
+.vu-btn-secondary {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, rgba(255,255,255,0.10));
+  color: var(--text, #e5e7eb);
+}
+body.light .vu-btn-secondary {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #1f2937;
+}
+.vu-btn-secondary:hover {
+  background: rgba(139, 92, 246, 0.10);
+  border-color: rgba(139, 92, 246, 0.45);
+  color: var(--text, #e5e7eb);
+}
+.vu-btn-secondary:active { transform: scale(0.98); }
+
+/* When the primary button is in "saving" state */
+.vu-btn-primary.is-saving {
+  opacity: 0.85;
+  cursor: progress;
+  pointer-events: none;
+}
+.vu-btn-primary.is-saving::before {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
+  animation: vuSpin 0.7s linear infinite;
+  margin-right: 0.45rem;
+}
+@keyframes vuSpin { to { transform: rotate(360deg); } }
+
+/* Mobile */
+@media (max-width: 600px) {
+  .video-upload-overlay { padding: 0; align-items: flex-end; }
+  .video-upload-modal-premium {
+    max-height: 95vh;
+    border-radius: 24px 24px 0 0;
+    max-width: 100%;
+  }
+  .vu-header, .vu-body, .vu-footer { padding-left: 1.25rem; padding-right: 1.25rem; }
+  .vu-header-text h2 { font-size: 1.2rem; }
+  .vu-dropzone { padding: 2.5rem 1rem; }
+}
+
+/* Form groups */
+.form-group {
+  margin-bottom: 1.25rem;
+}
+.form-group label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+  color: var(--text);
+}
+.form-group label small {
+  font-weight: 400;
+  color: var(--text-muted, #888);
+  margin-left: 0.5rem;
+}
+.form-group .required { color: #ef4444; }
+.form-group input[type="text"],
+.form-group textarea,
+.form-group select {
+  width: 100%;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: inherit;
+  resize: vertical;
+}
+.form-group input:focus,
+.form-group textarea:focus,
+.form-group select:focus {
+  outline: none;
+  border-color: var(--accent, #7c3aed);
+}
+.char-hint {
+  display: block;
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--text-muted, #888);
+  margin-top: 0.3rem;
+}
+
+/* Videos page header with upload button */
+.videos-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.btn-upload-video {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.2rem;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  border: none;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.3);
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.btn-upload-video:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(124, 58, 237, 0.4);
+}
+
+.btn-upload-video:active {
+  transform: translateY(0);
+}
+
+.btn-upload-video svg {
+  flex-shrink: 0;
+}
+
+@media (max-width: 700px) {
+  .btn-upload-video {
+    padding: 0.55rem 1rem;
+    font-size: 0.85rem;
+  }
+}
+
+/* Video posts in feed */
+.post-video {
+  position: relative;
+  margin: 0.75rem 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 16/9;
+}
+.post-video-player {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: #000;
+}
+
+
+/* ════════════════════════════════════════
+   CREATOR STUDIO
+   ════════════════════════════════════════ */
+
+#studioPage {
+  padding: 1.5rem 1.75rem 3rem;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.studio-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1.75rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid rgba(168, 85, 247, 0.12);
+}
+
+.studio-title {
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin: 0;
+}
+
+.studio-subtitle {
+  color: #6b7280;
+  margin: 0.35rem 0 0 0;
+  font-size: 0.93rem;
+}
+
+/* ─── Stats grid ─── */
+.studio-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.85rem;
+  margin-bottom: 1.5rem;
+}
+
+.studio-stat {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1.1rem 1.25rem;
+  background: white;
+  border-radius: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.studio-stat:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.08);
+}
+
+.studio-stat-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+}
+
+.studio-stat-value {
+  font-size: 1.45rem;
+  font-weight: 700;
+  color: #111827;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+
+.studio-stat-label {
+  font-size: 0.78rem;
+  color: #6b7280;
+  margin-top: 0.15rem;
+  font-weight: 500;
+}
+
+/* ─── Toolbar (search + count) ─── */
+.studio-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding: 0 0.25rem;
+}
+
+.studio-search {
+  flex: 1;
+  max-width: 380px;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.studio-search svg {
+  position: absolute;
+  left: 0.85rem;
+  color: #9ca3af;
+  pointer-events: none;
+}
+
+.studio-search input {
+  width: 100%;
+  padding: 0.65rem 1rem 0.65rem 2.5rem;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: white;
+  font-size: 0.9rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  font-family: inherit;
+  color: #111827;
+}
+
+.studio-search input:focus {
+  outline: none;
+  border-color: #a855f7;
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.12);
+}
+
+.studio-toolbar-info {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin-left: auto;
+  font-weight: 500;
+}
+
+/* ─── Table ─── */
+.studio-table-wrap {
+  background: white;
+  border-radius: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+}
+
+.studio-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.studio-table thead {
+  background: rgba(168, 85, 247, 0.04);
+}
+
+.studio-table th {
+  padding: 0.85rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #6b7280;
+  border-bottom: 1px solid rgba(168, 85, 247, 0.1);
+}
+
+.studio-table td {
+  padding: 0.95rem 1rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  vertical-align: middle;
+  color: #1f2937;
+  font-size: 0.9rem;
+}
+
+.studio-table tbody tr {
+  transition: background 0.1s;
+}
+
+.studio-table tbody tr:hover {
+  background: rgba(168, 85, 247, 0.03);
+}
+
+.studio-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.studio-col-video { min-width: 280px; }
+.studio-col-status { width: 130px; }
+.studio-col-date { width: 120px; }
+.studio-col-views { width: 90px; }
+.studio-col-likes { width: 90px; }
+.studio-col-actions { width: 100px; text-align: right; }
+
+.studio-cell-muted {
+  color: #6b7280;
+  font-size: 0.88rem;
+}
+
+/* ─── Video cell ─── */
+.studio-row-video {
+  display: flex;
+  gap: 0.9rem;
+  align-items: flex-start;
+}
+
+.studio-thumb {
+  position: relative;
+  width: 120px;
+  height: 68px;
+  flex-shrink: 0;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.studio-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.studio-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, #a855f7, #6366f1);
+}
+
+.studio-thumb-duration {
+  position: absolute;
+  bottom: 5px;
+  right: 5px;
+  background: rgba(0, 0, 0, 0.85);
+  color: white;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-row-text {
+  min-width: 0;
+  flex: 1;
+  padding-top: 0.15rem;
+}
+
+.studio-row-title {
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 0.3rem;
+  line-height: 1.35;
+  font-size: 0.95rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.studio-row-desc {
+  font-size: 0.82rem;
+  color: #6b7280;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ─── Status badges ─── */
+.studio-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.studio-badge-ready {
+  background: rgba(34, 197, 94, 0.1);
+  color: #15803d;
+}
+
+.studio-badge-processing {
+  background: rgba(234, 179, 8, 0.12);
+  color: #a16207;
+}
+
+.studio-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.studio-dot-green { background: #22c55e; }
+.studio-dot-yellow { background: #eab308; }
+
+/* ─── Action buttons ─── */
+.studio-actions {
+  display: flex;
+  gap: 0.35rem;
+  justify-content: flex-end;
+}
+
+.studio-btn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+  transition: all 0.15s;
+}
+
+.studio-btn:hover {
+  background: rgba(168, 85, 247, 0.1);
+  color: #7c3aed;
+  transform: scale(1.05);
+}
+
+.studio-btn-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #dc2626;
+}
+
+/* ─── Empty state ─── */
+.studio-empty {
+  text-align: center;
+  padding: 4rem 2rem;
+}
+
+.studio-empty-icon {
+  width: 96px;
+  height: 96px;
+  margin: 0 auto 1.5rem;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(99, 102, 241, 0.1));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #a855f7;
+}
+
+.studio-empty h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #111827;
+  margin: 0 0 0.5rem 0;
+}
+
+.studio-empty p {
+  color: #6b7280;
+  margin: 0;
+  font-size: 0.93rem;
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 900px) {
+  .studio-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .studio-col-likes,
+  .studio-col-status {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  #studioPage {
+    padding: 1rem 1rem 2rem;
+  }
+  .studio-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .studio-thumb {
+    width: 90px;
+    height: 51px;
+  }
+  .studio-col-date {
+    display: none;
+  }
+}
+
+/* ════════════════════════════════════════
+   DARK MODE
+   ════════════════════════════════════════ */
+
+body:not(.light) .studio-header {
+  border-bottom-color: rgba(168, 85, 247, 0.18);
+}
+
+body:not(.light) .studio-subtitle {
+  color: #9ca3af;
+}
+
+body:not(.light) .studio-stat {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: none;
+}
+
+body:not(.light) .studio-stat:hover {
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.15);
+}
+
+body:not(.light) .studio-stat-value {
+  color: #f3f4f6;
+}
+
+body:not(.light) .studio-stat-label {
+  color: #9ca3af;
+}
+
+body:not(.light) .studio-search input {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #f3f4f6;
+}
+
+body:not(.light) .studio-search input::placeholder {
+  color: #6b7280;
+}
+
+body:not(.light) .studio-toolbar-info {
+  color: #9ca3af;
+}
+
+body:not(.light) .studio-table-wrap {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: none;
+}
+
+body:not(.light) .studio-table thead {
+  background: rgba(168, 85, 247, 0.07);
+}
+
+body:not(.light) .studio-table th {
+  color: #9ca3af;
+  border-bottom-color: rgba(168, 85, 247, 0.15);
+}
+
+body:not(.light) .studio-table td {
+  color: #e5e7eb;
+  border-bottom-color: rgba(255, 255, 255, 0.04);
+}
+
+body:not(.light) .studio-table tbody tr:hover {
+  background: rgba(168, 85, 247, 0.06);
+}
+
+body:not(.light) .studio-row-title {
+  color: #f3f4f6;
+}
+
+body:not(.light) .studio-row-desc {
+  color: #9ca3af;
+}
+
+body:not(.light) .studio-cell-muted {
+  color: #9ca3af;
+}
+
+body:not(.light) .studio-badge-ready {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+body:not(.light) .studio-badge-processing {
+  background: rgba(234, 179, 8, 0.15);
+  color: #facc15;
+}
+
+body:not(.light) .studio-btn {
+  color: #9ca3af;
+}
+
+body:not(.light) .studio-btn:hover {
+  background: rgba(168, 85, 247, 0.18);
+  color: #c084fc;
+}
+
+body:not(.light) .studio-btn-danger:hover {
+  background: rgba(239, 68, 68, 0.18);
+  color: #f87171;
+}
+
+body:not(.light) .studio-empty h3 {
+  color: #f3f4f6;
+}
+
+body:not(.light) .studio-empty p {
+  color: #9ca3af;
+}
+
+body:not(.light) .studio-empty-icon {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.15), rgba(99, 102, 241, 0.15));
+  color: #c084fc;
 }
-
-async function onNotificationClick(notifId) {
-  const n = _notifications.find(x => x.id === notifId);
-  if (!n) return;
-
-  // Mark as read locally + in DB (optimistic)
-  if (!n.is_read) {
-    n.is_read = true;
-    _notifUnreadCount = Math.max(0, _notifUnreadCount - 1);
-    updateNotifBadge();
-    renderNotifications();
-    supabase.from('notifications').update({ is_read: true }).eq('id', notifId)
-      .then(({ error }) => { if (error) console.warn('Mark read failed:', error); });
-  }
-
-  closeNotifPanel();
-
-  // Navigate to a sensible target
-  if (n.target_type === 'book' || n.parent_target_type === 'book') {
-    const bookId = (n.target_type === 'book') ? n.target_id : n.parent_target_id;
-    if (bookId) openBookDetail(bookId);
-  } else if (n.target_type === 'chapter' || n.parent_target_type === 'chapter') {
-    const bookId = n.parent_target_type === 'book' ? n.parent_target_id : null;
-    if (bookId) openBookDetail(bookId);
-  } else if (n.parent_target_type === 'post' || n.target_type === 'post') {
-    // We don't have post-detail pages yet — drop them on Home so they can find it
-    setSidebarActive('btnHome');
-    showFeed();
-  } else {
-    setSidebarActive('btnHome');
-    showFeed();
-  }
-}
-
-async function markAllNotificationsRead() {
-  if (!_notifUnreadCount) return;
-  const unread = _notifications.filter(n => !n.is_read).map(n => n.id);
-  _notifications.forEach(n => { n.is_read = true; });
-  _notifUnreadCount = 0;
-  updateNotifBadge();
-  renderNotifications();
-  if (unread.length) {
-    const { error } = await supabase.from('notifications').update({ is_read: true }).in('id', unread);
-    if (error) console.warn('Mark all read failed:', error);
-  }
-}
-
-function toggleNotifPanel() {
-  if (_notifPanelOpen) closeNotifPanel();
-  else openNotifPanel();
-}
-function openNotifPanel() {
-  const panel = document.getElementById('notificationsPanel');
-  if (!panel) return;
-  panel.style.display = 'flex';
-  _notifPanelOpen = true;
-}
-function closeNotifPanel() {
-  const panel = document.getElementById('notificationsPanel');
-  if (!panel) return;
-  panel.style.display = 'none';
-  _notifPanelOpen = false;
-}
-
-document.getElementById('btnNotifications')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  toggleNotifPanel();
-});
-document.getElementById('notifMarkAll')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  markAllNotificationsRead();
-});
-// Filter tabs
-document.querySelectorAll('.notif-filter-tab').forEach(tab => {
-  tab.addEventListener('click', (e) => {
-    e.stopPropagation();
-    document.querySelectorAll('.notif-filter-tab').forEach(t => t.classList.toggle('active', t === tab));
-    _notifFilter = tab.dataset.filter || 'all';
-    renderNotifications();
-  });
-});
-// Click outside the panel → close
-document.addEventListener('click', (e) => {
-  if (!_notifPanelOpen) return;
-  if (e.target.closest('#notificationsPanel') || e.target.closest('#btnNotifications')) return;
-  closeNotifPanel();
-});
-
-// ════════════════════════════════════════
-// @MENTION AUTOCOMPLETE
-// Type @ in any .comment-input → dropdown with matching usernames.
-// Arrow keys navigate, Enter/Tab inserts, Esc closes.
-// ════════════════════════════════════════
-let _mentionDropdown = null;
-let _mentionTextarea = null;
-let _mentionResults  = [];
-let _mentionIdx      = 0;
-let _mentionDebounce = null;
-
-function getMentionDropdown() {
-  if (_mentionDropdown) return _mentionDropdown;
-  const el = document.createElement('div');
-  el.className = 'mention-dropdown';
-  el.style.display = 'none';
-  document.body.appendChild(el);
-  _mentionDropdown = el;
-  return el;
-}
-
-function closeMentionDropdown() {
-  if (_mentionDropdown) _mentionDropdown.style.display = 'none';
-  _mentionTextarea = null;
-  _mentionResults = [];
-  _mentionIdx = 0;
-}
-
-function positionMentionDropdown(textarea) {
-  const dd = getMentionDropdown();
-  const rect = textarea.getBoundingClientRect();
-  dd.style.position = 'fixed';
-  // Place below the textarea by default; flip above if it would clip the viewport
-  const wantTop = rect.bottom + 6;
-  const ddH = dd.offsetHeight || 220;
-  const flipAbove = wantTop + ddH > window.innerHeight - 12;
-  dd.style.top  = `${flipAbove ? Math.max(8, rect.top - ddH - 6) : wantTop}px`;
-  dd.style.left = `${Math.max(8, rect.left)}px`;
-  dd.style.minWidth = `${Math.min(260, Math.max(220, rect.width * 0.7))}px`;
-}
-
-async function maybeShowMentionDropdown(textarea) {
-  if (!textarea) return;
-  const cursor = textarea.selectionStart ?? textarea.value.length;
-  const before = textarea.value.slice(0, cursor);
-  // Match @<word> at end of `before`. Allow underscores and digits.
-  const match = before.match(/(?:^|\s)@([A-Za-z0-9_]{0,24})$/);
-  if (!match) {
-    closeMentionDropdown();
-    return;
-  }
-  _mentionTextarea = textarea;
-  const query = match[1] || '';
-  _mentionIdx = 0;
-
-  // Debounced profile search
-  clearTimeout(_mentionDebounce);
-  _mentionDebounce = setTimeout(async () => {
-    let q = supabase.from('profiles').select('id, username, avatar_url').limit(6);
-    if (query) q = q.ilike('username', `${query}%`);
-    else q = q.order('username', { ascending: true }).limit(6);
-    const { data } = await q;
-    _mentionResults = (data || []).filter(p => p.id !== currentUser?.id);
-    renderMentionDropdown();
-  }, 120);
-}
-
-function renderMentionDropdown() {
-  const dd = getMentionDropdown();
-  if (!_mentionResults.length || !_mentionTextarea) {
-    dd.style.display = 'none';
-    return;
-  }
-  dd.innerHTML = _mentionResults.map((p, i) => `
-    <div class="mention-item ${i === _mentionIdx ? 'active' : ''}" data-idx="${i}">
-      <div class="mention-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : escHTML((p.username || '?').slice(0,2).toUpperCase())}</div>
-      <div class="mention-name"><strong>@${escHTML(p.username || '')}</strong></div>
-    </div>
-  `).join('');
-  dd.querySelectorAll('.mention-item').forEach(item => {
-    item.addEventListener('mousedown', (e) => {
-      e.preventDefault();    // keep textarea focus
-      e.stopPropagation();
-      selectMention(parseInt(item.dataset.idx, 10));
-    });
-  });
-  dd.style.display = 'block';
-  positionMentionDropdown(_mentionTextarea);
-}
-
-function selectMention(index) {
-  const profile = _mentionResults[index];
-  const textarea = _mentionTextarea;
-  if (!profile || !textarea) return;
-  const cursor = textarea.selectionStart ?? textarea.value.length;
-  const before = textarea.value.slice(0, cursor);
-  const after  = textarea.value.slice(cursor);
-  // Replace the @<typed> at end of `before` with @username + space
-  const newBefore = before.replace(/(^|\s)@([A-Za-z0-9_]{0,24})$/, `$1@${profile.username} `);
-  textarea.value = newBefore + after;
-  const newCursor = newBefore.length;
-  textarea.setSelectionRange(newCursor, newCursor);
-  // Bubble an input event so any auto-resize textareas re-measure
-  textarea.dispatchEvent(new Event('input', { bubbles: true }));
-  textarea.focus();
-  closeMentionDropdown();
-}
-
-// Document-level event delegation — works for dynamically created comment textareas
-document.addEventListener('input', (e) => {
-  const ta = e.target;
-  if (!ta || ta.tagName !== 'TEXTAREA') return;
-  if (!ta.classList.contains('comment-input')) return;
-  maybeShowMentionDropdown(ta);
-});
-
-document.addEventListener('keydown', (e) => {
-  if (!_mentionTextarea || !_mentionResults.length) return;
-  if (_mentionDropdown?.style.display !== 'block') return;
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    _mentionIdx = (_mentionIdx + 1) % _mentionResults.length;
-    renderMentionDropdown();
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    _mentionIdx = (_mentionIdx - 1 + _mentionResults.length) % _mentionResults.length;
-    renderMentionDropdown();
-  } else if (e.key === 'Enter' || e.key === 'Tab') {
-    e.preventDefault();
-    selectMention(_mentionIdx);
-  } else if (e.key === 'Escape') {
-    closeMentionDropdown();
-  }
-});
-
-document.addEventListener('click', (e) => {
-  if (e.target.closest('.mention-dropdown')) return;
-  if (e.target.closest('.comment-input')) return;
-  closeMentionDropdown();
-});
-window.addEventListener('scroll', closeMentionDropdown, true);
-window.addEventListener('resize', closeMentionDropdown);
-
-// Render @mentions inside posted comment bodies as clickable links.
-// Hooks into the existing linkify pipeline by post-processing its output.
-const _origLinkify = typeof linkify === 'function' ? linkify : null;
-if (_origLinkify) {
-  // Re-define linkify globally (the original was a const-declared function;
-  // we override behavior via the same name through the module scope).
-  // eslint-disable-next-line no-func-assign
-  linkify = function patchedLinkify(str) {
-    const html = _origLinkify(str || '');
-    return html.replace(/(^|[\s>])@([A-Za-z0-9_]{1,24})\b/g,
-      (_, lead, name) => `${lead}<span class="mention-token" data-mention="${escHTML(name)}">@${escHTML(name)}</span>`);
-  };
-}
-// Clicking a rendered @mention → navigate to that user's profile
-document.addEventListener('click', async (e) => {
-  const tok = e.target.closest('.mention-token');
-  if (!tok) return;
-  e.stopPropagation();
-  const username = tok.dataset.mention;
-  if (!username) return;
-  const { data } = await supabase.from('profiles').select('id').ilike('username', username).maybeSingle();
-  if (data?.id) openProfile(data.id);
-  else toast(`User @${username} not found`, 'error');
-});
