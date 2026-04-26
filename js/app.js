@@ -1134,11 +1134,27 @@ async function openMyProfile() {
   }
   openProfile(currentUser.id);
 }
-document.getElementById('btnProfile').addEventListener('click', openMyProfile);
-document.getElementById('topbarAvatar').addEventListener('click', openMyProfile);
+document.getElementById('btnProfile').addEventListener('click', () => {
+  setSidebarActive('btnProfile');
+  openMyProfile();
+});
+document.getElementById('topbarAvatar').addEventListener('click', () => {
+  setSidebarActive('btnProfile');
+  openMyProfile();
+});
 
-// Add Home button functionality — the first sidebar item
-document.querySelector('.sidebar-item.active')?.addEventListener('click', showFeed);
+// ── Sidebar active state syncing ──
+function setSidebarActive(buttonId) {
+  document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById(buttonId);
+  if (btn) btn.classList.add('active');
+}
+
+// Wire Home button → goes to feed + sets active
+document.getElementById('btnHome')?.addEventListener('click', () => {
+  setSidebarActive('btnHome');
+  showFeed();
+});
 
 // Handle browser back/forward
 window.addEventListener('popstate', () => {
@@ -2127,6 +2143,7 @@ function showVideoPlayer() {
 }
 
 document.getElementById('btnVideos').addEventListener('click', () => {
+  setSidebarActive('btnVideos');
   if (videosPage.style.display === 'block') {
     // Scroll the actual scrolling element to the very top
     document.documentElement.scrollTop = 0;
@@ -2137,6 +2154,7 @@ document.getElementById('btnVideos').addEventListener('click', () => {
   showVideos();
 });
 document.getElementById('btnStudio').addEventListener('click', () => {
+  setSidebarActive('btnStudio');
   showStudio();
 });
 document.getElementById('btnBackVideos').addEventListener('click', () => {
@@ -2646,11 +2664,23 @@ async function playVideo(videoId) {
 // Update popstate to handle videos
 window.addEventListener('popstate', () => {
   const hash = window.location.hash;
-  if (hash.startsWith('#profile/')) openProfile(hash.replace('#profile/', ''));
-  else if (hash === '#videos') showVideos();
-else if (hash === '#studio') showStudio();
-else if (hash.startsWith('#video/')) playVideo(hash.replace('#video/', ''));
-  else { showFeed(); loadFeed(); }
+  if (hash.startsWith('#profile/')) {
+    setSidebarActive('btnProfile');
+    openProfile(hash.replace('#profile/', ''));
+  } else if (hash === '#videos') {
+    setSidebarActive('btnVideos');
+    showVideos();
+  } else if (hash === '#studio') {
+    setSidebarActive('btnStudio');
+    showStudio();
+  } else if (hash.startsWith('#video/')) {
+    setSidebarActive('btnVideos');
+    playVideo(hash.replace('#video/', ''));
+  } else {
+    setSidebarActive('btnHome');
+    showFeed();
+    loadFeed();
+  }
 });
 
 // ── Theme toggle ──
