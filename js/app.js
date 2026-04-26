@@ -2439,6 +2439,9 @@ async function openChapterReader(chapterIndex) {
   content.scrollTop = 0;
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
+  // Apply username watermark (re-run in case the user logged in/out since last read)
+  applyReaderWatermark();
+
   // Save reading progress (Supabase only — `book_reads` is a Supabase table)
   if (!chapter._appwrite && !currentBookDetail.book._appwrite) {
     saveReadingProgress(currentBookDetail.book.id, resolvedChapterId, chapter.chapter_number);
@@ -2473,6 +2476,117 @@ async function saveReadingProgress(bookId, chapterId, chapterNumber) {
     }, { onConflict: 'user_id,book_id' });
   } catch (e) { /* ignore */ }
 }
+
+// ── Reader watermark (deterrent: leaked screenshots reveal the source) ──
+let _watermarkLabelCache = null;
+async function getReaderWatermarkLabel() {
+  if (_watermarkLabelCache) return _watermarkLabelCache;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { _watermarkLabelCache = 'Guest'; return _watermarkLabelCache; }
+    // Try profile.username, then email local part, then user id prefix
+    const { data: profile } = await supabase
+      .from('profiles').select('username').eq('id', user.id).maybeSingle();
+    const username = profile?.username
+      || (user.email ? user.email.split('@')[0] : null)
+      || (user.id ? user.id.slice(0, 8) : 'User');
+    _watermarkLabelCache = `${username} · ${(user.id || '').slice(0, 6)}`;
+  } catch {
+    _watermarkLabelCache = 'Reader';
+  }
+  return _watermarkLabelCache;
+}
+
+async function applyReaderWatermark() {
+  const el = document.getElementById('readerContent');
+  if (!el) return;
+  const label = await getReaderWatermarkLabel();
+  const isLight = document.body.classList.contains('light');
+  const fillColor = isLight ? '%237c3aed' : '%23a78bfa'; // %23 = encoded "#"
+  // Encode for safe data URI use
+  const safeLabel = String(label).replace(/[<>&'"]/g, c =>
+    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&#39;', '"': '&quot;' }[c]));
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200">' +
+      '<text x="160" y="100" text-anchor="middle"' +
+        ' transform="rotate(-25 160 100)"' +
+        ` fill="${isLight ? '#7c3aed' : '#a78bfa'}" fill-opacity="0.09"` +
+        ' font-family="system-ui, -apple-system, sans-serif"' +
+        ' font-size="13" font-weight="500" letter-spacing="0.04em">' +
+        safeLabel +
+      '</text>' +
+    '</svg>';
+  const dataUri = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
+  el.style.setProperty('--reader-watermark-bg', dataUri);
+}
+
+// Re-render watermark when theme toggles (so colour matches background)
+document.getElementById('btnTheme')?.addEventListener('click', () => {
+  // Run after the body class actually flips
+  setTimeout(() => {
+    if (chapterReaderPage?.style.display === 'block') applyReaderWatermark();
+  }, 50);
+});
+
+// ── Anti-copy protection on the reader ──
+// Discourages casual copy-paste. Not bulletproof against DevTools/view-source,
+// but blocks selection, right-click, and Cmd/Ctrl+C / Cmd/Ctrl+A inside the reader.
+(function setupReaderAntiCopy() {
+  const el = document.getElementById('readerContent');
+  if (!el) return;
+
+  const isReaderVisible = () =>
+    chapterReaderPage && chapterReaderPage.style.display === 'block';
+
+  let antiCopyToastTimer = null;
+  const showAntiCopyToast = () => {
+    if (antiCopyToastTimer) return;          // throttle so we don't spam
+    toast('Copying is disabled to protect the author\'s work', 'error');
+    antiCopyToastTimer = setTimeout(() => { antiCopyToastTimer = null; }, 1500);
+  };
+
+  // Block selection-start (covers click-and-drag)
+  el.addEventListener('selectstart', (e) => {
+    e.preventDefault();
+    return false;
+  });
+
+  // Block native copy (Cmd/Ctrl+C, right-click → Copy)
+  el.addEventListener('copy', (e) => {
+    e.preventDefault();
+    e.clipboardData?.setData('text/plain', '');
+    showAntiCopyToast();
+    return false;
+  });
+
+  // Block cut + paste too, just in case the reader ever becomes editable somehow
+  el.addEventListener('cut', (e) => { e.preventDefault(); return false; });
+
+  // Block right-click context menu inside the reader
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showAntiCopyToast();
+    return false;
+  });
+
+  // Block drag (so users can't drag-out a text fragment)
+  el.addEventListener('dragstart', (e) => { e.preventDefault(); return false; });
+
+  // Block Cmd/Ctrl+A so a user can't quickly select-all then copy
+  document.addEventListener('keydown', (e) => {
+    if (!isReaderVisible()) return;
+    const isMod = e.metaKey || e.ctrlKey;
+    if (!isMod) return;
+    const k = e.key.toLowerCase();
+    if (k === 'a' || k === 'c' || k === 'x') {
+      // Only block if the focus is in/over the reader content, not in form inputs
+      const tag = (e.target?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
+      e.preventDefault();
+      showAntiCopyToast();
+    }
+  });
+})();
 
 // Reader controls
 document.getElementById('btnReaderPrev')?.addEventListener('click', () => {
