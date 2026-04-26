@@ -4964,6 +4964,10 @@ function notificationLabel(n, knownUsername) {
     case 'follow_new_book':        return `${actorTag} published a new book${titleHint}`;
     case 'follow_repost':          return `${actorTag} shared a post`;
 
+    // ── Mentions ──
+    case 'mention_comment':        return `${actorTag} mentioned you in a comment`;
+    case 'mention_chapter_comment':return `${actorTag} mentioned you in a chapter comment`;
+
     default:                       return `${actorTag} did something on Selebox`;
   }
 }
@@ -5053,4 +5057,172 @@ document.addEventListener('click', (e) => {
   if (!_notifPanelOpen) return;
   if (e.target.closest('#notificationsPanel') || e.target.closest('#btnNotifications')) return;
   closeNotifPanel();
+});
+
+// ════════════════════════════════════════
+// @MENTION AUTOCOMPLETE
+// Type @ in any .comment-input → dropdown with matching usernames.
+// Arrow keys navigate, Enter/Tab inserts, Esc closes.
+// ════════════════════════════════════════
+let _mentionDropdown = null;
+let _mentionTextarea = null;
+let _mentionResults  = [];
+let _mentionIdx      = 0;
+let _mentionDebounce = null;
+
+function getMentionDropdown() {
+  if (_mentionDropdown) return _mentionDropdown;
+  const el = document.createElement('div');
+  el.className = 'mention-dropdown';
+  el.style.display = 'none';
+  document.body.appendChild(el);
+  _mentionDropdown = el;
+  return el;
+}
+
+function closeMentionDropdown() {
+  if (_mentionDropdown) _mentionDropdown.style.display = 'none';
+  _mentionTextarea = null;
+  _mentionResults = [];
+  _mentionIdx = 0;
+}
+
+function positionMentionDropdown(textarea) {
+  const dd = getMentionDropdown();
+  const rect = textarea.getBoundingClientRect();
+  dd.style.position = 'fixed';
+  // Place below the textarea by default; flip above if it would clip the viewport
+  const wantTop = rect.bottom + 6;
+  const ddH = dd.offsetHeight || 220;
+  const flipAbove = wantTop + ddH > window.innerHeight - 12;
+  dd.style.top  = `${flipAbove ? Math.max(8, rect.top - ddH - 6) : wantTop}px`;
+  dd.style.left = `${Math.max(8, rect.left)}px`;
+  dd.style.minWidth = `${Math.min(260, Math.max(220, rect.width * 0.7))}px`;
+}
+
+async function maybeShowMentionDropdown(textarea) {
+  if (!textarea) return;
+  const cursor = textarea.selectionStart ?? textarea.value.length;
+  const before = textarea.value.slice(0, cursor);
+  // Match @<word> at end of `before`. Allow underscores and digits.
+  const match = before.match(/(?:^|\s)@([A-Za-z0-9_]{0,24})$/);
+  if (!match) {
+    closeMentionDropdown();
+    return;
+  }
+  _mentionTextarea = textarea;
+  const query = match[1] || '';
+  _mentionIdx = 0;
+
+  // Debounced profile search
+  clearTimeout(_mentionDebounce);
+  _mentionDebounce = setTimeout(async () => {
+    let q = supabase.from('profiles').select('id, username, avatar_url').limit(6);
+    if (query) q = q.ilike('username', `${query}%`);
+    else q = q.order('username', { ascending: true }).limit(6);
+    const { data } = await q;
+    _mentionResults = (data || []).filter(p => p.id !== currentUser?.id);
+    renderMentionDropdown();
+  }, 120);
+}
+
+function renderMentionDropdown() {
+  const dd = getMentionDropdown();
+  if (!_mentionResults.length || !_mentionTextarea) {
+    dd.style.display = 'none';
+    return;
+  }
+  dd.innerHTML = _mentionResults.map((p, i) => `
+    <div class="mention-item ${i === _mentionIdx ? 'active' : ''}" data-idx="${i}">
+      <div class="mention-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : escHTML((p.username || '?').slice(0,2).toUpperCase())}</div>
+      <div class="mention-name"><strong>@${escHTML(p.username || '')}</strong></div>
+    </div>
+  `).join('');
+  dd.querySelectorAll('.mention-item').forEach(item => {
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();    // keep textarea focus
+      e.stopPropagation();
+      selectMention(parseInt(item.dataset.idx, 10));
+    });
+  });
+  dd.style.display = 'block';
+  positionMentionDropdown(_mentionTextarea);
+}
+
+function selectMention(index) {
+  const profile = _mentionResults[index];
+  const textarea = _mentionTextarea;
+  if (!profile || !textarea) return;
+  const cursor = textarea.selectionStart ?? textarea.value.length;
+  const before = textarea.value.slice(0, cursor);
+  const after  = textarea.value.slice(cursor);
+  // Replace the @<typed> at end of `before` with @username + space
+  const newBefore = before.replace(/(^|\s)@([A-Za-z0-9_]{0,24})$/, `$1@${profile.username} `);
+  textarea.value = newBefore + after;
+  const newCursor = newBefore.length;
+  textarea.setSelectionRange(newCursor, newCursor);
+  // Bubble an input event so any auto-resize textareas re-measure
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  textarea.focus();
+  closeMentionDropdown();
+}
+
+// Document-level event delegation — works for dynamically created comment textareas
+document.addEventListener('input', (e) => {
+  const ta = e.target;
+  if (!ta || ta.tagName !== 'TEXTAREA') return;
+  if (!ta.classList.contains('comment-input')) return;
+  maybeShowMentionDropdown(ta);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (!_mentionTextarea || !_mentionResults.length) return;
+  if (_mentionDropdown?.style.display !== 'block') return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _mentionIdx = (_mentionIdx + 1) % _mentionResults.length;
+    renderMentionDropdown();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _mentionIdx = (_mentionIdx - 1 + _mentionResults.length) % _mentionResults.length;
+    renderMentionDropdown();
+  } else if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    selectMention(_mentionIdx);
+  } else if (e.key === 'Escape') {
+    closeMentionDropdown();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.mention-dropdown')) return;
+  if (e.target.closest('.comment-input')) return;
+  closeMentionDropdown();
+});
+window.addEventListener('scroll', closeMentionDropdown, true);
+window.addEventListener('resize', closeMentionDropdown);
+
+// Render @mentions inside posted comment bodies as clickable links.
+// Hooks into the existing linkify pipeline by post-processing its output.
+const _origLinkify = typeof linkify === 'function' ? linkify : null;
+if (_origLinkify) {
+  // Re-define linkify globally (the original was a const-declared function;
+  // we override behavior via the same name through the module scope).
+  // eslint-disable-next-line no-func-assign
+  linkify = function patchedLinkify(str) {
+    const html = _origLinkify(str || '');
+    return html.replace(/(^|[\s>])@([A-Za-z0-9_]{1,24})\b/g,
+      (_, lead, name) => `${lead}<span class="mention-token" data-mention="${escHTML(name)}">@${escHTML(name)}</span>`);
+  };
+}
+// Clicking a rendered @mention → navigate to that user's profile
+document.addEventListener('click', async (e) => {
+  const tok = e.target.closest('.mention-token');
+  if (!tok) return;
+  e.stopPropagation();
+  const username = tok.dataset.mention;
+  if (!username) return;
+  const { data } = await supabase.from('profiles').select('id').ilike('username', username).maybeSingle();
+  if (data?.id) openProfile(data.id);
+  else toast(`User @${username} not found`, 'error');
 });
