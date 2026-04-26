@@ -590,6 +590,14 @@ function switchTab2(name) {
     }
     loadBans();
   }
+  if (name === 'content') {
+    const filterEl = document.getElementById('contentFilter');
+    if (!filterEl.dataset.bound) {
+      initContentTab();
+      filterEl.dataset.bound = '1';
+    }
+    loadHiddenContent();
+  }
 }
 // Re-bind tab clicks to use the augmented switchTab2
 document.querySelectorAll('.admin-tab').forEach(t => {
@@ -728,6 +736,100 @@ function renderBanRow(u, kind, detail) {
     });
   });
   return row;
+}
+
+// ─── CONTENT TAB (hidden posts) ──────────────────────────────────────────────
+
+function initContentTab() {
+  document.getElementById('contentFilter').addEventListener('change', loadHiddenContent);
+}
+
+async function loadHiddenContent() {
+  const listEl = document.getElementById('contentList');
+  const subEl  = document.getElementById('contentSubtitle');
+  const filter = document.getElementById('contentFilter').value;
+
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  let q = supabase
+    .from('posts')
+    .select('id, body, image_url, hidden_at, hidden_reason, hidden_by, user_id, created_at, profiles!user_id(id, username, avatar_url, is_banned)')
+    .eq('is_hidden', true)
+    .order('hidden_at', { ascending: false })
+    .limit(100);
+
+  if (filter !== 'all') q = q.eq('hidden_reason', filter);
+
+  const { data: posts, error } = await q;
+  if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
+  if (!posts.length) {
+    listEl.innerHTML = `<div class="admin-empty">No hidden posts${filter !== 'all' ? ` for "${esc(REASON_TEXT[filter] || filter)}"` : ''}.</div>`;
+    subEl.textContent = '0 hidden';
+    return;
+  }
+
+  // Resolve "hidden_by" admin usernames in one query
+  const byIds = [...new Set(posts.map(p => p.hidden_by).filter(Boolean))];
+  const { data: actors } = byIds.length
+    ? await supabase.from('profiles').select('id, username').in('id', byIds)
+    : { data: [] };
+  const actorMap = Object.fromEntries((actors || []).map(a => [a.id, a]));
+
+  subEl.textContent = `${posts.length}${posts.length === 100 ? ' shown · refine filter to narrow' : ' hidden'}`;
+  listEl.innerHTML = '';
+
+  for (const p of posts) {
+    const author  = p.profiles;
+    const adminBy = actorMap[p.hidden_by]?.username || 'a moderator';
+
+    const card = document.createElement('div');
+    card.className = 'content-card';
+    card.dataset.postId = p.id;
+    card.innerHTML = `
+      <div class="content-card-head">
+        <div class="content-card-meta">
+          <span class="report-reason-badge">${esc(REASON_TEXT[p.hidden_reason] || p.hidden_reason || 'No reason')}</span>
+          <span class="report-time">Hidden ${esc(timeRel(p.hidden_at))} by <b>${esc(adminBy)}</b></span>
+        </div>
+      </div>
+      <div class="content-card-body">
+        <div class="report-author">
+          <div class="report-avatar">${author?.avatar_url ? `<img src="${esc(author.avatar_url)}" alt=""/>` : esc(initials(author?.username))}</div>
+          <div>
+            <div class="report-author-name">${esc(author?.username || 'Unknown')}${author?.is_banned ? ' <span class="report-banned-tag">Banned</span>' : ''}</div>
+            <div class="report-author-time">Posted ${esc(timeRel(p.created_at))}</div>
+          </div>
+        </div>
+        <div class="report-post-body">${esc(p.body || '').slice(0, 280) || '<i>(no text)</i>'}</div>
+        ${p.image_url ? `<div class="report-post-image"><img src="${esc(p.image_url)}" loading="lazy"/></div>` : ''}
+      </div>
+      <div class="content-card-footer">
+        <span class="content-footer-hint">Currently invisible to everyone except mods.</span>
+        <div class="report-actions">
+          <button class="report-btn" data-act="unhide">Unhide</button>
+        </div>
+      </div>
+    `;
+
+    card.querySelector('[data-act="unhide"]').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const reasonAndNote = await openReasonModal('unhide', author);
+      if (!reasonAndNote) return;
+      const { reason, note } = reasonAndNote;
+      try {
+        await supabase.from('posts').update({
+          is_hidden: false, hidden_by: null, hidden_at: null, hidden_reason: null,
+        }).eq('id', p.id);
+        await logAction({ action: 'unhide_post', target_user_id: author?.id, target_post_id: p.id, reason, note });
+        toast('Post unhidden');
+        loadHiddenContent();
+      } catch (e) {
+        alert('Action failed: ' + (e.message || e));
+      }
+    });
+
+    listEl.appendChild(card);
+  }
 }
 
 // ─── ACTIVITY LOG ────────────────────────────────────────────────────────────
