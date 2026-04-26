@@ -588,36 +588,31 @@
           </div>
         </div>
       </div>
-      <div class="profile-tabs">
-      </div>
-      
-       <!-- Profile tabs -->
-      <div class="profile-tabs">
-        <button class="profile-tab active" data-tab="posts">Posts</button>
-        <button class="profile-tab" data-tab="about">About</button>
-      </div>
-      <div id="profilePosts" class="profile-tab-content"></div>
-      <div id="profileAbout" class="profile-tab-content" style="display:none">
-        <div class="about-grid">
-          <div class="about-card">
-            <h3 class="about-card-title">📇 Personal Information</h3>
-            <div class="about-row"><span class="about-label">Username</span><span class="about-value" id="aboutUsername">—</span></div>
-            <div class="about-row"><span class="about-label">Bio</span><span class="about-value" id="aboutBio">—</span></div>
-            <div class="about-row"><span class="about-label">Location</span><span class="about-value" id="aboutLocation">—</span></div>
-            <div class="about-row"><span class="about-label">Website</span><span class="about-value" id="aboutWebsite">—</span></div>
-            <div class="about-row"><span class="about-label">Joined</span><span class="about-value" id="aboutJoined">—</span></div>
-          </div>
-          <div class="about-card">
-            <h3 class="about-card-title">🛡️ Account Status</h3>
-            <div class="about-row"><span class="about-label">Status</span><span class="about-pill success">Active</span></div>
-            <div class="about-row"><span class="about-label">Type</span><span class="about-value" id="aboutType">Member</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
 
-      <!-- Profile content -->
+      <!-- Premium tabs -->
+      <div class="profile-tabs" role="tablist">
+        <button class="profile-tab active" data-tab="posts" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <span>Posts</span>
+        </button>
+        <button class="profile-tab" data-tab="videos" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="13.5" height="12" rx="2.5"/><path d="M16 10.5l5-2.5v8l-5-2.5z" fill="currentColor" stroke="none"/></svg>
+          <span>Videos</span>
+        </button>
+        <button class="profile-tab" data-tab="books" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/><line x1="12" y1="2" x2="12" y2="20"/></svg>
+          <span>Books</span>
+        </button>
+        <button class="profile-tab" data-tab="about" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          <span>About</span>
+        </button>
+      </div>
+
+      <!-- Tab content -->
       <div id="profilePosts" class="profile-tab-content"></div>
+      <div id="profileVideos" class="profile-tab-content" style="display:none"></div>
+      <div id="profileBooks" class="profile-tab-content" style="display:none"></div>
       <div id="profileAbout" class="profile-tab-content" style="display:none">
         <div class="about-grid">
           <div class="about-card">
