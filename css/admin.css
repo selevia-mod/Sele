@@ -735,6 +735,43 @@ body.light { background: var(--admin-bg); }
   flex-shrink: 0;
 }
 
+/* ─── Content tab (hidden posts) ─── */
+.content-card {
+  background: white;
+  border: 1px solid var(--admin-border);
+  border-radius: 14px;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  /* Subtle dim to communicate "this is suppressed" */
+  opacity: 0.92;
+}
+.content-card:hover { border-color: rgba(124, 58, 237, 0.2); box-shadow: 0 4px 16px rgba(15, 10, 28, 0.05); opacity: 1; }
+.content-card-head {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--admin-border);
+}
+.content-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.content-card-body { padding: 0.9rem 1rem; }
+.content-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 1rem;
+  background: #fafaf9;
+  border-top: 1px solid var(--admin-border);
+}
+.content-footer-hint {
+  font-size: 0.76rem;
+  color: var(--admin-text-2);
+  font-style: italic;
+}
+
 /* ─── Mobile ─── */
 @media (max-width: 640px) {
   .admin-header { padding: 0.85rem 1rem; }
