@@ -2544,13 +2544,37 @@ function renderVideoCard(video, uploader) {
 }
 
 async function playVideo(videoId) {
+  console.log('[playVideo] called with videoId:', videoId, '| starts with sb_?', videoId?.startsWith('sb_'));
   try {
-    const video = await appwriteGet(APPWRITE.videosCollection, videoId);
-    if (!video) return;
-
+    let video = null;
     let uploader = null;
-    if (video.uploader) {
-      try { uploader = await appwriteGet(APPWRITE.usersCollection, video.uploader); } catch {}
+
+    // Supabase videos are prefixed with 'sb_' and live in allVideosCache
+    // — never call Appwrite for them, that's why we were getting 400s.
+    if (videoId && videoId.startsWith('sb_')) {
+      console.log('[playVideo] taking SUPABASE branch — no Appwrite call');
+      // Make sure the cache is populated (in case the user navigated directly to #video/sb_...)
+      if (!allVideosCache.length) {
+        await ensureVideoCache();
+        const fresh = await fetchSupabaseVideos();
+        const existingIds = new Set(allVideosCache.map(v => v.$id));
+        fresh.forEach(v => { if (!existingIds.has(v.$id)) allVideosCache.push(v); });
+      }
+      const cached = allVideosCache.find(v => v.$id === videoId);
+      if (!cached) {
+        toast('Video not found', 'error');
+        return;
+      }
+      video = cached;
+      uploader = cached._uploaderInfo || null;
+    } else {
+      // Appwrite (mobile) video — fetch from Appwrite as before
+      console.log('[playVideo] taking APPWRITE branch for videoId:', videoId);
+      video = await appwriteGet(APPWRITE.videosCollection, videoId);
+      if (!video) return;
+      if (video.uploader) {
+        try { uploader = await appwriteGet(APPWRITE.usersCollection, video.uploader); } catch {}
+      }
     }
 
     showVideoPlayer();
