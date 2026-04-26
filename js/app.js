@@ -54,6 +54,10 @@ async function onSignedIn(user) {
   updateTopbarUser();
   showApp();
 
+  // Load user's content filters (hidden posts, snoozed users, blocked users)
+  // — fire-and-forget; loadFeed will refresh them anyway
+  loadUserContentFilters();
+
   // Notifications — fetch initial batch + start realtime subscription
   initNotifications();
 
@@ -236,7 +240,7 @@ let _feedScrollObserver = null;
 let _feedVideoObserver = null;
 let _feedPostObserver = null;
 
-const FEED_SELECT = `*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`;
+const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`;
 
 window.loadFeed = async function() {
   const feed = document.getElementById('feed');
@@ -260,9 +264,12 @@ window.loadFeed = async function() {
 
   if (error) { feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`; return; }
 
-  posts = data || [];
-  if (posts.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
-  _feedOffset = posts.length;
+  // Refresh user content filters (hidden / snoozed / blocked) before rendering
+  await loadUserContentFilters();
+
+  posts = (data || []).filter(p => !shouldHidePost(p));
+  if ((data || []).length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
+  _feedOffset = (data || []).length;
 
   if (!posts.length) {
     feed.innerHTML = '<div class="empty"><h3>No posts yet</h3><p>Be the first to share something!</p></div>';
@@ -297,9 +304,10 @@ async function loadMoreFeed() {
 
     if (error) throw error;
 
-    const more = data || [];
-    if (more.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
-    _feedOffset += more.length;
+    const rawMore = data || [];
+    const more    = rawMore.filter(p => !shouldHidePost(p));
+    if (rawMore.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
+    _feedOffset += rawMore.length;
 
     if (more.length) {
       const feed = document.getElementById('feed');
@@ -406,7 +414,8 @@ function attachFeedVideoPlayers() {
 function renderPost(post) {
   const div = document.createElement('div');
   div.className = 'post-card';
-  div.dataset.postid = post.id;
+  div.dataset.postid  = post.id;
+  div.dataset.authorId = post.user_id || '';
 
   const profile = post.profiles || {};
   const name = profile.username || 'Unknown';
@@ -423,8 +432,17 @@ function renderPost(post) {
         </div>
         <div class="post-time">${timeAgo(post.created_at)}</div>
       </div>
-      ${currentUser && currentUser.id === post.user_id ? `
-        <button class="comment-action-btn" onclick="deletePost('${post.id}')" style="font-size:0.8rem">✕ Delete</button>
+      ${currentUser ? `
+        <button class="post-menu-btn"
+                onclick="openPostActionMenu(event, this)"
+                data-post-id="${post.id}"
+                data-is-own="${currentUser.id === post.user_id ? '1' : '0'}"
+                data-author-id="${post.user_id}"
+                data-author-name="${escHTML(name)}"
+                title="${currentUser.id === post.user_id ? 'Delete post' : 'Post options'}"
+                aria-label="${currentUser.id === post.user_id ? 'Delete post' : 'Post options'}">
+          <span class="post-menu-glyph">${currentUser.id === post.user_id ? '✕' : '⋮'}</span>
+        </button>
       ` : ''}
     </div>
 
@@ -619,6 +637,252 @@ window.deletePost = async (postId) => {
     loadVideos();
   }
 };
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST ACTION MENU — kebab menu on others' posts (Report / Hide / Snooze / Block)
+//                    minimalist ✕ on own posts (delete)
+// ════════════════════════════════════════════════════════════════════════════
+
+// Cache of the current user's content filter sets (refreshed on bootstrap + after actions)
+let userContentFilters = {
+  hiddenPostIds:    new Set(),
+  snoozedUserIds:   new Set(),
+  blockedUserIds:   new Set(),
+};
+
+async function loadUserContentFilters() {
+  if (!currentUser) {
+    userContentFilters = { hiddenPostIds: new Set(), snoozedUserIds: new Set(), blockedUserIds: new Set() };
+    return;
+  }
+  try {
+    const [hides, snoozes, blocks] = await Promise.all([
+      supabase.from('post_hides').select('post_id').eq('user_id', currentUser.id),
+      supabase.from('user_snoozes').select('target_user_id').eq('user_id', currentUser.id).gt('expires_at', new Date().toISOString()),
+      supabase.from('user_blocks').select('blocked_user_id').eq('user_id', currentUser.id),
+    ]);
+    userContentFilters.hiddenPostIds  = new Set((hides.data    || []).map(r => r.post_id));
+    userContentFilters.snoozedUserIds = new Set((snoozes.data  || []).map(r => r.target_user_id));
+    userContentFilters.blockedUserIds = new Set((blocks.data   || []).map(r => r.blocked_user_id));
+  } catch (e) {
+    console.warn('[filters] load failed (likely tables missing — run migration_post_actions.sql)', e);
+  }
+}
+window.loadUserContentFilters = loadUserContentFilters;
+
+function shouldHidePost(post) {
+  if (!post) return false;
+  if (userContentFilters.hiddenPostIds.has(post.id))      return true;
+  if (userContentFilters.snoozedUserIds.has(post.user_id))return true;
+  if (userContentFilters.blockedUserIds.has(post.user_id))return true;
+  return false;
+}
+window.shouldHidePost = shouldHidePost;
+
+let _postActionMenuEl = null;
+function closePostActionMenu() {
+  if (_postActionMenuEl) { _postActionMenuEl.remove(); _postActionMenuEl = null; }
+}
+
+window.openPostActionMenu = (e, btn) => {
+  e.stopPropagation();
+  e.preventDefault();
+  if (!currentUser) { toast('Please sign in', 'error'); return; }
+
+  const postId     = btn.dataset.postId;
+  const isOwn      = btn.dataset.isOwn === '1';
+  const authorId   = btn.dataset.authorId;
+  const authorName = btn.dataset.authorName || 'this user';
+
+  // Own post: skip menu, go straight to delete confirm (minimalist)
+  if (isOwn) { window.deletePost(postId); return; }
+
+  closePostActionMenu();
+  _postActionMenuEl = document.createElement('div');
+  _postActionMenuEl.className = 'post-action-menu';
+  _postActionMenuEl.innerHTML = `
+    <button data-pam-action="report"><span class="pam-icon">⚐</span><span>Report post</span></button>
+    <button data-pam-action="hide"><span class="pam-icon">🙈</span><span>Hide this post</span></button>
+    <button data-pam-action="snooze"><span class="pam-icon">🔕</span><span>Snooze ${escHTML(authorName)} · 30 days</span></button>
+    <button data-pam-action="block" class="pam-danger"><span class="pam-icon">🚫</span><span>Block ${escHTML(authorName)}</span></button>
+  `;
+  document.body.appendChild(_postActionMenuEl);
+
+  // Position: below button, right-aligned to button's right edge
+  const r = btn.getBoundingClientRect();
+  _postActionMenuEl.style.position = 'fixed';
+  _postActionMenuEl.style.top      = `${Math.min(r.bottom + 6, window.innerHeight - 240)}px`;
+  _postActionMenuEl.style.right    = `${Math.max(window.innerWidth - r.right, 12)}px`;
+
+  _postActionMenuEl.querySelectorAll('[data-pam-action]').forEach(b => {
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      const action = b.dataset.pamAction;
+      closePostActionMenu();
+      if      (action === 'report') openReportModal(postId);
+      else if (action === 'hide')   hidePostFromFeed(postId);
+      else if (action === 'snooze') snoozeAuthor(authorId, authorName);
+      else if (action === 'block')  blockAuthor(authorId, authorName);
+    };
+  });
+
+  // Click anywhere else / Escape → close
+  setTimeout(() => {
+    const onDocClick = (ev) => {
+      if (!_postActionMenuEl?.contains(ev.target)) {
+        closePostActionMenu();
+        document.removeEventListener('click',  onDocClick);
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    const onKey = (ev) => { if (ev.key === 'Escape') { closePostActionMenu(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocClick); } };
+    document.addEventListener('click',  onDocClick);
+    document.addEventListener('keydown', onKey);
+  }, 0);
+};
+
+async function hidePostFromFeed(postId) {
+  const { error } = await supabase.from('post_hides').upsert({
+    user_id: currentUser.id,
+    post_id: postId,
+  }, { onConflict: 'user_id,post_id' });
+  if (error) { toast(error.message, 'error'); return; }
+
+  userContentFilters.hiddenPostIds.add(postId);
+
+  // Smooth fade out, then remove from DOM
+  const card = document.querySelector(`.post-card[data-postid="${postId}"]`);
+  if (card) {
+    card.style.transition = 'opacity 0.25s, transform 0.25s, max-height 0.3s';
+    card.style.opacity = '0';
+    card.style.transform = 'scale(0.97)';
+    setTimeout(() => card.remove(), 280);
+  }
+  toast('Post hidden', 'success');
+}
+
+async function snoozeAuthor(targetId, targetName) {
+  const expires = new Date();
+  expires.setDate(expires.getDate() + 30);
+  const { error } = await supabase.from('user_snoozes').upsert({
+    user_id: currentUser.id,
+    target_user_id: targetId,
+    expires_at: expires.toISOString(),
+  }, { onConflict: 'user_id,target_user_id' });
+  if (error) { toast(error.message, 'error'); return; }
+
+  userContentFilters.snoozedUserIds.add(targetId);
+  toast(`${targetName} snoozed for 30 days`, 'success');
+
+  // Remove all their visible posts from current feed
+  document.querySelectorAll(`.post-card[data-author-id="${targetId}"]`).forEach(c => c.remove());
+}
+
+async function blockAuthor(targetId, targetName) {
+  const ok = await confirmDialog({
+    title: `Block ${targetName}?`,
+    body: 'You won\'t see their posts and they won\'t see yours. You\'ll also unfollow each other. You can unblock later in settings.',
+    confirmLabel: 'Block',
+  });
+  if (!ok) return;
+
+  const { error } = await supabase.from('user_blocks').upsert({
+    user_id: currentUser.id,
+    blocked_user_id: targetId,
+  }, { onConflict: 'user_id,blocked_user_id' });
+  if (error) { toast(error.message, 'error'); return; }
+
+  userContentFilters.blockedUserIds.add(targetId);
+  toast(`Blocked ${targetName}`, 'success');
+
+  document.querySelectorAll(`.post-card[data-author-id="${targetId}"]`).forEach(c => c.remove());
+}
+
+function openReportModal(postId) {
+  // Remove any existing modal
+  document.querySelectorAll('.modal-backdrop[data-modal="report"]').forEach(m => m.remove());
+
+  const reasons = [
+    ['spam',      'Spam',                'Repetitive, misleading, or scammy'],
+    ['harassment','Harassment',          'Bullying or targeting someone'],
+    ['hate',      'Hate speech',         'Attacks on identity or group'],
+    ['nsfw',      'NSFW / Adult content','Inappropriate for general audiences'],
+    ['self_harm', 'Self-harm',           'Suicide, self-injury, or eating disorders'],
+    ['other',     'Other',               'Something else'],
+  ];
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'report';
+  modal.innerHTML = `
+    <div class="modal-card report-modal" role="dialog" aria-labelledby="report-title">
+      <h2 id="report-title">Report post</h2>
+      <p class="modal-sub">Help us keep Selebox safe — pick what's wrong with this post.</p>
+      <div class="report-reasons">
+        ${reasons.map(([val, label, desc]) => `
+          <label class="report-reason">
+            <input type="radio" name="reason" value="${val}"/>
+            <div class="report-reason-text">
+              <div class="report-reason-title">${label}</div>
+              <div class="report-reason-desc">${desc}</div>
+            </div>
+          </label>
+        `).join('')}
+      </div>
+      <textarea class="report-details" placeholder="Optional context (max 500 characters)" maxlength="500"></textarea>
+      <div class="modal-actions">
+        <button class="btn-ghost"   data-action="cancel">Cancel</button>
+        <button class="btn-primary" data-action="submit" disabled>Submit report</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const submitBtn = modal.querySelector('[data-action="submit"]');
+  modal.querySelectorAll('input[name="reason"]').forEach(r => {
+    r.addEventListener('change', () => {
+      submitBtn.disabled = false;
+      modal.querySelectorAll('.report-reason').forEach(rr => rr.classList.toggle('checked', rr.querySelector('input').checked));
+    });
+  });
+
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+  document.addEventListener('keydown', function onKey(ev) {
+    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+
+  submitBtn.onclick = async () => {
+    const reason  = modal.querySelector('input[name="reason"]:checked')?.value;
+    const details = modal.querySelector('.report-details').value.trim();
+    if (!reason) return;
+
+    submitBtn.disabled    = true;
+    submitBtn.textContent = 'Submitting…';
+
+    const { error } = await supabase.from('post_reports').insert({
+      reporter_id: currentUser.id,
+      post_id:     postId,
+      reason,
+      details:     details || null,
+    });
+
+    if (error) {
+      if (/duplicate|unique/i.test(error.message)) {
+        toast('You already reported this post', 'success');
+        close();
+      } else {
+        toast(error.message, 'error');
+        submitBtn.disabled    = false;
+        submitBtn.textContent = 'Submit report';
+      }
+      return;
+    }
+    toast('Report submitted — thanks for keeping Selebox safe', 'success');
+    close();
+  };
+}
 
 async function loadCommentCount(postId, videoId = null) {
   if (videoId) {
@@ -1160,7 +1424,7 @@ async function loadProfilePosts(userId) {
   wrap.innerHTML = '<div class="loading">Loading posts...</div>';
   const { data } = await supabase
     .from('posts')
-    .select(`*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
+    .select(`*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(40);
@@ -1633,7 +1897,7 @@ async function runFeedSearch(query) {
 
   const [{ data: profiles }, { data: posts }] = await Promise.all([
     supabase.from('profiles').select('*').ilike('username', `%${query}%`).limit(5),
-    supabase.from('posts').select('*, profiles(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
+    supabase.from('posts').select('*, profiles!user_id(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
   ]);
 
   let html = '';
@@ -4765,30 +5029,303 @@ async function playVideo(videoId) {
     addToWatchHistory(video, uploader);
     loadUpNext(video);
 
-    // Comments — only available for Supabase-uploaded videos
-    setupVideoComments(video);
+    // Each setup is independent — wrap so one failing path doesn't kill the others
+    try { setupVideoActions(video); }       catch (e) { console.warn('setupVideoActions failed:', e); }
+    try { setupVideoComments(video); }      catch (e) { console.warn('setupVideoComments failed:', e); }
+    try { setupCreatorFollow(video, uploader); } catch (e) { console.warn('setupCreatorFollow failed:', e); }
+    try { setupDescriptionToggle(); }       catch (e) { console.warn('setupDescriptionToggle failed:', e); }
   } catch (error) {
     toast('Couldn\'t load video: ' + error.message, 'error');
   }
 }
 
+// ── Follow-the-creator button on the video player ──
+// Always visible (except on your own video). Falls back to a friendly toast
+// when the creator is mobile-only (no matching Supabase profile).
+async function setupCreatorFollow(video, uploader) {
+  const btn = document.getElementById('btnFollowCreator');
+  if (!btn) return;
+  btn.style.display = 'none';
+  btn.disabled = false;
+  btn.classList.remove('following');
+  btn.onclick = null;
+  if (!currentUser) return;
+
+  const isSupabaseVideo = !!resolveSupabaseVideoId(video);
+  const username = uploader?.username || video?.uploader?.username || null;
+  let creatorId = null;
+
+  if (isSupabaseVideo) {
+    creatorId =
+         uploader?.id
+      || uploader?.$id
+      || video?.author_id
+      || video?.uploader
+      || video?._uploaderInfo?.$id
+      || video?._uploaderInfo?.id
+      || null;
+    if (creatorId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(creatorId)) {
+      creatorId = null;
+    }
+  } else if (username) {
+    const { data: matchingProfile } = await supabase
+      .from('profiles')
+      .select('id')
+      .ilike('username', username)
+      .maybeSingle();
+    creatorId = matchingProfile?.id || null;
+  }
+
+  if (creatorId === currentUser.id) return;   // your own video → hide
+
+  // Always show the button. Behavior depends on whether we resolved a profile.
+  btn.style.display = 'inline-flex';
+
+  // CASE A: creator has a Supabase profile → full follow flow
+  if (creatorId) {
+    const setFollowingState = (isFollowing) => {
+      if (isFollowing) {
+        btn.classList.add('following');
+        btn.textContent = '✓ Following';
+      } else {
+        btn.classList.remove('following');
+        btn.textContent = '+ Follow';
+      }
+    };
+
+    const { data: existing } = await supabase
+      .from('follows')
+      .select('follower_id')
+      .eq('follower_id', currentUser.id)
+      .eq('following_id', creatorId)
+      .maybeSingle();
+    setFollowingState(!!existing);
+
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const wasFollowing = btn.classList.contains('following');
+      setFollowingState(!wasFollowing);   // optimistic
+      let error = null;
+      if (wasFollowing) {
+        ({ error } = await supabase.from('follows').delete()
+          .eq('follower_id', currentUser.id).eq('following_id', creatorId));
+      } else {
+        ({ error } = await supabase.from('follows').insert({
+          follower_id: currentUser.id, following_id: creatorId,
+        }));
+      }
+      btn.disabled = false;
+      if (error) {
+        setFollowingState(wasFollowing);
+        toast('Couldn\'t update follow: ' + error.message, 'error');
+      } else {
+        toast(wasFollowing ? 'Unfollowed' : 'Following!', 'success');
+      }
+    };
+    return;
+  }
+
+  // CASE B: legacy creator without a Supabase profile → show button, friendly toast
+  btn.textContent = '+ Follow';
+  btn.classList.remove('following');
+  btn.onclick = () => {
+    const who = username ? `@${username}` : 'this creator';
+    toast(`${who} is on the mobile app — follow them there for now.`, 'error');
+  };
+  return;
+
+  const setFollowingState = (isFollowing) => {
+    if (isFollowing) {
+      btn.classList.add('following');
+      btn.textContent = '✓ Following';
+    } else {
+      btn.classList.remove('following');
+      btn.textContent = '+ Follow';
+    }
+  };
+
+  // Initial state lookup
+  const { data: existing } = await supabase
+    .from('follows')
+    .select('follower_id')
+    .eq('follower_id', currentUser.id)
+    .eq('following_id', creatorId)
+    .maybeSingle();
+  setFollowingState(!!existing);
+
+  btn.onclick = async () => {
+    btn.disabled = true;
+    const wasFollowing = btn.classList.contains('following');
+    setFollowingState(!wasFollowing);   // optimistic
+    let error = null;
+    if (wasFollowing) {
+      ({ error } = await supabase.from('follows').delete()
+        .eq('follower_id', currentUser.id).eq('following_id', creatorId));
+    } else {
+      ({ error } = await supabase.from('follows').insert({
+        follower_id: currentUser.id, following_id: creatorId,
+      }));
+    }
+    btn.disabled = false;
+    if (error) {
+      // Revert on failure
+      setFollowingState(wasFollowing);
+      toast('Couldn\'t update follow: ' + error.message, 'error');
+    } else {
+      toast(wasFollowing ? 'Unfollowed' : 'Following!', 'success');
+    }
+  };
+}
+
+// ── Description "Show more" toggle (4-line clamp) ──
+function setupDescriptionToggle() {
+  const desc   = document.getElementById('videoDescription');
+  const toggle = document.getElementById('videoDescriptionToggle');
+  if (!desc || !toggle) return;
+
+  // Reset state so navigating between videos doesn't carry over
+  desc.classList.remove('expanded');
+  toggle.style.display = 'none';
+  toggle.textContent = 'Show more';
+
+  // Wait one frame for the new text to lay out, then check overflow
+  requestAnimationFrame(() => {
+    if (desc.scrollHeight > desc.clientHeight + 2) {
+      toggle.style.display = 'inline-block';
+    }
+  });
+
+  toggle.onclick = () => {
+    const expanded = desc.classList.toggle('expanded');
+    toggle.textContent = expanded ? 'Show less' : 'Show more';
+  };
+}
+
+// Resolve the Supabase video ID from whatever shape `video` happens to be
+function resolveSupabaseVideoId(video) {
+  if (!video) return null;
+  if (video._supabaseId) return video._supabaseId;
+  if (video._supabase && video.id) return video.id;
+  if (typeof video.$id === 'string' && video.$id.startsWith('sb_')) return video.$id.slice(3);
+  return null;
+}
+
 // Wire up the comment section on the video player page.
-// Only shows for Supabase-uploaded videos (legacy Appwrite videos don't have a comments-side schema in Supabase).
+// Works for BOTH Supabase-uploaded videos (UUID id) and legacy Appwrite videos
+// (text id). After migration_video_comments_legacy.sql, comments.video_id is text
+// so it can hold either format.
 function setupVideoComments(video) {
   const wrap = document.getElementById('videoCommentsWrap');
-  if (!wrap) return;
-  const isSupabase = !!(video?._supabase || video?._supabaseId);
-  const supabaseVideoId = video?._supabaseId || (video?.$id?.startsWith?.('sb_') ? video.$id.slice(3) : null);
+  if (!wrap) {
+    console.warn('[video] videoCommentsWrap missing from the DOM — index.html may be stale');
+    return;
+  }
+  const supabaseId = resolveSupabaseVideoId(video);
+  // Pick whichever id this video has. Supabase ID wins if present.
+  const videoIdForComments = supabaseId || video?.$id || null;
 
-  if (!isSupabase || !supabaseVideoId) {
+  if (!videoIdForComments) {
     wrap.style.display = 'none';
     return;
   }
 
-  wrap.style.display = '';
-  document.getElementById('videoCommentsCount').textContent = '';
-  loadComments(null, supabaseVideoId);
-  loadCommentCount(null, supabaseVideoId);
+  // Make sure the wrap is visible (override any stale inline display:none)
+  wrap.style.display = 'block';
+  const countEl = document.getElementById('videoCommentsCount');
+  if (countEl) countEl.textContent = '';
+  loadComments(null, videoIdForComments);
+  loadCommentCount(null, videoIdForComments);
+}
+
+// ── VIDEO ACTIONS: Like / Repost / Share ──
+let _currentVideoCtx = null;   // { supabaseId, appwriteId, title, post_id }
+
+async function setupVideoActions(video) {
+  const actionsBar = document.getElementById('videoActions');
+  if (!actionsBar) return;
+
+  const supabaseVideoId = resolveSupabaseVideoId(video);
+  const legacyVideoId   = !supabaseVideoId ? (video?.$id || null) : null;
+  const isLegacy        = !supabaseVideoId;
+  // Polymorphic id used for the reactions table — works for both Supabase and legacy now
+  const videoIdForActions = supabaseVideoId || legacyVideoId;
+
+  const reactionWrap = actionsBar.querySelector('.reaction-wrap[data-type="video"]');
+  const reactionBtn  = actionsBar.querySelector('.reaction-trigger[data-type="video"]');
+  const picker       = actionsBar.querySelector('.reaction-picker');
+
+  // Like button — works for both Supabase and legacy videos via the polymorphic
+  // reactions.target_id (now text after migration_reactions_legacy.sql).
+  if (videoIdForActions) {
+    reactionWrap.style.display = '';
+    reactionWrap.dataset.target = videoIdForActions;
+    reactionBtn.dataset.target  = videoIdForActions;
+    reactionBtn.onclick = null;     // restore default reaction-picker behavior
+    picker.style.display = '';
+    picker.innerHTML = REACTIONS.map(r => `
+      <button class="reaction-option" data-key="${r.key}" data-target="${videoIdForActions}" data-type="video" title="${r.label}">
+        <span class="r-emoji">${r.emoji}</span>
+        <span class="r-label">${r.label}</span>
+      </button>
+    `).join('');
+    loadReactions(videoIdForActions, 'video');
+  } else {
+    reactionWrap.style.display = 'none';
+  }
+
+  // Repost — always show. Supabase: real repost via the auto-created post.
+  // Legacy: friendly toast (we can't repost into the posts table without a video_id FK).
+  const repostBtn = document.getElementById('videoRepostBtn');
+  repostBtn.style.display = '';
+  let postIdForRepost = null;
+  if (supabaseVideoId) {
+    const { data: postRow } = await supabase
+      .from('posts')
+      .select('id')
+      .eq('video_id', supabaseVideoId)
+      .maybeSingle();
+    postIdForRepost = postRow?.id || null;
+  }
+  if (postIdForRepost) {
+    repostBtn.onclick = () => repostPost(postIdForRepost);
+  } else if (isLegacy) {
+    repostBtn.onclick = () => toast('Reposting legacy videos is coming soon — share the link instead.', 'error');
+  } else {
+    repostBtn.onclick = () => toast('This video has no original post to repost.', 'error');
+  }
+
+  // Share — always works. Opens the menu, options pick the platform.
+  const shareBtn  = document.getElementById('videoShareBtn');
+  const shareMenu = document.getElementById('videoShareMenu');
+  shareBtn.onclick = (e) => {
+    e.stopPropagation();
+    shareMenu.classList.toggle('visible');
+  };
+  shareMenu.querySelectorAll('.share-option').forEach(opt => {
+    opt.onclick = (e) => {
+      e.stopPropagation();
+      shareMenu.classList.remove('visible');
+      const platform = opt.dataset.platform;
+      const fragId = supabaseVideoId ? 'sb_' + supabaseVideoId : (video.$id || '');
+      const url = `${window.location.origin}/#video/${fragId}`;
+      const text = encodeURIComponent(video.title || 'Check out this video on Selebox');
+      const shareUrl = encodeURIComponent(url);
+      if (platform === 'copy') {
+        navigator.clipboard?.writeText(url).then(
+          () => toast('Link copied', 'success'),
+          () => toast('Could not copy link', 'error')
+        );
+      } else if (platform === 'facebook') {
+        window.open(`https://www.facebook.com/sharer/sharer.php?u=${shareUrl}`, '_blank');
+      } else if (platform === 'twitter') {
+        window.open(`https://twitter.com/intent/tweet?text=${text}&url=${shareUrl}`, '_blank');
+      } else if (platform === 'whatsapp') {
+        window.open(`https://wa.me/?text=${text}%20${shareUrl}`, '_blank');
+      }
+    };
+  });
+
+  _currentVideoCtx = { supabaseId: supabaseVideoId, appwriteId: video?.$id || null, title: video?.title || '' };
 }
 
 // Update popstate to handle videos
@@ -5050,9 +5587,12 @@ async function onNotificationClick(notifId) {
     const bookId = n.parent_target_type === 'book' ? n.parent_target_id : null;
     if (bookId) openBookDetail(bookId);
   } else if (n.target_type === 'video' || n.parent_target_type === 'video') {
-    // playVideo expects the prefixed cache id ("sb_<uuid>") for Supabase videos
-    const vid = n.target_type === 'video' ? n.target_id : n.parent_target_id;
-    if (vid) playVideo('sb_' + vid);
+    // Supabase videos: target_id / parent_target_id is a UUID → prefix "sb_" for playVideo.
+    // Legacy videos: target/parent UUIDs are null; the Appwrite id rides in metadata.
+    const supabaseUuid = n.target_type === 'video' ? n.target_id : n.parent_target_id;
+    const legacyId     = n.metadata?.video_legacy_id || null;
+    if (supabaseUuid)      playVideo('sb_' + supabaseUuid);
+    else if (legacyId)     playVideo(legacyId);
   } else if (n.parent_target_type === 'post' || n.target_type === 'post') {
     // We don't have post-detail pages yet — drop them on Home so they can find it
     setSidebarActive('btnHome');
