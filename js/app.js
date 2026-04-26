@@ -1917,6 +1917,7 @@ async function fetchSupabaseBooks() {
 }
 
 // ── Appwrite books (legacy mobile) ──
+// Stats (views/likes/chapter counts) are loaded lazily per-card after render.
 async function fetchAppwriteBooks() {
   if (!APPWRITE.booksCollection) return [];
   try {
@@ -1925,19 +1926,18 @@ async function fetchAppwriteBooks() {
       JSON.stringify({ method: 'limit', values: [80] }),
     ]);
     const books = result.documents || [];
-    const bookIds = books.map(b => b.$id);
-
-    // Run uploader-resolution + stats aggregation in parallel
-    const [userMap, stats] = await Promise.all([
-      fetchAppwriteUsers(collectAppwriteUploaderIds(books)),
-      fetchAppwriteBookStats(bookIds),
-    ]);
+    const userMap = await fetchAppwriteUsers(collectAppwriteUploaderIds(books));
 
     return books.map(b => {
       const mapped = mapAppwriteBookToBook(b, userMap);
-      mapped.views_count    = stats.views[b.$id]         || 0;
-      mapped.likes_count    = stats.likes[b.$id]         || 0;
-      mapped.chapters_count = stats.chaptersCount[b.$id] || 0;
+      // Pre-fill from cache if available (otherwise stays 0; lazy fetch will update later)
+      const cached = getCachedAppwriteStats(b.$id);
+      if (cached) {
+        mapped.views_count    = cached.views;
+        mapped.likes_count    = cached.likes;
+        mapped.chapters_count = cached.chaptersCount;
+        mapped._statsLoaded   = true;     // skip lazy fetch for this one
+      }
       return mapped;
     });
   } catch (err) {
@@ -2182,11 +2182,162 @@ function renderBooks() {
     card.style.animationDelay = `${i * 0.025}s`;
     grid.appendChild(card);
   });
+
+  // Set up lazy stats loading for Appwrite cards that don't have cached values yet
+  setupAppwriteStatsLazyLoad(grid);
+}
+
+// ════════════════════════════════════════
+// LAZY STATS LOADING (Appwrite books)
+// ════════════════════════════════════════
+
+const STATS_CACHE_KEY = 'selebox_book_stats_v1';
+const STATS_CACHE_TTL_MS = 5 * 60 * 1000;   // 5 minutes
+
+function getCachedAppwriteStats(appwriteBookId) {
+  try {
+    const raw = localStorage.getItem(STATS_CACHE_KEY);
+    if (!raw) return null;
+    const cache = JSON.parse(raw);
+    const e = cache[appwriteBookId];
+    if (!e) return null;
+    if (Date.now() - (e.ts || 0) > STATS_CACHE_TTL_MS) return null;
+    return { views: e.views || 0, likes: e.likes || 0, chaptersCount: e.chaptersCount || 0 };
+  } catch { return null; }
+}
+
+function setCachedAppwriteStats(appwriteBookId, stats) {
+  try {
+    const raw = localStorage.getItem(STATS_CACHE_KEY);
+    const cache = raw ? JSON.parse(raw) : {};
+    // Light pruning: drop entries older than 1 hour to bound size
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const k of Object.keys(cache)) {
+      if ((cache[k]?.ts || 0) < cutoff) delete cache[k];
+    }
+    cache[appwriteBookId] = { ...stats, ts: Date.now() };
+    localStorage.setItem(STATS_CACHE_KEY, JSON.stringify(cache));
+  } catch { /* localStorage full or disabled */ }
+}
+
+let _statsObserver = null;
+let _statsBatchQueue = new Set();
+let _statsBatchTimer = null;
+
+function setupAppwriteStatsLazyLoad(grid) {
+  // Tear down any previous observer (e.g. when filter changes)
+  if (_statsObserver) _statsObserver.disconnect();
+  _statsObserver = null;
+  _statsBatchQueue.clear();
+  if (_statsBatchTimer) { clearTimeout(_statsBatchTimer); _statsBatchTimer = null; }
+
+  if (!('IntersectionObserver' in window)) {
+    // Old browser: just kick off all pending stats at once
+    const ids = Array.from(grid.querySelectorAll('.book-card[data-appwrite-id]:not([data-stats-loaded="true"])'))
+      .map(el => el.dataset.appwriteId);
+    if (ids.length) flushAppwriteStatsBatch(ids);
+    return;
+  }
+
+  _statsObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const card = entry.target;
+      const awId = card.dataset.appwriteId;
+      if (!awId || card.dataset.statsLoaded === 'true' || card.dataset.statsPending === 'true') continue;
+      card.dataset.statsPending = 'true';
+      _statsBatchQueue.add(awId);
+      _statsObserver.unobserve(card);
+    }
+    if (_statsBatchTimer) clearTimeout(_statsBatchTimer);
+    // Coalesce IDs that show up in the same scroll burst
+    _statsBatchTimer = setTimeout(() => {
+      const ids = Array.from(_statsBatchQueue);
+      _statsBatchQueue.clear();
+      _statsBatchTimer = null;
+      if (ids.length) flushAppwriteStatsBatch(ids);
+    }, 120);
+  }, {
+    root: null,
+    rootMargin: '200px 0px',           // start fetching slightly before card enters viewport
+    threshold: 0.01,
+  });
+
+  grid.querySelectorAll('.book-card[data-appwrite-id]:not([data-stats-loaded="true"])').forEach(c => {
+    _statsObserver.observe(c);
+  });
+}
+
+// Tracks whether we've done the "fetch everything once" pass for this session
+let _allAppwriteStatsFetched = false;
+
+async function flushAppwriteStatsBatch(appwriteBookIds) {
+  if (!appwriteBookIds || !appwriteBookIds.length) return;
+
+  // Cache check first — pull anything fresh from cache so we don't refetch
+  const fromCache = {};
+  const needsFetch = [];
+  for (const id of appwriteBookIds) {
+    const c = getCachedAppwriteStats(id);
+    if (c) fromCache[id] = c;
+    else needsFetch.push(id);
+  }
+  Object.entries(fromCache).forEach(([id, s]) => updateBookCardStats(id, s));
+
+  if (!needsFetch.length) return;
+
+  // First time we hit this code in a session: aggregate stats for ALL Appwrite books at once.
+  // The underlying fetch reads the whole reads/chapters/likes collections regardless, so
+  // it costs the same as fetching for one book — and pre-warms the cache for everything.
+  // After this, scrolling instantly hits the cache for all subsequent cards.
+  let idsToFetch = needsFetch;
+  if (!_allAppwriteStatsFetched) {
+    const everyAppwriteId = allBooksCache.filter(b => b._appwrite).map(b => b._appwriteId);
+    if (everyAppwriteId.length > needsFetch.length) idsToFetch = everyAppwriteId;
+    _allAppwriteStatsFetched = true;
+  }
+
+  let stats = { views: {}, likes: {}, chaptersCount: {} };
+  try {
+    stats = await fetchAppwriteBookStats(idsToFetch);
+  } catch (e) { /* swallowed; cards keep dashes */ }
+
+  for (const id of idsToFetch) {
+    const s = {
+      views: stats.views[id] || 0,
+      likes: stats.likes[id] || 0,
+      chaptersCount: stats.chaptersCount[id] || 0,
+    };
+    setCachedAppwriteStats(id, s);
+    updateBookCardStats(id, s);
+  }
+}
+
+function updateBookCardStats(appwriteBookId, stats) {
+  const card = document.querySelector(`.book-card[data-appwrite-id="${appwriteBookId}"]`);
+  if (!card) return;
+  const v = card.querySelector('[data-stat="views"]');
+  const l = card.querySelector('[data-stat="likes"]');
+  if (v) v.textContent = `👁 ${formatCompact(stats.views || 0)}`;
+  if (l) l.textContent = `❤ ${formatCompact(stats.likes || 0)}`;
+  card.dataset.statsLoaded = 'true';
+  card.dataset.statsPending = '';
+  // Keep the in-memory book object in sync so sorting / detail page reflects the truth
+  const cached = allBooksCache.find(b => b._appwriteId === appwriteBookId);
+  if (cached) {
+    cached.views_count = stats.views || 0;
+    cached.likes_count = stats.likes || 0;
+    cached.chapters_count = stats.chaptersCount || 0;
+    cached._statsLoaded = true;
+  }
 }
 
 function renderBookCard(b) {
   const card = document.createElement('button');
   card.className = 'book-card';
+  card.dataset.bookId = b.id;                // for IntersectionObserver lookup
+  if (b._appwrite) card.dataset.appwriteId = b._appwriteId;
+  if (b._statsLoaded) card.dataset.statsLoaded = 'true';
   card.onclick = () => openBookDetail(b.id);
 
   const authorName = b.author?.username || 'Unknown author';
@@ -2197,13 +2348,19 @@ function renderBookCard(b) {
   const legacyBadge = b._appwrite ? '<span class="book-cover-badge legacy">Legacy</span>' : '';
   const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
 
+  // For Appwrite books without cached stats, show a dash placeholder
+  // (Supabase books already have correct inline counts on the row)
+  const statsLoaded = !b._appwrite || b._statsLoaded;
+  const viewsText = statsLoaded ? formatCompact(b.views_count || 0) : '—';
+  const likesText = statsLoaded ? formatCompact(b.likes_count || 0) : '—';
+
   card.innerHTML = `
     <div class="book-cover">
       ${cover}
       ${legacyBadge}
       <div class="book-stats">
-        <span title="Views">👁 ${(b.views_count || 0).toLocaleString()}</span>
-        <span title="Likes">❤ ${(b.likes_count || 0).toLocaleString()}</span>
+        <span title="Views" data-stat="views">👁 ${viewsText}</span>
+        <span title="Likes" data-stat="likes">❤ ${likesText}</span>
       </div>
     </div>
     ${genreLabel ? `<div class="book-card-genre">${escHTML(genreLabel)}</div>` : ''}
@@ -2211,6 +2368,14 @@ function renderBookCard(b) {
     <p class="book-card-author">by ${escHTML(authorName)}</p>
   `;
   return card;
+}
+
+// Format a number compactly: 1234 → "1.2k", 1500000 → "1.5M"
+function formatCompact(n) {
+  if (n == null) return '0';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return (n / 1000).toFixed(n < 10000 ? 1 : 0).replace(/\.0$/, '') + 'k';
+  return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
 }
 
 // Wire up genre chips + sort
@@ -2243,17 +2408,28 @@ async function openBookDetail(bookId) {
     if (bookId.startsWith('aw_')) {
       // ── Appwrite book ──
       const appwriteId = bookId.slice(3);
-      const [appwriteBookDoc, awChapters, stats] = await Promise.all([
+      // Always need book doc + chapters; stats come from cache if fresh, else aggregated
+      const cachedStats = getCachedAppwriteStats(appwriteId);
+      const [appwriteBookDoc, awChapters, statsResult] = await Promise.all([
         appwriteGet(APPWRITE.booksCollection, appwriteId),
         fetchAppwriteChaptersForBook(appwriteId),
-        fetchAppwriteBookStats([appwriteId]),
+        cachedStats ? Promise.resolve(null) : fetchAppwriteBookStats([appwriteId]),
       ]);
       // If the uploader didn't come back expanded, fetch the user record
       const uploaderIds = collectAppwriteUploaderIds([appwriteBookDoc]);
       const userMap = await fetchAppwriteUsers(uploaderIds);
       book = mapAppwriteBookToBook(appwriteBookDoc, userMap);
-      book.views_count    = stats.views[appwriteId]         || 0;
-      book.likes_count    = stats.likes[appwriteId]         || 0;
+
+      const resolvedStats = cachedStats || {
+        views: statsResult?.views?.[appwriteId] || 0,
+        likes: statsResult?.likes?.[appwriteId] || 0,
+        chaptersCount: awChapters.filter(c => c.is_published).length,
+      };
+      // Persist to cache when fresh
+      if (!cachedStats) setCachedAppwriteStats(appwriteId, resolvedStats);
+
+      book.views_count    = resolvedStats.views;
+      book.likes_count    = resolvedStats.likes;
       book.chapters_count = awChapters.filter(c => c.is_published).length;
       chapters = awChapters.filter(c => c.is_published);
     } else {
