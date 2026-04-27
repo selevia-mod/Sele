@@ -95,6 +95,9 @@ async function onSignedIn(user) {
   } else if (hash.startsWith('#video/')) {
     setSidebarActive('btnVideos');
     playVideo(hash.replace('#video/', ''));
+  } else if (hash === '#bookmarks') {
+    setSidebarActive('btnBookmarks');
+    showBookmarks();
   } else {
     loadStories();
     loadFeed();
@@ -547,6 +550,31 @@ function escHTML(str) {
 function linkify(str) {
   const escaped = escHTML(str);
   return escaped.replace(/(https?:\/\/[^\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+// Translate vertical mouse-wheel scrolling into horizontal scroll on chip rails
+// (Trackpads already do this natively; this fixes mouse-wheel users.)
+function enableHorizontalWheelScroll(el) {
+  if (!el || el.dataset.wheelBound === '1') return;
+  el.dataset.wheelBound = '1';
+  el.addEventListener('wheel', (e) => {
+    // If user is scrolling more vertically than horizontally, redirect to horizontal scroll
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    }
+  }, { passive: false });
+}
+
+// Wire it up for both chip rails as soon as DOM is ready
+function setupChipRailScrolling() {
+  enableHorizontalWheelScroll(document.getElementById('bookGenreChips'));
+  enableHorizontalWheelScroll(document.getElementById('videoSearchTags'));
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', setupChipRailScrolling);
+} else {
+  setupChipRailScrolling();
 }
 
 // ── Link previews (YouTube thumbnail + generic favicon fallback) ──
@@ -2458,6 +2486,7 @@ const bookPage = document.getElementById('bookPage');
 const authorPage = document.getElementById('authorPage');
 const bookDetailPage = document.getElementById('bookDetailPage');
 const chapterReaderPage = document.getElementById('chapterReaderPage');
+const bookmarksPage = document.getElementById('bookmarksPage');  // Hoisted here (used by hideAllMainPages)
 
 // Hide every main content page; show functions call this first then set their own page to block.
 function hideAllMainPages() {
@@ -2472,6 +2501,7 @@ function hideAllMainPages() {
   if (authorPage) authorPage.style.display = 'none';
   if (bookDetailPage) bookDetailPage.style.display = 'none';
   if (chapterReaderPage) chapterReaderPage.style.display = 'none';
+  if (bookmarksPage) bookmarksPage.style.display = 'none';
   // Sibling sentinels (live outside the page divs) — also hide
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel) feedSentinel.style.display = 'none';
@@ -2580,8 +2610,8 @@ async function loadBooks() {
   _isLoadingMoreBooks = false;
 
   // Kick off recommendation rail + adaptive chip render in parallel (don't block grid)
-  loadBookRecommendations().catch(() => {});
-  renderBookChips().catch(() => {});
+  loadBookRecommendations().catch(e => console.warn('[recs] failed', e));
+  renderBookChips().catch(e => console.warn('[chips] failed', e));
 
   try {
     // First-page Appwrite fetch + full Supabase fetch (Supabase is small and shouldn't paginate)
@@ -3699,13 +3729,14 @@ function renderBookDetail() {
               📱 From mobile (read-only on web)
             </span>
           ` : `
-            <button class="btn btn-ghost btn-sm" id="btnLikeBook">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-              Like
+            <button class="btn btn-ghost btn-sm book-action-btn" id="btnLikeBook" data-active="0">
+              <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+              <span class="book-action-label">Like</span>
+              <span class="book-action-count" id="btnLikeBookCount">${(book.likes_count || 0).toLocaleString()}</span>
             </button>
-            <button class="btn btn-ghost btn-sm" id="btnBookmarkBook">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-              Bookmark
+            <button class="btn btn-ghost btn-sm book-action-btn" id="btnBookmarkBook" data-active="0">
+              <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+              <span class="book-action-label">Bookmark</span>
             </button>
           `}
         </div>
@@ -3724,30 +3755,111 @@ function renderBookDetail() {
   });
   // Start reading → first unread chapter (or chapter 1)
   document.getElementById('btnStartReading')?.addEventListener('click', () => openChapterReader(0));
-  document.getElementById('btnLikeBook')?.addEventListener('click', () => toggleBookLike(book.id));
-  document.getElementById('btnBookmarkBook')?.addEventListener('click', () => toggleBookBookmark(book.id));
+
+  // Wire like + bookmark — only for Supabase books (legacy Appwrite books are read-only on web)
+  if (!book._appwrite) {
+    const likeBtn = document.getElementById('btnLikeBook');
+    const bookmarkBtn = document.getElementById('btnBookmarkBook');
+    likeBtn?.addEventListener('click', () => toggleBookLike(book.id));
+    bookmarkBtn?.addEventListener('click', () => toggleBookBookmark(book.id));
+    // Load initial state (whether the user has already liked/bookmarked)
+    loadBookActionState(book.id);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Load initial like/bookmark state for the current book + render visual
+// ────────────────────────────────────────────────────────────────────────
+async function loadBookActionState(bookId) {
+  if (!currentUser) return;
+  try {
+    const [{ data: like }, { data: bm }] = await Promise.all([
+      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle(),
+      supabase.from('book_bookmarks').select('book_id').eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle(),
+    ]);
+    setBookActionActive('btnLikeBook',     !!like);
+    setBookActionActive('btnBookmarkBook', !!bm);
+  } catch (e) { /* non-fatal */ }
+}
+
+function setBookActionActive(buttonId, active) {
+  const btn = document.getElementById(buttonId);
+  if (!btn) return;
+  btn.dataset.active = active ? '1' : '0';
+  // Fill the SVG icon when active (heart filled, bookmark filled)
+  const icon = btn.querySelector('.book-action-icon');
+  if (icon) icon.setAttribute('fill', active ? 'currentColor' : 'none');
+  // Update label
+  const label = btn.querySelector('.book-action-label');
+  if (label) {
+    if (buttonId === 'btnLikeBook')      label.textContent = active ? 'Liked' : 'Like';
+    if (buttonId === 'btnBookmarkBook')  label.textContent = active ? 'Saved' : 'Bookmark';
+  }
 }
 
 async function toggleBookLike(bookId) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) { toast('Sign in to like books', 'error'); return; }
-  // Try delete first; if no row, insert.
-  const { count } = await supabase.from('book_likes').delete()
-    .eq('user_id', user.id).eq('book_id', bookId).select('*', { count: 'exact', head: true });
-  if (count) { toast('Removed like', 'success'); return; }
-  const { error } = await supabase.from('book_likes').insert({ user_id: user.id, book_id: bookId });
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  toast('Liked', 'success');
+  if (!currentUser) { toast('Sign in to like books', 'error'); return; }
+  const btn  = document.getElementById('btnLikeBook');
+  const wasActive = btn?.dataset.active === '1';
+  const countEl   = document.getElementById('btnLikeBookCount');
+
+  // Optimistic UI — flip immediately
+  setBookActionActive('btnLikeBook', !wasActive);
+  if (countEl) {
+    const cur = parseInt(countEl.textContent.replace(/[^\d]/g, ''), 10) || 0;
+    const next = wasActive ? Math.max(0, cur - 1) : cur + 1;
+    countEl.textContent = next.toLocaleString();
+    if (currentBookDetail?.book) currentBookDetail.book.likes_count = next;
+  }
+
+  try {
+    if (wasActive) {
+      const { error } = await supabase.from('book_likes')
+        .delete()
+        .eq('user_id', currentUser.id)
+        .eq('book_id', bookId);
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from('book_likes')
+        .insert({ user_id: currentUser.id, book_id: bookId });
+      // Ignore duplicate-key (already liked from another tab); other errors throw
+      if (error && !/duplicate|unique/i.test(error.message)) throw error;
+    }
+  } catch (e) {
+    // Revert optimistic UI on error
+    setBookActionActive('btnLikeBook', wasActive);
+    if (countEl) {
+      const cur = parseInt(countEl.textContent.replace(/[^\d]/g, ''), 10) || 0;
+      countEl.textContent = (wasActive ? cur + 1 : Math.max(0, cur - 1)).toLocaleString();
+    }
+    toast('Failed: ' + (e.message || e), 'error');
+  }
 }
+
 async function toggleBookBookmark(bookId) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) { toast('Sign in to bookmark books', 'error'); return; }
-  const { count } = await supabase.from('book_bookmarks').delete()
-    .eq('user_id', user.id).eq('book_id', bookId).select('*', { count: 'exact', head: true });
-  if (count) { toast('Removed bookmark', 'success'); return; }
-  const { error } = await supabase.from('book_bookmarks').insert({ user_id: user.id, book_id: bookId });
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  toast('Bookmarked', 'success');
+  if (!currentUser) { toast('Sign in to bookmark books', 'error'); return; }
+  const btn = document.getElementById('btnBookmarkBook');
+  const wasActive = btn?.dataset.active === '1';
+
+  // Optimistic UI
+  setBookActionActive('btnBookmarkBook', !wasActive);
+
+  try {
+    if (wasActive) {
+      const { error } = await supabase.from('book_bookmarks')
+        .delete()
+        .eq('user_id', currentUser.id)
+        .eq('book_id', bookId);
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from('book_bookmarks')
+        .insert({ user_id: currentUser.id, book_id: bookId });
+      if (error && !/duplicate|unique/i.test(error.message)) throw error;
+    }
+  } catch (e) {
+    setBookActionActive('btnBookmarkBook', wasActive);
+    toast('Failed: ' + (e.message || e), 'error');
+  }
 }
 
 // Back to book list
@@ -3989,6 +4101,312 @@ function showAuthor() {
   history.pushState(null, '', '#author');
   loadAuthorDashboard();
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// VIDEO PLAYER — premium nav controls (prev / rewind / fast-forward / next + autoplay)
+// ════════════════════════════════════════════════════════════════════════════
+const _videoHistoryStack = [];          // IDs of videos we've watched, for the "Previous" button
+const SKIP_SECONDS = 10;
+const AUTONEXT_KEY = 'selebox_video_autonext';
+
+function _currentVideoIdForRoute() {
+  if (!_currentVideoCtx) return null;
+  if (_currentVideoCtx.supabaseId) return 'sb_' + _currentVideoCtx.supabaseId;
+  return _currentVideoCtx.appwriteId || null;
+}
+
+function vcRewind() {
+  const v = document.getElementById('videoPlayer');
+  if (!v) return;
+  v.currentTime = Math.max(0, (v.currentTime || 0) - SKIP_SECONDS);
+  _flashSkipBadge('back');
+}
+
+function vcFastForward() {
+  const v = document.getElementById('videoPlayer');
+  if (!v) return;
+  const dur = isFinite(v.duration) ? v.duration : 0;
+  v.currentTime = Math.min(dur || (v.currentTime + SKIP_SECONDS), (v.currentTime || 0) + SKIP_SECONDS);
+  _flashSkipBadge('forward');
+}
+
+function _flashSkipBadge(direction) {
+  const el = document.querySelector(direction === 'back' ? '#vcRewind' : '#vcFastForward');
+  if (!el) return;
+  el.classList.add('vc-flash');
+  setTimeout(() => el.classList.remove('vc-flash'), 360);
+}
+
+function vcPrev() {
+  const prevId = _videoHistoryStack.pop();
+  if (!prevId) { toast('No previous video', 'error'); return; }
+  // Don't push current onto history — that would create a loop
+  playVideo(prevId);
+}
+
+function vcNext() {
+  const list = document.getElementById('upNextList');
+  const firstItem = list?.querySelector('.upnext-item');
+  if (!firstItem) { toast('No related video to play next', 'error'); return; }
+  // Push current onto history before navigating
+  const cur = _currentVideoIdForRoute();
+  if (cur) _videoHistoryStack.push(cur);
+  firstItem.click(); // existing handler calls playVideo(video.$id)
+}
+
+function vcInitControls() {
+  // Wire buttons (idempotent — won't re-bind)
+  const wire = (id, fn) => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.bound === '1') return;
+    el.dataset.bound = '1';
+    el.addEventListener('click', fn);
+  };
+  wire('vcRewind',      vcRewind);
+  wire('vcFastForward', vcFastForward);
+  wire('vcPrev',        vcPrev);
+  wire('vcNext',        vcNext);
+
+  // Autoplay toggle — restore from localStorage
+  const autoEl = document.getElementById('vcAutoNext');
+  if (autoEl && autoEl.dataset.bound !== '1') {
+    autoEl.dataset.bound = '1';
+    autoEl.checked = localStorage.getItem(AUTONEXT_KEY) !== '0';  // default ON
+    autoEl.addEventListener('change', (e) => {
+      localStorage.setItem(AUTONEXT_KEY, e.target.checked ? '1' : '0');
+    });
+  }
+
+  // Hook into the video element's `ended` event for auto-next
+  const video = document.getElementById('videoPlayer');
+  if (video && video.dataset.autoNextBound !== '1') {
+    video.dataset.autoNextBound = '1';
+    video.addEventListener('ended', () => {
+      const auto = document.getElementById('vcAutoNext');
+      if (auto?.checked) vcNext();
+    });
+  }
+
+  // Keyboard shortcuts (only when video page is visible and not typing in input/textarea)
+  if (!window._videoKbBound) {
+    window._videoKbBound = true;
+    document.addEventListener('keydown', (e) => {
+      const playerVisible = document.getElementById('videoPlayerPage')?.style.display === 'block';
+      if (!playerVisible) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); vcRewind(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); vcFastForward(); }
+      else if (e.key === 'n' || e.key === 'N') { e.preventDefault(); vcNext(); }
+      else if (e.key === 'p' || e.key === 'P') { e.preventDefault(); vcPrev(); }
+    });
+  }
+}
+// Init when DOM is ready
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', vcInitControls);
+else vcInitControls();
+
+// ════════════════════════════════════════════════════════════════════════════
+// BOOKMARKS — saved videos + saved books for the current user
+// (bookmarksPage const hoisted with other page consts at top — see line ~2489)
+// ════════════════════════════════════════════════════════════════════════════
+let _bookmarksActiveTab = 'videos';
+
+function showBookmarks() {
+  hideAllMainPages();
+  if (bookmarksPage) bookmarksPage.style.display = 'block';
+  document.body.classList.remove('on-videos');
+  stopVideoPlayer();
+  history.pushState(null, '', '#bookmarks');
+  loadBookmarks();
+}
+
+async function loadBookmarks() {
+  if (!currentUser) {
+    document.getElementById('bookmarksContent').innerHTML = `
+      <div class="bookmarks-empty">
+        <p>Sign in to see your saved videos and books.</p>
+      </div>
+    `;
+    return;
+  }
+
+  // Pre-load both counts so the tab badges show instantly
+  const [vidCountRes, bookCountRes] = await Promise.all([
+    supabase.from('video_bookmarks').select('*', { count: 'exact', head: true }).eq('user_id', currentUser.id),
+    supabase.from('book_bookmarks').select('*', { count: 'exact', head: true }).eq('user_id', currentUser.id),
+  ]);
+  document.getElementById('bookmarkVideoCount').textContent = vidCountRes.count != null ? vidCountRes.count : '';
+  document.getElementById('bookmarkBookCount').textContent  = bookCountRes.count != null ? bookCountRes.count : '';
+
+  if (_bookmarksActiveTab === 'videos') await loadVideoBookmarks();
+  else                                  await loadBookBookmarks();
+}
+
+async function loadVideoBookmarks() {
+  const wrap = document.getElementById('bookmarksContent');
+  wrap.innerHTML = '<div class="loading">Loading saved videos…</div>';
+  const { data, error } = await supabase
+    .from('video_bookmarks')
+    .select(`
+      created_at,
+      videos (
+        id, bunny_video_id, title, description, tags, video_url, thumbnail_url,
+        views, duration, created_at, uploader_id,
+        profiles!videos_uploader_id_fkey ( id, username, avatar_url )
+      )
+    `)
+    .eq('user_id', currentUser.id)
+    .order('created_at', { ascending: false });
+
+  if (error) { wrap.innerHTML = `<div class="bookmarks-empty"><p>${escHTML(error.message)}</p></div>`; return; }
+
+  const items = (data || []).filter(r => r.videos);
+  if (!items.length) {
+    wrap.innerHTML = `
+      <div class="bookmarks-empty">
+        <div class="bookmarks-empty-icon">🎬</div>
+        <h3>No saved videos yet</h3>
+        <p>Tap the <strong>Bookmark</strong> button on any video to save it here.</p>
+        <button class="btn btn-purple btn-sm" onclick="setSidebarActive('btnVideos');showVideos();">Browse videos</button>
+      </div>`;
+    return;
+  }
+
+  wrap.innerHTML = `<div class="video-grid bookmarks-video-grid"></div>`;
+  const grid = wrap.querySelector('.bookmarks-video-grid');
+  for (const row of items) {
+    const v = row.videos;
+    const card = document.createElement('div');
+    card.className = 'video-card';
+    card.onclick = () => playVideo('sb_' + v.id);
+    const name = v.profiles?.username || 'Unknown';
+    const avatar = v.profiles?.avatar_url ? `<img src="${escHTML(v.profiles.avatar_url)}" alt=""/>` : initials(name);
+    card.innerHTML = `
+      <div class="video-thumb">
+        ${v.thumbnail_url ? `<img src="${escHTML(v.thumbnail_url)}" loading="lazy"/>` : '<div class="video-thumb-placeholder">▶</div>'}
+        ${v.duration ? `<span class="video-duration">${formatDuration(v.duration)}</span>` : ''}
+      </div>
+      <div class="video-card-meta">
+        <div class="avatar">${avatar}</div>
+        <div style="min-width:0;flex:1">
+          <div class="video-card-title">${escHTML(v.title || 'Untitled')}</div>
+          <div class="video-card-uploader">${escHTML(name)}</div>
+          <div class="video-card-stats">${(v.views || 0).toLocaleString()} views</div>
+        </div>
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+}
+
+async function loadBookBookmarks() {
+  const wrap = document.getElementById('bookmarksContent');
+  wrap.innerHTML = '<div class="loading">Loading saved books…</div>';
+  const { data, error } = await supabase
+    .from('book_bookmarks')
+    .select(`
+      created_at,
+      books (
+        id, title, cover_url, genre, tags,
+        views_count, likes_count, chapters_count, word_count,
+        author_id, created_at,
+        profiles!books_author_id_fkey ( id, username, avatar_url )
+      )
+    `)
+    .eq('user_id', currentUser.id)
+    .order('created_at', { ascending: false });
+
+  if (error) { wrap.innerHTML = `<div class="bookmarks-empty"><p>${escHTML(error.message)}</p></div>`; return; }
+
+  const items = (data || []).filter(r => r.books);
+  if (!items.length) {
+    wrap.innerHTML = `
+      <div class="bookmarks-empty">
+        <div class="bookmarks-empty-icon">📚</div>
+        <h3>No saved books yet</h3>
+        <p>Tap the <strong>Bookmark</strong> button on any book to save it for later.</p>
+        <button class="btn btn-purple btn-sm" onclick="setSidebarActive('btnBook');showBook();">Browse books</button>
+      </div>`;
+    return;
+  }
+
+  wrap.innerHTML = `<div class="book-grid bookmarks-book-grid"></div>`;
+  const grid = wrap.querySelector('.bookmarks-book-grid');
+  for (const row of items) {
+    const b = row.books;
+    const card = renderBookCard(b);
+    grid.appendChild(card);
+  }
+}
+
+// Tab switching
+document.querySelectorAll('.bookmarks-tab').forEach(t => {
+  t.addEventListener('click', () => {
+    _bookmarksActiveTab = t.dataset.tab;
+    document.querySelectorAll('.bookmarks-tab').forEach(x => x.classList.toggle('active', x === t));
+    if (_bookmarksActiveTab === 'videos') loadVideoBookmarks();
+    else                                   loadBookBookmarks();
+  });
+});
+
+// Sidebar wire-up
+document.getElementById('btnBookmarks')?.addEventListener('click', () => {
+  setSidebarActive('btnBookmarks');
+  showBookmarks();
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// VIDEO BOOKMARK — wire the new button in the player action bar
+// ════════════════════════════════════════════════════════════════════════════
+async function loadVideoBookmarkState(videoSupabaseId) {
+  if (!currentUser || !videoSupabaseId) return;
+  const btn = document.getElementById('videoBookmarkBtn');
+  if (!btn) return;
+  const { data } = await supabase.from('video_bookmarks')
+    .select('video_id')
+    .eq('user_id', currentUser.id)
+    .eq('video_id', videoSupabaseId)
+    .maybeSingle();
+  setVideoBookmarkActive(!!data);
+}
+
+function setVideoBookmarkActive(active) {
+  const btn = document.getElementById('videoBookmarkBtn');
+  if (!btn) return;
+  btn.dataset.active = active ? '1' : '0';
+  const icon = btn.querySelector('svg');
+  if (icon) icon.setAttribute('fill', active ? 'currentColor' : 'none');
+  const label = btn.querySelector('span');
+  if (label) label.textContent = active ? 'Saved' : 'Bookmark';
+}
+
+async function toggleVideoBookmark(videoSupabaseId) {
+  if (!currentUser) { toast('Sign in to bookmark videos', 'error'); return; }
+  if (!videoSupabaseId) { toast('Bookmarking only works on new videos for now', 'error'); return; }
+  const btn = document.getElementById('videoBookmarkBtn');
+  const wasActive = btn?.dataset.active === '1';
+  setVideoBookmarkActive(!wasActive); // optimistic
+  try {
+    if (wasActive) {
+      const { error } = await supabase.from('video_bookmarks')
+        .delete().eq('user_id', currentUser.id).eq('video_id', videoSupabaseId);
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from('video_bookmarks')
+        .insert({ user_id: currentUser.id, video_id: videoSupabaseId });
+      if (error && !/duplicate|unique/i.test(error.message)) throw error;
+    }
+  } catch (e) {
+    setVideoBookmarkActive(wasActive);
+    toast('Failed: ' + (e.message || e), 'error');
+  }
+}
+
+document.getElementById('videoBookmarkBtn')?.addEventListener('click', () => {
+  const videoId = window._currentVideoCtx?.supabaseId;
+  toggleVideoBookmark(videoId);
+});
 
 // ════════════════════════════════════════
 // AUTHOR — DASHBOARD + BOOK EDITOR + CHAPTER EDITOR
@@ -5953,6 +6371,11 @@ async function setupVideoActions(video) {
   });
 
   _currentVideoCtx = { supabaseId: supabaseVideoId, appwriteId: video?.$id || null, title: video?.title || '' };
+
+  // Hide bookmark button for legacy (Appwrite-only) videos that have no Supabase row
+  const bmBtn = document.getElementById('videoBookmarkBtn');
+  if (bmBtn) bmBtn.style.display = supabaseVideoId ? 'inline-flex' : 'none';
+  if (supabaseVideoId) loadVideoBookmarkState(supabaseVideoId);
 }
 
 // Update popstate to handle videos
