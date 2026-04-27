@@ -7013,10 +7013,23 @@ let dmState = {
   activeConvId: null,           // currently-open conversation id
   activeOther: null,            // { id, username, avatar_url, ... }
   messages: [],                 // current thread's messages
-  realtimeChannel: null,        // active Realtime subscription
+  reactions: {},                // { messageId: [{ user_id, emoji }, ...] }
+  realtimeChannel: null,        // active Realtime subscription (DB changes for active thread)
+  presenceChannel: null,        // presence + typing broadcast for active thread
   totalUnread: 0,
   inboxChannel: null,           // realtime subscription for unread badge
+  otherIsTyping: false,         // is the other user currently typing?
+  otherTypingTimer: null,       // auto-clear typing if no broadcast for N seconds
+  myTypingTimer: null,          // debounce my own typing broadcasts
+  otherIsOnline: false,
+  otherLastSeen: null,
+  hoverMenuEl: null,            // currently-open bubble hover menu
+  reactionPickerEl: null,       // currently-open reaction picker
+  editingMessageId: null,       // bubble being inline-edited
 };
+
+// Quick-reaction emojis (FB-style — these match the existing post REACTIONS set)
+const DM_QUICK_REACTIONS = ['❤️','😂','😮','😢','😡','👍'];
 
 async function showMessages(targetUserId = null) {
   if (!currentUser) { toast('Please sign in', 'error'); return; }
@@ -7035,9 +7048,16 @@ async function showMessages(targetUserId = null) {
 }
 
 // ── Conversation list ─────────────────────────────────────────────────────
+const DM_EMPTY_HTML = `
+  <div class="dm-empty-list" id="dmEmptyList">
+    <div class="dm-empty-icon">💬</div>
+    <h3>No conversations yet</h3>
+    <p>Start one from anyone's profile.</p>
+  </div>
+`;
+
 async function loadConversationList() {
   const wrap = document.getElementById('dmConvList');
-  const empty = document.getElementById('dmEmptyList');
   if (!wrap || !currentUser) return;
 
   // Skeleton while loading
@@ -7063,11 +7083,9 @@ async function loadConversationList() {
   }
 
   if (!convs || !convs.length) {
-    wrap.innerHTML = '';
-    empty.style.display = 'flex';
+    wrap.innerHTML = DM_EMPTY_HTML;
     return;
   }
-  empty.style.display = 'none';
 
   // Hydrate the "other user" profile for each + count unread per convo
   const otherIds = convs.map(c => c.user_a === currentUser.id ? c.user_b : c.user_a);
@@ -7115,15 +7133,12 @@ async function fetchUnreadCounts(conversationIds) {
 
 function renderConversationList() {
   const wrap = document.getElementById('dmConvList');
-  const empty = document.getElementById('dmEmptyList');
   if (!wrap) return;
 
   if (!dmState.conversations.length) {
-    wrap.innerHTML = '';
-    empty.style.display = 'flex';
+    wrap.innerHTML = DM_EMPTY_HTML;
     return;
   }
-  empty.style.display = 'none';
 
   wrap.innerHTML = dmState.conversations.map(c => renderConvItemHtml(c)).join('');
   // Wire clicks
@@ -7243,20 +7258,46 @@ async function loadMessages(convId) {
   if (!wrap) return;
   wrap.innerHTML = '<div class="dm-loading">Loading messages…</div>';
 
-  const { data, error } = await supabase
-    .from('messages')
-    .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at')
-    .eq('conversation_id', convId)
-    .order('created_at', { ascending: true })
-    .limit(200);
+  // Fetch messages + reactions in parallel
+  const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
+    supabase
+      .from('messages')
+      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at')
+      .eq('conversation_id', convId)
+      .order('created_at', { ascending: true })
+      .limit(200),
+    fetchReactionsForConversation(convId),
+  ]);
 
-  if (error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load messages: ${escHTML(error.message)}</div>`;
+  if (msgErr) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load messages: ${escHTML(msgErr.message)}</div>`;
     return;
   }
-  dmState.messages = data || [];
+  dmState.messages = msgs || [];
+  dmState.reactions = reactionsByMsg;
   renderMessages();
   scrollMessagesToBottom();
+}
+
+// Fetch all reactions for messages in this conversation, indexed by message_id
+async function fetchReactionsForConversation(convId) {
+  // First get the message ids in this convo (RLS-protected)
+  const { data: msgIds } = await supabase
+    .from('messages')
+    .select('id')
+    .eq('conversation_id', convId);
+  if (!msgIds?.length) return {};
+  const ids = msgIds.map(m => m.id);
+  const { data: reactions } = await supabase
+    .from('message_reactions')
+    .select('message_id, user_id, emoji, created_at')
+    .in('message_id', ids);
+  const out = {};
+  (reactions || []).forEach(r => {
+    if (!out[r.message_id]) out[r.message_id] = [];
+    out[r.message_id].push(r);
+  });
+  return out;
 }
 
 // ── Render messages with FB-style grouping ────────────────────────────────
@@ -7319,6 +7360,8 @@ function renderMessages() {
       ? `<em class="dm-bubble-deleted">Message deleted</em>`
       : escHTML(m.body || '').replace(/\n/g, '<br>');
 
+    const editedTag = (!m.deleted_at && m.edited_at) ? '<span class="dm-edited-tag" title="Edited">(edited)</span>' : '';
+
     const readBadge = mine && m.id === lastReadOfMine
       ? `<div class="dm-bubble-read" title="Seen ${timeAgo(m.read_at)}">
           ${dmState.activeOther?.avatar_url
@@ -7327,16 +7370,54 @@ function renderMessages() {
         </div>`
       : '';
 
+    // Reaction pills (groups by emoji)
+    const reactions = (dmState.reactions[m.id] || []);
+    let reactionsHtml = '';
+    if (reactions.length) {
+      const grouped = {};
+      const myReacts = new Set();
+      reactions.forEach(r => {
+        grouped[r.emoji] = (grouped[r.emoji] || 0) + 1;
+        if (r.user_id === currentUser.id) myReacts.add(r.emoji);
+      });
+      reactionsHtml = `<div class="dm-bubble-reactions">${
+        Object.entries(grouped).map(([emoji, count]) =>
+          `<button class="dm-rx-pill ${myReacts.has(emoji) ? 'mine' : ''}" data-msg="${m.id}" data-emoji="${escHTML(emoji)}" title="${myReacts.has(emoji) ? 'Remove your reaction' : 'React'}">
+            <span>${emoji}</span>${count > 1 ? `<span class="dm-rx-count">${count}</span>` : ''}
+          </button>`
+        ).join('')
+      }</div>`;
+    }
+
+    const canEditDelete = mine && !m.deleted_at;
     html += `
       <div class="dm-bubble-row ${mine ? 'mine' : 'theirs'}" data-msg-id="${m.id}">
         ${!mine ? avatarHtml : ''}
-        <div class="${bubbleCls}" title="${new Date(m.created_at).toLocaleString()}">
-          ${linkify(body)}
+        <div class="dm-bubble-wrap">
+          <div class="${bubbleCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
+            ${linkify(body)}${editedTag ? ' ' + editedTag : ''}
+          </div>
+          ${reactionsHtml}
         </div>
         ${mine ? readBadge : ''}
       </div>
     `;
   }
+
+  // Typing indicator at bottom (only if other is typing AND we have at least one msg)
+  if (dmState.otherIsTyping) {
+    html += `
+      <div class="dm-bubble-row theirs dm-typing-row">
+        <div class="dm-bubble-avatar">${dmState.activeOther?.avatar_url
+          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
+          : initials(dmState.activeOther?.username)}</div>
+        <div class="dm-bubble theirs first-in-group last-in-group dm-typing-bubble" aria-label="Typing">
+          <span class="dm-typing-dot"></span><span class="dm-typing-dot"></span><span class="dm-typing-dot"></span>
+        </div>
+      </div>
+    `;
+  }
+
   wrap.innerHTML = html;
 }
 
@@ -7448,45 +7529,371 @@ function resizeDmInput() {
 
 // ── Realtime ──────────────────────────────────────────────────────────────
 function subscribeToThread(convId) {
-  // Tear down previous channel
+  // Tear down previous channels
   if (dmState.realtimeChannel) {
     supabase.removeChannel(dmState.realtimeChannel);
     dmState.realtimeChannel = null;
   }
+  if (dmState.presenceChannel) {
+    supabase.removeChannel(dmState.presenceChannel);
+    dmState.presenceChannel = null;
+  }
+  // Reset transient state
+  dmState.otherIsTyping = false;
+  if (dmState.otherTypingTimer) { clearTimeout(dmState.otherTypingTimer); dmState.otherTypingTimer = null; }
+  if (dmState.myTypingTimer) { clearTimeout(dmState.myTypingTimer); dmState.myTypingTimer = null; }
+  dmState.otherIsOnline = false;
+
+  // — Channel A: postgres_changes for this thread (messages + reactions) —
   dmState.realtimeChannel = supabase
     .channel(`dm-thread-${convId}`)
     .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'messages',
+      event: 'INSERT', schema: 'public', table: 'messages',
       filter: `conversation_id=eq.${convId}`,
     }, (payload) => {
       const newMsg = payload.new;
-      // Ignore if it's already in our list (we just inserted it locally)
       if (dmState.messages.some(m => m.id === newMsg.id)) return;
       dmState.messages.push(newMsg);
       renderMessages();
       scrollMessagesToBottom();
-      // If the new message isn't from me, mark conversation read immediately
       if (newMsg.sender_id !== currentUser.id) {
+        // The other side just sent — clear typing indicator
+        dmState.otherIsTyping = false;
         supabase.rpc('mark_conversation_read', { p_conversation_id: convId });
       }
     })
     .on('postgres_changes', {
-      event: 'UPDATE',
-      schema: 'public',
-      table: 'messages',
+      event: 'UPDATE', schema: 'public', table: 'messages',
       filter: `conversation_id=eq.${convId}`,
     }, (payload) => {
-      // Read receipts / deletes / edits
       const idx = dmState.messages.findIndex(m => m.id === payload.new.id);
       if (idx >= 0) {
         dmState.messages[idx] = payload.new;
         renderMessages();
       }
     })
+    .on('postgres_changes', {
+      event: 'INSERT', schema: 'public', table: 'message_reactions',
+    }, (payload) => {
+      const r = payload.new;
+      // Only handle reactions on messages in this thread
+      if (!dmState.messages.some(m => m.id === r.message_id)) return;
+      if (!dmState.reactions[r.message_id]) dmState.reactions[r.message_id] = [];
+      // Avoid duplicates from optimistic insert
+      const exists = dmState.reactions[r.message_id].some(x => x.user_id === r.user_id && x.emoji === r.emoji);
+      if (!exists) {
+        dmState.reactions[r.message_id].push(r);
+        renderMessages();
+      }
+    })
+    .on('postgres_changes', {
+      event: 'DELETE', schema: 'public', table: 'message_reactions',
+    }, (payload) => {
+      const r = payload.old;
+      if (!dmState.reactions[r.message_id]) return;
+      dmState.reactions[r.message_id] = dmState.reactions[r.message_id].filter(x =>
+        !(x.user_id === r.user_id && x.emoji === r.emoji));
+      renderMessages();
+    })
     .subscribe();
+
+  // — Channel B: presence + typing broadcast (lighter weight, ephemeral) —
+  subscribeToPresenceAndTyping(convId);
 }
+
+function subscribeToPresenceAndTyping(convId) {
+  const channel = supabase.channel(`dm-presence-${convId}`, {
+    config: { presence: { key: currentUser.id } },
+  });
+
+  channel
+    .on('presence', { event: 'sync' }, () => {
+      const state = channel.presenceState();
+      const otherId = dmState.activeOther?.id;
+      const otherPresent = otherId && state[otherId];
+      dmState.otherIsOnline = !!otherPresent;
+      updateThreadPresenceUI();
+    })
+    .on('broadcast', { event: 'typing' }, (payload) => {
+      const fromId = payload.payload?.userId;
+      if (!fromId || fromId === currentUser.id) return;
+      // Show typing for ~3s; if more broadcasts arrive, refresh the timer
+      dmState.otherIsTyping = true;
+      if (dmState.otherTypingTimer) clearTimeout(dmState.otherTypingTimer);
+      dmState.otherTypingTimer = setTimeout(() => {
+        dmState.otherIsTyping = false;
+        renderMessages();
+        scrollMessagesToBottom();
+      }, 3500);
+      renderMessages();
+      scrollMessagesToBottom();
+    })
+    .subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        await channel.track({ userId: currentUser.id, online_at: new Date().toISOString() });
+      }
+    });
+
+  dmState.presenceChannel = channel;
+}
+
+function updateThreadPresenceUI() {
+  const dot = document.getElementById('dmOnlineDot');
+  const status = document.getElementById('dmThreadStatus');
+  if (dot) dot.style.display = dmState.otherIsOnline ? '' : 'none';
+  if (status) status.textContent = dmState.otherIsOnline ? 'Active now' : '';
+}
+
+// Broadcast that I'm typing (debounced)
+function broadcastTyping() {
+  if (!dmState.presenceChannel) return;
+  if (dmState.myTypingTimer) return;  // already broadcasted recently — wait
+  dmState.presenceChannel.send({
+    type: 'broadcast',
+    event: 'typing',
+    payload: { userId: currentUser.id },
+  });
+  // Throttle: don't re-broadcast more than once every 1.5s
+  dmState.myTypingTimer = setTimeout(() => {
+    dmState.myTypingTimer = null;
+  }, 1500);
+}
+
+// ── Reactions API ──────────────────────────────────────────────────────────
+async function toggleReaction(messageId, emoji) {
+  if (!currentUser) return;
+  const existing = (dmState.reactions[messageId] || []).find(r =>
+    r.user_id === currentUser.id && r.emoji === emoji);
+
+  if (existing) {
+    // Remove (optimistic)
+    dmState.reactions[messageId] = dmState.reactions[messageId].filter(r =>
+      !(r.user_id === currentUser.id && r.emoji === emoji));
+    renderMessages();
+    const { error } = await supabase.from('message_reactions')
+      .delete()
+      .eq('message_id', messageId)
+      .eq('user_id', currentUser.id)
+      .eq('emoji', emoji);
+    if (error) toast(error.message, 'error');
+  } else {
+    // Add (optimistic)
+    if (!dmState.reactions[messageId]) dmState.reactions[messageId] = [];
+    dmState.reactions[messageId].push({ message_id: messageId, user_id: currentUser.id, emoji });
+    renderMessages();
+    const { error } = await supabase.from('message_reactions').insert({
+      message_id: messageId, user_id: currentUser.id, emoji,
+    });
+    if (error) {
+      // Rollback
+      dmState.reactions[messageId] = dmState.reactions[messageId].filter(r =>
+        !(r.user_id === currentUser.id && r.emoji === emoji));
+      renderMessages();
+      toast(error.message, 'error');
+    }
+  }
+  closeReactionPicker();
+}
+
+// ── Edit / delete own message ─────────────────────────────────────────────
+async function deleteMessage(messageId) {
+  const ok = await confirmDialog({
+    title: 'Delete message?',
+    body: 'This message will be replaced with "Message deleted" for both of you. Can\'t be undone.',
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
+  const { error } = await supabase.from('messages')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', messageId)
+    .eq('sender_id', currentUser.id);
+  if (error) { toast(error.message, 'error'); return; }
+  // Local update — realtime UPDATE will also fire
+  const idx = dmState.messages.findIndex(m => m.id === messageId);
+  if (idx >= 0) {
+    dmState.messages[idx] = { ...dmState.messages[idx], deleted_at: new Date().toISOString() };
+    renderMessages();
+  }
+}
+
+function startEditMessage(messageId) {
+  const msg = dmState.messages.find(m => m.id === messageId);
+  if (!msg || msg.sender_id !== currentUser.id) return;
+  dmState.editingMessageId = messageId;
+  // Replace the bubble's contents with an inline editor
+  const bubble = document.querySelector(`.dm-bubble[data-msg-id="${messageId}"]`);
+  if (!bubble) return;
+  const original = msg.body || '';
+  bubble.innerHTML = `
+    <textarea class="dm-edit-textarea" maxlength="4000">${escHTML(original)}</textarea>
+    <div class="dm-edit-actions">
+      <button class="dm-edit-cancel" type="button">Cancel</button>
+      <button class="dm-edit-save" type="button">Save</button>
+    </div>
+  `;
+  const ta = bubble.querySelector('.dm-edit-textarea');
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  bubble.querySelector('.dm-edit-cancel').onclick = () => {
+    dmState.editingMessageId = null;
+    renderMessages();
+  };
+  bubble.querySelector('.dm-edit-save').onclick = () => saveEditMessage(messageId, ta.value);
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      saveEditMessage(messageId, ta.value);
+    } else if (e.key === 'Escape') {
+      dmState.editingMessageId = null;
+      renderMessages();
+    }
+  });
+}
+
+async function saveEditMessage(messageId, newBody) {
+  const trimmed = (newBody || '').trim();
+  const msg = dmState.messages.find(m => m.id === messageId);
+  if (!msg) return;
+  if (!trimmed) { toast('Message can\'t be empty', 'error'); return; }
+  if (trimmed === msg.body) {
+    dmState.editingMessageId = null;
+    renderMessages();
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const { error } = await supabase.from('messages')
+    .update({ body: trimmed, edited_at: nowIso })
+    .eq('id', messageId)
+    .eq('sender_id', currentUser.id);
+  if (error) { toast(error.message, 'error'); return; }
+  const idx = dmState.messages.findIndex(m => m.id === messageId);
+  if (idx >= 0) {
+    dmState.messages[idx] = { ...dmState.messages[idx], body: trimmed, edited_at: nowIso };
+  }
+  dmState.editingMessageId = null;
+  renderMessages();
+}
+
+// ── Hover menu + reaction picker ──────────────────────────────────────────
+function closeHoverMenu() {
+  if (dmState.hoverMenuEl) { dmState.hoverMenuEl.remove(); dmState.hoverMenuEl = null; }
+}
+function closeReactionPicker() {
+  if (dmState.reactionPickerEl) { dmState.reactionPickerEl.remove(); dmState.reactionPickerEl = null; }
+}
+
+function openHoverMenu(bubbleEl) {
+  closeHoverMenu();
+  if (!bubbleEl) return;
+  const messageId = bubbleEl.dataset.msgId;
+  const isMine = bubbleEl.dataset.isMine === '1';
+  const canEdit = bubbleEl.dataset.canEdit === '1';
+
+  const menu = document.createElement('div');
+  menu.className = 'dm-hover-menu' + (isMine ? ' mine' : ' theirs');
+  menu.innerHTML = `
+    <button class="dm-hover-btn" data-act="react" title="React">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+    </button>
+    <button class="dm-hover-btn" data-act="copy" title="Copy text">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    </button>
+    ${canEdit ? `
+      <button class="dm-hover-btn" data-act="edit" title="Edit">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+      </button>
+      <button class="dm-hover-btn dm-hover-danger" data-act="delete" title="Delete">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+    ` : ''}
+  `;
+  document.body.appendChild(menu);
+
+  // Position above the bubble
+  const r = bubbleEl.getBoundingClientRect();
+  menu.style.position = 'fixed';
+  menu.style.top = `${Math.max(8, r.top - 44)}px`;
+  if (isMine) {
+    menu.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+  } else {
+    menu.style.left = `${Math.max(8, r.left)}px`;
+  }
+  dmState.hoverMenuEl = menu;
+
+  menu.querySelectorAll('[data-act]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const act = btn.dataset.act;
+      closeHoverMenu();
+      if      (act === 'react')  openReactionPicker(bubbleEl);
+      else if (act === 'copy')   copyMessageText(messageId);
+      else if (act === 'edit')   startEditMessage(messageId);
+      else if (act === 'delete') deleteMessage(messageId);
+    };
+  });
+}
+
+function openReactionPicker(bubbleEl) {
+  closeReactionPicker();
+  if (!bubbleEl) return;
+  const messageId = bubbleEl.dataset.msgId;
+  const picker = document.createElement('div');
+  picker.className = 'dm-reaction-picker';
+  picker.innerHTML = DM_QUICK_REACTIONS.map(emoji =>
+    `<button class="dm-rx-pick" data-emoji="${emoji}">${emoji}</button>`
+  ).join('');
+  document.body.appendChild(picker);
+
+  const r = bubbleEl.getBoundingClientRect();
+  picker.style.position = 'fixed';
+  picker.style.top = `${Math.max(8, r.top - 50)}px`;
+  const isMine = bubbleEl.dataset.isMine === '1';
+  if (isMine) picker.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+  else        picker.style.left  = `${Math.max(8, r.left)}px`;
+
+  dmState.reactionPickerEl = picker;
+  picker.querySelectorAll('[data-emoji]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      toggleReaction(messageId, btn.dataset.emoji);
+    };
+  });
+}
+
+async function copyMessageText(messageId) {
+  const m = dmState.messages.find(x => x.id === messageId);
+  if (!m) return;
+  try {
+    await navigator.clipboard.writeText(m.body || '');
+    toast('Copied', 'success');
+  } catch {
+    toast('Copy failed', 'error');
+  }
+}
+
+// Bubble hover/click → show menu (works on mobile via tap)
+document.addEventListener('click', (e) => {
+  // Click on existing reaction pill → toggle
+  const pill = e.target.closest('.dm-rx-pill');
+  if (pill) {
+    e.stopPropagation();
+    toggleReaction(pill.dataset.msg, pill.dataset.emoji);
+    return;
+  }
+  // Click on bubble → open hover menu
+  const bubble = e.target.closest('.dm-bubble');
+  if (bubble && bubble.dataset.msgId && !bubble.classList.contains('dm-typing-bubble')) {
+    if (dmState.editingMessageId === bubble.dataset.msgId) return; // don't reopen while editing
+    e.stopPropagation();
+    openHoverMenu(bubble);
+    return;
+  }
+  // Click outside → close menus
+  if (!e.target.closest('.dm-hover-menu') && !e.target.closest('.dm-reaction-picker')) {
+    closeHoverMenu();
+    closeReactionPicker();
+  }
+});
 
 // Inbox-wide subscription so the unread badge updates even when DMs page is closed
 function subscribeToInbox() {
@@ -7541,13 +7948,25 @@ document.getElementById('dmBackBtn')?.addEventListener('click', () => {
     supabase.removeChannel(dmState.realtimeChannel);
     dmState.realtimeChannel = null;
   }
+  if (dmState.presenceChannel) {
+    supabase.removeChannel(dmState.presenceChannel);
+    dmState.presenceChannel = null;
+  }
+  closeHoverMenu();
+  closeReactionPicker();
   dmState.activeConvId = null;
   dmState.activeOther = null;
+  dmState.editingMessageId = null;
 });
 
 const dmInputEl = document.getElementById('dmInput');
 if (dmInputEl) {
-  dmInputEl.addEventListener('input', () => { resizeDmInput(); updateSendButton(); });
+  dmInputEl.addEventListener('input', () => {
+    resizeDmInput();
+    updateSendButton();
+    // Broadcast that I'm typing (throttled inside)
+    if (dmInputEl.value.trim().length > 0) broadcastTyping();
+  });
   dmInputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
