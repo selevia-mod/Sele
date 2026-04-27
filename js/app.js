@@ -5249,6 +5249,8 @@ async function openAuthorBookEditor(bookId) {
   authorPage.style.display = 'block';
   setAuthorView('book');
   history.pushState(null, '', `#author/book/${bookId}`);
+  // Background sweep — surface any scheduled chapters whose time passed.
+  maybeFlushDueScheduledChapters();
   await loadBookEditor(bookId);
 }
 
@@ -5292,7 +5294,7 @@ async function loadBookEditor(bookId) {
   // Load chapters
   const { data: chapters, error: chErr } = await supabase
     .from('chapters')
-    .select('id, chapter_number, title, word_count, is_published, updated_at')
+    .select('id, chapter_number, title, word_count, is_published, scheduled_publish_at, updated_at')
     .eq('book_id', bookId)
     .order('chapter_number', { ascending: true });
 
@@ -5305,12 +5307,18 @@ async function loadBookEditor(bookId) {
     chList.innerHTML = '<div style="color:var(--text2);padding:1rem 0">No chapters yet. Click <strong>Add chapter</strong> to write the first one.</div>';
     return;
   }
-  chList.innerHTML = chapters.map(c => `
+  chList.innerHTML = chapters.map(c => {
+    const isFutureSch = c.is_published && c.scheduled_publish_at && new Date(c.scheduled_publish_at) > new Date();
+    let pillClass, pillLabel;
+    if (isFutureSch)        { pillClass = 'author-chapter-pub-scheduled'; pillLabel = 'Scheduled · ' + formatScheduleShort(c.scheduled_publish_at); }
+    else if (c.is_published) { pillClass = 'author-chapter-pub-published'; pillLabel = 'Published'; }
+    else                     { pillClass = 'author-chapter-pub-draft';     pillLabel = 'Draft'; }
+    return `
     <div class="author-chapter-row" data-chapter-id="${c.id}">
       <span class="author-chapter-num">Ch ${c.chapter_number}</span>
       <span class="author-chapter-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
       <span class="author-chapter-meta">${(c.word_count || 0).toLocaleString()} words</span>
-      <span class="author-chapter-pub-pill ${c.is_published ? 'author-chapter-pub-published' : 'author-chapter-pub-draft'}">${c.is_published ? 'Published' : 'Draft'}</span>
+      <span class="author-chapter-pub-pill ${pillClass}">${escHTML(pillLabel)}</span>
       <div class="author-chapter-actions">
         <button class="author-book-action-btn" data-chapter-action="edit" data-id="${c.id}" title="Edit">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
@@ -5320,7 +5328,8 @@ async function loadBookEditor(bookId) {
         </button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   chList.querySelectorAll('[data-chapter-action]').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -5479,10 +5488,6 @@ async function openAuthorChapterEditor(bookId, chapterId) {
       chapterDirty = true;
       scheduleChapterAutosave();
     });
-    document.getElementById('chapterEditorPublished').addEventListener('change', () => {
-      chapterDirty = true;
-      scheduleChapterAutosave();
-    });
 
     // ─── Chapter cover upload ───
     document.getElementById('btnUploadChapterCover')?.addEventListener('click', () => {
@@ -5501,7 +5506,8 @@ async function openAuthorChapterEditor(bookId, chapterId) {
   // Reset state
   chapterQuill.setText('');
   document.getElementById('chapterEditorTitle').value = '';
-  document.getElementById('chapterEditorPublished').checked = false;
+  _chapterPublishState = { is_published: false, scheduled_publish_at: null };
+  setChapterStatePill();
   setChapterCoverPreview(null);
   setChapterSaveStatus('idle');
   chapterDirty = false;
@@ -5509,12 +5515,16 @@ async function openAuthorChapterEditor(bookId, chapterId) {
   if (chapterId) {
     const { data, error } = await supabase
       .from('chapters')
-      .select('id, chapter_number, title, content, is_published, cover_url')
+      .select('id, chapter_number, title, content, is_published, scheduled_publish_at, cover_url')
       .eq('id', chapterId)
       .single();
     if (error || !data) { toast('Chapter not found', 'error'); openAuthorBookEditor(bookId); return; }
     document.getElementById('chapterEditorTitle').value = data.title || '';
-    document.getElementById('chapterEditorPublished').checked = !!data.is_published;
+    _chapterPublishState = {
+      is_published: !!data.is_published,
+      scheduled_publish_at: data.scheduled_publish_at || null,
+    };
+    setChapterStatePill();
     setChapterCoverPreview(data.cover_url || null);
     if (data.content) chapterQuill.clipboard.dangerouslyPasteHTML(data.content);
     chapterDirty = false;
@@ -5549,7 +5559,6 @@ async function saveChapter() {
   if (!editingBookId || !chapterQuill) return;
   setChapterSaveStatus('saving');
   const title = document.getElementById('chapterEditorTitle').value.trim();
-  const isPublished = document.getElementById('chapterEditorPublished').checked;
   const content = chapterQuill.root.innerHTML;
   const text = chapterQuill.getText().trim();
   const wordCount = text.length ? text.split(/\s+/).length : 0;
@@ -5559,9 +5568,10 @@ async function saveChapter() {
 
   let result;
   if (editingChapterId) {
+    // Save = autosave the draft body. Don't touch is_published or scheduled_publish_at —
+    // those are owned by the Publish/Unpublish flow.
     result = await supabase.from('chapters').update({
       title, content, word_count: wordCount,
-      is_published: isPublished,
       cover_url: coverUrl,
       updated_at: new Date().toISOString(),
     }).eq('id', editingChapterId).select().single();
@@ -5573,7 +5583,7 @@ async function saveChapter() {
       book_id: editingBookId,
       chapter_number: nextNum,
       title, content, word_count: wordCount,
-      is_published: isPublished,
+      is_published: false, // brand-new chapter is always a draft until Publish
       cover_url: coverUrl,
     }).select().single();
     if (result.data) {
@@ -5590,6 +5600,288 @@ async function saveChapter() {
   await recomputeBookCounts(editingBookId);
   setChapterSaveStatus('saved');
   chapterDirty = false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Chapter publish — Now / Schedule + Wattpad-style success modal
+// ════════════════════════════════════════════════════════════════════════════
+
+// Mirror of chapter row's publish state, kept in sync as we edit.
+let _chapterPublishState = { is_published: false, scheduled_publish_at: null };
+
+// Throttled diagnostic sweep so the author sees recent schedule firings reflected.
+let _lastChapterPublishCheck = 0;
+function maybeFlushDueScheduledChapters() {
+  const now = Date.now();
+  if (now - _lastChapterPublishCheck < 5 * 60 * 1000) return; // 5 min throttle
+  _lastChapterPublishCheck = now;
+  supabase.rpc('publish_due_scheduled_chapters').then(({ data, error }) => {
+    if (error) { console.warn('publish_due_scheduled_chapters:', error.message); return; }
+    if (data && data > 0) console.log(`[schedule] ${data} chapter(s) flipped public in the last 24h`);
+  }).catch(() => {});
+}
+
+function setChapterStatePill() {
+  const pill = document.getElementById('chapterStatePill');
+  const txt  = pill?.querySelector('.chapter-state-text');
+  const btnLabel = document.getElementById('btnPublishChapterLabel');
+  if (!pill || !txt) return;
+
+  const { is_published, scheduled_publish_at } = _chapterPublishState;
+  const isFutureSchedule = is_published && scheduled_publish_at && new Date(scheduled_publish_at) > new Date();
+
+  if (!is_published) {
+    pill.dataset.state = 'draft';
+    txt.textContent = 'Draft';
+    if (btnLabel) btnLabel.textContent = 'Publish';
+  } else if (isFutureSchedule) {
+    pill.dataset.state = 'scheduled';
+    txt.textContent = 'Scheduled · ' + formatScheduleShort(scheduled_publish_at);
+    if (btnLabel) btnLabel.textContent = 'Reschedule';
+  } else {
+    pill.dataset.state = 'published';
+    txt.textContent = 'Published';
+    if (btnLabel) btnLabel.textContent = 'Republish';
+  }
+}
+
+function formatScheduleShort(iso) {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return d.toLocaleString(undefined, {
+      month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+      ...(sameYear ? {} : { year: 'numeric' }),
+    });
+  } catch { return ''; }
+}
+
+// ── Publish dialog ──
+function openChapterPublishModal() {
+  if (!editingChapterId) {
+    toast('Save your chapter first', 'error');
+    return;
+  }
+  const modal = document.getElementById('chapterPublishModal');
+  const subtitle = document.getElementById('cpSubtitle');
+  const commitBtn = document.getElementById('cpCommit');
+  const unpubBtn  = document.getElementById('cpUnpublish');
+  const radioNow  = document.querySelector('label.vu-radio[data-cp-when="now"]');
+  const radioSch  = document.querySelector('label.vu-radio[data-cp-when="schedule"]');
+  const dtWrap    = document.getElementById('cpScheduleWrap');
+  const dtInput   = document.getElementById('cpScheduleDatetime');
+
+  const { is_published, scheduled_publish_at } = _chapterPublishState;
+  const isFutureSchedule = is_published && scheduled_publish_at && new Date(scheduled_publish_at) > new Date();
+
+  // Default radio + datetime based on current state
+  if (isFutureSchedule) {
+    document.querySelector('input[name="cpWhen"][value="schedule"]').checked = true;
+    radioNow.classList.remove('active'); radioSch.classList.add('active');
+    dtWrap.style.display = 'block';
+    // Pre-fill picker with current scheduled time (in local format)
+    const d = new Date(scheduled_publish_at);
+    const pad = n => String(n).padStart(2, '0');
+    dtInput.value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    subtitle.textContent = 'Currently scheduled — change the time or publish now';
+  } else {
+    document.querySelector('input[name="cpWhen"][value="now"]').checked = true;
+    radioNow.classList.add('active'); radioSch.classList.remove('active');
+    dtWrap.style.display = 'none';
+    dtInput.value = '';
+    subtitle.textContent = is_published ? 'Already live — re-publish or unpublish below' : 'Choose when this chapter goes live';
+  }
+
+  unpubBtn.style.display = is_published ? '' : 'none';
+  commitBtn.textContent = 'Publish now';
+
+  modal.style.display = 'flex';
+}
+
+function closeChapterPublishModal() {
+  document.getElementById('chapterPublishModal').style.display = 'none';
+}
+
+async function commitChapterPublish() {
+  const which = document.querySelector('input[name="cpWhen"]:checked')?.value || 'now';
+  let scheduledAt = null;
+  if (which === 'schedule') {
+    const dtStr = document.getElementById('cpScheduleDatetime').value;
+    if (!dtStr) { toast('Pick a date and time', 'error'); return; }
+    const dt = new Date(dtStr);
+    if (isNaN(dt.getTime()) || dt.getTime() <= Date.now()) {
+      toast('Schedule a future time', 'error');
+      return;
+    }
+    scheduledAt = dt.toISOString();
+  }
+
+  const commitBtn = document.getElementById('cpCommit');
+  commitBtn.disabled = true;
+  commitBtn.textContent = scheduledAt ? 'Scheduling…' : 'Publishing…';
+
+  // Persist any unsaved body edits first so what we publish is current.
+  if (chapterDirty) await saveChapter();
+
+  const { error } = await supabase.from('chapters').update({
+    is_published: true,
+    scheduled_publish_at: scheduledAt,
+    updated_at: new Date().toISOString(),
+  }).eq('id', editingChapterId);
+
+  if (error) {
+    commitBtn.disabled = false;
+    commitBtn.textContent = scheduledAt ? 'Schedule' : 'Publish now';
+    toast('Couldn\'t publish: ' + error.message, 'error');
+    return;
+  }
+
+  // Update local state + UI
+  _chapterPublishState = { is_published: true, scheduled_publish_at: scheduledAt };
+  setChapterStatePill();
+  closeChapterPublishModal();
+
+  // Touch the book's updated_at so dashboards re-sort.
+  await supabase.from('books').update({ updated_at: new Date().toISOString() }).eq('id', editingBookId);
+
+  // Show the Wattpad-style success modal
+  await showChapterPublishSuccess(editingBookId, editingChapterId, !!scheduledAt, scheduledAt);
+
+  commitBtn.disabled = false;
+  commitBtn.textContent = 'Publish now';
+}
+
+async function unpublishChapter() {
+  if (!editingChapterId) return;
+  const { error } = await supabase.from('chapters').update({
+    is_published: false,
+    scheduled_publish_at: null,
+    updated_at: new Date().toISOString(),
+  }).eq('id', editingChapterId);
+  if (error) { toast('Couldn\'t unpublish: ' + error.message, 'error'); return; }
+  _chapterPublishState = { is_published: false, scheduled_publish_at: null };
+  setChapterStatePill();
+  closeChapterPublishModal();
+  toast('Chapter unpublished', 'success');
+}
+
+// ── Wattpad-style success modal ──
+async function showChapterPublishSuccess(bookId, chapterId, isScheduled, scheduledAt) {
+  // Pull just enough data for the card. Keep it cheap.
+  const [bookRes, chRes] = await Promise.all([
+    supabase.from('books').select('id, title, cover_url, genre, tags').eq('id', bookId).maybeSingle(),
+    supabase.from('chapters').select('id, chapter_number, title').eq('id', chapterId).maybeSingle(),
+  ]);
+  const book = bookRes.data || {};
+  const ch   = chRes.data   || {};
+
+  const modal = document.getElementById('chapterPublishSuccessModal');
+  const title = document.getElementById('cpSuccessTitle');
+  const sub   = document.getElementById('cpSuccessSub');
+  const cover = document.getElementById('cpSuccessCover');
+  const bookT = document.getElementById('cpSuccessBookTitle');
+  const chNum = document.getElementById('cpSuccessChapterNum');
+  const chTit = document.getElementById('cpSuccessChapterTitle');
+  const chips = document.getElementById('cpSuccessChips');
+  const previewBtn = document.getElementById('cpSuccessPreview');
+  const shareBtn   = document.getElementById('cpSuccessShare');
+
+  title.textContent = isScheduled ? 'Chapter scheduled!' : 'Chapter published!';
+  sub.textContent   = isScheduled
+    ? `Goes live ${formatScheduleShort(scheduledAt)} — readers can’t see it until then.`
+    : 'Your readers can dive in right now.';
+
+  if (book.cover_url) {
+    cover.src = book.cover_url;
+    cover.style.display = '';
+  } else {
+    cover.removeAttribute('src');
+    cover.style.display = 'none';
+  }
+  bookT.textContent = book.title || 'Untitled book';
+  chNum.textContent = `Ch ${ch.chapter_number || ''}`.trim();
+  chTit.textContent = ch.title || `Chapter ${ch.chapter_number || ''}`.trim();
+
+  // "Found under" chips: genre first, then up to 4 tags
+  chips.innerHTML = '';
+  const labels = [];
+  if (book.genre) labels.push(book.genre);
+  if (Array.isArray(book.tags)) labels.push(...book.tags.slice(0, 4));
+  if (!labels.length) labels.push('Uncategorized');
+  labels.forEach(l => {
+    const span = document.createElement('span');
+    span.className = 'cp-chip';
+    span.textContent = l;
+    chips.appendChild(span);
+  });
+
+  // Wire actions (use the public reader URL — works for both states; scheduled
+  // chapters will 404 for non-authors via RLS, which is the desired UX).
+  const shareUrl = `${location.origin}${location.pathname}#book/${bookId}/chapter/${chapterId}`;
+  shareBtn.onclick = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: book.title || 'Selebox',
+          text: `Read "${ch.title || 'Chapter ' + (ch.chapter_number || '')}" on Selebox`,
+          url: shareUrl,
+        });
+      } else {
+        await navigator.clipboard.writeText(shareUrl);
+        toast('Link copied to clipboard', 'success');
+      }
+    } catch { /* user cancelled */ }
+  };
+  previewBtn.onclick = () => {
+    closeChapterPublishSuccessModal();
+    location.hash = `#book/${bookId}/chapter/${chapterId}`;
+  };
+
+  modal.style.display = 'flex';
+}
+
+function closeChapterPublishSuccessModal() {
+  document.getElementById('chapterPublishSuccessModal').style.display = 'none';
+}
+
+// ── Wire up buttons (one-shot init guarded by dataset flag) ──
+function wireChapterPublishUI() {
+  const root = document.getElementById('btnPublishChapter');
+  if (!root || root.dataset.wired) return;
+  root.dataset.wired = '1';
+
+  root.addEventListener('click', openChapterPublishModal);
+  document.getElementById('cpClose')?.addEventListener('click', closeChapterPublishModal);
+  document.getElementById('cpCancel')?.addEventListener('click', closeChapterPublishModal);
+  document.getElementById('cpCommit')?.addEventListener('click', commitChapterPublish);
+  document.getElementById('cpUnpublish')?.addEventListener('click', unpublishChapter);
+
+  // Radio active-state + datetime visibility
+  document.querySelectorAll('label.vu-radio[data-cp-when]').forEach(label => {
+    label.addEventListener('click', () => {
+      document.querySelectorAll('label.vu-radio[data-cp-when]').forEach(l => l.classList.remove('active'));
+      label.classList.add('active');
+      const wrap = document.getElementById('cpScheduleWrap');
+      wrap.style.display = label.dataset.cpWhen === 'schedule' ? 'block' : 'none';
+    });
+  });
+
+  // Success modal close
+  document.getElementById('cpSuccessClose')?.addEventListener('click', closeChapterPublishSuccessModal);
+  document.getElementById('chapterPublishSuccessModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'chapterPublishSuccessModal') closeChapterPublishSuccessModal();
+  });
+  document.getElementById('chapterPublishModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'chapterPublishModal') closeChapterPublishModal();
+  });
+}
+// Init once when the script loads
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', wireChapterPublishUI);
+} else {
+  wireChapterPublishUI();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -6534,16 +6826,52 @@ async function playVideo(videoId) {
     let video = null;
     let uploader = null;
 
-    // All videos are now Supabase. Cache may be empty if the user navigated
-    // directly to #video/sb_... — populate it on demand.
+    // All videos are now Supabase. Cache holds the most recent ~100 platform-wide,
+    // but profiles can list older uploads — so a cache miss is normal and not an error.
+    // Try the cache first, then fall back to a direct fetch by ID.
     if (!allVideosCache.length) {
       const fresh = await fetchSupabaseVideos();
       allVideosCache = fresh;
     }
-    const cached = allVideosCache.find(v => v.$id === videoId);
+    let cached = allVideosCache.find(v => v.$id === videoId);
     if (!cached) {
-      toast('Video not found', 'error');
-      return;
+      // Cache miss — fetch this specific video by ID (works for older videos
+      // outside the top-100 window, deep links, and shared URLs).
+      const rawId = videoId.startsWith('sb_') ? videoId.slice(3) : videoId;
+      const { data, error } = await supabase
+        .from('videos')
+        .select(`id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, status, is_hidden, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`)
+        .eq('id', rawId)
+        .maybeSingle();
+      if (error || !data) {
+        toast('Video not found', 'error');
+        return;
+      }
+      // Block playback for banned uploaders or unready/hidden videos (unless owner).
+      const isOwner = currentUser && currentUser.id === data.uploader_id;
+      if (data.profiles?.is_banned) { toast('Video unavailable', 'error'); return; }
+      if (!isOwner && (data.status !== 'ready' || data.is_hidden)) {
+        toast('Video unavailable', 'error');
+        return;
+      }
+      cached = {
+        $id: 'sb_' + data.id,
+        _supabase: true,
+        _supabaseId: data.id,
+        title: data.title,
+        description: data.description || '',
+        tags: data.tags || [],
+        uploader: data.uploader_id,
+        thumbnail: data.thumbnail_url,
+        videoUrl: data.video_url,
+        uri: data.video_url,
+        videoStats: { views: data.views || 0, duration: data.duration || 0 },
+        status: data.status || 'ready',
+        $createdAt: data.created_at,
+        _uploaderInfo: data.profiles ? { $id: data.profiles.id, username: data.profiles.username, avatar: data.profiles.avatar_url } : null,
+      };
+      // Cache it so revisits are instant + Prev/Next nav has it.
+      allVideosCache.push(cached);
     }
     video = cached;
     uploader = cached._uploaderInfo || null;
