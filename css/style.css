@@ -825,6 +825,21 @@ body.light .page-empty-body strong { color: #7c3aed; }
   gap: 1rem;
   margin-bottom: 1.5rem;
   flex-wrap: wrap;
+  /* Sticky toolbar — stays at top while scrolling books grid (like Spotify/Netflix) */
+  position: sticky;
+  top: var(--header-h, 0);
+  z-index: 20;
+  padding: 0.7rem 0.4rem;
+  margin-left: -0.4rem;
+  margin-right: -0.4rem;
+  background: rgba(250, 250, 249, 0.85);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-bottom: 1px solid rgba(124, 58, 237, 0.08);
+}
+body:not(.light) .book-toolbar {
+  background: rgba(15, 10, 28, 0.78);
+  border-bottom-color: rgba(167, 139, 250, 0.10);
 }
 .book-genre-chips {
   display: flex;
@@ -872,9 +887,7 @@ body.light .book-chip {
   background: linear-gradient(135deg, #7c3aed, #a78bfa);
   border-color: transparent;
   color: #ffffff;
-  font-weight: 600;
-  /* Soft subtle shadow — was too strong before, looked like a halo */
-  box-shadow: 0 1px 4px rgba(124, 58, 237, 0.18);
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.35);
 }
 .book-chip:focus { outline: none; }
 .book-chip:focus-visible { outline: 2px solid rgba(124, 58, 237, 0.5); outline-offset: 2px; }
