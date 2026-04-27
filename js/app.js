@@ -6745,8 +6745,6 @@ async function initNotifications() {
         filter: `recipient_id=eq.${currentUser.id}`,
       }, async (payload) => {
         const n = payload.new;
-        // Skip DM notifications — those use the Messages sidebar badge instead
-        if (n.type === 'dm_message') return;
         // Fetch the actor profile for nicer rendering
         await hydrateActorProfiles([n]);
         _notifications.unshift(n);
@@ -6756,6 +6754,27 @@ async function initNotifications() {
         renderNotifications();
         // Subtle toast so the user knows something happened
         toast(notificationLabel(n), 'success');
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'notifications',
+        filter: `recipient_id=eq.${currentUser.id}`,
+      }, async (payload) => {
+        // Coalesced DM notifications: an existing unread row is being bumped
+        // (preview/timestamp updated). Replace the row in-place — DON'T re-increment
+        // the badge (it was already counted on first INSERT).
+        const n = payload.new;
+        await hydrateActorProfiles([n]);
+        const idx = _notifications.findIndex(x => x.id === n.id);
+        if (idx >= 0) {
+          _notifications[idx] = n;
+        } else {
+          _notifications.unshift(n);
+        }
+        // Re-sort by created_at desc so the bumped row floats to the top
+        _notifications.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        renderNotifications();
       })
       .subscribe();
   } catch (err) {
@@ -6771,7 +6790,6 @@ async function loadNotifications() {
     .from('notifications')
     .select('*')
     .eq('recipient_id', currentUser.id)
-    .neq('type', 'dm_message')             // DMs have their own badge in the sidebar — keep the bell clean
     .order('created_at', { ascending: false })
     .limit(NOTIF_PAGE_SIZE);
 
@@ -7931,8 +7949,20 @@ function updateSendButton() {
 function resizeDmInput() {
   const input = document.getElementById('dmInput');
   if (!input) return;
+  // Capture whether the user was anchored to the bottom BEFORE the resize
+  const messages = document.getElementById('dmMessages');
+  const wasAtBottom = messages
+    ? (messages.scrollTop + messages.clientHeight >= messages.scrollHeight - 80)
+    : false;
+
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+
+  // Composer just got taller → messages area shrunk. If user was at the
+  // bottom before, keep them at the bottom (so latest message stays visible).
+  if (wasAtBottom && messages) {
+    requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+  }
 }
 
 // ── Realtime ──────────────────────────────────────────────────────────────
