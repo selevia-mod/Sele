@@ -1257,8 +1257,9 @@ async function loadCommentCount(postId, videoId = null) {
     return count || 0;
   }
   const { count } = await supabase.from('comments').select('*', { count: 'exact', head: true }).eq('post_id', postId);
-  const el = document.getElementById(`ccount-${postId}`);
-  if (el) el.textContent = count > 0 ? `${count} comment${count !== 1 ? 's' : ''}` : '';
+  // Update ALL matches — same post can be present in multiple pages (feed + profile)
+  const text = count > 0 ? `${count} comment${count !== 1 ? 's' : ''}` : '';
+  document.querySelectorAll(`#ccount-${postId}`).forEach(el => { el.textContent = text; });
   return count || 0;
 }
 
@@ -1276,39 +1277,42 @@ async function loadReactions(targetId, targetType) {
 }
 
 function updateReactionUI(targetId, targetType, counts, userReaction) {
-  const wrap = document.querySelector(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
-  if (!wrap) return;
-  const trigger = wrap.querySelector('.reaction-trigger');
-  if (!trigger) return;
+  // Update ALL matching wraps — same post may exist in multiple pages
+  // (home feed cached as display:none + profile rendering it fresh).
+  const wraps = document.querySelectorAll(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
+  if (!wraps.length) return;
 
   const total = Object.values(counts).reduce((a,b) => a+b, 0);
   const activeR = userReaction ? REACTIONS.find(r => r.key === userReaction) : null;
+  const heartSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
 
-  const iconEl = trigger.querySelector('.r-icon');
-  const labelEl = trigger.querySelector('.r-label-text');
+  wraps.forEach(wrap => {
+    const trigger = wrap.querySelector('.reaction-trigger');
+    if (!trigger) return;
 
-  if (activeR) {
-    // Sizing comes from CSS (.action-btn .r-icon vs .comment-action-btn .r-icon)
-    // — no inline font-size, so liking a comment/reply doesn't grow the row.
-    iconEl.innerHTML = `<span>${activeR.emoji}</span>`;
-    if (labelEl) labelEl.textContent = activeR.label;
-    trigger.classList.add('reacted');
-  } else {
-    iconEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
-    if (labelEl) labelEl.textContent = 'Like';
-    trigger.classList.remove('reacted');
-  }
+    const iconEl = trigger.querySelector('.r-icon');
+    const labelEl = trigger.querySelector('.r-label-text');
 
-  wrap.querySelectorAll('.reaction-option').forEach(btn => btn.classList.toggle('active', btn.dataset.key === userReaction));
-
-  // Summary stats above action bar
-  const summary = document.getElementById(`rsummary-${targetId}`);
-  if (summary && targetType === 'post') {
-    const sortedEmojis = REACTIONS.filter(r => counts[r.key] > 0).sort((a,b) => counts[b.key] - counts[a.key]);
-    if (sortedEmojis.length === 0) { summary.innerHTML = ''; }
-    else {
-      summary.innerHTML = `<span class="rcount-emojis">${sortedEmojis.map(r => r.emoji).join('')}</span> ${total}`;
+    if (activeR) {
+      iconEl.innerHTML = `<span>${activeR.emoji}</span>`;
+      if (labelEl) labelEl.textContent = activeR.label;
+      trigger.classList.add('reacted');
+    } else {
+      iconEl.innerHTML = heartSvg;
+      if (labelEl) labelEl.textContent = 'Like';
+      trigger.classList.remove('reacted');
     }
+
+    wrap.querySelectorAll('.reaction-option').forEach(btn =>
+      btn.classList.toggle('active', btn.dataset.key === userReaction));
+  });
+
+  // Summary stats above action bar — also update ALL matches
+  if (targetType === 'post') {
+    const sortedEmojis = REACTIONS.filter(r => counts[r.key] > 0).sort((a,b) => counts[b.key] - counts[a.key]);
+    const summaryHtml = sortedEmojis.length === 0 ? ''
+      : `<span class="rcount-emojis">${sortedEmojis.map(r => r.emoji).join('')}</span> ${total}`;
+    document.querySelectorAll(`#rsummary-${targetId}`).forEach(el => { el.innerHTML = summaryHtml; });
   }
 }
 
@@ -1699,6 +1703,12 @@ async function openProfile(userId) {
     history.pushState(null, '', `#profile/${userId}`);
   }
 
+  // Scroll to top — the previous page's scroll position lingers otherwise,
+  // so users land on the bottom of someone's posts instead of the header.
+  window.scrollTo(0, 0);
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
+
   // Close any modals/menus from a previous profile (rapid-nav safety)
   document.querySelectorAll('.modal-backdrop[data-modal="follow-list"], .modal-backdrop[data-modal="share-profile"], .modal-backdrop[data-modal="report-user"]').forEach(m => m.remove());
   closeProfileActionMenu?.();
@@ -1711,12 +1721,22 @@ async function openProfile(userId) {
 
   // ── Fire ALL queries in parallel (was sequential — now ~5x faster) ──
   // Mutuals RPC is included here so it doesn't add a sequential round-trip later.
+  // Video/book counts apply the SAME filters as loadProfileVideos/Books for
+  // non-owners — otherwise the tab pill ("Videos · 7") disagrees with what
+  // the user actually sees in the tab ("No videos yet").
   const profileP   = fetchProfileWithRetry(userId);
   const followersP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', userId);
   const followingP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId);
   const postsP     = supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId);
-  const videosP    = supabase.from('videos').select('*', { count: 'exact', head: true }).eq('uploader_id', userId);
-  const booksP     = supabase.from('books').select('*', { count: 'exact', head: true }).eq('author_id', userId);
+
+  let videosQ = supabase.from('videos').select('*', { count: 'exact', head: true }).eq('uploader_id', userId);
+  if (!isOwn) videosQ = videosQ.eq('status', 'ready');
+  const videosP = videosQ;
+
+  let booksQ = supabase.from('books').select('*', { count: 'exact', head: true }).eq('author_id', userId);
+  if (!isOwn) booksQ = booksQ.eq('is_public', true).in('status', ['ongoing', 'completed']);
+  const booksP = booksQ;
+
   const badgesP    = supabase.from('user_badges').select('badge').eq('user_id', userId);
   const followP    = (!isOwn && currentUser)
     ? supabase.from('follows').select('follower_id').eq('follower_id', currentUser.id).eq('following_id', userId).maybeSingle()
@@ -2499,6 +2519,15 @@ function setSidebarActive(buttonId) {
 document.getElementById('btnHome')?.addEventListener('click', () => {
   setSidebarActive('btnHome');
   showFeed();
+});
+
+// Logo click → home + scroll to top (whether already on feed or elsewhere)
+document.getElementById('topbarLogoBtn')?.addEventListener('click', () => {
+  setSidebarActive('btnHome');
+  showFeed();
+  window.scrollTo(0, 0);
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
 });
 
 // Handle browser back/forward
