@@ -457,6 +457,7 @@ function renderPost(post) {
     ` : ''}
 
     ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
+    ${post.body ? renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
     ${post.videos ? `
       <div class="post-video" data-video-url="${escHTML(post.videos.video_url || '')}" data-video-id="${escHTML(post.videos.id || '')}">
@@ -474,6 +475,7 @@ function renderPost(post) {
           </div>
         </div>
         ${post.original.body ? `<div class="post-body">${linkify(post.original.body)}</div>` : ''}
+        ${post.original.body ? renderLinkPreview(post.original.body) : ''}
         ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
         ${post.original.videos ? `
           <div class="post-video" data-video-url="${escHTML(post.original.videos.video_url || '')}" data-video-id="${escHTML(post.original.videos.id || '')}">
@@ -545,6 +547,59 @@ function escHTML(str) {
 function linkify(str) {
   const escaped = escHTML(str);
   return escaped.replace(/(https?:\/\/[^\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+// ── Link previews (YouTube thumbnail + generic favicon fallback) ──
+function youtubeIdFromUrl(url) {
+  if (!url) return null;
+  // Matches: youtube.com/watch?v=ID  •  youtu.be/ID  •  youtube.com/shorts/ID  •  youtube.com/embed/ID
+  const m = url.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+function firstUrlInText(str) {
+  if (!str) return null;
+  const m = str.match(/https?:\/\/[^\s<>"']+/);
+  return m ? m[0] : null;
+}
+
+function renderLinkPreview(text) {
+  const url = firstUrlInText(text);
+  if (!url) return '';
+
+  // YouTube — instant, no API needed (free public thumbnail)
+  const ytId = youtubeIdFromUrl(url);
+  if (ytId) {
+    return `
+      <a class="link-preview link-preview-youtube" href="${escHTML(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">
+        <div class="link-preview-thumb">
+          <img src="https://i.ytimg.com/vi/${ytId}/hqdefault.jpg" alt="YouTube thumbnail" loading="lazy"
+               onerror="this.src='https://i.ytimg.com/vi/${ytId}/mqdefault.jpg'"/>
+          <div class="link-preview-play-badge" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </div>
+          <div class="link-preview-platform">YouTube</div>
+        </div>
+      </a>
+    `;
+  }
+
+  // Generic — favicon + hostname (no thumbnail, but distinguishes link from raw text)
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    return `
+      <a class="link-preview link-preview-generic" href="${escHTML(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">
+        <div class="link-preview-favicon">
+          <img src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(u.hostname)}&sz=64" alt="" loading="lazy"/>
+        </div>
+        <div class="link-preview-meta">
+          <div class="link-preview-host">${escHTML(host)}</div>
+          <div class="link-preview-url">${escHTML(url.length > 80 ? url.slice(0, 77) + '…' : url)}</div>
+        </div>
+      </a>
+    `;
+  } catch { return ''; }
 }
 
 // ── Premium confirmation dialog (replaces native confirm()) ──
@@ -1030,6 +1085,7 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
         ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
       </div>
       ${comment.body ? `<div class="comment-bubble">${linkify(comment.body)}</div>` : ''}
+      ${comment.body ? renderLinkPreview(comment.body) : ''}
       ${comment.image_url ? `<div class="comment-image" onclick="openLightbox('${comment.image_url}')"><img src="${comment.image_url}" loading="lazy"/></div>` : ''}
       <div class="comment-actions">
         <div class="reaction-wrap" data-target="${comment.id}" data-type="comment" style="position:relative">
@@ -1239,6 +1295,7 @@ window.repostPost = (postId) => {
       <div><span class="post-author">${escHTML(name)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
     </div>
     ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
+    ${post.body ? renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div style="border-radius:8px;overflow:hidden;margin-top:0.5rem"><img src="${post.image_url}"/></div>` : ''}
   `;
   document.getElementById('repostCaption').value = '';
@@ -2259,35 +2316,47 @@ async function loadUpNext(currentVideo) {
   const currentTags = currentVideo.tags || [];
 
   try {
-    // Fetch a larger pool to pick from
-    const result = await appwriteList(APPWRITE.videosCollection, [
-      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit', values: [200] })
+    // Fetch pool from BOTH Supabase + Appwrite in parallel (unified recommendations)
+    const [sbVideos, awResult] = await Promise.all([
+      fetchSupabaseVideos().catch(() => []),
+      appwriteList(APPWRITE.videosCollection, [
+        JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
+        JSON.stringify({ method: 'limit', values: [200] }),
+      ]).catch(() => ({ documents: [] })),
     ]);
 
-    let pool = result.documents.filter(v =>
+    const awVideos = awResult.documents || [];
+
+    // Merge both pools — Supabase videos already match the Appwrite shape
+    // (fetchSupabaseVideos transforms them with $id, tags, uploader, videoStats, etc.)
+    let pool = [...sbVideos, ...awVideos].filter(v =>
       v.$id !== currentVideo.$id && !watchedIds.has(v.$id)
     );
 
-    // Score each video
+    // Score each video — same algorithm for both sources
     pool.forEach(v => {
       let score = 0;
 
-      // Tag matching (40% from interest profile + boost for current video tags)
+      // Tag matching: interest profile (long-term) + current video tags (short-term)
       (v.tags || []).forEach(tag => {
         if (tagWeights[tag]) score += tagWeights[tag] * 100;
         if (currentTags.includes(tag)) score += 30;
       });
 
-      // Same uploader bonus
-      if (v.uploader === currentVideo.uploader) score += 25;
-      if (recentUploaders.includes(v.uploader)) score += 15;
+      // Same uploader bonus (works across sources via uploader field)
+      if (v.uploader && currentVideo.uploader && v.uploader === currentVideo.uploader) score += 25;
+      if (v.uploader && recentUploaders.includes(v.uploader)) score += 15;
 
-      // Engagement boost (views)
+      // Engagement boost (log-scaled views)
       const views = v.videoStats?.views || 0;
       score += Math.log10(views + 1) * 2;
 
-      // Small randomness so it doesn't feel static
+      // Recency boost (last 30 days get a small lift)
+      const ageMs = Date.now() - new Date(v.$createdAt || 0).getTime();
+      const ageDays = ageMs / (1000 * 60 * 60 * 24);
+      if (ageDays < 30) score += Math.max(0, 10 - ageDays / 3);
+
+      // Small randomness so feed feels fresh on each visit
       score += Math.random() * 5;
 
       v._score = score;
@@ -2297,17 +2366,37 @@ async function loadUpNext(currentVideo) {
     pool.sort((a, b) => b._score - a._score);
     const suggestions = pool.slice(0, 10);
 
-    // Fetch uploaders for these
-    const uploaderIds = [...new Set(suggestions.map(v => v.uploader).filter(Boolean))];
+    // Resolve uploader info — Supabase videos already have _uploaderInfo cached;
+    // Appwrite videos need a separate users batch.
     const uploaders = {};
-    if (uploaderIds.length) {
+    for (const v of suggestions) {
+      if (v._uploaderInfo) uploaders[v.uploader] = v._uploaderInfo;
+    }
+    const missingUploaderIds = [...new Set(
+      suggestions.map(v => v.uploader).filter(id => id && !uploaders[id])
+    )];
+    if (missingUploaderIds.length) {
       try {
-        const userResult = await appwriteList(APPWRITE.usersCollection, [
-          JSON.stringify({ method: 'equal', attribute: '$id', values: uploaderIds }),
-          JSON.stringify({ method: 'limit', values: [100] })
-        ]);
-        userResult.documents.forEach(u => { uploaders[u.$id] = u; });
+        // Try Supabase profiles first (covers migrated users)
+        const { data: sbProfiles } = await supabase
+          .from('profiles')
+          .select('id, username, avatar_url')
+          .in('id', missingUploaderIds);
+        for (const p of (sbProfiles || [])) {
+          uploaders[p.id] = { $id: p.id, username: p.username, avatar: p.avatar_url };
+        }
       } catch {}
+      // Fall back to Appwrite users for any still-missing legacy IDs
+      const stillMissing = missingUploaderIds.filter(id => !uploaders[id]);
+      if (stillMissing.length) {
+        try {
+          const userResult = await appwriteList(APPWRITE.usersCollection, [
+            JSON.stringify({ method: 'equal', attribute: '$id', values: stillMissing }),
+            JSON.stringify({ method: 'limit', values: [100] }),
+          ]);
+          (userResult.documents || []).forEach(u => { uploaders[u.$id] = u; });
+        } catch {}
+      }
     }
 
     // Render
@@ -2489,6 +2578,9 @@ async function loadBooks() {
   _appwriteOffset = 0;
   _hasMoreAppwriteBooks = true;
   _isLoadingMoreBooks = false;
+
+  // Kick off recommendation rail in parallel (doesn't block main grid)
+  loadBookRecommendations().catch(() => {});
 
   try {
     // First-page Appwrite fetch + full Supabase fetch (Supabase is small and shouldn't paginate)
@@ -2701,6 +2793,142 @@ function setupBooksInfiniteScroll() {
 }
 
 // ── Supabase books ──
+// ────────────────────────────────────────────────────────────────────────
+// Adaptive book recommendations — content-based scoring (tags + author + popularity)
+// Uses the same interest-profile pattern as video recommendations.
+// Cached per session so the rail doesn't re-fetch on every navigation.
+// ────────────────────────────────────────────────────────────────────────
+let _bookRecsCache = null;
+let _bookRecsTimestamp = 0;
+const BOOK_RECS_TTL = 5 * 60 * 1000; // 5 min
+
+async function loadBookRecommendations() {
+  const rail = document.getElementById('bookRecommendRail');
+  const track = document.getElementById('bookRecommendTrack');
+  const sub   = document.getElementById('bookRecommendSub');
+  if (!rail || !track) return;
+
+  // Only show for signed-in users
+  if (!currentUser) { rail.style.display = 'none'; return; }
+
+  // Use cache if fresh
+  if (_bookRecsCache && (Date.now() - _bookRecsTimestamp) < BOOK_RECS_TTL) {
+    renderBookRecsRail(_bookRecsCache);
+    return;
+  }
+
+  try {
+    // Pull user's recent reads + likes for the interest signal
+    const [{ data: reads }, { data: likes }] = await Promise.all([
+      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
+      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
+    ]);
+
+    const readIds  = new Set((reads || []).map(r => r.book_id));
+    const likedIds = new Set((likes || []).map(l => l.book_id));
+    const seedIds  = [...new Set([...readIds, ...likedIds])].slice(0, 30);
+
+    // Fetch a candidate pool (most recent public books)
+    const { data: pool } = await supabase
+      .from('books')
+      .select(`
+        id, title, cover_url, genre, tags,
+        views_count, likes_count, chapters_count,
+        author_id, created_at,
+        profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
+      `)
+      .eq('is_public', true)
+      .eq('is_hidden', false)
+      .order('created_at', { ascending: false })
+      .limit(200);
+
+    if (!pool || !pool.length) { rail.style.display = 'none'; return; }
+
+    // Build interest profile from seed books (tags + authors)
+    let tagWeights = {};
+    let authorWeights = {};
+    if (seedIds.length) {
+      const { data: seedBooks } = await supabase
+        .from('books')
+        .select('id, genre, tags, author_id')
+        .in('id', seedIds);
+      for (const sb of (seedBooks || [])) {
+        for (const t of (sb.tags || [])) tagWeights[t] = (tagWeights[t] || 0) + 1;
+        if (sb.genre) tagWeights[sb.genre] = (tagWeights[sb.genre] || 0) + 1;
+        if (sb.author_id) authorWeights[sb.author_id] = (authorWeights[sb.author_id] || 0) + 1;
+      }
+    }
+
+    const hasInterest = Object.keys(tagWeights).length > 0;
+
+    // Score each candidate
+    const scored = pool
+      .filter(b => !readIds.has(b.id))                  // skip already-read
+      .filter(b => !b.profiles?.is_banned)              // skip banned authors
+      .map(b => {
+        let score = 0;
+        // Tag overlap with user's interests
+        for (const t of (b.tags || [])) {
+          if (tagWeights[t]) score += tagWeights[t] * 12;
+        }
+        // Genre match
+        if (b.genre && tagWeights[b.genre]) score += tagWeights[b.genre] * 10;
+        // Same-author bonus
+        if (authorWeights[b.author_id]) score += authorWeights[b.author_id] * 18;
+        // Engagement boost
+        score += Math.log10((b.views_count || 0) + 1) * 1.5;
+        score += Math.log10((b.likes_count || 0) + 1) * 2;
+        // Recency boost (last 60 days)
+        const ageDays = (Date.now() - new Date(b.created_at).getTime()) / 86400000;
+        if (ageDays < 60) score += Math.max(0, 6 - ageDays / 10);
+        // Random freshness
+        score += Math.random() * 4;
+        return { book: b, score };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 12)
+      .map(x => x.book);
+
+    _bookRecsCache = scored;
+    _bookRecsTimestamp = Date.now();
+
+    if (sub) sub.textContent = hasInterest ? 'Based on your reading taste' : 'Trending this week';
+    renderBookRecsRail(scored);
+  } catch (e) {
+    console.warn('[recs] failed', e);
+    rail.style.display = 'none';
+  }
+}
+
+function renderBookRecsRail(books) {
+  const rail = document.getElementById('bookRecommendRail');
+  const track = document.getElementById('bookRecommendTrack');
+  if (!rail || !track) return;
+  if (!books || !books.length) { rail.style.display = 'none'; return; }
+
+  track.innerHTML = '';
+  for (const b of books) {
+    const a = document.createElement('a');
+    a.href = `#book/${b.id}`;
+    a.className = 'recommend-card';
+    a.onclick = (e) => { e.preventDefault(); openBookDetail(b.id, b); };
+
+    const initial = (b.title || '?').trim().charAt(0).toUpperCase();
+    a.innerHTML = `
+      <div class="recommend-card-cover">
+        ${b.cover_url
+          ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
+          : `<div class="recommend-card-cover-empty">${escHTML(initial)}</div>`}
+      </div>
+      <div class="recommend-card-title">${escHTML(b.title || 'Untitled')}</div>
+      <div class="recommend-card-author">${escHTML(b.profiles?.username || 'Unknown')}</div>
+      <div class="recommend-card-meta">${(b.views_count || 0).toLocaleString()} reads · ${(b.likes_count || 0).toLocaleString()} ♥</div>
+    `;
+    track.appendChild(a);
+  }
+  rail.style.display = 'block';
+}
+
 async function fetchSupabaseBooks() {
   try {
     const { data, error } = await supabase
