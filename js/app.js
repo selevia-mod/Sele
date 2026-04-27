@@ -3656,6 +3656,95 @@ let chapterQuill = null;
 let chapterAutosaveTimer = null;
 let chapterDirty = false;
 
+// ──────────────────────────────────────────────────────────────────────────
+// Curated genre picker — up to 5 selections, premium chip UI
+// ──────────────────────────────────────────────────────────────────────────
+const SELEBOX_GENRES = [
+  'Dark Romance', 'Mafia Boss', 'Billionaire', 'Enemies to Lovers', 'Spicy', 'Contract Marriage',
+  'CEO', 'Possession', 'Obsession', 'Alpha', 'Forbidden Love', 'Hot Romance',
+  'Arranged Marriage', 'Revenge', 'Twisted Fate', 'Cold', 'Elite', 'Second Chance',
+  'Substitute Bride', 'New Adult', 'Contemporary', 'Sweet Love', 'Romance', 'Teen Fiction',
+  'Boy Love (BL)', 'Girl Love (GL)', 'Werewolf', 'Vampire', 'Fantasy', 'Mystery', 'Thriller', 'Horror',
+  'Action', 'Sci-fi', 'Adventure', 'Mythology', 'Historical', 'Tragic', 'General Fiction',
+  'Slice of Life', 'Divorce', 'Poor', 'Secretary', 'Maid', 'Nurse', 'Doctor', 'Professor',
+  'Engineer', 'Attorney', 'Pilot', 'Architect', 'Haciendero', 'Wild', 'Comedy',
+  'Escape While Pregnant', 'One Shot Story', 'Erotic', 'Valentines Special',
+];
+
+function genreSlug(label) {
+  return String(label || '').toLowerCase().trim()
+    .replace(/\([^)]*\)/g, '')      // drop parenthetical e.g. "(BL)"
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// Build a chip picker. Returns { getSelected(), setSelected(arr) }
+function buildGenrePicker(containerId, initialSelected = [], max = 5) {
+  const root = document.getElementById(containerId);
+  if (!root) return null;
+  const chipsEl   = root.querySelector('.genre-picker-chips');
+  const counterEl = root.querySelector('.genre-picker-count');
+  const selected  = new Set();
+
+  // Normalise initial: accept slugs, lowercase strings, or original labels
+  const initialSet = new Set();
+  for (const v of initialSelected) {
+    if (!v) continue;
+    const s = String(v).trim();
+    // Match against SELEBOX_GENRES by either label or slug
+    const hit = SELEBOX_GENRES.find(g => g === s || g.toLowerCase() === s.toLowerCase() || genreSlug(g) === genreSlug(s));
+    if (hit) initialSet.add(hit);
+  }
+
+  function render() {
+    chipsEl.innerHTML = SELEBOX_GENRES.map(g => `
+      <button type="button" class="genre-chip ${selected.has(g) ? 'genre-chip-active' : ''}" data-genre="${escHTML(g)}">
+        ${escHTML(g)}
+      </button>
+    `).join('');
+    counterEl.textContent = selected.size;
+    root.classList.toggle('genre-picker-full', selected.size >= max);
+  }
+
+  function toggle(g) {
+    if (selected.has(g)) {
+      selected.delete(g);
+    } else {
+      if (selected.size >= max) {
+        toast(`Pick up to ${max} genres — remove one to add another`, 'error');
+        return;
+      }
+      selected.add(g);
+    }
+    render();
+  }
+
+  // Seed initial
+  for (const g of initialSet) selected.add(g);
+  render();
+
+  // Delegate clicks
+  chipsEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-genre]');
+    if (!btn) return;
+    toggle(btn.dataset.genre);
+  });
+
+  return {
+    getSelected: () => [...selected],
+    setSelected: (arr) => { selected.clear(); for (const v of (arr || [])) {
+      const hit = SELEBOX_GENRES.find(g => g === v || g.toLowerCase() === String(v).toLowerCase());
+      if (hit) selected.add(hit);
+    } render(); },
+    clear: () => { selected.clear(); render(); },
+  };
+}
+
+// Singletons — populated lazily when their containers exist on screen
+let _bookEditorGenrePicker = null;
+let _newBookGenrePicker    = null;
+
 function setAuthorView(view) {
   authorDashboard.style.display     = view === 'dashboard' ? 'block' : 'none';
   authorBookEditor.style.display    = view === 'book'      ? 'block' : 'none';
@@ -3773,8 +3862,13 @@ async function deleteAuthorBook(bookId) {
 const newBookModal = document.getElementById('newBookModal');
 function openNewBookModal() {
   document.getElementById('newBookTitle').value = '';
-  document.getElementById('newBookGenre').value = '';
   document.getElementById('newBookDescription').value = '';
+  // Build / reset the new-book genre picker
+  if (!_newBookGenrePicker) {
+    _newBookGenrePicker = buildGenrePicker('newBookGenrePicker', [], 5);
+  } else {
+    _newBookGenrePicker.clear();
+  }
   newBookModal.style.display = 'flex';
   setTimeout(() => document.getElementById('newBookTitle').focus(), 50);
 }
@@ -3782,8 +3876,11 @@ function closeNewBookModal() { newBookModal.style.display = 'none'; }
 async function createNewBook() {
   const title = document.getElementById('newBookTitle').value.trim();
   if (!title) { toast('Title is required', 'error'); return; }
-  const genre = document.getElementById('newBookGenre').value || null;
   const description = document.getElementById('newBookDescription').value.trim();
+
+  const curated = _newBookGenrePicker?.getSelected() || [];
+  const genre = curated.length ? genreSlug(curated[0]) : null;
+  const tags  = curated;
 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) { toast('Sign in first', 'error'); return; }
@@ -3793,7 +3890,7 @@ async function createNewBook() {
 
   const { data, error } = await supabase.from('books').insert({
     author_id: user.id,
-    title, description, genre,
+    title, description, genre, tags,
     status: 'draft',
     is_public: false,
   }).select().single();
@@ -3836,11 +3933,26 @@ async function loadBookEditor(bookId) {
 
   document.getElementById('bookEditorTitle').value = book.title || '';
   document.getElementById('bookEditorDescription').value = book.description || '';
-  document.getElementById('bookEditorGenre').value = book.genre || '';
-  document.getElementById('bookEditorTags').value = (book.tags || []).join(', ');
   document.getElementById('bookEditorBookStatus').value = book.status || 'draft';
   document.getElementById('bookEditorPublic').checked = !!book.is_public;
   document.getElementById('bookEditorStatusBadge').textContent = book.is_public ? 'Visible to readers' : 'Hidden draft';
+
+  // Build / refresh genre picker. Seed from book.tags first (where curated genres live),
+  // fall back to book.genre (single legacy slug). Unknown freeform tags go to the Custom tags input.
+  const allTags = Array.isArray(book.tags) ? book.tags : [];
+  const knownLabels    = new Set(SELEBOX_GENRES.map(g => g.toLowerCase()));
+  const knownSlugs     = new Set(SELEBOX_GENRES.map(g => genreSlug(g)));
+  const curatedSeeded  = allTags.filter(t => knownLabels.has(String(t).toLowerCase()) || knownSlugs.has(genreSlug(t)));
+  const customTagsLeft = allTags.filter(t => !curatedSeeded.includes(t));
+
+  // If the picker doesn't exist yet (first open), build it; else just reset selection
+  if (!_bookEditorGenrePicker) {
+    _bookEditorGenrePicker = buildGenrePicker('bookEditorGenrePicker', curatedSeeded.length ? curatedSeeded : (book.genre ? [book.genre] : []), 5);
+  } else {
+    _bookEditorGenrePicker.setSelected(curatedSeeded.length ? curatedSeeded : (book.genre ? [book.genre] : []));
+  }
+
+  document.getElementById('bookEditorTags').value = customTagsLeft.join(', ');
 
   const coverWrap = document.getElementById('bookEditorCover');
   const initialLetter = (book.title || '?').trim().charAt(0).toUpperCase();
@@ -3903,9 +4015,19 @@ async function saveBookMetadata() {
 
   btn.disabled = true; btn.textContent = 'Saving…';
 
-  const tags = document.getElementById('bookEditorTags').value.split(',').map(t => t.trim()).filter(Boolean);
+  // Combine curated genres (from picker) + free-form custom tags
+  const curated = _bookEditorGenrePicker?.getSelected() || [];
+  const customTags = document.getElementById('bookEditorTags').value.split(',').map(t => t.trim()).filter(Boolean);
+  // De-dupe — case-insensitive
+  const seen = new Set();
+  const tags = [...curated, ...customTags].filter(t => {
+    const k = t.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+  // Browse filter still uses single `genre` field — slug of first selected curated genre
+  const genre = curated.length ? genreSlug(curated[0]) : null;
   const description = document.getElementById('bookEditorDescription').value.trim();
-  const genre = document.getElementById('bookEditorGenre').value || null;
   const status = document.getElementById('bookEditorBookStatus').value;
   const isPublic = document.getElementById('bookEditorPublic').checked;
 
