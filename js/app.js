@@ -419,16 +419,24 @@ function attachFeedVideoPlayers() {
 
 function renderPost(post) {
   const div = document.createElement('div');
-  div.className = 'post-card';
+  div.className = 'post-card' + (post.pinned_at ? ' is-pinned' : '');
   div.dataset.postid  = post.id;
   div.dataset.authorId = post.user_id || '';
+  if (post.pinned_at) div.dataset.pinned = '1';
 
   const profile = post.profiles || {};
   const name = profile.username || 'Unknown';
   const isGuest = profile.is_guest;
   const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}" alt="${name}"/>` : initials(name);
+  const isOwn = currentUser && currentUser.id === post.user_id;
 
   div.innerHTML = `
+    ${post.pinned_at ? `
+      <div class="post-pinned-tag" title="Pinned to profile">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M16 2l-1.4 1.4 1.6 1.6-5.4 5.4-3-1.5L6 11.3l3.7 3.7L4 21l1.4 1.4 5.7-5.7 3.7 3.7 1.4-1.4-1.5-3 5.4-5.4 1.6 1.6L23 9l-7-7z"/></svg>
+        Pinned
+      </div>
+    ` : ''}
     <div class="post-header">
       <div class="avatar profile-link" data-user-id="${post.user_id}" title="View profile">${avatarHTML}</div>
       <div style="flex:1">
@@ -442,12 +450,13 @@ function renderPost(post) {
         <button class="post-menu-btn"
                 onclick="openPostActionMenu(event, this)"
                 data-post-id="${post.id}"
-                data-is-own="${currentUser.id === post.user_id ? '1' : '0'}"
+                data-is-own="${isOwn ? '1' : '0'}"
+                data-is-pinned="${post.pinned_at ? '1' : '0'}"
                 data-author-id="${post.user_id}"
                 data-author-name="${escHTML(name)}"
-                title="${currentUser.id === post.user_id ? 'Delete post' : 'Post options'}"
-                aria-label="${currentUser.id === post.user_id ? 'Delete post' : 'Post options'}">
-          <span class="post-menu-glyph">${currentUser.id === post.user_id ? '✕' : '⋮'}</span>
+                title="${isOwn ? 'Post options' : 'Post options'}"
+                aria-label="Post options">
+          <span class="post-menu-glyph">⋮</span>
         </button>
       ` : ''}
     </div>
@@ -724,9 +733,34 @@ window.deletePost = async (postId) => {
   }
 };
 
+// Pin/unpin a post to your profile (max 3 enforced server-side)
+async function togglePinPost(postId, currentlyPinned) {
+  const newPinnedAt = currentlyPinned ? null : new Date().toISOString();
+  const { error } = await supabase
+    .from('posts')
+    .update({ pinned_at: newPinnedAt })
+    .eq('id', postId)
+    .eq('user_id', currentUser.id); // belt-and-suspenders — RLS already enforces
+
+  if (error) {
+    if (/up to 3|max/i.test(error.message)) {
+      toast('You can only pin 3 posts. Unpin one first.', 'error');
+    } else {
+      toast(error.message, 'error');
+    }
+    return;
+  }
+
+  toast(currentlyPinned ? 'Unpinned' : 'Pinned to profile', 'success');
+
+  // If we're on the profile, refresh the posts tab so order updates
+  if (viewingProfileId === currentUser.id) {
+    loadProfilePosts(currentUser.id);
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
-// POST ACTION MENU — kebab menu on others' posts (Report / Hide / Snooze / Block)
-//                    minimalist ✕ on own posts (delete)
+// POST ACTION MENU — kebab menu on posts (own: Pin/Delete · others: Report/Hide/Snooze/Block)
 // ════════════════════════════════════════════════════════════════════════════
 
 // Cache of the current user's content filter sets (refreshed on bootstrap + after actions)
@@ -780,14 +814,15 @@ window.openPostActionMenu = (e, btn) => {
   const isOwn      = btn.dataset.isOwn === '1';
   const authorId   = btn.dataset.authorId;
   const authorName = btn.dataset.authorName || 'this user';
-
-  // Own post: skip menu, go straight to delete confirm (minimalist)
-  if (isOwn) { window.deletePost(postId); return; }
+  const isPinned   = btn.dataset.isPinned === '1';
 
   closePostActionMenu();
   _postActionMenuEl = document.createElement('div');
   _postActionMenuEl.className = 'post-action-menu';
-  _postActionMenuEl.innerHTML = `
+  _postActionMenuEl.innerHTML = isOwn ? `
+    <button data-pam-action="${isPinned ? 'unpin' : 'pin'}">${isPinned ? 'Unpin from profile' : 'Pin to profile'}</button>
+    <button data-pam-action="delete" class="pam-danger">Delete post</button>
+  ` : `
     <button data-pam-action="report">Report</button>
     <button data-pam-action="hide">Hide post</button>
     <button data-pam-action="snooze">Snooze · 30 days</button>
@@ -810,6 +845,9 @@ window.openPostActionMenu = (e, btn) => {
       else if (action === 'hide')   hidePostFromFeed(postId);
       else if (action === 'snooze') snoozeAuthor(authorId, authorName);
       else if (action === 'block')  blockAuthor(authorId, authorName);
+      else if (action === 'pin')    togglePinPost(postId, false);
+      else if (action === 'unpin')  togglePinPost(postId, true);
+      else if (action === 'delete') window.deletePost(postId);
     };
   });
 
@@ -958,6 +996,246 @@ function openReportModal(postId) {
     if (error) {
       if (/duplicate|unique/i.test(error.message)) {
         toast('You already reported this post', 'success');
+        close();
+      } else {
+        toast(error.message, 'error');
+        submitBtn.disabled    = false;
+        submitBtn.textContent = 'Submit report';
+      }
+      return;
+    }
+    toast('Report submitted — thanks for keeping Selebox safe', 'success');
+    close();
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROFILE ACTION MENU — kebab on profile (Share / Report / Snooze / Block)
+// ════════════════════════════════════════════════════════════════════════════
+let _profileActionMenuEl = null;
+function closeProfileActionMenu() {
+  if (_profileActionMenuEl) { _profileActionMenuEl.remove(); _profileActionMenuEl = null; }
+}
+
+window.openProfileActionMenu = (e, btn, ctx) => {
+  e.stopPropagation();
+  e.preventDefault();
+  if (!currentUser) { toast('Please sign in', 'error'); return; }
+
+  const { isOwn, userId, username } = ctx;
+
+  // Own profile: just share — single action, no menu
+  if (isOwn) {
+    shareProfile(userId, username);
+    return;
+  }
+
+  closeProfileActionMenu();
+  _profileActionMenuEl = document.createElement('div');
+  _profileActionMenuEl.className = 'post-action-menu profile-action-menu';
+  _profileActionMenuEl.innerHTML = `
+    <button data-pam-action="share">Share profile</button>
+    <button data-pam-action="report">Report user</button>
+    <button data-pam-action="snooze">Snooze · 30 days</button>
+    <button data-pam-action="block" class="pam-danger">Block</button>
+  `;
+  document.body.appendChild(_profileActionMenuEl);
+
+  // Position: below button, right-aligned
+  const r = btn.getBoundingClientRect();
+  _profileActionMenuEl.style.position = 'fixed';
+  _profileActionMenuEl.style.top      = `${Math.min(r.bottom + 6, window.innerHeight - 240)}px`;
+  _profileActionMenuEl.style.right    = `${Math.max(window.innerWidth - r.right, 12)}px`;
+
+  _profileActionMenuEl.querySelectorAll('[data-pam-action]').forEach(b => {
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      const action = b.dataset.pamAction;
+      closeProfileActionMenu();
+      if      (action === 'share')  shareProfile(userId, username);
+      else if (action === 'report') openReportUserModal(userId, username);
+      else if (action === 'snooze') snoozeAuthor(userId, username);
+      else if (action === 'block')  blockAuthor(userId, username);
+    };
+  });
+
+  // Click anywhere else / Escape → close
+  setTimeout(() => {
+    const onDocClick = (ev) => {
+      if (!_profileActionMenuEl?.contains(ev.target)) {
+        closeProfileActionMenu();
+        document.removeEventListener('click',  onDocClick);
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    const onKey = (ev) => { if (ev.key === 'Escape') { closeProfileActionMenu(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocClick); } };
+    document.addEventListener('click',  onDocClick);
+    document.addEventListener('keydown', onKey);
+  }, 0);
+};
+
+// Share profile — modal with copy link, native share, X/Facebook
+async function shareProfile(userId, username) {
+  const url = `${window.location.origin}${window.location.pathname}#profile/${userId}`;
+  const title = `${username} on Selebox`;
+  const text  = `Check out @${username} on Selebox`;
+  const safeUser = escHTML(username);
+
+  // Remove any existing modal
+  document.querySelectorAll('.modal-backdrop[data-modal="share-profile"]').forEach(m => m.remove());
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'share-profile';
+  modal.innerHTML = `
+    <div class="modal-card share-modal" role="dialog" aria-labelledby="share-title">
+      <h2 id="share-title">Share profile</h2>
+      <p class="modal-sub">Share <strong>@${safeUser}</strong>'s profile with friends.</p>
+
+      <div class="share-link-row">
+        <input type="text" class="share-link-input" readonly value="${url}"/>
+        <button class="btn-primary share-copy-btn" data-action="copy">Copy</button>
+      </div>
+
+      <div class="share-options">
+        ${navigator.share ? `
+        <button class="share-option" data-action="native">
+          <span class="share-option-icon">📤</span>
+          <span>More…</span>
+        </button>` : ''}
+        <a class="share-option" target="_blank" rel="noopener"
+           href="https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}">
+          <span class="share-option-icon">𝕏</span>
+          <span>Post</span>
+        </a>
+        <a class="share-option" target="_blank" rel="noopener"
+           href="https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}">
+          <span class="share-option-icon">f</span>
+          <span>Facebook</span>
+        </a>
+        <a class="share-option" target="_blank" rel="noopener"
+           href="https://api.whatsapp.com/send?text=${encodeURIComponent(text + ' ' + url)}">
+          <span class="share-option-icon">💬</span>
+          <span>WhatsApp</span>
+        </a>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-ghost" data-action="cancel">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+  document.addEventListener('keydown', function onKey(ev) {
+    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+
+  // Copy
+  const copyBtn = modal.querySelector('[data-action="copy"]');
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      copyBtn.textContent = 'Copied!';
+      copyBtn.classList.add('copied');
+      setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('copied'); }, 1600);
+    } catch {
+      // Fallback: select the input
+      const inp = modal.querySelector('.share-link-input');
+      inp.select();
+      document.execCommand?.('copy');
+      toast('Link copied', 'success');
+    }
+  };
+
+  // Native share
+  const nativeBtn = modal.querySelector('[data-action="native"]');
+  if (nativeBtn) {
+    nativeBtn.onclick = async () => {
+      try { await navigator.share({ title, text, url }); close(); }
+      catch { /* user cancelled */ }
+    };
+  }
+}
+
+// Report user — modal, mirrors openReportModal but writes to user_reports
+function openReportUserModal(targetUserId, targetUsername) {
+  document.querySelectorAll('.modal-backdrop[data-modal="report-user"]').forEach(m => m.remove());
+
+  const reasons = [
+    ['harassment',   'Harassment',           'Bullying, threats, or targeting'],
+    ['spam',         'Spam',                 'Repetitive, scammy, or fake account'],
+    ['impersonation','Impersonation',        'Pretending to be someone else'],
+    ['hate',         'Hate speech',          'Attacks on identity or group'],
+    ['nsfw',         'NSFW / Adult content', 'Inappropriate profile content'],
+    ['self_harm',    'Self-harm',            'Suicide, self-injury, or eating disorders'],
+    ['other',        'Other',                'Something else'],
+  ];
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'report-user';
+  const safeUser = escHTML(targetUsername);
+  modal.innerHTML = `
+    <div class="modal-card report-modal" role="dialog" aria-labelledby="report-user-title">
+      <h2 id="report-user-title">Report user</h2>
+      <p class="modal-sub">Reporting <strong>@${safeUser}</strong> — help us keep Selebox safe.</p>
+      <div class="report-reasons">
+        ${reasons.map(([val, label, desc]) => `
+          <label class="report-reason">
+            <input type="radio" name="reason" value="${val}"/>
+            <div class="report-reason-text">
+              <div class="report-reason-title">${label}</div>
+              <div class="report-reason-desc">${desc}</div>
+            </div>
+          </label>
+        `).join('')}
+      </div>
+      <textarea class="report-details" placeholder="Optional context (max 500 characters)" maxlength="500"></textarea>
+      <div class="modal-actions">
+        <button class="btn-ghost"   data-action="cancel">Cancel</button>
+        <button class="btn-primary" data-action="submit" disabled>Submit report</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const submitBtn = modal.querySelector('[data-action="submit"]');
+  modal.querySelectorAll('input[name="reason"]').forEach(r => {
+    r.addEventListener('change', () => {
+      submitBtn.disabled = false;
+      modal.querySelectorAll('.report-reason').forEach(rr => rr.classList.toggle('checked', rr.querySelector('input').checked));
+    });
+  });
+
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+  document.addEventListener('keydown', function onKey(ev) {
+    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+
+  submitBtn.onclick = async () => {
+    const reason  = modal.querySelector('input[name="reason"]:checked')?.value;
+    const details = modal.querySelector('.report-details').value.trim();
+    if (!reason) return;
+
+    submitBtn.disabled    = true;
+    submitBtn.textContent = 'Submitting…';
+
+    const { error } = await supabase.from('user_reports').insert({
+      reporter_id:      currentUser.id,
+      reported_user_id: targetUserId,
+      reason,
+      details:          details || null,
+    });
+
+    if (error) {
+      if (/duplicate|unique/i.test(error.message)) {
+        toast('You already reported this user', 'success');
         close();
       } else {
         toast(error.message, 'error');
@@ -1421,33 +1699,62 @@ async function openProfile(userId) {
     history.pushState(null, '', `#profile/${userId}`);
   }
 
-  // Retry up to 3 times in case profile isn't ready yet
-  let profile = null;
-  for (let i = 0; i < 3; i++) {
-    const result = await supabase.from('profiles').select('*').eq('id', userId).single();
-    if (result.data) { profile = result.data; break; }
-    await new Promise(r => setTimeout(r, 300));
-  }
+  // Close any modals/menus from a previous profile (rapid-nav safety)
+  document.querySelectorAll('.modal-backdrop[data-modal="follow-list"], .modal-backdrop[data-modal="share-profile"], .modal-backdrop[data-modal="report-user"]').forEach(m => m.remove());
+  closeProfileActionMenu?.();
+  closePostActionMenu?.();
+
+  // ── Paint skeleton instantly so the page never feels frozen ──
+  paintProfileSkeleton();
+
+  const isOwn = !!(currentUser && currentUser.id === userId);
+
+  // ── Fire ALL queries in parallel (was sequential — now ~5x faster) ──
+  // Mutuals RPC is included here so it doesn't add a sequential round-trip later.
+  const profileP   = fetchProfileWithRetry(userId);
+  const followersP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', userId);
+  const followingP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId);
+  const postsP     = supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+  const videosP    = supabase.from('videos').select('*', { count: 'exact', head: true }).eq('uploader_id', userId);
+  const booksP     = supabase.from('books').select('*', { count: 'exact', head: true }).eq('author_id', userId);
+  const badgesP    = supabase.from('user_badges').select('badge').eq('user_id', userId);
+  const followP    = (!isOwn && currentUser)
+    ? supabase.from('follows').select('follower_id').eq('follower_id', currentUser.id).eq('following_id', userId).maybeSingle()
+    : Promise.resolve({ data: null });
+  const mutualsP   = (!isOwn && currentUser)
+    ? supabase.rpc('get_mutual_followers', { p_target_id: userId, p_viewer_id: currentUser.id, p_limit: 6 })
+    : Promise.resolve({ data: null });
+
+  const [profile, fRes, gRes, pRes, vRes, bRes, badgesRes, followRes, mutualsRes] = await Promise.all([
+    profileP, followersP, followingP, postsP, videosP, booksP, badgesP, followP, mutualsP
+  ]);
+
   if (!profile) {
     toast('Could not load profile', 'error');
+    clearProfileSkeleton();
     return;
   }
-  
+
+  const followers = fRes.count || 0;
+  const following = gRes.count || 0;
+  const postCount = pRes.count || 0;
+  const videoCount = vRes.count || 0;
+  const bookCount  = bRes.count || 0;
+  const badges    = (badgesRes?.data || []).map(b => b.badge);
+
   // Banner (preserve the edit button!)
   const banner = document.getElementById('profileBanner');
   const existingBtn = document.getElementById('editBannerBtn');
   banner.innerHTML = profile.banner_url ? `<img src="${profile.banner_url}" alt="banner"/>` : '';
   if (existingBtn) banner.appendChild(existingBtn);
-  
+
   // Avatar
   const avatarBig = document.getElementById('profileAvatarBig');
   avatarBig.innerHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(profile.username);
 
   // Name / badge / bio
   document.getElementById('profileName').textContent = profile.username;
-  const badge = document.getElementById('profileBadge');
-  badge.textContent = profile.is_guest ? 'Guest' : 'Member';
-  badge.className = 'profile-badge' + (profile.is_guest ? ' guest' : '');
+  renderProfileBadges(profile, badges);
   document.getElementById('profileBio').textContent = profile.bio || '';
 
   // Joined date
@@ -1455,15 +1762,19 @@ async function openProfile(userId) {
   const joinedStr = joined.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   document.getElementById('profileJoined').textContent = joinedStr;
 
-  // Counts
-  const [{ count: followers }, { count: following }, { count: postCount }] = await Promise.all([
-    supabase.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', userId),
-    supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId),
-    supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId)
-  ]);
-  document.getElementById('statFollowers').innerHTML = `<strong>${followers || 0}</strong> followers`;
-  document.getElementById('statFollowing').innerHTML = `<strong>${following || 0}</strong> following`;
-  document.getElementById('statPosts').innerHTML = `<strong>${postCount || 0}</strong> posts`;
+  // Stats
+  document.getElementById('statFollowers').innerHTML = `<strong>${followers}</strong> followers`;
+  document.getElementById('statFollowing').innerHTML = `<strong>${following}</strong> following`;
+  document.getElementById('statPosts').innerHTML     = `<strong>${postCount}</strong> posts`;
+  // Wire the followers/following stats to open the list modal
+  document.getElementById('statFollowers').onclick = () => openFollowListModal(userId, profile.username, 'followers');
+  document.getElementById('statFollowing').onclick = () => openFollowListModal(userId, profile.username, 'following');
+  document.getElementById('statPosts').onclick     = () => switchProfileTab('posts');
+
+  // Tab counts
+  setProfileTabCount('posts',  postCount);
+  setProfileTabCount('videos', videoCount);
+  setProfileTabCount('books',  bookCount);
 
   // About tab
   document.getElementById('aboutUsername').textContent = profile.username;
@@ -1473,8 +1784,7 @@ async function openProfile(userId) {
   document.getElementById('aboutJoined').textContent = joined.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   document.getElementById('aboutType').textContent = profile.is_guest ? 'Guest account' : 'Member';
 
-  // Action button + edit controls
-  const isOwn = currentUser && currentUser.id === userId;
+  // Action button + edit controls (isOwn already computed above)
   const actionBtn = document.getElementById('profileActionBtn');
   const editAvatarBtn = document.getElementById('editAvatarBtn');
   const editBannerBtn = document.getElementById('editBannerBtn');
@@ -1487,12 +1797,25 @@ async function openProfile(userId) {
     editBannerBtn.style.display = 'flex';
     editBannerBtn.style.visibility = 'visible';
   } else {
-    const { data: existing } = await supabase.from('follows').select('*').eq('follower_id', currentUser.id).eq('following_id', userId).maybeSingle();
-    actionBtn.textContent = existing ? 'Unfollow' : 'Follow';
-    actionBtn.onclick = () => toggleFollow(userId, !!existing);
+    const isFollowing = !!followRes.data;
+    actionBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
+    actionBtn.onclick = () => toggleFollow(userId, isFollowing);
     editAvatarBtn.style.display = 'none';
     editBannerBtn.style.display = 'none';
   }
+
+  // Wire profile menu (kebab) — share / report / snooze / block
+  const menuBtn = document.getElementById('profileMenuBtn');
+  if (menuBtn) {
+    menuBtn.onclick = (e) => openProfileActionMenu(e, menuBtn, {
+      isOwn,
+      userId,
+      username: profile.username || 'this user',
+    });
+  }
+
+  // Mutual followers strip — render from the RPC result we already fetched
+  renderMutualFollowers(userId, isOwn, mutualsRes?.data || null);
 
   // Reset tab to Posts and load
   document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'posts'));
@@ -1509,16 +1832,320 @@ async function openProfile(userId) {
   loadProfilePosts(userId);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// PROFILE — helpers (skeleton, badges, tab counts, switch, follow list modal)
+// ════════════════════════════════════════════════════════════════════════════
+
+// Retry profile fetch up to 3 times — protects against just-created accounts
+async function fetchProfileWithRetry(userId, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+    if (data) return data;
+    if (i < attempts - 1) await new Promise(r => setTimeout(r, 300));
+  }
+  return null;
+}
+
+// Paint shimmer placeholders so the page looks alive while parallel queries run
+function paintProfileSkeleton() {
+  const banner = document.getElementById('profileBanner');
+  if (banner && !banner.querySelector('img')) banner.classList.add('skeleton-banner');
+  const avatarBig = document.getElementById('profileAvatarBig');
+  if (avatarBig) { avatarBig.classList.add('skeleton-avatar'); avatarBig.innerHTML = ''; }
+  document.getElementById('profileName').textContent = ' ';
+  document.getElementById('profileName').classList.add('skeleton-text');
+  document.getElementById('profileBio').textContent = ' ';
+  document.getElementById('profileBio').classList.add('skeleton-text', 'skeleton-text-wide');
+  ['statFollowing','statFollowers','statPosts'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.innerHTML = '&nbsp;'; el.classList.add('skeleton-text'); }
+  });
+  // Hide stale badges so previous profile's "Member"/Creator/etc. don't flash
+  const baseBadge = document.getElementById('profileBadge');
+  if (baseBadge) baseBadge.style.visibility = 'hidden';
+  const badgeWrap = document.getElementById('profileBadgesExtra');
+  if (badgeWrap) badgeWrap.innerHTML = '';
+  // Hide stale mutuals strip from previous profile
+  const mutuals = document.getElementById('profileMutuals');
+  if (mutuals) { mutuals.style.display = 'none'; mutuals.innerHTML = ''; }
+}
+
+function clearProfileSkeleton() {
+  const banner = document.getElementById('profileBanner');
+  if (banner) banner.classList.remove('skeleton-banner');
+  const avatarBig = document.getElementById('profileAvatarBig');
+  if (avatarBig) avatarBig.classList.remove('skeleton-avatar');
+  ['profileName','profileBio','statFollowing','statFollowers','statPosts'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('skeleton-text', 'skeleton-text-wide');
+  });
+}
+
+// Render Member/Guest pill + Creator/Writer/Pioneer/etc. earned badges
+function renderProfileBadges(profile, badges) {
+  clearProfileSkeleton();
+
+  const baseBadge = document.getElementById('profileBadge');
+  baseBadge.textContent     = profile.is_guest ? 'Guest' : 'Member';
+  baseBadge.className       = 'profile-badge' + (profile.is_guest ? ' guest' : '');
+  baseBadge.style.visibility = ''; // un-hide after skeleton
+
+  // Earned badges live in a sibling container so they sit inline with username
+  let extra = document.getElementById('profileBadgesExtra');
+  if (!extra) {
+    extra = document.createElement('span');
+    extra.id = 'profileBadgesExtra';
+    extra.className = 'profile-badges-extra';
+    baseBadge.insertAdjacentElement('afterend', extra);
+  }
+  extra.innerHTML = '';
+
+  const META = {
+    creator:  { label: 'Creator',  icon: '🎬', cls: 'badge-creator',  title: 'Creator — earned by sharing original videos' },
+    writer:   { label: 'Writer',   icon: '✍️', cls: 'badge-writer',   title: 'Writer — earned by publishing books on Selebox' },
+    pioneer:  { label: 'Pioneer',  icon: '⭐', cls: 'badge-pioneer',  title: 'Pioneer — early Selebox community member' },
+    verified: { label: 'Verified', icon: '✓',  cls: 'badge-verified', title: 'Verified account' },
+    staff:    { label: 'Staff',    icon: '🛡', cls: 'badge-staff',    title: 'Selebox team member' },
+  };
+
+  // Stable display order
+  const order = ['staff','verified','pioneer','creator','writer'];
+  order.forEach(key => {
+    if (!badges.includes(key)) return;
+    const m = META[key];
+    const el = document.createElement('span');
+    el.className = `earned-badge ${m.cls}`;
+    el.title = m.title;
+    el.innerHTML = `<span class="earned-badge-icon">${m.icon}</span><span>${m.label}</span>`;
+    extra.appendChild(el);
+  });
+}
+
+function setProfileTabCount(tab, n) {
+  const btn = document.querySelector(`.profile-tab[data-tab="${tab}"]`);
+  if (!btn) return;
+  let pill = btn.querySelector('.tab-count');
+  if (!pill) {
+    pill = document.createElement('span');
+    pill.className = 'tab-count';
+    btn.appendChild(pill);
+  }
+  pill.textContent = n > 999 ? `${(n/1000).toFixed(1)}k` : String(n);
+}
+
+function switchProfileTab(tab) {
+  const btn = document.querySelector(`.profile-tab[data-tab="${tab}"]`);
+  if (btn) btn.click();
+}
+
+// "Followed by alice, bob, +12 others you follow" social-proof strip
+// Data is pre-fetched in openProfile's Promise.all — this just renders it.
+function renderMutualFollowers(userId, isOwn, data) {
+  const wrap = document.getElementById('profileMutuals');
+  if (!wrap) return;
+  if (isOwn || !currentUser || !data || !data.length) {
+    // Hide silently — no mutuals, viewing own, signed-out, or RPC missing
+    wrap.style.display = 'none';
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.style.display = '';
+
+  const total = Number(data[0]?.total_count || data.length);
+  const shown = data.slice(0, 3);
+  const extra = Math.max(0, total - shown.length);
+
+  // Stacked avatars
+  const avatars = shown.map(p => {
+    const safeName = escHTML(p.username || '');
+    const safeAvatar = p.avatar_url ? escHTML(p.avatar_url) : '';
+    return `
+    <button class="mutual-avatar" data-uid="${p.id}" title="@${safeName}" aria-label="View @${safeName}">
+      ${safeAvatar ? `<img src="${safeAvatar}" alt="@${safeName}"/>` : `<span>${initials(p.username)}</span>`}
+    </button>
+  `;}).join('');
+
+  // Names line
+  const nameStrs = shown.map(p =>
+    `<button class="mutual-name" data-uid="${p.id}">@${escHTML(p.username || '')}</button>`
+  );
+  let namesPart;
+  if (nameStrs.length === 1) namesPart = nameStrs[0];
+  else if (nameStrs.length === 2) namesPart = `${nameStrs[0]} and ${nameStrs[1]}`;
+  else namesPart = `${nameStrs[0]}, ${nameStrs[1]}, and ${nameStrs[2]}`;
+
+  const tail = extra > 0
+    ? ` <button class="mutual-more">+${extra} other${extra === 1 ? '' : 's'} you follow</button>`
+    : ' you follow';
+
+  wrap.innerHTML = `
+    <div class="mutual-avatars">${avatars}</div>
+    <div class="mutual-text">Followed by ${namesPart}${tail}</div>
+  `;
+
+  // Click handlers — avatars + names → that profile; "+N others" → followers modal
+  wrap.querySelectorAll('[data-uid]').forEach(el => {
+    el.onclick = () => openProfile(el.dataset.uid);
+  });
+  const moreBtn = wrap.querySelector('.mutual-more');
+  if (moreBtn) {
+    moreBtn.onclick = () => {
+      const uname = document.getElementById('profileName')?.textContent || 'user';
+      openFollowListModal(userId, uname, 'followers');
+    };
+  }
+}
+
+// ── Followers/Following list modal ──────────────────────────────────────────
+async function openFollowListModal(userId, username, mode) {
+  if (!currentUser) { toast('Please sign in', 'error'); return; }
+  // mode: 'followers' (people who follow userId) | 'following' (people userId follows)
+
+  document.querySelectorAll('.modal-backdrop[data-modal="follow-list"]').forEach(m => m.remove());
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'follow-list';
+  const safeUser = escHTML(username);
+  modal.innerHTML = `
+    <div class="modal-card follow-list-modal" role="dialog" aria-labelledby="follow-list-title">
+      <div class="follow-list-header">
+        <h2 id="follow-list-title">${mode === 'followers' ? 'Followers' : 'Following'}</h2>
+        <p class="modal-sub">@${safeUser} · ${mode === 'followers' ? 'people who follow' : 'people followed by'}</p>
+      </div>
+      <input type="text" class="follow-list-search" placeholder="Search by username…" />
+      <div class="follow-list-body" id="followListBody">
+        ${'<div class="follow-list-row skeleton-row"></div>'.repeat(6)}
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" data-action="cancel">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+  document.addEventListener('keydown', function onKey(ev) {
+    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+
+  // Fetch the relevant follows + each side's profile, then who *I* follow (for follow-back state)
+  const followsCol = mode === 'followers' ? 'follower_id' : 'following_id';
+  const matchCol   = mode === 'followers' ? 'following_id' : 'follower_id';
+
+  // Get the list of user ids
+  const { data: edges, error: edgeErr } = await supabase
+    .from('follows')
+    .select(`${followsCol}, created_at`)
+    .eq(matchCol, userId)
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  if (edgeErr) { toast(edgeErr.message, 'error'); return; }
+  const ids = (edges || []).map(e => e[followsCol]).filter(Boolean);
+
+  if (!ids.length) {
+    document.getElementById('followListBody').innerHTML = `
+      <div class="follow-list-empty">
+        <div class="follow-list-empty-icon">👥</div>
+        <div>${mode === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}</div>
+      </div>`;
+    return;
+  }
+
+  // Hydrate profiles + my own follows in parallel
+  const [{ data: profiles }, { data: myFollows }] = await Promise.all([
+    supabase.from('profiles').select('id, username, avatar_url, is_guest, bio').in('id', ids),
+    supabase.from('follows').select('following_id').eq('follower_id', currentUser.id).in('following_id', ids),
+  ]);
+
+  const myFollowSet = new Set((myFollows || []).map(f => f.following_id));
+  const profileMap  = new Map((profiles || []).map(p => [p.id, p]));
+
+  // Render in the original follow order (most recent first)
+  const rows = ids.map(id => profileMap.get(id)).filter(Boolean);
+  const body = document.getElementById('followListBody');
+  body.innerHTML = rows.map(p => {
+    const safeName = escHTML(p.username || '');
+    const safeBio  = escHTML((p.bio || '').slice(0, 80));
+    const safeAvatar = p.avatar_url ? escHTML(p.avatar_url) : '';
+    return `
+    <div class="follow-list-row" data-username="${(p.username || '').toLowerCase().replace(/"/g, '')}">
+      <button class="follow-list-avatar" data-uid="${p.id}">
+        ${safeAvatar ? `<img src="${safeAvatar}"/>` : initials(p.username)}
+      </button>
+      <div class="follow-list-info">
+        <button class="follow-list-name" data-uid="${p.id}">@${safeName}</button>
+        <div class="follow-list-bio">${safeBio}</div>
+      </div>
+      ${p.id === currentUser.id ? '<span class="follow-list-you">You</span>' :
+        `<button class="follow-list-btn ${myFollowSet.has(p.id) ? 'is-following' : ''}" data-uid="${p.id}">
+          ${myFollowSet.has(p.id) ? 'Following' : 'Follow'}
+        </button>`}
+    </div>
+  `;}).join('');
+
+  // Click avatar/name → open profile
+  body.querySelectorAll('[data-uid]').forEach(el => {
+    if (el.classList.contains('follow-list-btn')) return;
+    el.onclick = () => { close(); openProfile(el.dataset.uid); };
+  });
+
+  // Follow toggle
+  body.querySelectorAll('.follow-list-btn').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const uid = btn.dataset.uid;
+      const wasFollowing = btn.classList.contains('is-following');
+      btn.disabled = true;
+      btn.textContent = wasFollowing ? 'Unfollowing…' : 'Following…';
+      let error;
+      if (wasFollowing) {
+        ({ error } = await supabase.from('follows').delete().eq('follower_id', currentUser.id).eq('following_id', uid));
+      } else {
+        ({ error } = await supabase.from('follows').insert({ follower_id: currentUser.id, following_id: uid }));
+      }
+      btn.disabled = false;
+      if (error) {
+        toast(error.message, 'error');
+        btn.textContent = wasFollowing ? 'Following' : 'Follow';
+        return;
+      }
+      btn.classList.toggle('is-following', !wasFollowing);
+      btn.textContent = wasFollowing ? 'Follow' : 'Following';
+    };
+  });
+
+  // Search filter
+  const search = modal.querySelector('.follow-list-search');
+  search.oninput = () => {
+    const q = search.value.trim().toLowerCase();
+    body.querySelectorAll('.follow-list-row').forEach(row => {
+      row.style.display = !q || row.dataset.username.includes(q) ? '' : 'none';
+    });
+  };
+  search.focus();
+}
+
 async function loadProfilePosts(userId) {
   const wrap = document.getElementById('profilePosts');
   wrap.innerHTML = '<div class="loading">Loading posts...</div>';
+  // Fetch by created_at; sort pinned-first client-side. Bulletproof if pinned_at
+  // column doesn't exist yet (works pre-migration, just won't have pinning).
   const { data } = await supabase
     .from('posts')
     .select(`*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(40);
-  posts = data || [];
+  posts = (data || []).slice().sort((a, b) => {
+    if (a.pinned_at && !b.pinned_at) return -1;
+    if (!a.pinned_at && b.pinned_at) return 1;
+    if (a.pinned_at && b.pinned_at) return new Date(b.pinned_at) - new Date(a.pinned_at);
+    return new Date(b.created_at) - new Date(a.created_at);
+  });
   wrap.innerHTML = '';
   if (!posts.length) {
     wrap.innerHTML = `
@@ -1531,7 +2158,25 @@ async function loadProfilePosts(userId) {
       </div>`;
     return;
   }
+
+  // Inject "Pinned" + "Posts" section dividers when the pinned/unpinned boundary is crossed
+  let pinnedShown = false, postsShown = false;
+  const hasAnyPinned = posts.some(p => p.pinned_at);
   posts.forEach(p => {
+    if (p.pinned_at && !pinnedShown) {
+      const hdr = document.createElement('div');
+      hdr.className = 'profile-section-header';
+      hdr.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M16 2l-1.4 1.4 1.6 1.6-5.4 5.4-3-1.5L6 11.3l3.7 3.7L4 21l1.4 1.4 5.7-5.7 3.7 3.7 1.4-1.4-1.5-3 5.4-5.4 1.6 1.6L23 9l-7-7z"/></svg> <span>Pinned</span>`;
+      wrap.appendChild(hdr);
+      pinnedShown = true;
+    }
+    if (!p.pinned_at && !postsShown && hasAnyPinned) {
+      const hdr = document.createElement('div');
+      hdr.className = 'profile-section-header';
+      hdr.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg> <span>Posts</span>`;
+      wrap.appendChild(hdr);
+      postsShown = true;
+    }
     const el = renderPost(p);
     wrap.appendChild(el);
     // Lazy-load reactions/comments for these too
