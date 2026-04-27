@@ -2579,8 +2579,9 @@ async function loadBooks() {
   _hasMoreAppwriteBooks = true;
   _isLoadingMoreBooks = false;
 
-  // Kick off recommendation rail in parallel (doesn't block main grid)
+  // Kick off recommendation rail + adaptive chip render in parallel (don't block grid)
   loadBookRecommendations().catch(() => {});
+  renderBookChips().catch(() => {});
 
   try {
     // First-page Appwrite fetch + full Supabase fetch (Supabase is small and shouldn't paginate)
@@ -2794,10 +2795,110 @@ function setupBooksInfiniteScroll() {
 
 // ── Supabase books ──
 // ────────────────────────────────────────────────────────────────────────
-// Adaptive book recommendations — content-based scoring (tags + author + popularity)
-// Uses the same interest-profile pattern as video recommendations.
-// Cached per session so the rail doesn't re-fetch on every navigation.
+// Adaptive book chip rail — YouTube-style: tags from user's reads + platform popular
+// Re-renders on each books-page open so it adapts as reading habits evolve.
 // ────────────────────────────────────────────────────────────────────────
+const PRETTY_GENRE = {
+  'hot-romance':         'Hot Romance',
+  'dark-romance':        'Dark Romance',
+  'mafia-boss':          'Mafia Boss',
+  'enemies-to-lovers':   'Enemies to Lovers',
+  'forbidden-love':      'Forbidden Love',
+  'arranged-marriage':   'Arranged Marriage',
+  'contract-marriage':   'Contract Marriage',
+  'second-chance':       'Second Chance',
+  'boy-love-bl':         'Boy Love',
+  'girl-love-gl':        'Girl Love',
+  'sci-fi':              'Sci-fi',
+  'teen-fiction':        'Teen Fiction',
+  'general-fiction':     'General Fiction',
+  'slice-of-life':       'Slice of Life',
+  'one-shot-story':      'One Shot Story',
+  'valentines-special':  'Valentines Special',
+};
+function prettyGenre(slug) {
+  if (!slug) return '';
+  if (PRETTY_GENRE[slug]) return PRETTY_GENRE[slug];
+  return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+async function renderBookChips() {
+  const wrap = document.getElementById('bookGenreChips');
+  if (!wrap) return;
+
+  // Build a candidate set from BOTH platform popularity + user's reading taste
+  let userTags = {};
+  let platformGenres = {};
+
+  // Platform popularity — count genres + tags across the books we already loaded
+  const allLoadedBooks = (typeof allBooks !== 'undefined' && Array.isArray(allBooks))
+    ? allBooks
+    : (Array.isArray(window._latestBooksList) ? window._latestBooksList : []);
+  for (const b of allLoadedBooks) {
+    if (b.genre) platformGenres[b.genre] = (platformGenres[b.genre] || 0) + 1;
+    for (const t of (b.tags || [])) {
+      const slug = String(t).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      if (slug) platformGenres[slug] = (platformGenres[slug] || 0) + 1;
+    }
+  }
+
+  // User reading taste (only for signed-in users)
+  if (currentUser) {
+    try {
+      const [{ data: reads }, { data: likes }] = await Promise.all([
+        supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30),
+        supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30),
+      ]);
+      const seedIds = [...new Set([...(reads || []), ...(likes || [])].map(r => r.book_id))].slice(0, 30);
+      if (seedIds.length) {
+        const { data: seedBooks } = await supabase
+          .from('books').select('id, genre, tags').in('id', seedIds);
+        for (const b of (seedBooks || [])) {
+          if (b.genre) userTags[b.genre] = (userTags[b.genre] || 0) + 2;
+          for (const t of (b.tags || [])) {
+            const slug = String(t).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            if (slug) userTags[slug] = (userTags[slug] || 0) + 1;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const userRanked = Object.entries(userTags)
+    .filter(([t]) => platformGenres[t]) // only show tags that have content
+    .sort((a, b) => b[1] - a[1])
+    .map(([t]) => t);
+
+  const platformRanked = Object.entries(platformGenres)
+    .sort((a, b) => b[1] - a[1])
+    .map(([t]) => t);
+
+  // Blend: 70% from interest, 30% platform discovery (or 100% platform for new users)
+  const limit = 22;
+  let chips = [];
+  if (userRanked.length) {
+    const userQuota = Math.ceil(limit * 0.7);
+    const seen = new Set(userRanked.slice(0, userQuota));
+    for (const t of platformRanked) { if (seen.size >= limit) break; seen.add(t); }
+    chips = [...seen].slice(0, limit);
+  } else {
+    chips = platformRanked.slice(0, limit);
+  }
+
+  // Fallback if we still have nothing (e.g. on first page open before any books load)
+  if (!chips.length) {
+    chips = ['romance', 'hot-romance', 'dark-romance', 'mafia-boss', 'billionaire', 'werewolf', 'vampire', 'thriller', 'horror', 'fantasy', 'comedy', 'drama'];
+  }
+
+  // Render — "All" chip first, then adaptive list
+  const activeAll = !bookGenreFilter ? 'active' : '';
+  let html = `<button class="book-chip ${activeAll}" data-genre="">All</button>`;
+  html += chips.map(g =>
+    `<button class="book-chip ${g === bookGenreFilter ? 'active' : ''}" data-genre="${escHTML(g)}">${escHTML(prettyGenre(g))}</button>`
+  ).join('');
+  wrap.innerHTML = html;
+}
+
 let _bookRecsCache = null;
 let _bookRecsTimestamp = 0;
 const BOOK_RECS_TTL = 5 * 60 * 1000; // 5 min
