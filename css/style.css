@@ -859,38 +859,51 @@ body:not(.light) .book-toolbar {
   padding-right: 0.5rem;
 }
 .book-genre-chips::-webkit-scrollbar { display: none; }
-.book-chip { white-space: nowrap; flex-shrink: 0; }
+/* YouTube-style chip: flat, high-contrast, no shadows */
 .book-chip {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border, rgba(255,255,255,0.10));
-  color: var(--text2);
-  font-size: 0.82rem;
+  background: rgba(15, 23, 42, 0.06);        /* very subtle gray fill */
+  border: 1px solid transparent;             /* no visible border */
+  color: #0f172a;
+  font-size: 0.84rem;
   font-weight: 500;
-  padding: 0.42rem 0.95rem;
+  letter-spacing: -0.005em;
+  padding: 0.45rem 0.95rem;
   border-radius: 999px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background 0.14s, color 0.14s;
   font-family: inherit;
   white-space: nowrap;
-}
-body.light .book-chip {
-  background: #ffffff;
-  border-color: #e5e7eb;
-  color: #4b5563;
+  flex-shrink: 0;
 }
 .book-chip:hover {
-  background: rgba(139, 92, 246, 0.10);
-  border-color: rgba(139, 92, 246, 0.45);
-  color: var(--text);
+  background: rgba(15, 23, 42, 0.11);
 }
 .book-chip.active {
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  border-color: transparent;
+  background: #0f172a;            /* near-black — high contrast pop */
   color: #ffffff;
-  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.35);
+  font-weight: 600;
+}
+.book-chip.active:hover {
+  background: #1e293b;
 }
 .book-chip:focus { outline: none; }
 .book-chip:focus-visible { outline: 2px solid rgba(124, 58, 237, 0.5); outline-offset: 2px; }
+
+/* Dark mode — inverted high-contrast */
+body:not(.light) .book-chip {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f3f4f6;
+}
+body:not(.light) .book-chip:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+body:not(.light) .book-chip.active {
+  background: #f3f4f6;
+  color: #0f172a;
+}
+body:not(.light) .book-chip.active:hover {
+  background: #ffffff;
+}
 .book-sort-select {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border, rgba(255,255,255,0.10));
@@ -2759,45 +2772,48 @@ body.on-videos .main-wrap {
 .video-search-tags::-webkit-scrollbar { display: none; }
 .video-search-tags:empty { display: none; }
 
+/* YouTube-style flat chip — same as .book-chip */
 .search-tag-pill {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  color: var(--text2);
-  padding: 0.42rem 0.95rem;
-  border-radius: 99px;
-  font-size: 0.82rem;
+  background: rgba(15, 23, 42, 0.06);
+  border: 1px solid transparent;
+  color: #0f172a;
+  padding: 0.45rem 0.95rem;
+  border-radius: 999px;
+  font-size: 0.84rem;
   font-weight: 500;
   letter-spacing: -0.005em;
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s, background 0.15s, transform 0.12s;
+  transition: background 0.14s, color 0.14s;
   white-space: nowrap;
   flex-shrink: 0;
   font-family: inherit;
 }
 .search-tag-pill:hover {
-  border-color: var(--purple);
-  color: var(--purple-lt);
-  transform: translateY(-1px);
+  background: rgba(15, 23, 42, 0.11);
 }
 .search-tag-pill.active {
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  border-color: transparent;
-  color: #fff;
+  background: #0f172a;
+  color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 3px 10px rgba(124, 58, 237, 0.28);
 }
-/* "All" chip subtle differentiation (slightly larger contrast when active) */
+.search-tag-pill.active:hover { background: #1e293b; }
+.search-tag-pill:focus { outline: none; }
+.search-tag-pill:focus-visible { outline: 2px solid rgba(124, 58, 237, 0.5); outline-offset: 2px; }
 .search-tag-pill-all { font-weight: 600; }
-body.light .search-tag-pill {
-  background: white;
-  border-color: rgba(17, 24, 39, 0.08);
-  color: #374151;
+
+/* Dark mode parity */
+body:not(.light) .search-tag-pill {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f3f4f6;
 }
-body.light .search-tag-pill:hover {
-  border-color: #c4b5fd;
-  color: #5b21b6;
-  background: rgba(124, 58, 237, 0.04);
+body:not(.light) .search-tag-pill:hover {
+  background: rgba(255, 255, 255, 0.14);
 }
+body:not(.light) .search-tag-pill.active {
+  background: #f3f4f6;
+  color: #0f172a;
+}
+body:not(.light) .search-tag-pill.active:hover { background: #ffffff; }
 
 .video-search-empty {
   text-align: center; padding: 3rem 1rem; color: var(--text3);
