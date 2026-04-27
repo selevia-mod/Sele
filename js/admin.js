@@ -46,8 +46,24 @@ function switchTab(name) {
   document.querySelectorAll('.admin-tab-content').forEach(s => {
     s.style.display = s.dataset.tabContent === name ? 'block' : 'none';
   });
+  // Tabs that just need a single load call
   if (name === 'activity') loadActivity();
   if (name === 'inbox')    loadInbox();
+  // Tabs that have init-once + load wiring (Users / Bans / Content). The init
+  // functions are declared later in the file but we only call them when the
+  // tab is opened, so the binding works whatever order the code runs in.
+  const lazyInit = (rootElId, initFn, loadFn) => {
+    const el = document.getElementById(rootElId);
+    if (!el) return;
+    if (!el.dataset.bound && typeof initFn === 'function') {
+      initFn();
+      el.dataset.bound = '1';
+    }
+    if (typeof loadFn === 'function') loadFn();
+  };
+  if (name === 'users')   lazyInit('usersSearch',   typeof initUsersTab   === 'function' ? initUsersTab   : null, typeof loadUsers          === 'function' ? loadUsers          : null);
+  if (name === 'bans')    lazyInit('bansFilter',    typeof initBansTab    === 'function' ? initBansTab    : null, typeof loadBans           === 'function' ? loadBans           : null);
+  if (name === 'content') lazyInit('contentFilter', typeof initContentTab === 'function' ? initContentTab : null, typeof loadHiddenContent  === 'function' ? loadHiddenContent  : null);
 }
 
 document.querySelectorAll('.admin-tab').forEach(t => {
@@ -570,39 +586,7 @@ ACTION_TITLES.unsuspend   = 'Lift suspension';
 ACTION_TITLES.unban       = 'Unban user';
 ACTION_TITLES.role_change = 'Change role';
 
-// Switch tab on Users / Bans → load
-const _origSwitchTab = switchTab;
-function switchTab2(name) {
-  _origSwitchTab(name);
-  if (name === 'users') {
-    const searchEl = document.getElementById('usersSearch');
-    if (!searchEl.dataset.bound) {
-      initUsersTab();
-      searchEl.dataset.bound = '1';
-    }
-    loadUsers();
-  }
-  if (name === 'bans') {
-    const filterEl = document.getElementById('bansFilter');
-    if (!filterEl.dataset.bound) {
-      initBansTab();
-      filterEl.dataset.bound = '1';
-    }
-    loadBans();
-  }
-  if (name === 'content') {
-    const filterEl = document.getElementById('contentFilter');
-    if (!filterEl.dataset.bound) {
-      initContentTab();
-      filterEl.dataset.bound = '1';
-    }
-    loadHiddenContent();
-  }
-}
-// Re-bind tab clicks to use the augmented switchTab2
-document.querySelectorAll('.admin-tab').forEach(t => {
-  t.onclick = () => switchTab2(t.dataset.tab);
-});
+// (Users / Bans / Content tab wiring is now handled inline in switchTab.)
 
 // ─── BANS TAB ────────────────────────────────────────────────────────────────
 
