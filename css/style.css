@@ -1584,6 +1584,117 @@ body.light .chapter-editor-bar { background: rgba(255, 255, 255, 0.85); border-c
   flex-shrink: 0;
 }
 
+/* ─── Chapter cover (Wattpad-style hero above title) ─── */
+.chapter-cover {
+  position: relative;
+  margin: 0.85rem 0 1.1rem;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(124, 58, 237, 0.16);
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.05), rgba(124, 58, 237, 0.02)), #ffffff;
+  min-height: 0;
+}
+body:not(.light) .chapter-cover {
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.08), rgba(124, 58, 237, 0.04)), rgba(26, 20, 40, 0.5);
+  border-color: rgba(167, 139, 250, 0.22);
+}
+
+.chapter-cover-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 160px;
+  padding: 1.5rem;
+  background: transparent;
+  border: 2px dashed rgba(124, 58, 237, 0.2);
+  border-radius: 12px;
+  margin: 0.5rem;
+  color: #6b7280;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s, background 0.18s;
+}
+.chapter-cover-empty:hover {
+  border-color: rgba(124, 58, 237, 0.45);
+  color: #5b21b6;
+  background: rgba(124, 58, 237, 0.04);
+}
+.chapter-cover-empty svg { color: rgba(124, 58, 237, 0.6); }
+.chapter-cover-empty small {
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: #9ca3af;
+  letter-spacing: -0.005em;
+}
+body:not(.light) .chapter-cover-empty { color: #9ca3af; border-color: rgba(167, 139, 250, 0.25); }
+body:not(.light) .chapter-cover-empty:hover {
+  border-color: rgba(167, 139, 250, 0.55);
+  color: #ddd6fe;
+  background: rgba(167, 139, 250, 0.08);
+}
+body:not(.light) .chapter-cover-empty small { color: #6b7280; }
+
+.chapter-cover-img {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: cover;
+  border-radius: 13px;
+}
+
+.chapter-cover-actions {
+  position: absolute;
+  bottom: 0.85rem;
+  right: 0.85rem;
+  display: none;
+  gap: 0.4rem;
+  z-index: 2;
+}
+.chapter-cover-actions button {
+  padding: 0.4rem 0.85rem;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.chapter-cover-actions button:hover {
+  background: rgba(0, 0, 0, 0.8);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+.chapter-cover-actions button:last-child:hover {
+  background: rgba(220, 38, 38, 0.85);
+  border-color: rgba(220, 38, 38, 0.95);
+}
+
+/* ─── Inline images inside chapter content (long screenshots OK) ─── */
+#chapterEditorQuill .ql-editor img,
+.chapter-content img {
+  display: block;
+  max-width: 100%;
+  height: auto;            /* preserves aspect ratio for tall images */
+  /* No max-height — long scrollable screenshots flow naturally */
+  margin: 1rem auto;
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(15, 10, 28, 0.10);
+  cursor: zoom-in;
+}
+body:not(.light) #chapterEditorQuill .ql-editor img,
+body:not(.light) .chapter-content img {
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.4);
+}
+
 /* Quill theme overrides */
 #chapterEditorQuill {
   border-radius: 14px;
