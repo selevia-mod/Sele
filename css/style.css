@@ -1548,25 +1548,52 @@ body.light .author-chapter-row { background: #ffffff; border-color: #e5e7eb; }
   backdrop-filter: blur(8px);
 }
 body.light .chapter-editor-bar { background: rgba(255, 255, 255, 0.85); border-color: #e5e7eb; }
-.chapter-editor-bar-mid { flex: 1; min-width: 0; }
-.chapter-editor-title-input {
-  width: 100%;
-  background: transparent;
-  border: none;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 1.05rem;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  outline: none;
+.chapter-editor-bar-mid {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
-.chapter-editor-title-input::placeholder { color: var(--text3); font-weight: 500; }
 .chapter-editor-meta {
   display: flex;
-  gap: 1rem;
-  margin-top: 0.2rem;
+  gap: 0.75rem;
   font-size: 0.78rem;
   color: var(--text2);
+  align-items: center;
+}
+
+/* Hero-style chapter title input (replaces old title-in-topbar) */
+.chapter-title-hero {
+  display: block;
+  width: 100%;
+  margin: 0.4rem 0 1rem;
+  padding: 0.4rem 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  outline: none;
+  transition: border-color 0.18s, color 0.18s;
+}
+.chapter-title-hero::placeholder {
+  color: var(--text3);
+  font-weight: 700;
+  opacity: 0.55;
+}
+.chapter-title-hero:focus {
+  border-bottom-color: rgba(124, 58, 237, 0.35);
+}
+body.light .chapter-title-hero { color: #0f172a; }
+body.light .chapter-title-hero::placeholder { color: #9ca3af; }
+body.light .chapter-title-hero:focus { border-bottom-color: rgba(124, 58, 237, 0.4); }
+
+@media (max-width: 700px) {
+  .chapter-title-hero { font-size: 1.4rem; }
 }
 .chapter-save-status {
   display: inline-flex; align-items: center; gap: 0.35rem;
