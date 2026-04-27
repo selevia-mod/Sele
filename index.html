@@ -747,8 +747,22 @@
               </button>
             </div>
 
+            <!-- Image attachment preview (shown after selecting a file, before send) -->
+            <div class="dm-attach-preview" id="dmAttachPreview" style="display:none">
+              <div class="dm-attach-preview-img"><img id="dmAttachPreviewImg" alt="Selected attachment"/></div>
+              <div class="dm-attach-preview-info">
+                <span class="dm-attach-preview-name" id="dmAttachPreviewName"></span>
+                <span class="dm-attach-preview-size" id="dmAttachPreviewSize"></span>
+              </div>
+              <button type="button" class="dm-attach-preview-cancel" id="dmAttachCancel" aria-label="Remove attachment" title="Remove">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+
+            <input type="file" id="dmFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none"/>
+
             <form class="dm-composer" id="dmComposer" onsubmit="return false">
-              <button type="button" class="dm-composer-btn" id="dmAttachBtn" title="Attach (coming soon)" disabled aria-label="Attach">
+              <button type="button" class="dm-composer-btn" id="dmAttachBtn" title="Attach photo or GIF" aria-label="Attach">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               </button>
               <div class="dm-composer-input-wrap">
