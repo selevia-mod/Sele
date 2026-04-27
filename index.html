@@ -415,23 +415,19 @@
             <label class="vu-label">Description</label>
             <textarea id="bookEditorDescription" class="vu-textarea" rows="4" placeholder="What's it about?"></textarea>
 
-            <label class="vu-label">Genre</label>
-            <select id="bookEditorGenre" class="vu-input">
-              <option value="">—</option>
-              <option value="romance">Romance</option>
-              <option value="hot-romance">Hot Romance</option>
-              <option value="thriller">Thriller</option>
-              <option value="horror">Horror</option>
-              <option value="fantasy">Fantasy</option>
-              <option value="comedy">Comedy</option>
-              <option value="anime">Anime</option>
-              <option value="adventure">Adventure</option>
-              <option value="drama">Drama</option>
-              <option value="mystery">Mystery</option>
-            </select>
+            <label class="vu-label">
+              Genres
+              <small style="color:#888">pick up to 5 — readers find your book by these</small>
+            </label>
+            <div id="bookEditorGenrePicker" class="genre-picker">
+              <div class="genre-picker-counter"><span class="genre-picker-count">0</span> / 5 selected</div>
+              <div class="genre-picker-chips"></div>
+            </div>
+            <!-- Hidden legacy input — kept for back-compat; the picker writes here invisibly -->
+            <input type="hidden" id="bookEditorGenre"/>
 
-            <label class="vu-label">Tags <small style="color:#888">comma-separated</small></label>
-            <input type="text" id="bookEditorTags" class="vu-input" placeholder="dark, slowburn, enemies-to-lovers">
+            <label class="vu-label">Custom tags <small style="color:#888">comma-separated, in addition to genres above</small></label>
+            <input type="text" id="bookEditorTags" class="vu-input" placeholder="slowburn, enemies-to-lovers, my-original-tag">
 
             <label class="vu-label">Status</label>
             <select id="bookEditorBookStatus" class="vu-input">
@@ -514,20 +510,15 @@
             <label class="vu-label">Title <span class="vu-required">*</span></label>
             <input type="text" id="newBookTitle" class="vu-input" maxlength="120" placeholder="Untitled novel">
 
-            <label class="vu-label">Genre</label>
-            <select id="newBookGenre" class="vu-input">
-              <option value="">—</option>
-              <option value="romance">Romance</option>
-              <option value="hot-romance">Hot Romance</option>
-              <option value="thriller">Thriller</option>
-              <option value="horror">Horror</option>
-              <option value="fantasy">Fantasy</option>
-              <option value="comedy">Comedy</option>
-              <option value="anime">Anime</option>
-              <option value="adventure">Adventure</option>
-              <option value="drama">Drama</option>
-              <option value="mystery">Mystery</option>
-            </select>
+            <label class="vu-label">
+              Genres
+              <small style="color:#888">pick up to 5</small>
+            </label>
+            <div id="newBookGenrePicker" class="genre-picker">
+              <div class="genre-picker-counter"><span class="genre-picker-count">0</span> / 5 selected</div>
+              <div class="genre-picker-chips"></div>
+            </div>
+            <input type="hidden" id="newBookGenre"/>
 
             <label class="vu-label">Short description</label>
             <textarea id="newBookDescription" class="vu-textarea" rows="3" placeholder="What's it about?"></textarea>
@@ -548,21 +539,63 @@
           <div class="video-player-wrap">
             <video id="videoPlayer" controls></video>
           </div>
+
+          <!-- Title + meta -->
           <div class="video-info">
-        <h1 class="video-title-big" id="videoTitle">—</h1>
-        <div class="video-meta">
-          <span id="videoViews"></span>
-          <span id="videoDate">—</span>
-        </div>
-        <div class="video-uploader">
-          <div class="avatar" id="videoUploaderAvatar">?</div>
-          <div>
-            <div class="video-uploader-name" id="videoUploaderName">—</div>
-            <div class="video-uploader-badge" id="videoUploaderBadge"></div>
+            <h1 class="video-title-big" id="videoTitle">—</h1>
+            <div class="video-meta">
+              <span id="videoViews"></span>
+              <span id="videoDate">—</span>
+            </div>
           </div>
-        </div>
-        <div class="video-description" id="videoDescription"></div>
+
+          <!-- Action bar: like / repost / share -->
+          <div class="video-actions" id="videoActions">
+            <div class="reaction-wrap" data-target="" data-type="video">
+              <button class="action-btn reaction-trigger" data-target="" data-type="video">
+                <span class="r-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                </span>
+                <span class="r-label-text">Like</span>
+              </button>
+              <div class="reaction-picker"></div>
+            </div>
+            <button class="action-btn" id="videoRepostBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+              <span>Repost</span>
+            </button>
+            <div class="reaction-wrap" style="position:relative">
+              <button class="action-btn" id="videoShareBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+                <span>Share</span>
+              </button>
+              <div class="share-menu" id="videoShareMenu">
+                <button class="share-option" data-platform="facebook">📘 Facebook</button>
+                <button class="share-option" data-platform="twitter">🐦 Twitter / X</button>
+                <button class="share-option" data-platform="whatsapp">💬 WhatsApp</button>
+                <button class="share-option" data-platform="copy">🔗 Copy link</button>
+              </div>
+            </div>
           </div>
+
+          <!-- Uploader (with Follow) + description -->
+          <div class="video-info-secondary">
+            <div class="video-uploader-row">
+              <div class="video-uploader">
+                <div class="avatar" id="videoUploaderAvatar">?</div>
+                <div>
+                  <div class="video-uploader-name" id="videoUploaderName">—</div>
+                  <div class="video-uploader-badge" id="videoUploaderBadge"></div>
+                </div>
+              </div>
+              <button class="btn-follow-creator" id="btnFollowCreator" style="display:none">+ Follow</button>
+            </div>
+            <div class="video-description-wrap">
+              <div class="video-description" id="videoDescription"></div>
+              <button class="video-description-toggle" id="videoDescriptionToggle" style="display:none">Show more</button>
+            </div>
+          </div>
+
           <!-- Comments on this video -->
           <div class="video-comments-wrap" id="videoCommentsWrap" style="display:none">
             <div class="video-comments-header">
