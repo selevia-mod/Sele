@@ -4126,14 +4126,19 @@ async function openAuthorChapterEditor(bookId, chapterId) {
       theme: 'snow',
       placeholder: 'Start writing your chapter…',
       modules: {
-        toolbar: [
-          [{ header: [1, 2, 3, false] }],
-          ['bold', 'italic', 'underline', 'strike'],
-          [{ list: 'ordered' }, { list: 'bullet' }],
-          ['blockquote', 'link'],
-          [{ align: [] }],
-          ['clean'],
-        ],
+        toolbar: {
+          container: [
+            [{ header: [1, 2, 3, false] }],
+            ['bold', 'italic', 'underline', 'strike'],
+            [{ list: 'ordered' }, { list: 'bullet' }],
+            ['blockquote', 'link', 'image'],
+            [{ align: [] }],
+            ['clean'],
+          ],
+          handlers: {
+            image: openChapterImagePicker,
+          },
+        },
       },
     });
     chapterQuill.on('text-change', () => {
@@ -4149,24 +4154,39 @@ async function openAuthorChapterEditor(bookId, chapterId) {
       chapterDirty = true;
       scheduleChapterAutosave();
     });
+
+    // ─── Chapter cover upload ───
+    document.getElementById('btnUploadChapterCover')?.addEventListener('click', () => {
+      document.getElementById('chapterCoverFile').click();
+    });
+    document.getElementById('btnReplaceChapterCover')?.addEventListener('click', () => {
+      document.getElementById('chapterCoverFile').click();
+    });
+    document.getElementById('btnRemoveChapterCover')?.addEventListener('click', removeChapterCover);
+    document.getElementById('chapterCoverFile')?.addEventListener('change', uploadChapterCover);
+
+    // ─── Inline content image upload ───
+    document.getElementById('chapterContentImageFile')?.addEventListener('change', uploadChapterInlineImage);
   }
 
   // Reset state
   chapterQuill.setText('');
   document.getElementById('chapterEditorTitle').value = '';
   document.getElementById('chapterEditorPublished').checked = false;
+  setChapterCoverPreview(null);
   setChapterSaveStatus('idle');
   chapterDirty = false;
 
   if (chapterId) {
     const { data, error } = await supabase
       .from('chapters')
-      .select('id, chapter_number, title, content, is_published')
+      .select('id, chapter_number, title, content, is_published, cover_url')
       .eq('id', chapterId)
       .single();
     if (error || !data) { toast('Chapter not found', 'error'); openAuthorBookEditor(bookId); return; }
     document.getElementById('chapterEditorTitle').value = data.title || '';
     document.getElementById('chapterEditorPublished').checked = !!data.is_published;
+    setChapterCoverPreview(data.cover_url || null);
     if (data.content) chapterQuill.clipboard.dangerouslyPasteHTML(data.content);
     chapterDirty = false;
   }
@@ -4205,11 +4225,15 @@ async function saveChapter() {
   const text = chapterQuill.getText().trim();
   const wordCount = text.length ? text.split(/\s+/).length : 0;
 
+  // Cover URL — null if no cover, otherwise the public URL of uploaded image
+  const coverUrl = document.getElementById('chapterCoverImg')?.dataset?.url || null;
+
   let result;
   if (editingChapterId) {
     result = await supabase.from('chapters').update({
       title, content, word_count: wordCount,
       is_published: isPublished,
+      cover_url: coverUrl,
       updated_at: new Date().toISOString(),
     }).eq('id', editingChapterId).select().single();
   } else {
@@ -4221,6 +4245,7 @@ async function saveChapter() {
       chapter_number: nextNum,
       title, content, word_count: wordCount,
       is_published: isPublished,
+      cover_url: coverUrl,
     }).select().single();
     if (result.data) {
       editingChapterId = result.data.id;
@@ -4236,6 +4261,101 @@ async function saveChapter() {
   await recomputeBookCounts(editingBookId);
   setChapterSaveStatus('saved');
   chapterDirty = false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Chapter cover + inline images
+// ════════════════════════════════════════════════════════════════════════════
+
+function setChapterCoverPreview(url) {
+  const empty   = document.getElementById('btnUploadChapterCover');
+  const img     = document.getElementById('chapterCoverImg');
+  const actions = document.getElementById('chapterCoverActions');
+  if (!empty || !img || !actions) return;
+  if (url) {
+    img.src = url;
+    img.dataset.url = url;
+    img.style.display     = 'block';
+    actions.style.display = 'flex';
+    empty.style.display   = 'none';
+  } else {
+    img.removeAttribute('src');
+    delete img.dataset.url;
+    img.style.display     = 'none';
+    actions.style.display = 'none';
+    empty.style.display   = 'flex';
+  }
+}
+
+async function uploadChapterCover(e) {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  if (!file.type.startsWith('image/'))   { toast('Pick an image file', 'error'); return; }
+  if (file.size > 8 * 1024 * 1024)        { toast('Cover must be under 8MB', 'error'); return; }
+
+  toast('Uploading cover…', '');
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) { toast('Sign in first', 'error'); return; }
+
+  const ext  = (file.name.split('.').pop() || 'jpg').toLowerCase();
+  const path = `chapters/${user.id}/${editingBookId || 'unsaved'}-${editingChapterId || 'new'}-${Date.now()}.${ext}`;
+  const { error: upErr } = await supabase.storage.from('book-covers').upload(path, file, { upsert: true, contentType: file.type });
+  if (upErr) { toast('Upload failed: ' + upErr.message, 'error'); return; }
+
+  const { data: { publicUrl } } = supabase.storage.from('book-covers').getPublicUrl(path);
+  setChapterCoverPreview(publicUrl);
+
+  // If chapter already exists, persist immediately. Otherwise it'll go in via saveChapter.
+  if (editingChapterId) {
+    await supabase.from('chapters').update({ cover_url: publicUrl, updated_at: new Date().toISOString() }).eq('id', editingChapterId);
+  }
+  chapterDirty = true;
+  scheduleChapterAutosave();
+  toast('Cover updated', 'success');
+}
+
+async function removeChapterCover() {
+  setChapterCoverPreview(null);
+  if (editingChapterId) {
+    await supabase.from('chapters').update({ cover_url: null, updated_at: new Date().toISOString() }).eq('id', editingChapterId);
+  }
+  chapterDirty = true;
+  scheduleChapterAutosave();
+  toast('Cover removed', 'success');
+}
+
+// Quill image button → triggers our hidden file input
+function openChapterImagePicker() {
+  document.getElementById('chapterContentImageFile').click();
+}
+
+async function uploadChapterInlineImage(e) {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file || !chapterQuill) return;
+  if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
+  if (file.size > 12 * 1024 * 1024)     { toast('Image must be under 12MB', 'error'); return; }
+
+  toast('Uploading image…', '');
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) { toast('Sign in first', 'error'); return; }
+
+  const ext  = (file.name.split('.').pop() || 'jpg').toLowerCase();
+  const path = `chapter-content/${user.id}/${editingChapterId || 'new'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error: upErr } = await supabase.storage.from('book-covers').upload(path, file, { upsert: false, contentType: file.type });
+  if (upErr) { toast('Upload failed: ' + upErr.message, 'error'); return; }
+
+  const { data: { publicUrl } } = supabase.storage.from('book-covers').getPublicUrl(path);
+
+  // Insert image at current cursor position. Quill keeps it as <img class="ql-image">
+  const range = chapterQuill.getSelection(true);
+  chapterQuill.insertEmbed(range.index, 'image', publicUrl, 'user');
+  chapterQuill.setSelection(range.index + 1);
+
+  toast('Image inserted', 'success');
+  chapterDirty = true;
+  scheduleChapterAutosave();
 }
 
 document.getElementById('btnSaveChapter')?.addEventListener('click', saveChapter);
