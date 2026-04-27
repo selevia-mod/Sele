@@ -6812,7 +6812,16 @@ async function loadNotifications() {
 }
 
 async function hydrateActorProfiles(items) {
-  const ids = [...new Set(items.map(n => n.actor_id).filter(Boolean).filter(id => !_notifActorCache[id]))];
+  // Collect ALL actor ids (primary + coalesced others) so the
+  // "Alice and Bob reacted" label can resolve every name.
+  const allIds = new Set();
+  items.forEach(n => {
+    if (n.actor_id) allIds.add(n.actor_id);
+    if (Array.isArray(n.actor_ids)) {
+      n.actor_ids.forEach(id => { if (id) allIds.add(id); });
+    }
+  });
+  const ids = [...allIds].filter(id => !_notifActorCache[id]);
   if (!ids.length) return;
   const { data } = await supabase.from('profiles').select('id, username, avatar_url').in('id', ids);
   (data || []).forEach(p => { _notifActorCache[p.id] = p; });
@@ -6885,8 +6894,26 @@ function renderNotifications() {
 }
 
 function notificationLabel(n, knownUsername) {
-  const username = knownUsername || _notifActorCache[n.actor_id]?.username || 'Someone';
-  const actorTag = `<strong>${escHTML(username)}</strong>`;
+  // Build the actor display: 1 = "Alice", 2 = "Alice and Bob",
+  // 3+ = "Alice and N others". Uses actor_ids when present (coalesced
+  // engagement notifications), otherwise falls back to the single actor_id.
+  const ids = (Array.isArray(n.actor_ids) && n.actor_ids.length)
+    ? n.actor_ids
+    : (n.actor_id ? [n.actor_id] : []);
+  const names = ids
+    .map(id => _notifActorCache[id]?.username)
+    .filter(Boolean);
+  const fallbackName = knownUsername || _notifActorCache[n.actor_id]?.username || 'Someone';
+  let actorTag;
+  if (names.length === 0) {
+    actorTag = `<strong>${escHTML(fallbackName)}</strong>`;
+  } else if (names.length === 1) {
+    actorTag = `<strong>${escHTML(names[0])}</strong>`;
+  } else if (names.length === 2) {
+    actorTag = `<strong>${escHTML(names[0])}</strong> and <strong>${escHTML(names[1])}</strong>`;
+  } else {
+    actorTag = `<strong>${escHTML(names[0])}</strong> and <strong>${names.length - 1} others</strong>`;
+  }
   const titleHint = n.metadata?.title ? ` <em style="color:var(--text2)">"${escHTML(n.metadata.title)}"</em>` : '';
   switch (n.type) {
     // ── You: engagement on your stuff ──
