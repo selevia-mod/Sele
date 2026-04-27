@@ -8944,7 +8944,7 @@ const DM_BUCKET = 'dm-attachments';
 // 2. Create app (free, ~3 min) — choose "API" not "SDK"
 // 3. Copy the API Key and paste it below, replacing the empty string.
 // Free tier = 100k requests/day — plenty for a chat app.
-const DM_GIPHY_KEY = '';  // ← paste your Giphy API key here
+const DM_GIPHY_KEY = 'UYrH9t3qUegWfBNynMFTHL3uEHsySkSm';  // ← paste your Giphy API key here
 
 let _dmPendingAttachment = null;   // { file, dataUrl, kind: 'upload' | 'gif', gifUrl }
 let _dmAttachMenuEl = null;
