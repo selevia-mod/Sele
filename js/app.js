@@ -498,8 +498,8 @@ function renderPost(post) {
       ` : ''}
 
     <div class="post-stats">
-      <div class="rcount" id="rsummary-${post.id}"></div>
-      <div id="ccount-${post.id}"></div>
+      <div class="rcount" id="rsummary-${post.id}" data-target="${post.id}" data-type="post"></div>
+      <div class="ccount" id="ccount-${post.id}" data-postid="${post.id}"></div>
     </div>
 
     <div class="post-actions">
@@ -3309,6 +3309,11 @@ function hideAllMainPages() {
   // Sibling sentinels (live outside the page divs) — also hide
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel) feedSentinel.style.display = 'none';
+  // Reset scroll on every page nav so tabs always start at the top
+  // (avoids landing in the middle of someone else's posts after switching pages).
+  window.scrollTo(0, 0);
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
 }
 let currentHls = null;
 
@@ -7184,6 +7189,132 @@ document.addEventListener('click', async (e) => {
   else toast(`User @${username} not found`, 'error');
 });
 
+// ── Reaction summary tap → modal listing who reacted ──────────────────────
+document.addEventListener('click', (e) => {
+  const summary = e.target.closest('.rcount');
+  if (!summary || !summary.textContent.trim()) return;   // empty summary = no reactions yet, ignore
+  if (e.target.closest('.reaction-trigger')) return;     // safety: don't hijack the trigger button
+  e.stopPropagation();
+  const targetId = summary.dataset.target;
+  const targetType = summary.dataset.type || 'post';
+  if (targetId) openReactorListModal(targetId, targetType);
+});
+
+// ── "N comments" tap → toggle the comment section open (same as the icon button) ──
+document.addEventListener('click', (e) => {
+  const counter = e.target.closest('.ccount');
+  if (!counter || !counter.textContent.trim()) return;   // empty = no comments yet, ignore
+  e.stopPropagation();
+  const postId = counter.dataset.postid;
+  if (!postId) return;
+  const section = document.getElementById(`comments-${postId}`);
+  if (!section) return;
+  if (section.style.display === 'none' || section.style.display === '') {
+    section.style.display = 'block';
+    loadComments(postId);
+  } else {
+    section.style.display = 'none';
+  }
+});
+
+// ── Reactor list modal ────────────────────────────────────────────────────
+async function openReactorListModal(targetId, targetType = 'post') {
+  document.querySelectorAll('.modal-backdrop[data-modal="reactor-list"]').forEach(m => m.remove());
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'reactor-list';
+  modal.innerHTML = `
+    <div class="modal-card follow-list-modal" role="dialog" aria-labelledby="reactor-list-title">
+      <div class="follow-list-header">
+        <h2 id="reactor-list-title">Reactions</h2>
+      </div>
+      <div class="reactor-tabs" id="reactorTabs"></div>
+      <div class="follow-list-body" id="reactorListBody">
+        <div class="loading">Loading…</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" data-action="cancel">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+  document.addEventListener('keydown', function onKey(ev) {
+    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+
+  // Fetch reactions + reactor profiles
+  const { data: rxs, error } = await supabase
+    .from('reactions')
+    .select('emoji, user_id, created_at')
+    .eq('target_id', targetId)
+    .eq('target_type', targetType)
+    .order('created_at', { ascending: false })
+    .limit(500);
+  const body = modal.querySelector('#reactorListBody');
+  if (error) {
+    body.innerHTML = `<div class="dm-error">Couldn't load: ${escHTML(error.message)}</div>`;
+    return;
+  }
+  if (!rxs || !rxs.length) {
+    body.innerHTML = `<div class="follow-list-empty"><div class="follow-list-empty-icon">🤍</div><div>No reactions yet.</div></div>`;
+    return;
+  }
+
+  const userIds = [...new Set(rxs.map(r => r.user_id))];
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, username, avatar_url, is_guest')
+    .in('id', userIds);
+  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
+
+  // Build emoji tabs (All, then per-emoji with counts)
+  const counts = {};
+  rxs.forEach(r => { counts[r.emoji] = (counts[r.emoji] || 0) + 1; });
+  const sortedEmojis = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const tabsEl = modal.querySelector('#reactorTabs');
+  tabsEl.innerHTML = `
+    <button class="reactor-tab active" data-emoji-filter="">All ${rxs.length}</button>
+    ${sortedEmojis.map(([emoji, c]) =>
+      `<button class="reactor-tab" data-emoji-filter="${escHTML(emoji)}">${emoji} ${c}</button>`
+    ).join('')}
+  `;
+
+  function renderRows(filterEmoji) {
+    const rows = filterEmoji ? rxs.filter(r => r.emoji === filterEmoji) : rxs;
+    body.innerHTML = rows.map(r => {
+      const p = profileMap.get(r.user_id) || { id: r.user_id, username: 'Unknown', avatar_url: null };
+      const safeName = escHTML(p.username || '');
+      const safeAvatar = p.avatar_url ? escHTML(p.avatar_url) : '';
+      return `
+        <div class="follow-list-row">
+          <button class="follow-list-avatar" data-uid="${p.id}">
+            ${safeAvatar ? `<img src="${safeAvatar}"/>` : initials(p.username)}
+          </button>
+          <div class="follow-list-info">
+            <button class="follow-list-name" data-uid="${p.id}">@${safeName}</button>
+          </div>
+          <span class="reactor-emoji">${escHTML(r.emoji)}</span>
+        </div>
+      `;
+    }).join('');
+    body.querySelectorAll('[data-uid]').forEach(el => {
+      el.onclick = () => { close(); openProfile(el.dataset.uid); };
+    });
+  }
+
+  renderRows('');
+  tabsEl.querySelectorAll('.reactor-tab').forEach(t => {
+    t.onclick = () => {
+      tabsEl.querySelectorAll('.reactor-tab').forEach(x => x.classList.toggle('active', x === t));
+      renderRows(t.dataset.emojiFilter);
+    };
+  });
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // DIRECT MESSAGES — Phase 1 (FB Messenger-style with purple)
 // Two-pane layout: conversation list on left, active thread on right.
@@ -8944,7 +9075,7 @@ const DM_BUCKET = 'dm-attachments';
 // 2. Create app (free, ~3 min) — choose "API" not "SDK"
 // 3. Copy the API Key and paste it below, replacing the empty string.
 // Free tier = 100k requests/day — plenty for a chat app.
-const DM_GIPHY_KEY = 'UYrH9t3qUegWfBNynMFTHL3uEHsySkSm';  // ← paste your Giphy API key here
+const DM_GIPHY_KEY = '';  // ← paste your Giphy API key here
 
 let _dmPendingAttachment = null;   // { file, dataUrl, kind: 'upload' | 'gif', gifUrl }
 let _dmAttachMenuEl = null;
