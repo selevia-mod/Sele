@@ -206,6 +206,8 @@ document.getElementById('btnPost').addEventListener('click', async () => {
 // ── Stories row (users) ──
 async function loadStories() {
   const row = document.getElementById('storiesRow');
+  // Skip the network round-trip if the row is hidden (saves 1 query per home-tab visit)
+  if (!row || row.style.display === 'none') return;
   const { data, error } = await supabase
     .from('profiles')
     .select('id, username, avatar_url, is_guest')
@@ -1300,7 +1302,8 @@ let viewingProfileId = null;
 function showFeed() {
   hideAllMainPages();
   feedEl.style.display = '';
-  storiesEl.style.display = '';
+  // storiesEl intentionally untouched — inline display:none in HTML keeps it hidden.
+  // To bring stories back, remove `style="display:none"` from #storiesRow in index.html.
   composeEl.style.display = '';
   // Restore the feed sentinel only when there's actually more to load and posts already rendered
   const feedSentinel = document.getElementById('feedSentinel');
