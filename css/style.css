@@ -7655,3 +7655,315 @@ body:not(.light) .dm-emoji-picker {
   border-color: rgba(255, 255, 255, 0.08);
 }
 body:not(.light) .dm-emoji-cell:hover { background: rgba(167, 139, 250, 0.12); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Video Upload Wizard — 4-phase premium UI
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.vu-wizard { min-width: min(720px, 92vw); max-width: 720px; }
+
+/* Stepper */
+.vu-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid rgba(124, 58, 237, 0.10);
+  background: linear-gradient(180deg, rgba(124, 58, 237, 0.03), transparent);
+}
+.vu-step-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  color: var(--text2);
+  font-size: 0.78rem;
+  font-weight: 600;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+  white-space: nowrap;
+}
+.vu-step-pill .vu-step-num {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: rgba(124, 58, 237, 0.10);
+  color: #6d28d9;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 800;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.vu-step-pill.active {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  border-color: rgba(124, 58, 237, 0.40);
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.28);
+  transform: scale(1.04);
+}
+.vu-step-pill.active .vu-step-num { background: rgba(255, 255, 255, 0.22); color: white; }
+.vu-step-pill.done {
+  border-color: rgba(124, 58, 237, 0.40);
+  color: #6d28d9;
+}
+.vu-step-pill.done .vu-step-num {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+}
+.vu-step-line {
+  flex: 0 0 22px;
+  height: 2px;
+  background: rgba(124, 58, 237, 0.12);
+  border-radius: 2px;
+  transition: background 0.18s ease;
+}
+.vu-step-line.done { background: linear-gradient(90deg, #7c3aed, #a78bfa); }
+
+body:not(.light) .vu-stepper { border-bottom-color: rgba(167, 139, 250, 0.14); background: linear-gradient(180deg, rgba(167, 139, 250, 0.05), transparent); }
+body:not(.light) .vu-step-pill { color: #9ca3af; border-color: rgba(167, 139, 250, 0.18); }
+body:not(.light) .vu-step-pill .vu-step-num { background: rgba(167, 139, 250, 0.14); color: #c4b5fd; }
+body:not(.light) .vu-step-pill.done { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.40); }
+body:not(.light) .vu-step-line { background: rgba(167, 139, 250, 0.16); }
+
+/* Panels */
+.vu-panel { animation: vuFadeIn 0.18s ease-out; }
+@keyframes vuFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Dropzone drag-over visual feedback */
+.vu-dropzone.drag-over {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.10), rgba(167, 139, 250, 0.16));
+  border-color: rgba(124, 58, 237, 0.55) !important;
+  transform: scale(1.01);
+}
+
+/* Selected file summary (Phase 1, after pick) */
+.vu-file-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  background: rgba(124, 58, 237, 0.05);
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-radius: 14px;
+}
+.vu-preview-box.compact { width: 96px; height: 64px; flex-shrink: 0; border-radius: 10px; overflow: hidden; background: #000; }
+.vu-preview-box.compact video { width: 100%; height: 100%; object-fit: cover; }
+.vu-file-meta { flex: 1; min-width: 0; }
+.vu-file-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vu-file-size { font-size: 0.78rem; color: var(--text3); margin-top: 2px; }
+.vu-replace-btn {
+  margin-top: 0.4rem;
+  padding: 0.3rem 0.75rem;
+  background: transparent;
+  border: 1px solid rgba(124, 58, 237, 0.30);
+  border-radius: 999px;
+  color: #6d28d9;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.vu-replace-btn:hover { background: rgba(124, 58, 237, 0.08); }
+body:not(.light) .vu-file-summary { background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.18); }
+body:not(.light) .vu-replace-btn { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.35); }
+body:not(.light) .vu-replace-btn:hover { background: rgba(167, 139, 250, 0.12); }
+
+/* Phase 3 — cards */
+.vu-card {
+  background: rgba(124, 58, 237, 0.04);
+  border: 1px solid rgba(124, 58, 237, 0.12);
+  border-radius: 14px;
+  margin-bottom: 0.85rem;
+  overflow: hidden;
+}
+.vu-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+}
+.vu-card-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.vu-card-sub { font-size: 0.78rem; color: var(--text3); margin-top: 0.15rem; }
+.vu-card-body { padding: 0.5rem 1rem 1rem; font-size: 0.85rem; color: var(--text2); }
+.vu-card-body.muted { color: var(--text3); font-style: italic; }
+.vu-badge-soon {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+}
+body:not(.light) .vu-card { background: rgba(167, 139, 250, 0.06); border-color: rgba(167, 139, 250, 0.16); }
+
+/* Toggle */
+.vu-toggle {
+  position: relative;
+  display: inline-block;
+  width: 42px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.vu-toggle input { opacity: 0; width: 0; height: 0; }
+.vu-toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: rgba(124, 58, 237, 0.18);
+  border-radius: 999px;
+  transition: background 0.18s ease;
+}
+.vu-toggle-slider::before {
+  position: absolute;
+  content: '';
+  height: 18px; width: 18px;
+  left: 3px; top: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.18s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.vu-toggle input:checked + .vu-toggle-slider { background: linear-gradient(135deg, #7c3aed, #a78bfa); }
+.vu-toggle input:checked + .vu-toggle-slider::before { transform: translateX(18px); }
+.vu-toggle.disabled .vu-toggle-slider { opacity: 0.4; cursor: not-allowed; }
+
+/* Visibility radios */
+.vu-radio-row { display: flex; flex-direction: column; gap: 0.5rem; }
+.vu-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.7rem 0.85rem;
+  background: white;
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.vu-radio:hover { background: rgba(124, 58, 237, 0.04); }
+.vu-radio.active {
+  border-color: rgba(124, 58, 237, 0.55);
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.06), rgba(167, 139, 250, 0.10));
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.10);
+}
+.vu-radio input { margin-top: 4px; accent-color: #7c3aed; flex-shrink: 0; }
+.vu-radio-content { flex: 1; }
+.vu-radio-title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+.vu-radio.active .vu-radio-title { color: #6d28d9; }
+.vu-radio-sub { font-size: 0.78rem; color: var(--text3); margin-top: 2px; }
+.vu-schedule-input {
+  margin-top: 0.65rem;
+  padding-left: 0.3rem;
+}
+.vu-schedule-input input {
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  background: white;
+  border: 1px solid rgba(124, 58, 237, 0.30);
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  outline: none;
+}
+.vu-schedule-input input:focus { border-color: rgba(124, 58, 237, 0.60); box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.10); }
+body:not(.light) .vu-radio { background: rgba(167, 139, 250, 0.05); border-color: rgba(167, 139, 250, 0.15); }
+body:not(.light) .vu-radio:hover { background: rgba(167, 139, 250, 0.10); }
+body:not(.light) .vu-radio.active { background: rgba(167, 139, 250, 0.14); border-color: rgba(167, 139, 250, 0.45); }
+body:not(.light) .vu-radio.active .vu-radio-title { color: #c4b5fd; }
+body:not(.light) .vu-schedule-input input { background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.30); color: #e5e7eb; }
+
+.vu-fb-note {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  color: var(--text3);
+  margin: 0.6rem 0 0;
+  padding: 0.55rem 0.8rem;
+  background: rgba(124, 58, 237, 0.04);
+  border-radius: 10px;
+}
+body:not(.light) .vu-fb-note { background: rgba(167, 139, 250, 0.06); }
+
+/* Phase 4 — Upload hero */
+.vu-upload-hero {
+  text-align: center;
+  padding: 1.2rem 1rem 0.8rem;
+}
+.vu-upload-icon-wrap {
+  width: 88px; height: 88px;
+  margin: 0 auto 0.85rem;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.10), rgba(167, 139, 250, 0.20));
+  color: #7c3aed;
+  position: relative;
+}
+.vu-upload-icon-wrap::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px solid rgba(124, 58, 237, 0.30);
+  border-top-color: #7c3aed;
+  animation: vuSpin 1.4s linear infinite;
+}
+@keyframes vuSpin { to { transform: rotate(360deg); } }
+.vu-upload-title { font-size: 1.1rem; font-weight: 800; color: var(--text); margin: 0 0 0.25rem; letter-spacing: -0.01em; }
+.vu-upload-sub { font-size: 0.85rem; color: var(--text3); margin: 0; }
+.vu-upload-bytes {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text3);
+  margin-top: 0.6rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.vu-upload-speed { color: #6d28d9; font-weight: 600; }
+body:not(.light) .vu-upload-icon-wrap { background: linear-gradient(135deg, rgba(167, 139, 250, 0.14), rgba(167, 139, 250, 0.24)); color: #c4b5fd; }
+body:not(.light) .vu-upload-icon-wrap::after { border-color: rgba(167, 139, 250, 0.30); border-top-color: #c4b5fd; }
+body:not(.light) .vu-upload-speed { color: #c4b5fd; }
+
+/* Footer split layout */
+.vu-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1.25rem;
+  border-top: 1px solid rgba(124, 58, 237, 0.10);
+}
+.vu-footer-right { display: flex; gap: 0.5rem; align-items: center; }
+body:not(.light) .vu-footer { border-top-color: rgba(167, 139, 250, 0.14); }
