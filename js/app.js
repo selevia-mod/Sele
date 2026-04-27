@@ -240,7 +240,7 @@ let _feedScrollObserver = null;
 let _feedVideoObserver = null;
 let _feedPostObserver = null;
 
-const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`;
+const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration))`;
 
 window.loadFeed = async function() {
   const feed = document.getElementById('feed');
@@ -259,14 +259,14 @@ window.loadFeed = async function() {
   const { data, error } = await supabase
     .from('posts')
     .select(FEED_SELECT)
+    .eq('is_hidden', false)
     .order('created_at', { ascending: false })
     .range(0, FEED_PAGE_SIZE - 1);
 
   if (error) { feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`; return; }
 
-  // Refresh user content filters (hidden / snoozed / blocked) before rendering
-  await loadUserContentFilters();
-
+  // Filter happens client-side using the cached filter set (loaded once on sign-in).
+  // No re-fetch here — keeps feed load fast.
   posts = (data || []).filter(p => !shouldHidePost(p));
   if ((data || []).length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
   _feedOffset = (data || []).length;
@@ -299,6 +299,7 @@ async function loadMoreFeed() {
     const { data, error } = await supabase
       .from('posts')
       .select(FEED_SELECT)
+      .eq('is_hidden', false)
       .order('created_at', { ascending: false })
       .range(_feedOffset, _feedOffset + FEED_PAGE_SIZE - 1);
 
@@ -672,6 +673,7 @@ window.loadUserContentFilters = loadUserContentFilters;
 
 function shouldHidePost(post) {
   if (!post) return false;
+  if (post.profiles?.is_banned)                            return true;
   if (userContentFilters.hiddenPostIds.has(post.id))      return true;
   if (userContentFilters.snoozedUserIds.has(post.user_id))return true;
   if (userContentFilters.blockedUserIds.has(post.user_id))return true;
