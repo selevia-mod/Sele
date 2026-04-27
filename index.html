@@ -190,24 +190,9 @@
 
     <!-- Book (Reader) Page -->
     <div id="bookPage" style="display:none">
-      <div class="page-hero page-hero-book">
-        <div class="page-hero-content">
-          <h1 class="page-hero-title">Books</h1>
-          <p class="page-hero-subtitle">Discover stories. One chapter at a time.</p>
-        </div>
-        <div class="page-hero-decoration" aria-hidden="true">
-          <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10 18a6 6 0 0 1 6-6h24v52H16a6 6 0 0 1-6-6V18z"/>
-            <path d="M70 18a6 6 0 0 0-6-6H40v52h24a6 6 0 0 0 6-6V18z"/>
-            <line x1="40" y1="12" x2="40" y2="64"/>
-            <line x1="18" y1="22" x2="34" y2="22"/>
-            <line x1="18" y1="30" x2="34" y2="30"/>
-            <line x1="18" y1="38" x2="30" y2="38"/>
-            <line x1="46" y1="22" x2="62" y2="22"/>
-            <line x1="46" y1="30" x2="62" y2="30"/>
-            <line x1="46" y1="38" x2="58" y2="38"/>
-          </svg>
-        </div>
+      <!-- Minimalist header — just the title, premium gradient -->
+      <div class="books-header-min">
+        <h1 class="books-title-min">Books</h1>
       </div>
 
       <!-- Recommended for you carousel (logged-in only, populated by JS) -->
@@ -219,39 +204,10 @@
         <div class="book-recommend-track" id="bookRecommendTrack"></div>
       </div>
 
-      <!-- Genre / sort bar — single-line horizontal scroll -->
+      <!-- Genre / sort bar — single-line horizontal scroll, adaptive -->
       <div class="book-toolbar">
         <div class="book-genre-chips" id="bookGenreChips">
-          <button class="book-chip active" data-genre="">All</button>
-          <button class="book-chip" data-genre="romance">Romance</button>
-          <button class="book-chip" data-genre="hot-romance">Hot Romance</button>
-          <button class="book-chip" data-genre="dark-romance">Dark Romance</button>
-          <button class="book-chip" data-genre="mafia-boss">Mafia Boss</button>
-          <button class="book-chip" data-genre="billionaire">Billionaire</button>
-          <button class="book-chip" data-genre="enemies-to-lovers">Enemies to Lovers</button>
-          <button class="book-chip" data-genre="ceo">CEO</button>
-          <button class="book-chip" data-genre="forbidden-love">Forbidden Love</button>
-          <button class="book-chip" data-genre="arranged-marriage">Arranged Marriage</button>
-          <button class="book-chip" data-genre="contract-marriage">Contract Marriage</button>
-          <button class="book-chip" data-genre="second-chance">Second Chance</button>
-          <button class="book-chip" data-genre="werewolf">Werewolf</button>
-          <button class="book-chip" data-genre="vampire">Vampire</button>
-          <button class="book-chip" data-genre="boy-love-bl">Boy Love</button>
-          <button class="book-chip" data-genre="girl-love-gl">Girl Love</button>
-          <button class="book-chip" data-genre="thriller">Thriller</button>
-          <button class="book-chip" data-genre="horror">Horror</button>
-          <button class="book-chip" data-genre="fantasy">Fantasy</button>
-          <button class="book-chip" data-genre="mystery">Mystery</button>
-          <button class="book-chip" data-genre="comedy">Comedy</button>
-          <button class="book-chip" data-genre="anime">Anime</button>
-          <button class="book-chip" data-genre="adventure">Adventure</button>
-          <button class="book-chip" data-genre="action">Action</button>
-          <button class="book-chip" data-genre="sci-fi">Sci-fi</button>
-          <button class="book-chip" data-genre="drama">Drama</button>
-          <button class="book-chip" data-genre="historical">Historical</button>
-          <button class="book-chip" data-genre="teen-fiction">Teen Fiction</button>
-          <button class="book-chip" data-genre="contemporary">Contemporary</button>
-          <button class="book-chip" data-genre="general-fiction">General Fiction</button>
+          <!-- Populated by renderBookChips() based on user's reading history + platform popularity -->
         </div>
         <div class="book-sort">
           <select id="bookSortSelect" class="book-sort-select" title="Sort books">
