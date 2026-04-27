@@ -4054,66 +4054,152 @@ body:not(.light) .post-action-menu button.pam-danger {
 body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(248, 113, 113, 0.10); color: #fca5a5; }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   GENRE PICKER — multi-select chip UI for book editor + new-book modal
+   GENRE PICKER v2 — premium 3-line scrollable, purple-accented
    ════════════════════════════════════════════════════════════════════════════ */
 
 .genre-picker {
-  margin: 0.4rem 0 1rem;
-  padding: 0.85rem 0.95rem;
-  border: 1px solid rgba(124, 58, 237, 0.15);
-  border-radius: 12px;
-  background: rgba(124, 58, 237, 0.03);
+  position: relative;
+  margin: 0.5rem 0 1.1rem;
+  border: 1px solid rgba(124, 58, 237, 0.16);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(167, 139, 250, 0.05) 0%, rgba(124, 58, 237, 0.02) 100%),
+    #ffffff;
+  overflow: hidden;
+  box-shadow: 0 1px 0 rgba(124, 58, 237, 0.04), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+  transition: border-color 0.18s, box-shadow 0.18s;
 }
-body:not(.light) .genre-picker {
-  background: rgba(167, 139, 250, 0.05);
-  border-color: rgba(167, 139, 250, 0.16);
+.genre-picker:focus-within {
+  border-color: rgba(124, 58, 237, 0.35);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
 }
 
+/* ─── Sticky counter header ─── */
 .genre-picker-counter {
-  font-size: 0.76rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.95rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.7));
+  border-bottom: 1px solid rgba(124, 58, 237, 0.08);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-size: 0.72rem;
   font-weight: 600;
   color: #6b7280;
-  margin-bottom: 0.7rem;
-  letter-spacing: -0.005em;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
 }
-body:not(.light) .genre-picker-counter { color: #9ca3af; }
 .genre-picker-count {
-  color: #7c3aed;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  font-size: 0.74rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-transform: none;
+  box-shadow: 0 2px 6px rgba(124, 58, 237, 0.32);
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-body:not(.light) .genre-picker-count { color: #c4b5fd; }
+.genre-picker-counter:has(.genre-picker-count:not(:empty)) .genre-picker-count {
+  transform: scale(1);
+}
+/* Bounce on count change is just nice — done via JS class toggle, but baseline is here */
 
+/* ─── Scrollable chip area — exactly 3 rows visible ─── */
 .genre-picker-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
+  padding: 0.7rem 0.95rem 0.85rem;
+  max-height: 138px;          /* 3 rows × ~38px (chip + gap) + padding */
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124, 58, 237, 0.28) transparent;
+  /* Subtle fade at bottom edge — visual cue there's more to scroll */
+  -webkit-mask-image: linear-gradient(180deg, black 0%, black 88%, rgba(0,0,0,0.4) 100%);
+          mask-image: linear-gradient(180deg, black 0%, black 88%, rgba(0,0,0,0.4) 100%);
+}
+.genre-picker-chips::-webkit-scrollbar { width: 6px; }
+.genre-picker-chips::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 4px 0;
+}
+.genre-picker-chips::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #c4b5fd, #a78bfa);
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+.genre-picker-chips::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #a78bfa, #7c3aed);
+}
+
+/* ─── Dark mode shell ─── */
+body:not(.light) .genre-picker {
+  background:
+    linear-gradient(180deg, rgba(167, 139, 250, 0.10) 0%, rgba(124, 58, 237, 0.04) 100%),
+    rgba(26, 20, 40, 0.6);
+  border-color: rgba(167, 139, 250, 0.22);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+body:not(.light) .genre-picker-counter {
+  background:
+    linear-gradient(180deg, rgba(26, 20, 40, 0.8), rgba(26, 20, 40, 0.4));
+  border-bottom-color: rgba(167, 139, 250, 0.12);
+  color: #9ca3af;
+}
+body:not(.light) .genre-picker-chips::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #a78bfa, #7c3aed);
+  border-color: rgba(255, 255, 255, 0.06);
 }
 
 .genre-chip {
   font-family: inherit;
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   font-weight: 500;
   letter-spacing: -0.005em;
   color: #374151;
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(17, 24, 39, 0.08);
   border-radius: 999px;
-  padding: 0.4rem 0.85rem;
+  padding: 0.34rem 0.78rem;
   cursor: pointer;
-  transition: border-color 0.12s, color 0.12s, background 0.12s, transform 0.1s;
   user-select: none;
+  white-space: nowrap;
+  transition: border-color 0.18s, color 0.18s, background 0.18s, transform 0.12s, box-shadow 0.18s;
 }
-.genre-chip:hover { border-color: #c4b5fd; color: #4c1d95; }
-.genre-chip:active { transform: scale(0.96); }
+.genre-chip:hover {
+  border-color: rgba(124, 58, 237, 0.35);
+  color: #5b21b6;
+  background: rgba(124, 58, 237, 0.04);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(124, 58, 237, 0.10);
+}
+.genre-chip:active { transform: translateY(0) scale(0.97); }
 
 .genre-chip-active {
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
   border-color: transparent;
   color: white;
-  box-shadow: 0 3px 10px rgba(124, 58, 237, 0.28);
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
-.genre-chip-active:hover { color: white; border-color: transparent; }
+.genre-chip-active:hover {
+  color: white;
+  border-color: transparent;
+  background: linear-gradient(135deg, #6d28d9 0%, #9061f9 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(124, 58, 237, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
 
 /* When 5 are selected, dim the unselected to signal "limit reached" */
 .genre-picker-full .genre-chip:not(.genre-chip-active) {
@@ -4127,17 +4213,24 @@ body:not(.light) .genre-picker-count { color: #c4b5fd; }
 
 body:not(.light) .genre-chip {
   background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.08);
   color: #d1d5db;
 }
 body:not(.light) .genre-chip:hover {
-  border-color: rgba(167, 139, 250, 0.35);
+  background: rgba(167, 139, 250, 0.10);
+  border-color: rgba(167, 139, 250, 0.45);
   color: #ddd6fe;
+  box-shadow: 0 2px 8px rgba(167, 139, 250, 0.16);
 }
 body:not(.light) .genre-chip-active {
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
   color: white;
   border-color: transparent;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+body:not(.light) .genre-chip-active:hover {
+  background: linear-gradient(135deg, #6d28d9 0%, #9061f9 100%);
+  box-shadow: 0 6px 18px rgba(124, 58, 237, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
 /* ─── Generic modal (used by Report) ─── */
