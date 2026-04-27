@@ -4053,6 +4053,93 @@ body:not(.light) .post-action-menu button.pam-danger {
 }
 body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(248, 113, 113, 0.10); color: #fca5a5; }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   GENRE PICKER — multi-select chip UI for book editor + new-book modal
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.genre-picker {
+  margin: 0.4rem 0 1rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-radius: 12px;
+  background: rgba(124, 58, 237, 0.03);
+}
+body:not(.light) .genre-picker {
+  background: rgba(167, 139, 250, 0.05);
+  border-color: rgba(167, 139, 250, 0.16);
+}
+
+.genre-picker-counter {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #6b7280;
+  margin-bottom: 0.7rem;
+  letter-spacing: -0.005em;
+}
+body:not(.light) .genre-picker-counter { color: #9ca3af; }
+.genre-picker-count {
+  color: #7c3aed;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+body:not(.light) .genre-picker-count { color: #c4b5fd; }
+
+.genre-picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.genre-chip {
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: #374151;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s, transform 0.1s;
+  user-select: none;
+}
+.genre-chip:hover { border-color: #c4b5fd; color: #4c1d95; }
+.genre-chip:active { transform: scale(0.96); }
+
+.genre-chip-active {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  border-color: transparent;
+  color: white;
+  box-shadow: 0 3px 10px rgba(124, 58, 237, 0.28);
+}
+.genre-chip-active:hover { color: white; border-color: transparent; }
+
+/* When 5 are selected, dim the unselected to signal "limit reached" */
+.genre-picker-full .genre-chip:not(.genre-chip-active) {
+  opacity: 0.55;
+}
+.genre-picker-full .genre-chip:not(.genre-chip-active):hover {
+  opacity: 0.85;
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
+body:not(.light) .genre-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.10);
+  color: #d1d5db;
+}
+body:not(.light) .genre-chip:hover {
+  border-color: rgba(167, 139, 250, 0.35);
+  color: #ddd6fe;
+}
+body:not(.light) .genre-chip-active {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  border-color: transparent;
+}
+
 /* ─── Generic modal (used by Report) ─── */
 .modal-backdrop {
   position: fixed;
