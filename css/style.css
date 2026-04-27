@@ -4517,7 +4517,7 @@ body:not(.light) .studio-empty-icon {
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   POST ACTION MENU — kebab (⋮) on others' posts, ✕ on own posts
+   POST ACTION MENU — kebab (⋮) on all posts (own gets Pin/Delete menu)
    + REPORT MODAL
    ════════════════════════════════════════════════════════════════════════════ */
 
@@ -4544,14 +4544,10 @@ body:not(.light) .studio-empty-icon {
 .post-menu-btn:active { transform: scale(0.92); }
 .post-menu-glyph {
   display: block;
-  font-size: 1.05rem;
+  font-size: 1.35rem;
   line-height: 1;
   font-weight: 500;
-  /* Dots glyph rendered slightly larger and tighter */
   letter-spacing: 0;
-}
-.post-menu-btn[data-is-own="0"] .post-menu-glyph {
-  font-size: 1.35rem;
   margin-top: -2px;
 }
 
@@ -5278,4 +5274,589 @@ body:not(.light) .modal-actions .btn-ghost {
 body:not(.light) .modal-actions .btn-ghost:hover {
   border-color: rgba(167, 139, 250, 0.5);
   color: #ddd6fe;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PROFILE — kebab menu button + share modal
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.profile-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.profile-menu-btn {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: #6b7280;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
+  margin-left: 0.25rem;
+}
+.profile-menu-btn svg { width: 18px; height: 18px; display: block; }
+.profile-menu-btn:hover {
+  background: rgba(124, 58, 237, 0.10);
+  color: #4c1d95;
+  border-color: rgba(124, 58, 237, 0.18);
+}
+.profile-menu-btn:active { transform: scale(0.94); }
+
+body:not(.light) .profile-menu-btn { color: #9ca3af; }
+body:not(.light) .profile-menu-btn:hover {
+  background: rgba(167, 139, 250, 0.14);
+  color: #ddd6fe;
+  border-color: rgba(167, 139, 250, 0.22);
+}
+
+.profile-action-menu { min-width: 200px; }
+
+/* ── Share modal ───────────────────────────────────────────────── */
+.share-modal { max-width: 460px; }
+
+.share-link-row {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.85rem 0 1rem;
+}
+.share-link-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem 0.85rem;
+  background: #f5f3ff;
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  border-radius: 10px;
+  color: #1f2937;
+  font-size: 0.85rem;
+  font-family: inherit;
+  letter-spacing: -0.005em;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.share-link-input:focus {
+  border-color: rgba(124, 58, 237, 0.45);
+  background: white;
+}
+.share-copy-btn {
+  flex-shrink: 0;
+  min-width: 80px;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+.share-copy-btn.copied {
+  background: linear-gradient(135deg, #10b981, #059669) !important;
+  transform: scale(1.02);
+}
+
+.share-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 0.55rem;
+  margin-bottom: 0.4rem;
+}
+.share-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.85rem 0.5rem;
+  background: rgba(124, 58, 237, 0.04);
+  border: 1px solid rgba(124, 58, 237, 0.10);
+  border-radius: 12px;
+  color: #4c1d95;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease, box-shadow 0.18s ease;
+}
+.share-option:hover {
+  background: rgba(124, 58, 237, 0.10);
+  border-color: rgba(124, 58, 237, 0.28);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(124, 58, 237, 0.12);
+}
+.share-option:active { transform: translateY(0); }
+.share-option-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  font-weight: 700;
+}
+
+body:not(.light) .share-link-input {
+  background: rgba(167, 139, 250, 0.08);
+  border-color: rgba(167, 139, 250, 0.20);
+  color: #e5e7eb;
+}
+body:not(.light) .share-link-input:focus {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.50);
+}
+body:not(.light) .share-option {
+  background: rgba(167, 139, 250, 0.06);
+  border-color: rgba(167, 139, 250, 0.14);
+  color: #ddd6fe;
+}
+body:not(.light) .share-option:hover {
+  background: rgba(167, 139, 250, 0.14);
+  border-color: rgba(167, 139, 250, 0.32);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.30);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PROFILE Phase 2 — skeletons, earned badges, tab counts, follow list modal
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Skeleton shimmer ──────────────────────────────────────────────── */
+@keyframes skelShimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position:  400px 0; }
+}
+.skeleton-banner,
+.skeleton-avatar,
+.skeleton-text,
+.skeleton-row {
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.06) 0%, rgba(167, 139, 250, 0.18) 50%, rgba(124, 58, 237, 0.06) 100%);
+  background-size: 800px 100%;
+  animation: skelShimmer 1.4s infinite linear;
+  color: transparent !important;
+  border-radius: 8px;
+}
+.skeleton-banner { min-height: 180px; }
+.skeleton-avatar { border-radius: 50%; }
+.skeleton-text   { display: inline-block; min-width: 80px; height: 1em; border-radius: 6px; }
+.skeleton-text-wide { min-width: 220px; }
+.skeleton-row    { height: 56px; margin-bottom: 0.5rem; }
+
+body:not(.light) .skeleton-banner,
+body:not(.light) .skeleton-avatar,
+body:not(.light) .skeleton-text,
+body:not(.light) .skeleton-row {
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.06) 0%, rgba(167, 139, 250, 0.20) 50%, rgba(167, 139, 250, 0.06) 100%);
+  background-size: 800px 100%;
+}
+
+/* ── Earned badges (Creator / Writer / Pioneer / Verified / Staff) ── */
+.profile-badges-extra {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  margin-left: 0.25rem;
+}
+.earned-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: transform 0.12s ease, box-shadow 0.18s ease;
+  cursor: default;
+  user-select: none;
+}
+.earned-badge:hover { transform: translateY(-1px); }
+.earned-badge-icon { font-size: 0.78rem; line-height: 1; }
+
+/* Creator — purple gradient (Selebox primary) */
+.earned-badge.badge-creator {
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  color: white;
+  border-color: rgba(124, 58, 237, 0.4);
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.25);
+}
+/* Writer — emerald (books vibe) */
+.earned-badge.badge-writer {
+  background: linear-gradient(135deg, #059669 0%, #34d399 100%);
+  color: white;
+  border-color: rgba(5, 150, 105, 0.35);
+  box-shadow: 0 2px 8px rgba(5, 150, 105, 0.22);
+}
+/* Pioneer — amber/gold rare-feeling */
+.earned-badge.badge-pioneer {
+  background: linear-gradient(135deg, #d97706 0%, #fbbf24 100%);
+  color: #422006;
+  border-color: rgba(217, 119, 6, 0.4);
+  box-shadow: 0 2px 8px rgba(217, 119, 6, 0.22);
+}
+/* Verified — blue */
+.earned-badge.badge-verified {
+  background: linear-gradient(135deg, #2563eb 0%, #60a5fa 100%);
+  color: white;
+  border-color: rgba(37, 99, 235, 0.4);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.22);
+}
+.earned-badge.badge-verified .earned-badge-icon { font-weight: 900; font-size: 0.85rem; }
+/* Staff — slate (admin team) */
+.earned-badge.badge-staff {
+  background: linear-gradient(135deg, #1f2937 0%, #4b5563 100%);
+  color: white;
+  border-color: rgba(31, 41, 55, 0.4);
+}
+
+/* ── Tab count pills ───────────────────────────────────────────────── */
+.profile-tab .tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 0.45rem;
+  background: rgba(124, 58, 237, 0.10);
+  color: #6d28d9;
+  font-size: 0.7rem;
+  font-weight: 700;
+  border-radius: 999px;
+  letter-spacing: 0.01em;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.profile-tab.active .tab-count {
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  color: white;
+  box-shadow: 0 2px 6px rgba(124, 58, 237, 0.3);
+}
+body:not(.light) .profile-tab .tab-count {
+  background: rgba(167, 139, 250, 0.14);
+  color: #c4b5fd;
+}
+
+/* ── Follow list modal ─────────────────────────────────────────────── */
+.follow-list-modal {
+  max-width: 480px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+}
+.follow-list-header h2 { margin: 0 0 0.15rem; }
+.follow-list-search {
+  width: 100%;
+  padding: 0.65rem 0.85rem;
+  margin: 0.85rem 0 0.6rem;
+  background: #f5f3ff;
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  border-radius: 10px;
+  color: #1f2937;
+  font-size: 0.88rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.follow-list-search:focus {
+  border-color: rgba(124, 58, 237, 0.45);
+  background: white;
+}
+.follow-list-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.25rem 0;
+  margin-bottom: 0.5rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124, 58, 237, 0.3) transparent;
+}
+.follow-list-body::-webkit-scrollbar { width: 6px; }
+.follow-list-body::-webkit-scrollbar-thumb {
+  background: rgba(124, 58, 237, 0.3);
+  border-radius: 3px;
+}
+.follow-list-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.5rem;
+  border-radius: 10px;
+  transition: background 0.15s ease;
+}
+.follow-list-row:hover { background: rgba(124, 58, 237, 0.04); }
+.follow-list-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.95rem;
+  border: none;
+  cursor: pointer;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+.follow-list-avatar:hover { transform: scale(1.05); }
+.follow-list-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.follow-list-info {
+  flex: 1;
+  min-width: 0;
+}
+.follow-list-name {
+  display: block;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: #1f2937;
+  cursor: pointer;
+  text-align: left;
+  letter-spacing: -0.005em;
+}
+.follow-list-name:hover { color: #7c3aed; }
+.follow-list-bio {
+  font-size: 0.78rem;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.1rem;
+}
+.follow-list-btn {
+  flex-shrink: 0;
+  padding: 0.4rem 0.95rem;
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  color: white;
+  border: none;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.18s ease, opacity 0.15s;
+  letter-spacing: 0.01em;
+  min-width: 88px;
+}
+.follow-list-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(124, 58, 237, 0.30); }
+.follow-list-btn:active { transform: translateY(0); }
+.follow-list-btn:disabled { opacity: 0.6; cursor: progress; }
+.follow-list-btn.is-following {
+  background: transparent;
+  color: #7c3aed;
+  border: 1px solid rgba(124, 58, 237, 0.4);
+}
+.follow-list-btn.is-following:hover {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #dc2626;
+}
+.follow-list-btn.is-following:hover::after { content: ''; }
+.follow-list-you {
+  flex-shrink: 0;
+  padding: 0.35rem 0.85rem;
+  background: rgba(124, 58, 237, 0.08);
+  color: #6d28d9;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+.follow-list-empty {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: #6b7280;
+}
+.follow-list-empty-icon {
+  font-size: 2.4rem;
+  margin-bottom: 0.5rem;
+  opacity: 0.6;
+}
+
+body:not(.light) .follow-list-search {
+  background: rgba(167, 139, 250, 0.08);
+  border-color: rgba(167, 139, 250, 0.20);
+  color: #e5e7eb;
+}
+body:not(.light) .follow-list-search:focus {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.50);
+}
+body:not(.light) .follow-list-row:hover { background: rgba(167, 139, 250, 0.08); }
+body:not(.light) .follow-list-name { color: #f3f4f6; }
+body:not(.light) .follow-list-name:hover { color: #c4b5fd; }
+body:not(.light) .follow-list-bio { color: #9ca3af; }
+body:not(.light) .follow-list-btn.is-following {
+  color: #c4b5fd;
+  border-color: rgba(167, 139, 250, 0.45);
+}
+body:not(.light) .follow-list-btn.is-following:hover {
+  background: rgba(248, 113, 113, 0.08);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fca5a5;
+}
+body:not(.light) .follow-list-you {
+  background: rgba(167, 139, 250, 0.14);
+  color: #ddd6fe;
+}
+body:not(.light) .follow-list-empty { color: #9ca3af; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PROFILE Phase 3 — Pinned posts + Mutual followers strip
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Pinned post tag (📌 sits above the post header) ──────────────── */
+.post-card.is-pinned {
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  background: linear-gradient(180deg, rgba(124, 58, 237, 0.025) 0%, transparent 60px);
+  position: relative;
+}
+.post-pinned-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.10) 0%, rgba(167, 139, 250, 0.14) 100%);
+  border: 1px solid rgba(124, 58, 237, 0.22);
+  border-radius: 999px;
+  color: #6d28d9;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-bottom: 0.55rem;
+  width: fit-content;
+}
+.post-pinned-tag svg { display: block; }
+body:not(.light) .post-card.is-pinned {
+  border-color: rgba(167, 139, 250, 0.22);
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.04) 0%, transparent 60px);
+}
+body:not(.light) .post-pinned-tag {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.10) 0%, rgba(167, 139, 250, 0.18) 100%);
+  border-color: rgba(167, 139, 250, 0.30);
+  color: #c4b5fd;
+}
+
+/* ── Section header (Pinned / Posts dividers on profile feed) ─────── */
+.profile-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.95rem 0.25rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6d28d9;
+  border-top: 1px solid transparent;
+}
+.profile-section-header:first-child { padding-top: 0.25rem; }
+.profile-section-header svg { display: block; opacity: 0.85; }
+body:not(.light) .profile-section-header { color: #c4b5fd; }
+
+/* ── Mutual followers strip ────────────────────────────────────────── */
+.profile-mutuals {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.4rem 0 0.7rem;
+  padding: 0.55rem 0.8rem;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.04) 0%, rgba(167, 139, 250, 0.06) 100%);
+  border: 1px solid rgba(124, 58, 237, 0.10);
+  border-radius: 12px;
+  font-size: 0.84rem;
+  color: #4b5563;
+  flex-wrap: wrap;
+}
+.mutual-avatars {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.mutual-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  border: 2px solid #faf5ff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  overflow: hidden;
+  margin-left: -8px;
+  padding: 0;
+  transition: transform 0.12s ease, z-index 0s;
+  position: relative;
+}
+.mutual-avatar:first-child { margin-left: 0; }
+.mutual-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mutual-avatar span { line-height: 1; }
+.mutual-avatar:hover {
+  transform: translateY(-2px) scale(1.1);
+  z-index: 2;
+  box-shadow: 0 4px 10px rgba(124, 58, 237, 0.30);
+}
+.mutual-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+}
+.mutual-name,
+.mutual-more {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 600;
+  color: #6d28d9;
+  cursor: pointer;
+  letter-spacing: -0.005em;
+}
+.mutual-name:hover,
+.mutual-more:hover { text-decoration: underline; }
+
+.mutuals-skel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+.mutuals-skel-dot {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.10) 0%, rgba(167, 139, 250, 0.22) 50%, rgba(124, 58, 237, 0.10) 100%);
+  background-size: 800px 100%;
+  animation: skelShimmer 1.4s infinite linear;
+  margin-left: -8px;
+}
+.mutuals-skel-dot:first-child { margin-left: 0; }
+.mutuals-skel-text {
+  flex: 1;
+  height: 12px;
+  border-radius: 6px;
+  margin-left: 0.4rem;
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.06) 0%, rgba(167, 139, 250, 0.18) 50%, rgba(124, 58, 237, 0.06) 100%);
+  background-size: 800px 100%;
+  animation: skelShimmer 1.4s infinite linear;
+}
+
+body:not(.light) .profile-mutuals {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.06) 0%, rgba(167, 139, 250, 0.10) 100%);
+  border-color: rgba(167, 139, 250, 0.16);
+  color: #cbd5e1;
+}
+body:not(.light) .mutual-avatar {
+  border-color: #1a1428;
+}
+body:not(.light) .mutual-name,
+body:not(.light) .mutual-more {
+  color: #c4b5fd;
 }
