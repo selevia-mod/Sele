@@ -5259,32 +5259,66 @@ function searchVideos(query, tagFilter) {
   });
 }
 
-function getTopTags(limit = 12) {
-  const tagCounts = {};
+// Adaptive tag chips — blends user's watch-history tags with platform-popular tags.
+// YouTube-style: chips reflect what YOU'VE been watching, with some discovery sprinkled in.
+function getTopTags(limit = 18) {
+  // Platform popularity (counts every tag occurrence across all videos)
+  const platformCounts = {};
   allVideosCache.forEach(v => {
     (v.tags || []).forEach(t => {
-      tagCounts[t] = (tagCounts[t] || 0) + 1;
+      if (!t || typeof t !== 'string') return;
+      platformCounts[t] = (platformCounts[t] || 0) + 1;
     });
   });
-  return Object.entries(tagCounts)
+  const platformRanked = Object.entries(platformCounts)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
     .map(([tag]) => tag);
+
+  // User's interest profile — tags weighted by their recent watch history
+  const { tagWeights } = (typeof getInterestProfile === 'function')
+    ? getInterestProfile()
+    : { tagWeights: {} };
+  const userRanked = Object.entries(tagWeights || {})
+    .filter(([t]) => t && platformCounts[t]) // only suggest tags that actually have content
+    .sort((a, b) => b[1] - a[1])
+    .map(([tag]) => tag);
+
+  const hasInterest = userRanked.length > 0;
+
+  if (!hasInterest) {
+    // Brand new user → 100% platform-popular
+    return platformRanked.slice(0, limit);
+  }
+
+  // Returning user → 70% from interest profile, 30% platform discovery
+  const userQuota = Math.ceil(limit * 0.7);
+  const out = new Set(userRanked.slice(0, userQuota));
+  for (const t of platformRanked) {
+    if (out.size >= limit) break;
+    out.add(t);
+  }
+  return [...out].slice(0, limit);
 }
 
 function renderTagPills() {
   const wrap = document.getElementById('videoSearchTags');
-  const tags = getTopTags(12);
-  wrap.innerHTML = tags.map(tag => 
+  const tags = getTopTags(18);
+
+  // First chip = "All" (clears active filter)
+  const allActive = !activeTagFilter ? 'active' : '';
+  let html = `<button class="search-tag-pill search-tag-pill-all ${allActive}" data-tag="">All</button>`;
+  // Then user-adapted + popular tag chips
+  html += tags.map(tag =>
     `<button class="search-tag-pill ${tag === activeTagFilter ? 'active' : ''}" data-tag="${escHTML(tag)}">${escHTML(tag)}</button>`
   ).join('');
+  wrap.innerHTML = html;
 
   wrap.querySelectorAll('.search-tag-pill').forEach(pill => {
     pill.onclick = () => {
       const tag = pill.dataset.tag;
-      activeTagFilter = (activeTagFilter === tag) ? null : tag;
+      // "All" chip (empty data-tag) clears the filter; clicking the active tag toggles it off
+      activeTagFilter = (!tag || activeTagFilter === tag) ? null : tag;
       renderTagPills();
-      // If no tag selected, show personalized feed; else show filtered
       if (!activeTagFilter && !activeSearchQuery) {
         renderVideoResults(getPersonalizedFeed());
       } else {
