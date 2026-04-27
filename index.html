@@ -699,13 +699,7 @@
             <svg class="dm-search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
             <input type="text" id="dmSearchInput" placeholder="Search conversations…" />
           </div>
-          <div class="dm-conv-list" id="dmConvList">
-            <div class="dm-empty-list" id="dmEmptyList" style="display:none">
-              <div class="dm-empty-icon">💬</div>
-              <h3>No conversations yet</h3>
-              <p>Start one from anyone's profile.</p>
-            </div>
-          </div>
+          <div class="dm-conv-list" id="dmConvList"></div>
         </aside>
 
         <!-- Right pane: active thread -->
@@ -739,6 +733,18 @@
 
             <div class="dm-messages" id="dmMessages">
               <!-- Messages render here as bubbles -->
+            </div>
+
+            <!-- Reply preview slot (above composer; populated when replying) -->
+            <div class="dm-reply-preview" id="dmReplyPreview" style="display:none">
+              <div class="dm-reply-bar"></div>
+              <div class="dm-reply-meta">
+                <span class="dm-reply-label">Replying to <strong id="dmReplyName"></strong></span>
+                <span class="dm-reply-text" id="dmReplyText"></span>
+              </div>
+              <button type="button" class="dm-reply-cancel" id="dmReplyCancel" aria-label="Cancel reply" title="Cancel reply">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
             </div>
 
             <form class="dm-composer" id="dmComposer" onsubmit="return false">
