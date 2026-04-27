@@ -6700,9 +6700,103 @@ function renderTagPills() {
   });
 }
 
-function runSearch() {
-  const filtered = searchVideos(activeSearchQuery, activeTagFilter);
-  renderVideoResults(filtered);
+async function runSearch() {
+  const q = (activeSearchQuery || '').trim();
+
+  // Empty query — show personalized feed (or tag-filtered cache)
+  if (!q) {
+    if (activeTagFilter) {
+      const filtered = searchVideos('', activeTagFilter);
+      renderVideoResults(filtered);
+    } else {
+      renderVideoResults(getPersonalizedFeed?.() || allVideosCache);
+    }
+    return;
+  }
+
+  // Hashtag mode → cache filter is fine (tag is typed, exact field)
+  if (q.startsWith('#')) {
+    renderVideoResults(searchVideos(q, activeTagFilter));
+    return;
+  }
+
+  // Real search → query the DB so we find ALL matching videos site-wide,
+  // not just the 100 most-recent that live in allVideosCache. This also
+  // fixes "Unknown" creator names (the 100-cap cache may miss some uploaders).
+  const grid = document.getElementById('videoGrid');
+  grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Searching…</div>';
+
+  const term = `%${q.replace(/[%_]/g, m => '\\' + m)}%`;
+  const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
+
+  try {
+    // Two parallel queries: title/description match, and creator-name match.
+    const [byText, byUploader] = await Promise.all([
+      supabase.from('videos').select(baseSelect)
+        .eq('status', 'ready').eq('is_hidden', false)
+        .or(`title.ilike.${term},description.ilike.${term}`)
+        .order('created_at', { ascending: false })
+        .limit(60),
+      (async () => {
+        const { data: profs } = await supabase.from('profiles')
+          .select('id').ilike('username', term).limit(25);
+        if (!profs?.length) return { data: [] };
+        const ids = profs.map(p => p.id);
+        return await supabase.from('videos').select(baseSelect)
+          .eq('status', 'ready').eq('is_hidden', false)
+          .in('uploader_id', ids)
+          .order('created_at', { ascending: false })
+          .limit(60);
+      })(),
+    ]);
+
+    // Merge + dedupe + drop banned uploaders
+    const seen = new Set();
+    const merged = [];
+    [...(byText.data || []), ...(byUploader.data || [])].forEach(v => {
+      if (seen.has(v.id) || v.profiles?.is_banned) return;
+      seen.add(v.id);
+      merged.push(v);
+    });
+
+    // Map to canonical shape
+    const formatted = merged.map(v => ({
+      $id: 'sb_' + v.id,
+      _supabase: true,
+      _supabaseId: v.id,
+      title: v.title,
+      description: v.description || '',
+      tags: v.tags || [],
+      uploader: v.uploader_id,
+      thumbnail: v.thumbnail_url,
+      videoUrl: v.video_url,
+      uri: v.video_url,
+      videoStats: { views: v.views || 0, duration: v.duration || 0 },
+      status: 'ready',
+      $createdAt: v.created_at,
+      _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
+    }));
+
+    // Hydrate caches so playVideo + repeat searches are instant
+    formatted.forEach(v => {
+      if (!allVideosCache.find(x => x.$id === v.$id)) allVideosCache.push(v);
+      if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
+        allUploadersCache[v.uploader] = v._uploaderInfo;
+      }
+    });
+
+    // Apply optional tag filter client-side (rare path)
+    let out = formatted;
+    if (activeTagFilter) {
+      out = formatted.filter(v => (v.tags || []).some(t => t.toLowerCase() === activeTagFilter.toLowerCase()));
+    }
+
+    renderVideoResults(out);
+  } catch (err) {
+    console.error('Search failed:', err);
+    // Fallback: cache filter (covers offline / RPC issues)
+    renderVideoResults(searchVideos(q, activeTagFilter));
+  }
 }
 
 function renderVideoResults(videos) {
@@ -6730,13 +6824,22 @@ function renderVideoCard(video, uploader) {
   div.className = 'video-card';
   div.onclick = () => playVideo(video.$id);
 
+  // Resolve uploader from arg → cache → embedded info, in that order
+  uploader = uploader
+    || allUploadersCache[video.uploader]
+    || video._uploaderInfo
+    || null;
   const name = uploader?.username || 'Unknown';
-  const avatarHTML = uploader?.avatar ? `<img src="${uploader.avatar}" alt="${name}"/>` : initials(name);
+  const uploaderId = uploader?.$id || uploader?.id || video.uploader || null;
+  const avatarHTML = uploader?.avatar ? `<img src="${uploader.avatar}" alt="${escHTML(name)}"/>` : initials(name);
 
   const thumbHTML = video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : '';
   const resumeTime = getResumeTime(video.$id);
   const videoDuration = video.videoStats?.duration || 0;
   const progressPct = (resumeTime && videoDuration) ? Math.min(100, (resumeTime / videoDuration) * 100) : 0;
+
+  // Make creator name + avatar clickable when we have an uploader id
+  const clickableClass = uploaderId ? ' video-card-creator-clickable' : '';
 
   div.innerHTML = `
     <div class="video-thumb">
@@ -6746,16 +6849,26 @@ function renderVideoCard(video, uploader) {
       ${progressPct > 0 ? `<div class="video-thumb-progress"><div class="video-thumb-progress-fill" style="width:${progressPct}%"></div></div>` : ''}
     </div>
     <div class="video-card-info">
-      <div class="avatar">${avatarHTML}</div>
+      <div class="avatar${clickableClass}" data-uploader-id="${uploaderId || ''}" title="${uploaderId ? 'View profile' : ''}">${avatarHTML}</div>
       <div class="video-card-text">
         <div class="video-card-title">${escHTML(video.title || 'Untitled')}</div>
         <div class="video-card-meta">
-          ${escHTML(name)}<br>
+          <span class="video-card-creator${clickableClass}" data-uploader-id="${uploaderId || ''}">${escHTML(name)}</span><br>
           ${(video.videoStats?.views || 0).toLocaleString()} views • ${timeAgo(video.$createdAt)}
         </div>
       </div>
     </div>
   `;
+
+  // Wire creator-name + avatar click → open profile (don't bubble to card)
+  if (uploaderId) {
+    div.querySelectorAll('[data-uploader-id="' + uploaderId + '"]').forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (typeof openProfile === 'function') openProfile(uploaderId);
+      });
+    });
+  }
 
   // Show duration if available, otherwise fetch from video metadata
   const durationEl = div.querySelector('[data-duration]');
