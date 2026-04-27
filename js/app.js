@@ -1,5 +1,22 @@
 import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supabase.js';
 
+// Columns we actually use from the profiles table — explicit list cuts payload
+// vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
+const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at';
+
+// Reset window scroll across all common scroll containers (covers Safari edge
+// cases where `body` vs `documentElement` is the scrolling element).
+function scrollToTop() {
+  window.scrollTo(0, 0);
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
+}
+
+// Remove any open modal-backdrop matching `selector` (default: all of them).
+function closeAllModals(selector = '.modal-backdrop') {
+  document.querySelectorAll(selector).forEach(m => m.remove());
+}
+
 let currentUser = null;
 let currentProfile = null;
 let posts = [];
@@ -49,7 +66,7 @@ async function initAuth() {
 
 async function onSignedIn(user) {
   currentUser = user;
-  const { data: profile } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+  const { data: profile } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
   currentProfile = profile;
   updateTopbarUser();
   showApp();
@@ -403,13 +420,68 @@ function attachHlsToPostVideo(wrap) {
   }
 }
 
+// Batch lazy-loads via a short debounce so 30 visible cards = 2 queries
+// (one for reactions, one for comment counts) instead of 60 round-trips.
+const _pendingLazyPostIds = new Set();
+let _pendingLazyPostTimer = null;
 function triggerPostLazyLoad(card) {
   if (card.dataset.lazyLoaded === '1') return;
   card.dataset.lazyLoaded = '1';
   const id = card.dataset.postid;
   if (!id) return;
-  loadReactions(id, 'post');
-  loadCommentCount(id);
+  _pendingLazyPostIds.add(id);
+  if (_pendingLazyPostTimer) clearTimeout(_pendingLazyPostTimer);
+  _pendingLazyPostTimer = setTimeout(flushPostLazyLoad, 80);
+}
+async function flushPostLazyLoad() {
+  const ids = [..._pendingLazyPostIds];
+  _pendingLazyPostIds.clear();
+  _pendingLazyPostTimer = null;
+  if (!ids.length) return;
+  // Both fetches can run in parallel.
+  await Promise.all([
+    bulkLoadReactions(ids, 'post'),
+    bulkLoadCommentCounts(ids),
+  ]);
+}
+
+// Bulk fetch reactions for many targets in one query, then update each row's UI.
+async function bulkLoadReactions(targetIds, targetType) {
+  if (!targetIds.length) return;
+  const { data } = await supabase
+    .from('reactions')
+    .select('target_id, emoji, user_id')
+    .in('target_id', targetIds)
+    .eq('target_type', targetType);
+  if (!data) return;
+  const grouped = {};
+  data.forEach(r => {
+    if (!grouped[r.target_id]) grouped[r.target_id] = { counts: {}, userReaction: null };
+    grouped[r.target_id].counts[r.emoji] = (grouped[r.target_id].counts[r.emoji] || 0) + 1;
+    if (currentUser && r.user_id === currentUser.id) grouped[r.target_id].userReaction = r.emoji;
+  });
+  // Update each target — empty groups still call updateReactionUI to clear stale state
+  for (const id of targetIds) {
+    const g = grouped[id] || { counts: {}, userReaction: null };
+    updateReactionUI(id, targetType, g.counts, g.userReaction);
+  }
+}
+
+// Bulk fetch comment counts via single rows-then-group (no count queries).
+async function bulkLoadCommentCounts(postIds) {
+  if (!postIds.length) return;
+  const { data } = await supabase
+    .from('comments')
+    .select('post_id')
+    .in('post_id', postIds);
+  if (!data) return;
+  const counts = {};
+  data.forEach(c => { counts[c.post_id] = (counts[c.post_id] || 0) + 1; });
+  postIds.forEach(id => {
+    const count = counts[id] || 0;
+    const text = count > 0 ? `${count} comment${count !== 1 ? 's' : ''}` : '';
+    document.querySelectorAll(`#ccount-${id}`).forEach(el => { el.textContent = text; });
+  });
 }
 
 // Backwards-compatibility shim — older code still calls this.
@@ -1070,7 +1142,7 @@ async function blockAuthor(targetId, targetName) {
 
 function openReportModal(postId) {
   // Remove any existing modal
-  document.querySelectorAll('.modal-backdrop[data-modal="report"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="report"]');
 
   const reasons = [
     ['spam',      'Spam',                'Repetitive, misleading, or scammy'],
@@ -1227,7 +1299,7 @@ async function shareProfile(userId, username) {
   const safeUser = escHTML(username);
 
   // Remove any existing modal
-  document.querySelectorAll('.modal-backdrop[data-modal="share-profile"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="share-profile"]');
 
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
@@ -1308,7 +1380,7 @@ async function shareProfile(userId, username) {
 
 // Report user — modal, mirrors openReportModal but writes to user_reports
 function openReportUserModal(targetUserId, targetUsername) {
-  document.querySelectorAll('.modal-backdrop[data-modal="report-user"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="report-user"]');
 
   const reasons = [
     ['harassment',   'Harassment',           'Bullying, threats, or targeting'],
@@ -1479,17 +1551,29 @@ async function loadComments(postId, videoId = null) {
   const section = document.getElementById(containerId);
   if (!section) return;
   section.innerHTML = '<div class="loading" style="padding:1rem">Loading...</div>';
+  // Fetch BOTH parents AND replies in a single query to eliminate the N+1
+  // pattern where each parent triggered its own reply lookup. We group
+  // client-side and pass replies down to renderComment so it doesn't refetch.
   let q = supabase.from('comments')
     .select(`*, profiles(id, username, avatar_url, is_guest)`)
-    .is('parent_id', null)
     .order('created_at', { ascending: true });
   if (videoId) q = q.eq('video_id', videoId);
   else q = q.eq('post_id', postId);
   const { data, error } = await q;
   if (error) { section.innerHTML = `<p style="color:var(--text3);font-size:0.85rem">${error.message}</p>`; return; }
+  // Split into parents + group replies by parent_id
+  const parents = [];
+  const repliesByParent = {};
+  (data || []).forEach(c => {
+    if (c.parent_id) {
+      if (!repliesByParent[c.parent_id]) repliesByParent[c.parent_id] = [];
+      repliesByParent[c.parent_id].push(c);
+    } else {
+      parents.push(c);
+    }
+  });
   section.innerHTML = '';
-  const comments = data || [];
-  for (const c of comments) section.appendChild(await renderComment(c, postId, false, null, videoId));
+  for (const c of parents) section.appendChild(await renderComment(c, postId, false, null, videoId, repliesByParent));
 
   const previewKey = videoId ? `cimgpreview-v-${videoId}` : `cimgpreview-${postId}`;
   const inputWrap = document.createElement('div');
@@ -1520,7 +1604,7 @@ async function loadComments(postId, videoId = null) {
   inputWrap.querySelector('.cimg-input').addEventListener('change', (e) => handleCommentImageSelect(e.target, previewKey));
 }
 
-async function renderComment(comment, postId, isReply = false, topLevelId = null, videoId = null) {
+async function renderComment(comment, postId, isReply = false, topLevelId = null, videoId = null, repliesByParent = null) {
   // Auto-detect video comments by inspecting the row
   if (!videoId && comment.video_id) videoId = comment.video_id;
   const div = document.createElement('div');
@@ -1566,10 +1650,22 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
 
   loadReactions(comment.id, 'comment');
   if (!isReply) {
-    const { data } = await supabase.from('comments').select(`*, profiles(id, username, avatar_url, is_guest)`).eq('parent_id', comment.id).order('created_at', { ascending: true });
-    if (data && data.length) {
+    let replies;
+    if (repliesByParent) {
+      // Use the pre-grouped replies from loadComments (no extra fetch — N+1 fixed)
+      replies = repliesByParent[comment.id] || [];
+    } else {
+      // Fallback for callers that don't pre-group (e.g. realtime add)
+      const { data } = await supabase
+        .from('comments')
+        .select(`*, profiles(id, username, avatar_url, is_guest)`)
+        .eq('parent_id', comment.id)
+        .order('created_at', { ascending: true });
+      replies = data || [];
+    }
+    if (replies.length) {
       const container = div.querySelector(`#replies-${comment.id}`);
-      for (const r of data) container.appendChild(await renderComment(r, postId, true, comment.id, videoId));
+      for (const r of replies) container.appendChild(await renderComment(r, postId, true, comment.id, videoId, repliesByParent));
     }
   }
   return div;
@@ -1848,14 +1944,11 @@ async function openProfile(userId) {
     history.pushState(null, '', `#profile/${userId}`);
   }
 
-  // Scroll to top — the previous page's scroll position lingers otherwise,
-  // so users land on the bottom of someone's posts instead of the header.
-  window.scrollTo(0, 0);
-  document.documentElement.scrollTop = 0;
-  document.body.scrollTop = 0;
+  // Scroll to top — the previous page's scroll position lingers otherwise.
+  scrollToTop();
 
   // Close any modals/menus from a previous profile (rapid-nav safety)
-  document.querySelectorAll('.modal-backdrop[data-modal="follow-list"], .modal-backdrop[data-modal="share-profile"], .modal-backdrop[data-modal="report-user"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="follow-list"], .modal-backdrop[data-modal="share-profile"], .modal-backdrop[data-modal="report-user"]');
   closeProfileActionMenu?.();
   closePostActionMenu?.();
 
@@ -2008,12 +2101,15 @@ async function openProfile(userId) {
 // PROFILE — helpers (skeleton, badges, tab counts, switch, follow list modal)
 // ════════════════════════════════════════════════════════════════════════════
 
-// Retry profile fetch up to 3 times — protects against just-created accounts
+// Retry profile fetch up to 3 times — protects against just-created accounts.
+// Exponential backoff (200ms → 500ms → 1.2s) so transient misses don't waste
+// 600ms in a tight loop; existing accounts return immediately on attempt 1.
 async function fetchProfileWithRetry(userId, attempts = 3) {
+  const delays = [0, 200, 500];
   for (let i = 0; i < attempts; i++) {
-    const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+    if (delays[i]) await new Promise(r => setTimeout(r, delays[i]));
+    const { data } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', userId).single();
     if (data) return data;
-    if (i < attempts - 1) await new Promise(r => setTimeout(r, 300));
   }
   return null;
 }
@@ -2173,7 +2269,7 @@ async function openFollowListModal(userId, username, mode) {
   if (!currentUser) { toast('Please sign in', 'error'); return; }
   // mode: 'followers' (people who follow userId) | 'following' (people userId follows)
 
-  document.querySelectorAll('.modal-backdrop[data-modal="follow-list"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="follow-list"]');
 
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
@@ -2545,7 +2641,7 @@ document.getElementById('editProfileSave').addEventListener('click', async () =>
   if (error) { toast(error.message, 'error'); return; }
   toast('Profile updated!', 'success');
   closeEditProfile();
-  const { data: updated } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
+  const { data: updated } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
   currentProfile = updated;
   updateTopbarUser();
   openProfile(currentUser.id);
@@ -2646,7 +2742,7 @@ async function openMyProfile() {
   }
   // Make sure profile is loaded before opening
   if (!currentProfile) {
-    const { data: profile } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
+    const { data: profile } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
     currentProfile = profile;
   }
   openProfile(currentUser.id);
@@ -2677,9 +2773,7 @@ document.getElementById('btnHome')?.addEventListener('click', () => {
 document.getElementById('topbarLogoBtn')?.addEventListener('click', () => {
   setSidebarActive('btnHome');
   showFeed();
-  window.scrollTo(0, 0);
-  document.documentElement.scrollTop = 0;
-  document.body.scrollTop = 0;
+  scrollToTop();
 });
 
 // Handle browser back/forward
@@ -2811,7 +2905,7 @@ async function runFeedSearch(query) {
   searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
 
   const [{ data: profiles }, { data: posts }] = await Promise.all([
-    supabase.from('profiles').select('*').ilike('username', `%${query}%`).limit(5),
+    supabase.from('profiles').select('id, username, avatar_url, bio, is_guest').ilike('username', `%${query}%`).limit(5),
     supabase.from('posts').select('*, profiles!user_id(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
   ]);
 
@@ -3309,11 +3403,8 @@ function hideAllMainPages() {
   // Sibling sentinels (live outside the page divs) — also hide
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel) feedSentinel.style.display = 'none';
-  // Reset scroll on every page nav so tabs always start at the top
-  // (avoids landing in the middle of someone else's posts after switching pages).
-  window.scrollTo(0, 0);
-  document.documentElement.scrollTop = 0;
-  document.body.scrollTop = 0;
+  // Reset scroll on every page nav so tabs always start at the top.
+  scrollToTop();
 }
 let currentHls = null;
 
@@ -7246,7 +7337,7 @@ document.addEventListener('click', (e) => {
 
 // ── Reactor list modal ────────────────────────────────────────────────────
 async function openReactorListModal(targetId, targetType = 'post') {
-  document.querySelectorAll('.modal-backdrop[data-modal="reactor-list"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="reactor-list"]');
 
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
@@ -7459,7 +7550,7 @@ async function loadConversationList() {
 
   // Filter out archived (per-side) conversations
   const visibleConvs = convs.filter(c => {
-    if (c.is_group) return true; // archive on groups: TODO Phase 4
+    if (c.is_group) return true; // group archive is per-side too once we add admin UI
     const archivedByMe = (c.user_a === currentUser.id && c.archived_by_a) ||
                          (c.user_b === currentUser.id && c.archived_by_b);
     return !archivedByMe;
@@ -7673,13 +7764,18 @@ async function openConversation(convId) {
   // Find conversation in cache (or refetch — also re-hydrate participants)
   let conv = dmState.conversations.find(c => c.id === convId);
   if (!conv) {
-    const { data, error: fetchErr } = await supabase.from('conversations').select('*').eq('id', convId).single();
+    // Fetch conversation + participants in parallel (saves one round-trip).
+    // For 1:1 we still know the partner from user_a/user_b, but we kick off
+    // the participants query speculatively so groups don't pay an extra hop.
+    const [{ data, error: fetchErr }, { data: parts }] = await Promise.all([
+      supabase.from('conversations')
+        .select('id, user_a, user_b, is_group, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, archived_by_a, archived_by_b, muted_until_a, muted_until_b, created_at')
+        .eq('id', convId)
+        .single(),
+      supabase.from('conversation_participants').select('user_id').eq('conversation_id', convId),
+    ]);
     if (fetchErr || !data) { toast('Conversation not found', 'error'); console.warn('[dm] conv fetch failed', fetchErr); return; }
     if (data.is_group) {
-      // 2-step fetch (no FK embed — more bulletproof)
-      const { data: parts } = await supabase.from('conversation_participants')
-        .select('user_id')
-        .eq('conversation_id', convId);
       const memberIds = (parts || []).map(p => p.user_id);
       const { data: profs } = memberIds.length
         ? await supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', memberIds)
@@ -7765,14 +7861,18 @@ async function loadMessages(convId) {
   // Fresh conversation → reset the "already-animated" tracker so first paint animates in
   _renderedMessageIds.clear();
 
-  // Fetch messages + reactions in parallel (include reply_to_id + image fields)
+  // Fetch messages + reactions in parallel (include reply_to_id + image fields).
+  // Pull the LATEST 100 (descending), then reverse to chronological order so
+  // newest sits at the bottom. Previously this was ascending+limit(200) which,
+  // on a thread with >200 messages, would silently miss the most recent ones.
+  // Older messages can be paged in via a future "load older" affordance.
   const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
     supabase
       .from('messages')
       .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id, image_url, image_kind')
       .eq('conversation_id', convId)
-      .order('created_at', { ascending: true })
-      .limit(200),
+      .order('created_at', { ascending: false })
+      .limit(100),
     fetchReactionsForConversation(convId),
   ]);
 
@@ -7780,7 +7880,8 @@ async function loadMessages(convId) {
     wrap.innerHTML = `<div class="dm-error">Couldn't load messages: ${escHTML(msgErr.message)}</div>`;
     return;
   }
-  dmState.messages = msgs || [];
+  // Reverse to chronological order (oldest first → newest at bottom of thread)
+  dmState.messages = (msgs || []).slice().reverse();
   dmState.reactions = reactionsByMsg;
   renderMessages();
   scrollMessagesToBottom();
@@ -8822,7 +8923,7 @@ async function confirmLeaveGroup() {
 function showGroupMembersDialog() {
   const c = dmState.activeConv;
   if (!c?.isGroup) return;
-  document.querySelectorAll('.modal-backdrop[data-modal="group-members"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="group-members"]');
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
   modal.dataset.modal = 'group-members';
@@ -8863,7 +8964,7 @@ document.getElementById('dmNewBtn')?.addEventListener('click', () => openNewConv
 
 function openNewConvModal() {
   if (!currentUser) { toast('Please sign in', 'error'); return; }
-  document.querySelectorAll('.modal-backdrop[data-modal="dm-new"]').forEach(m => m.remove());
+  closeAllModals('.modal-backdrop[data-modal="dm-new"]');
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
   modal.dataset.modal = 'dm-new';
@@ -9097,12 +9198,9 @@ const DM_MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;   // 2.5 MB
 const DM_BUCKET = 'dm-attachments';
 
 // ─── GIF picker key ───────────────────────────────────────────────────────
-// Giphy retired their public beta key years ago, so the picker needs your own.
-// 1. Go to https://developers.giphy.com/dashboard/
-// 2. Create app (free, ~3 min) — choose "API" not "SDK"
-// 3. Copy the API Key and paste it below, replacing the empty string.
-// Free tier = 100k requests/day — plenty for a chat app.
-const DM_GIPHY_KEY = '';  // ← paste your Giphy API key here
+// Giphy API key from developers.giphy.com/dashboard. Free tier = 100k req/day.
+// Public client-side use is the intended exposure — Giphy rate-limits per IP.
+const DM_GIPHY_KEY = 'UYrH9t3qUegWfBNynMFTHL3uEHsySkSm';
 
 let _dmPendingAttachment = null;   // { file, dataUrl, kind: 'upload' | 'gif', gifUrl }
 let _dmAttachMenuEl = null;
