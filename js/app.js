@@ -2484,7 +2484,6 @@ async function loadBooks() {
   _appwriteOffset = 0;
   _hasMoreAppwriteBooks = true;
   _isLoadingMoreBooks = false;
-  _allAppwriteStatsFetched = false;
 
   try {
     // First-page Appwrite fetch + full Supabase fetch (Supabase is small and shouldn't paginate)
@@ -3109,8 +3108,6 @@ function setupAppwriteStatsLazyLoad(grid) {
 }
 
 // Stats are fetched per visible-card batch — at 4000+ books "fetch all" isn't viable.
-// Used to track session-level state if we want to skip refetching across navigations.
-let _allAppwriteStatsFetched = false;        // kept for compatibility; no longer triggers prefetch
 
 async function flushAppwriteStatsBatch(appwriteBookIds) {
   if (!appwriteBookIds || !appwriteBookIds.length) return;
@@ -5176,7 +5173,6 @@ function renderVideoCard(video, uploader) {
 }
 
 async function playVideo(videoId) {
-  console.log('[playVideo] called with videoId:', videoId, '| starts with sb_?', videoId?.startsWith('sb_'));
   try {
     let video = null;
     let uploader = null;
@@ -5184,7 +5180,6 @@ async function playVideo(videoId) {
     // Supabase videos are prefixed with 'sb_' and live in allVideosCache
     // — never call Appwrite for them, that's why we were getting 400s.
     if (videoId && videoId.startsWith('sb_')) {
-      console.log('[playVideo] taking SUPABASE branch — no Appwrite call');
       // Make sure the cache is populated (in case the user navigated directly to #video/sb_...)
       if (!allVideosCache.length) {
         await ensureVideoCache();
@@ -5201,7 +5196,6 @@ async function playVideo(videoId) {
       uploader = cached._uploaderInfo || null;
     } else {
       // Appwrite (mobile) video — fetch from Appwrite as before
-      console.log('[playVideo] taking APPWRITE branch for videoId:', videoId);
       video = await appwriteGet(APPWRITE.videosCollection, videoId);
       if (!video) return;
       if (video.uploader) {
