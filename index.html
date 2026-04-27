@@ -33,9 +33,7 @@
   <!-- TOP HEADER -->
   <header class="topbar">
     <button class="topbar-logo" id="topbarLogoBtn" aria-label="Selebox — go to home" title="Home">
-      <button class="topbar-logo" id="topbarLogoBtn" aria-label="Selebox — go to home" title="Home">
-  <img src="img/logo.png" alt="Selebox" draggable="false"/>
-</button>
+      <img src="img/logo.png" alt="Selebox" draggable="false"/>
     </button>
 
     <div class="topbar-search" id="topbarSearch">
@@ -109,6 +107,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
       </span>
       <span class="sidebar-label">Bookmarks</span>
+    </button>
+    <button class="sidebar-item" title="Messages" id="btnMessages">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+      </span>
+      <span class="sidebar-label">Messages</span>
+      <span class="sidebar-badge" id="messagesUnreadBadge" style="display:none">0</span>
     </button>
     <button class="sidebar-item" title="Profile" id="btnProfile">
       <span class="sidebar-icon">
@@ -679,6 +684,84 @@
       </div>
     </div>
 
+    <!-- ── MESSAGES (Direct Messages, FB-style with purple) ── -->
+    <div id="messagesPage" style="display:none">
+      <div class="dm-shell">
+        <!-- Left pane: conversation list -->
+        <aside class="dm-sidebar">
+          <div class="dm-sidebar-header">
+            <h2>Chats</h2>
+            <button class="dm-new-btn" id="dmNewBtn" title="New message" aria-label="New message">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="11.01"/><line x1="8" y1="11" x2="8" y2="11.01"/><line x1="16" y1="11" x2="16" y2="11.01"/></svg>
+            </button>
+          </div>
+          <div class="dm-search-wrap">
+            <svg class="dm-search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="text" id="dmSearchInput" placeholder="Search conversations…" />
+          </div>
+          <div class="dm-conv-list" id="dmConvList">
+            <div class="dm-empty-list" id="dmEmptyList" style="display:none">
+              <div class="dm-empty-icon">💬</div>
+              <h3>No conversations yet</h3>
+              <p>Start one from anyone's profile.</p>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Right pane: active thread -->
+        <section class="dm-thread" id="dmThread">
+          <!-- Empty placeholder shown when no thread is open -->
+          <div class="dm-thread-empty" id="dmThreadEmpty">
+            <div class="dm-thread-empty-icon">
+              <svg viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+            </div>
+            <h2>Your messages</h2>
+            <p>Pick a chat from the left, or start a new one from someone's profile.</p>
+          </div>
+
+          <!-- Active thread (hidden until a conversation is selected) -->
+          <div class="dm-thread-active" id="dmThreadActive" style="display:none">
+            <header class="dm-thread-header">
+              <button class="dm-back-btn" id="dmBackBtn" aria-label="Back to chats" title="Back">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              <button class="dm-thread-avatar" id="dmThreadAvatar" aria-label="View profile">
+                <span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>
+              </button>
+              <div class="dm-thread-info">
+                <button class="dm-thread-name" id="dmThreadName">Loading…</button>
+                <span class="dm-thread-status" id="dmThreadStatus"></span>
+              </div>
+              <button class="dm-thread-menu" id="dmThreadMenu" title="Options" aria-label="Options">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+              </button>
+            </header>
+
+            <div class="dm-messages" id="dmMessages">
+              <!-- Messages render here as bubbles -->
+            </div>
+
+            <form class="dm-composer" id="dmComposer" onsubmit="return false">
+              <button type="button" class="dm-composer-btn" id="dmAttachBtn" title="Attach (coming soon)" disabled aria-label="Attach">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <div class="dm-composer-input-wrap">
+                <textarea id="dmInput" placeholder="Aa" rows="1" maxlength="4000"></textarea>
+                <button type="button" class="dm-composer-emoji" id="dmEmojiBtn" title="Emoji" aria-label="Emoji">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                </button>
+              </div>
+              <button type="submit" class="dm-send-btn" id="dmSendBtn" aria-label="Send">
+                <!-- Paper plane when has text, thumbs-up when empty (FB classic) -->
+                <svg class="dm-send-icon-plane" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                <svg class="dm-send-icon-thumb" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M2 10h4v12H2zm20 2c0-1.1-.9-2-2-2h-6.31l.95-4.57c.02-.1.03-.2.03-.31 0-.41-.17-.79-.44-1.06L13.17 3 6.59 9.59C6.22 9.95 6 10.45 6 11v9c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-1z"/></svg>
+              </button>
+            </form>
+          </div>
+        </section>
+      </div>
+    </div>
+
     <div id="profilePage" style="display:none">
       <div class="profile-banner" id="profileBanner">
         <button class="profile-banner-edit" id="editBannerBtn" style="display:none">
@@ -713,6 +796,10 @@
           <div class="profile-mutuals" id="profileMutuals" style="display:none"></div>
           <div class="profile-actions">
             <button class="btn btn-purple btn-sm" id="profileActionBtn">Settings</button>
+            <button class="btn btn-ghost btn-sm" id="profileMessageBtn" style="display:none">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.4rem"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+              Message
+            </button>
           </div>
         </div>
       </div>
