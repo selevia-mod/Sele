@@ -872,8 +872,12 @@ body.light .book-chip {
   background: linear-gradient(135deg, #7c3aed, #a78bfa);
   border-color: transparent;
   color: #ffffff;
-  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.35);
+  font-weight: 600;
+  /* Soft subtle shadow — was too strong before, looked like a halo */
+  box-shadow: 0 1px 4px rgba(124, 58, 237, 0.18);
 }
+.book-chip:focus { outline: none; }
+.book-chip:focus-visible { outline: 2px solid rgba(124, 58, 237, 0.5); outline-offset: 2px; }
 .book-sort-select {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border, rgba(255,255,255,0.10));
