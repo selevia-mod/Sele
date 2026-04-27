@@ -2728,6 +2728,12 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 
 .video-card:hover .video-card-title { color: var(--purple-lt); }
 
+/* Clickable creator (avatar + name) on video cards */
+.video-card-creator-clickable { cursor: pointer; transition: color 0.15s ease; }
+.video-card-creator.video-card-creator-clickable:hover { color: var(--purple-lt); text-decoration: underline; }
+.video-card-info .avatar.video-card-creator-clickable:hover { border-color: var(--purple-lt); transform: scale(1.05); }
+.video-card-info .avatar.video-card-creator-clickable { transition: transform 0.15s ease, border-color 0.15s ease; }
+
 /* Video player page (keep premium look) */
 .video-player-wrap {
   background: #000; border-radius: 12px; overflow: hidden;
