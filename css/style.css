@@ -2726,17 +2726,60 @@ body.on-videos .main-wrap {
 .video-search-clear:hover { background: var(--purple); color: #fff; }
 
 .video-search-tags {
-  display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem;
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: nowrap;            /* single line, YouTube-style */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  margin-bottom: 1rem;
+  padding: 0.15rem 0.5rem 0.5rem 0.05rem;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  -webkit-mask-image: linear-gradient(90deg, black 0%, black 92%, transparent 100%);
+          mask-image: linear-gradient(90deg, black 0%, black 92%, transparent 100%);
 }
+.video-search-tags::-webkit-scrollbar { display: none; }
 .video-search-tags:empty { display: none; }
+
 .search-tag-pill {
-  background: var(--bg2); border: 1px solid var(--border);
-  color: var(--text2); padding: 4px 12px; border-radius: 99px;
-  font-size: 0.78rem; cursor: pointer; transition: all 0.15s;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  padding: 0.42rem 0.95rem;
+  border-radius: 99px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s, transform 0.12s;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-family: inherit;
 }
-.search-tag-pill:hover { border-color: var(--purple); color: var(--purple-lt); }
+.search-tag-pill:hover {
+  border-color: var(--purple);
+  color: var(--purple-lt);
+  transform: translateY(-1px);
+}
 .search-tag-pill.active {
-  background: var(--purple); border-color: var(--purple); color: #fff; font-weight: 600;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 3px 10px rgba(124, 58, 237, 0.28);
+}
+/* "All" chip subtle differentiation (slightly larger contrast when active) */
+.search-tag-pill-all { font-weight: 600; }
+body.light .search-tag-pill {
+  background: white;
+  border-color: rgba(17, 24, 39, 0.08);
+  color: #374151;
+}
+body.light .search-tag-pill:hover {
+  border-color: #c4b5fd;
+  color: #5b21b6;
+  background: rgba(124, 58, 237, 0.04);
 }
 
 .video-search-empty {
