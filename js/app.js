@@ -1,4 +1,4 @@
-import { supabase, REACTIONS, timeAgo, initials, appwriteList, appwriteGet, APPWRITE, callEdgeFunction } from './supabase.js';
+import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supabase.js';
 
 let currentUser = null;
 let currentProfile = null;
@@ -2623,10 +2623,9 @@ if (topbarSearchClear) {
         card.style.animationDelay = `${i * 0.025}s`;
         grid.appendChild(card);
       });
-      setupAppwriteStatsLazyLoad(grid);
       // Resume infinite scroll if there's more to load
       const sentinel = document.getElementById('bookGridSentinel');
-      if (sentinel && _hasMoreAppwriteBooks) {
+      if (sentinel && _hasMoreBooks) {
         sentinel.style.display = 'block';
         setupBooksInfiniteScroll();
       }
@@ -3018,20 +3017,9 @@ async function loadUpNext(currentVideo) {
   const currentTags = currentVideo.tags || [];
 
   try {
-    // Fetch pool from BOTH Supabase + Appwrite in parallel (unified recommendations)
-    const [sbVideos, awResult] = await Promise.all([
-      fetchSupabaseVideos().catch(() => []),
-      appwriteList(APPWRITE.videosCollection, [
-        JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-        JSON.stringify({ method: 'limit', values: [200] }),
-      ]).catch(() => ({ documents: [] })),
-    ]);
-
-    const awVideos = awResult.documents || [];
-
-    // Merge both pools — Supabase videos already match the Appwrite shape
-    // (fetchSupabaseVideos transforms them with $id, tags, uploader, videoStats, etc.)
-    let pool = [...sbVideos, ...awVideos].filter(v =>
+    // Recommendation pool is sourced from Supabase.
+    const sbVideos = await fetchSupabaseVideos().catch(() => []);
+    let pool = sbVideos.filter(v =>
       v.$id !== currentVideo.$id && !watchedIds.has(v.$id)
     );
 
@@ -3069,7 +3057,7 @@ async function loadUpNext(currentVideo) {
     const suggestions = pool.slice(0, 10);
 
     // Resolve uploader info — Supabase videos already have _uploaderInfo cached;
-    // Appwrite videos need a separate users batch.
+    // for any missing, batch-fetch from profiles.
     const uploaders = {};
     for (const v of suggestions) {
       if (v._uploaderInfo) uploaders[v.uploader] = v._uploaderInfo;
@@ -3079,7 +3067,6 @@ async function loadUpNext(currentVideo) {
     )];
     if (missingUploaderIds.length) {
       try {
-        // Try Supabase profiles first (covers migrated users)
         const { data: sbProfiles } = await supabase
           .from('profiles')
           .select('id, username, avatar_url')
@@ -3088,17 +3075,6 @@ async function loadUpNext(currentVideo) {
           uploaders[p.id] = { $id: p.id, username: p.username, avatar: p.avatar_url };
         }
       } catch {}
-      // Fall back to Appwrite users for any still-missing legacy IDs
-      const stillMissing = missingUploaderIds.filter(id => !uploaders[id]);
-      if (stillMissing.length) {
-        try {
-          const userResult = await appwriteList(APPWRITE.usersCollection, [
-            JSON.stringify({ method: 'equal', attribute: '$id', values: stillMissing }),
-            JSON.stringify({ method: 'limit', values: [100] }),
-          ]);
-          (userResult.documents || []).forEach(u => { uploaders[u.$id] = u; });
-        } catch {}
-      }
     }
 
     // Render
@@ -3152,7 +3128,7 @@ function renderUpNextItem(video, uploader, currentTags) {
   return div;
 }
 
-// ── Videos (from Appwrite) ──
+// ── Videos ──
 const videosPage = document.getElementById('videosPage');
 const videoPlayerPage = document.getElementById('videoPlayerPage');
 const studioPage = document.getElementById('studioPage');
@@ -3263,9 +3239,9 @@ function showBook() {
 }
 
 // ── Pagination state for the public Book browse page ──
-const APPWRITE_BOOKS_PAGE_SIZE = 40;
-let _appwriteOffset = 0;
-let _hasMoreAppwriteBooks = true;
+const BOOKS_PAGE_SIZE = 80;
+let _booksOffset = 0;
+let _hasMoreBooks = true;
 let _isLoadingMoreBooks = false;
 let _bookScrollObserver = null;
 
@@ -3279,8 +3255,8 @@ async function loadBooks() {
   grid.innerHTML = '<div class="loading">Loading books...</div>';
 
   // Reset pagination state on every fresh load (filter/sort/page open)
-  _appwriteOffset = 0;
-  _hasMoreAppwriteBooks = true;
+  _booksOffset = 0;
+  _hasMoreBooks = true;
   _isLoadingMoreBooks = false;
 
   // Kick off recommendation rail + adaptive chip render in parallel (don't block grid)
@@ -3288,18 +3264,11 @@ async function loadBooks() {
   renderBookChips().catch(e => console.warn('[chips] failed', e));
 
   try {
-    // First-page Appwrite fetch + full Supabase fetch (Supabase is small and shouldn't paginate)
-    const [supabaseBooks, appwriteBooks] = await Promise.all([
-      fetchSupabaseBooks(),
-      fetchAppwriteBooks(0),
-    ]);
+    const books = await fetchSupabaseBooks(0, BOOKS_PAGE_SIZE);
+    if (books.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
+    _booksOffset = books.length;
 
-    if (appwriteBooks.length < APPWRITE_BOOKS_PAGE_SIZE) _hasMoreAppwriteBooks = false;
-    _appwriteOffset = appwriteBooks.length;
-
-    let merged = [...(supabaseBooks || []), ...(appwriteBooks || [])];
-
-    merged = applyBookFilterAndSort(merged);
+    let merged = applyBookFilterAndSort(books);
     allBooksCache = merged;
 
     if (!merged.length) {
@@ -3309,7 +3278,7 @@ async function loadBooks() {
     }
 
     renderBooks();
-    if (_hasMoreAppwriteBooks) setupBooksInfiniteScroll();
+    if (_hasMoreBooks) setupBooksInfiniteScroll();
   } catch (err) {
     console.error('Failed to load books:', err);
     grid.innerHTML = '<div class="loading">Couldn\'t load books</div>';
@@ -3350,7 +3319,7 @@ function applyBookFilterAndSort(list) {
 }
 
 async function loadMoreBooks() {
-  if (_isLoadingMoreBooks || !_hasMoreAppwriteBooks) return;
+  if (_isLoadingMoreBooks || !_hasMoreBooks) return;
   _isLoadingMoreBooks = true;
 
   const sentinel = document.getElementById('bookGridSentinel');
@@ -3358,9 +3327,9 @@ async function loadMoreBooks() {
   sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
 
   try {
-    const more = await fetchAppwriteBooks(_appwriteOffset);
-    if (more.length < APPWRITE_BOOKS_PAGE_SIZE) _hasMoreAppwriteBooks = false;
-    _appwriteOffset += more.length;
+    const more = await fetchSupabaseBooks(_booksOffset, BOOKS_PAGE_SIZE);
+    if (more.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
+    _booksOffset += more.length;
 
     if (more.length) {
       // Merge into cache, re-apply current filter/sort to keep order consistent
@@ -3379,11 +3348,9 @@ async function loadMoreBooks() {
           card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
           grid.appendChild(card);
         });
-      // Re-observe new cards for stats
-      setupAppwriteStatsLazyLoad(grid);
     }
 
-    if (_hasMoreAppwriteBooks) {
+    if (_hasMoreBooks) {
       sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
     } else {
       sentinel.innerHTML = '<div class="book-grid-end-msg">You\'ve reached the end · ' + allBooksCache.length.toLocaleString() + ' books</div>';
@@ -3448,8 +3415,7 @@ function runBookSearch() {
       card.style.animationDelay = `${i * 0.025}s`;
       grid.appendChild(card);
     });
-    setupAppwriteStatsLazyLoad(grid);
-    if (sentinel && _hasMoreAppwriteBooks) {
+    if (sentinel && _hasMoreBooks) {
       sentinel.style.display = 'block';
       setupBooksInfiniteScroll();
     }
@@ -3476,7 +3442,6 @@ function runBookSearch() {
     card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
     grid.appendChild(card);
   });
-  setupAppwriteStatsLazyLoad(grid);
 }
 
 function setupBooksInfiniteScroll() {
@@ -3734,7 +3699,7 @@ function renderBookRecsRail(books) {
   rail.style.display = 'block';
 }
 
-async function fetchSupabaseBooks() {
+async function fetchSupabaseBooks(offset = 0, limit = 80) {
   try {
     const { data, error } = await supabase
       .from('books')
@@ -3748,14 +3713,11 @@ async function fetchSupabaseBooks() {
       .eq('is_public', true)
       .eq('is_hidden', false)
       .in('status', ['ongoing', 'completed'])
-      .limit(80);
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (error) {
       console.error('Supabase books fetch error:', error);
-      // Don't break the whole page — return empty so Appwrite still renders
-      if (error.code === '42P01') {
-        // migration not run; show friendly state via the calling page
-      }
       return [];
     }
 
@@ -3766,280 +3728,10 @@ async function fetchSupabaseBooks() {
         ...b,
         id: b.id,                                    // raw UUID, no prefix needed (FK shape used elsewhere)
         $id: 'sb_' + b.id,
-        _supabase: true,
         author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
       }));
   } catch (err) {
     console.error('fetchSupabaseBooks failed:', err);
-    return [];
-  }
-}
-
-// ── Appwrite books (legacy mobile) ──
-// Stats (views/likes/chapter counts) are loaded lazily per-card after render.
-// Pagination via offset keeps initial load fast even with thousands of legacy books.
-async function fetchAppwriteBooks(offset = 0) {
-  if (!APPWRITE.booksCollection) return [];
-  try {
-    const result = await appwriteList(APPWRITE.booksCollection, [
-      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit',  values: [APPWRITE_BOOKS_PAGE_SIZE] }),
-      JSON.stringify({ method: 'offset', values: [offset] }),
-    ]);
-    const books = result.documents || [];
-    const userMap = await fetchAppwriteUsers(collectAppwriteUploaderIds(books));
-
-    return books.map(b => {
-      const mapped = mapAppwriteBookToBook(b, userMap);
-      // Pre-fill from cache if available (otherwise stays 0; lazy fetch will update later)
-      const cached = getCachedAppwriteStats(b.$id);
-      if (cached) {
-        mapped.views_count    = cached.views;
-        mapped.likes_count    = cached.likes;
-        mapped.chapters_count = cached.chaptersCount;
-        mapped._statsLoaded   = true;     // skip lazy fetch for this one
-      }
-      return mapped;
-    });
-  } catch (err) {
-    console.error('Failed to fetch Appwrite books:', err);
-    return [];
-  }
-}
-
-// Helper: get an ID from any possible shape Appwrite returns for a relationship field.
-// Could be a string, an object with $id, an array of strings, or an array of objects.
-function pluckRefId(value) {
-  if (!value) return null;
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return pluckRefId(value[0]);
-  if (typeof value === 'object') return value.$id || null;
-  return null;
-}
-
-// Aggregate views/likes/chapter counts for a SPECIFIC list of book IDs.
-// Uses Appwrite server-side `equal` filter on the `book` relationship attribute so
-// only relevant rows come back — critical when there are thousands of books.
-// Falls back gracefully (returns zeros) on any error.
-async function fetchAppwriteBookStats(bookIds) {
-  const empty = { views: {}, likes: {}, chaptersCount: {} };
-  if (!bookIds || !bookIds.length) return empty;
-
-  // Appwrite caps `equal values` at 100. Batch if larger.
-  if (bookIds.length > 100) {
-    const merged = { views: {}, likes: {}, chaptersCount: {} };
-    for (let i = 0; i < bookIds.length; i += 100) {
-      const part = await fetchAppwriteBookStats(bookIds.slice(i, i + 100));
-      Object.assign(merged.views, part.views);
-      Object.assign(merged.likes, part.likes);
-      Object.assign(merged.chaptersCount, part.chaptersCount);
-    }
-    return merged;
-  }
-
-  try {
-    const views = {};
-    const likes = {};
-    const chaptersCount = {};
-
-    // Reads + chapters in parallel, both server-side filtered
-    const settled = await Promise.allSettled([
-      APPWRITE.chapterReadsCollection
-        ? appwriteList(APPWRITE.chapterReadsCollection, [
-            JSON.stringify({ method: 'equal', attribute: 'book', values: bookIds }),
-            JSON.stringify({ method: 'limit', values: [5000] }),
-          ])
-        : Promise.resolve({ documents: [] }),
-      APPWRITE.chaptersCollection
-        ? appwriteList(APPWRITE.chaptersCollection, [
-            JSON.stringify({ method: 'equal', attribute: 'book', values: bookIds }),
-            JSON.stringify({ method: 'limit', values: [2000] }),
-          ])
-        : Promise.resolve({ documents: [] }),
-    ]);
-    const readDocs    = settled[0].status === 'fulfilled' ? (settled[0].value.documents || []) : [];
-    const chapterDocs = settled[1].status === 'fulfilled' ? (settled[1].value.documents || []) : [];
-
-    // Reads → views (sum readCount per book)
-    for (const row of readDocs) {
-      const bookId = pluckRefId(row.book);
-      if (!bookId) continue;
-      views[bookId] = (views[bookId] || 0) + (Number(row.readCount) || 0);
-    }
-
-    // Build chapter → book map + chapter counts
-    const chapterBookMap = {};
-    for (const c of chapterDocs) {
-      const bookId = pluckRefId(c.book);
-      if (!bookId) continue;
-      chapterBookMap[c.$id] = bookId;
-      const isPublished = (c.status || '').toLowerCase() !== 'draft';
-      if (isPublished) chaptersCount[bookId] = (chaptersCount[bookId] || 0) + 1;
-    }
-
-    // Likes → count, mapped chapter → book
-    const chapterIds = Object.keys(chapterBookMap);
-    if (APPWRITE.chapterLikesCollection && chapterIds.length) {
-      // Same 100-id cap on equal values
-      for (let i = 0; i < chapterIds.length; i += 100) {
-        const batch = chapterIds.slice(i, i + 100);
-        try {
-          const r = await appwriteList(APPWRITE.chapterLikesCollection, [
-            JSON.stringify({ method: 'equal', attribute: 'booksChapter', values: batch }),
-            JSON.stringify({ method: 'limit', values: [5000] }),
-          ]);
-          for (const l of (r.documents || [])) {
-            const cid = pluckRefId(l.booksChapter);
-            if (!cid) continue;
-            const bid = chapterBookMap[cid];
-            if (bid) likes[bid] = (likes[bid] || 0) + 1;
-          }
-        } catch (e) { /* swallowed */ }
-      }
-    }
-
-    return { views, likes, chaptersCount };
-  } catch (err) {
-    console.warn('fetchAppwriteBookStats failed:', err);
-    return empty;
-  }
-}
-
-// Page through an Appwrite collection until empty, returning all documents.
-// Caps at ~10k to avoid runaway loops on misconfigured collections.
-async function fetchAllAppwrite(collectionId) {
-  const all = [];
-  const PAGE = 100;
-  let offset = 0;
-  for (let safety = 0; safety < 100; safety++) {  // up to 10000 docs
-    try {
-      const r = await appwriteList(collectionId, [
-        JSON.stringify({ method: 'limit',  values: [PAGE] }),
-        JSON.stringify({ method: 'offset', values: [offset] }),
-      ]);
-      const docs = r.documents || [];
-      all.push(...docs);
-      if (docs.length < PAGE) break;
-      offset += PAGE;
-    } catch (err) {
-      console.warn(`fetchAllAppwrite(${collectionId}) failed at offset ${offset}:`, err);
-      break;
-    }
-  }
-  return all;
-}
-
-// Pull uploader IDs out of an Appwrite books list.
-// `uploader` may come back as: a string ID, an object with $id, or already-embedded with username.
-function collectAppwriteUploaderIds(items) {
-  const ids = new Set();
-  for (const item of items) {
-    const u = item?.uploader;
-    if (!u) continue;
-    if (typeof u === 'string') {
-      ids.add(u);
-    } else if (typeof u === 'object') {
-      // Already-embedded (has username) → no fetch needed
-      if (u.username) continue;
-      if (u.$id) ids.add(u.$id);
-    }
-  }
-  return ids;
-}
-
-async function fetchAppwriteUsers(idSet) {
-  if (!idSet || !idSet.size) return {};
-  const out = {};
-  const ids = [...idSet];
-  // Appwrite caps `equal $id values` at 100 per query; batch just in case.
-  for (let i = 0; i < ids.length; i += 100) {
-    const batch = ids.slice(i, i + 100);
-    try {
-      const userResult = await appwriteList(APPWRITE.usersCollection, [
-        JSON.stringify({ method: 'equal', attribute: '$id', values: batch }),
-        JSON.stringify({ method: 'limit', values: [100] }),
-      ]);
-      (userResult.documents || []).forEach(u => { out[u.$id] = u; });
-    } catch (err) {
-      console.warn('User batch lookup failed:', err);
-    }
-  }
-  return out;
-}
-
-// Resolve the uploader from any of: embedded object, just-ID string, or partial object
-function resolveAppwriteUploader(rawUploader, userMap = {}) {
-  if (!rawUploader) return null;
-  if (typeof rawUploader === 'string') return userMap[rawUploader] || null;
-  if (typeof rawUploader === 'object') {
-    if (rawUploader.username) return rawUploader;       // already expanded
-    if (rawUploader.$id) return userMap[rawUploader.$id] || rawUploader;
-  }
-  return null;
-}
-
-function mapAppwriteBookToBook(b, userMap = {}) {
-  const firstTag = (b.tags || [])[0] || '';
-  const genreSlug = firstTag.toLowerCase().replace(/\s+/g, '-');
-  const uploader = resolveAppwriteUploader(b.uploader, userMap);
-  return {
-    id: 'aw_' + b.$id,
-    $id: 'aw_' + b.$id,
-    _appwrite: true,
-    _appwriteId: b.$id,
-    title: b.title || 'Untitled',
-    description: b.synopsis || '',
-    cover_url: b.thumbnail || null,
-    genre: genreSlug || null,
-    tags: b.tags || [],
-    status: (b.status || 'ongoing').toLowerCase(),
-    is_public: !b.isLocked,
-    isLocked: !!b.isLocked,
-    contentRating: b.contentRating || null,
-    views_count: 0,
-    likes_count: 0,
-    chapters_count: 0,
-    word_count: 0,
-    published_at: b.$createdAt,
-    created_at: b.$createdAt,
-    author_id: uploader?.$id || null,
-    // Match the shape Supabase profiles join produces, so renderBookDetail/renderBookCard work uniformly
-    profiles: uploader ? {
-      id: uploader.$id,
-      username: uploader.username || 'Unknown',
-      avatar_url: uploader.avatar || null,
-    } : null,
-    author: uploader ? {
-      id: uploader.$id,
-      username: uploader.username || 'Unknown',
-      avatar: uploader.avatar || null,
-    } : null,
-  };
-}
-
-async function fetchAppwriteChaptersForBook(appwriteBookId) {
-  if (!APPWRITE.chaptersCollection) return [];
-  try {
-    const result = await appwriteList(APPWRITE.chaptersCollection, [
-      JSON.stringify({ method: 'equal', attribute: 'book', values: [appwriteBookId] }),
-      JSON.stringify({ method: 'orderAsc', attribute: 'order' }),
-      JSON.stringify({ method: 'limit', values: [200] }),
-    ]);
-    return (result.documents || []).map(c => ({
-      id: 'aw_' + c.$id,
-      _appwrite: true,
-      _appwriteId: c.$id,
-      chapter_number: typeof c.order === 'number' ? c.order : 0,
-      title: c.title || `Chapter ${c.order || ''}`.trim(),
-      word_count: 0,
-      views_count: 0,
-      // Treat anything that isn't explicitly a draft as published (mobile typically only stores published ones in this collection)
-      is_published: (c.status || '').toLowerCase() !== 'draft',
-      created_at: c.$createdAt,
-      _content: c.content || '',         // some renderers use it directly without a follow-up GET
-    }));
-  } catch (err) {
-    console.error('Failed to fetch Appwrite chapters:', err);
     return [];
   }
 }
@@ -4063,150 +3755,12 @@ function renderBooks() {
     card.style.animationDelay = `${i * 0.025}s`;
     grid.appendChild(card);
   });
-
-  // Set up lazy stats loading for Appwrite cards that don't have cached values yet
-  setupAppwriteStatsLazyLoad(grid);
-}
-
-// ════════════════════════════════════════
-// LAZY STATS LOADING (Appwrite books)
-// ════════════════════════════════════════
-
-const STATS_CACHE_KEY = 'selebox_book_stats_v1';
-const STATS_CACHE_TTL_MS = 5 * 60 * 1000;   // 5 minutes
-
-function getCachedAppwriteStats(appwriteBookId) {
-  try {
-    const raw = localStorage.getItem(STATS_CACHE_KEY);
-    if (!raw) return null;
-    const cache = JSON.parse(raw);
-    const e = cache[appwriteBookId];
-    if (!e) return null;
-    if (Date.now() - (e.ts || 0) > STATS_CACHE_TTL_MS) return null;
-    return { views: e.views || 0, likes: e.likes || 0, chaptersCount: e.chaptersCount || 0 };
-  } catch { return null; }
-}
-
-function setCachedAppwriteStats(appwriteBookId, stats) {
-  try {
-    const raw = localStorage.getItem(STATS_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    // Light pruning: drop entries older than 1 hour to bound size
-    const cutoff = Date.now() - 60 * 60 * 1000;
-    for (const k of Object.keys(cache)) {
-      if ((cache[k]?.ts || 0) < cutoff) delete cache[k];
-    }
-    cache[appwriteBookId] = { ...stats, ts: Date.now() };
-    localStorage.setItem(STATS_CACHE_KEY, JSON.stringify(cache));
-  } catch { /* localStorage full or disabled */ }
-}
-
-let _statsObserver = null;
-let _statsBatchQueue = new Set();
-let _statsBatchTimer = null;
-
-function setupAppwriteStatsLazyLoad(grid) {
-  // Tear down any previous observer (e.g. when filter changes)
-  if (_statsObserver) _statsObserver.disconnect();
-  _statsObserver = null;
-  _statsBatchQueue.clear();
-  if (_statsBatchTimer) { clearTimeout(_statsBatchTimer); _statsBatchTimer = null; }
-
-  if (!('IntersectionObserver' in window)) {
-    // Old browser: just kick off all pending stats at once
-    const ids = Array.from(grid.querySelectorAll('.book-card[data-appwrite-id]:not([data-stats-loaded="true"])'))
-      .map(el => el.dataset.appwriteId);
-    if (ids.length) flushAppwriteStatsBatch(ids);
-    return;
-  }
-
-  _statsObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const card = entry.target;
-      const awId = card.dataset.appwriteId;
-      if (!awId || card.dataset.statsLoaded === 'true' || card.dataset.statsPending === 'true') continue;
-      card.dataset.statsPending = 'true';
-      _statsBatchQueue.add(awId);
-      _statsObserver.unobserve(card);
-    }
-    if (_statsBatchTimer) clearTimeout(_statsBatchTimer);
-    // Coalesce IDs that show up in the same scroll burst
-    _statsBatchTimer = setTimeout(() => {
-      const ids = Array.from(_statsBatchQueue);
-      _statsBatchQueue.clear();
-      _statsBatchTimer = null;
-      if (ids.length) flushAppwriteStatsBatch(ids);
-    }, 120);
-  }, {
-    root: null,
-    rootMargin: '200px 0px',           // start fetching slightly before card enters viewport
-    threshold: 0.01,
-  });
-
-  grid.querySelectorAll('.book-card[data-appwrite-id]:not([data-stats-loaded="true"])').forEach(c => {
-    _statsObserver.observe(c);
-  });
-}
-
-// Stats are fetched per visible-card batch — at 4000+ books "fetch all" isn't viable.
-
-async function flushAppwriteStatsBatch(appwriteBookIds) {
-  if (!appwriteBookIds || !appwriteBookIds.length) return;
-
-  // Cache check first — pull anything fresh from cache so we don't refetch
-  const fromCache = {};
-  const needsFetch = [];
-  for (const id of appwriteBookIds) {
-    const c = getCachedAppwriteStats(id);
-    if (c) fromCache[id] = c;
-    else needsFetch.push(id);
-  }
-  Object.entries(fromCache).forEach(([id, s]) => updateBookCardStats(id, s));
-
-  if (!needsFetch.length) return;
-
-  let stats = { views: {}, likes: {}, chaptersCount: {} };
-  try {
-    stats = await fetchAppwriteBookStats(needsFetch);
-  } catch (e) { /* swallowed; cards keep dashes */ }
-
-  for (const id of needsFetch) {
-    const s = {
-      views: stats.views[id] || 0,
-      likes: stats.likes[id] || 0,
-      chaptersCount: stats.chaptersCount[id] || 0,
-    };
-    setCachedAppwriteStats(id, s);
-    updateBookCardStats(id, s);
-  }
-}
-
-function updateBookCardStats(appwriteBookId, stats) {
-  const card = document.querySelector(`.book-card[data-appwrite-id="${appwriteBookId}"]`);
-  if (!card) return;
-  const v = card.querySelector('[data-stat="views"]');
-  const l = card.querySelector('[data-stat="likes"]');
-  if (v) v.textContent = `👁 ${formatCompact(stats.views || 0)}`;
-  if (l) l.textContent = `❤ ${formatCompact(stats.likes || 0)}`;
-  card.dataset.statsLoaded = 'true';
-  card.dataset.statsPending = '';
-  // Keep the in-memory book object in sync so sorting / detail page reflects the truth
-  const cached = allBooksCache.find(b => b._appwriteId === appwriteBookId);
-  if (cached) {
-    cached.views_count = stats.views || 0;
-    cached.likes_count = stats.likes || 0;
-    cached.chapters_count = stats.chaptersCount || 0;
-    cached._statsLoaded = true;
-  }
 }
 
 function renderBookCard(b) {
   const card = document.createElement('button');
   card.className = 'book-card';
-  card.dataset.bookId = b.id;                // for IntersectionObserver lookup
-  if (b._appwrite) card.dataset.appwriteId = b._appwriteId;
-  if (b._statsLoaded) card.dataset.statsLoaded = 'true';
+  card.dataset.bookId = b.id;
   card.onclick = () => openBookDetail(b.id);
 
   const authorName = b.author?.username || 'Unknown author';
@@ -4214,22 +3768,14 @@ function renderBookCard(b) {
   const cover = b.cover_url
     ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=&quot;book-cover-placeholder&quot;>${initialLetter}</div>'"/>`
     : `<div class="book-cover-placeholder">${initialLetter}</div>`;
-  const legacyBadge = b._appwrite ? '<span class="book-cover-badge legacy">Legacy</span>' : '';
   const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
-
-  // For Appwrite books without cached stats, show a dash placeholder
-  // (Supabase books already have correct inline counts on the row)
-  const statsLoaded = !b._appwrite || b._statsLoaded;
-  const viewsText = statsLoaded ? formatCompact(b.views_count || 0) : '—';
-  const likesText = statsLoaded ? formatCompact(b.likes_count || 0) : '—';
 
   card.innerHTML = `
     <div class="book-cover">
       ${cover}
-      ${legacyBadge}
       <div class="book-stats">
-        <span title="Views" data-stat="views">👁 ${viewsText}</span>
-        <span title="Likes" data-stat="likes">❤ ${likesText}</span>
+        <span title="Views" data-stat="views">👁 ${formatCompact(b.views_count || 0)}</span>
+        <span title="Likes" data-stat="likes">❤ ${formatCompact(b.likes_count || 0)}</span>
       </div>
     </div>
     ${genreLabel ? `<div class="book-card-genre">${escHTML(genreLabel)}</div>` : ''}
@@ -4285,61 +3831,30 @@ async function openBookDetail(bookId) {
   content.innerHTML = '<div class="loading">Loading book...</div>';
 
   try {
-    let book, chapters;
+    // All books are now Supabase. Bare UUID or "sb_<uuid>" — strip the prefix if present.
+    const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
+    const [{ data: supBook, error: bookErr }, { data: supChapters, error: chErr }] = await Promise.all([
+      supabase.from('books')
+        .select(`
+          id, title, description, cover_url, genre, tags,
+          views_count, likes_count, chapters_count, word_count, status,
+          published_at, created_at,
+          author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
+        `)
+        .eq('id', realId)
+        .single(),
+      supabase.from('chapters')
+        .select('id, chapter_number, title, word_count, views_count, is_published, created_at')
+        .eq('book_id', realId)
+        .eq('is_published', true)
+        .order('chapter_number', { ascending: true })
+    ]);
 
-    if (bookId.startsWith('aw_')) {
-      // ── Appwrite book ──
-      const appwriteId = bookId.slice(3);
-      // Always need book doc + chapters; stats come from cache if fresh, else aggregated
-      const cachedStats = getCachedAppwriteStats(appwriteId);
-      const [appwriteBookDoc, awChapters, statsResult] = await Promise.all([
-        appwriteGet(APPWRITE.booksCollection, appwriteId),
-        fetchAppwriteChaptersForBook(appwriteId),
-        cachedStats ? Promise.resolve(null) : fetchAppwriteBookStats([appwriteId]),
-      ]);
-      // If the uploader didn't come back expanded, fetch the user record
-      const uploaderIds = collectAppwriteUploaderIds([appwriteBookDoc]);
-      const userMap = await fetchAppwriteUsers(uploaderIds);
-      book = mapAppwriteBookToBook(appwriteBookDoc, userMap);
+    if (bookErr || !supBook) throw new Error(bookErr?.message || 'Book not found');
+    if (chErr) console.warn('Failed to load chapters:', chErr);
 
-      const resolvedStats = cachedStats || {
-        views: statsResult?.views?.[appwriteId] || 0,
-        likes: statsResult?.likes?.[appwriteId] || 0,
-        chaptersCount: awChapters.filter(c => c.is_published).length,
-      };
-      // Persist to cache when fresh
-      if (!cachedStats) setCachedAppwriteStats(appwriteId, resolvedStats);
-
-      book.views_count    = resolvedStats.views;
-      book.likes_count    = resolvedStats.likes;
-      book.chapters_count = awChapters.filter(c => c.is_published).length;
-      chapters = awChapters.filter(c => c.is_published);
-    } else {
-      // ── Supabase book (UUID, possibly bare) ──
-      const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
-      const [{ data: supBook, error: bookErr }, { data: supChapters, error: chErr }] = await Promise.all([
-        supabase.from('books')
-          .select(`
-            id, title, description, cover_url, genre, tags,
-            views_count, likes_count, chapters_count, word_count, status,
-            published_at, created_at,
-            author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
-          `)
-          .eq('id', realId)
-          .single(),
-        supabase.from('chapters')
-          .select('id, chapter_number, title, word_count, views_count, is_published, created_at')
-          .eq('book_id', realId)
-          .eq('is_published', true)
-          .order('chapter_number', { ascending: true })
-      ]);
-
-      if (bookErr || !supBook) throw new Error(bookErr?.message || 'Book not found');
-      if (chErr) console.warn('Failed to load chapters:', chErr);
-
-      book = supBook;
-      chapters = supChapters || [];
-    }
+    const book = supBook;
+    const chapters = supChapters || [];
 
     currentBookDetail = { book, chapters };
     renderBookDetail();
@@ -4398,21 +3913,15 @@ function renderBookDetail() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             Start reading
           </button>
-          ${book._appwrite ? `
-            <span class="book-cover-badge legacy" style="position:static;display:inline-flex;align-items:center;gap:0.35rem;padding:0.35rem 0.75rem;font-size:0.7rem">
-              📱 From mobile (read-only on web)
-            </span>
-          ` : `
-            <button class="btn btn-ghost btn-sm book-action-btn" id="btnLikeBook" data-active="0">
-              <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-              <span class="book-action-label">Like</span>
-              <span class="book-action-count" id="btnLikeBookCount">${(book.likes_count || 0).toLocaleString()}</span>
-            </button>
-            <button class="btn btn-ghost btn-sm book-action-btn" id="btnBookmarkBook" data-active="0">
-              <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-              <span class="book-action-label">Bookmark</span>
-            </button>
-          `}
+          <button class="btn btn-ghost btn-sm book-action-btn" id="btnLikeBook" data-active="0">
+            <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+            <span class="book-action-label">Like</span>
+            <span class="book-action-count" id="btnLikeBookCount">${(book.likes_count || 0).toLocaleString()}</span>
+          </button>
+          <button class="btn btn-ghost btn-sm book-action-btn" id="btnBookmarkBook" data-active="0">
+            <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+            <span class="book-action-label">Bookmark</span>
+          </button>
         </div>
         <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
         <div class="chapter-list">
@@ -4430,15 +3939,13 @@ function renderBookDetail() {
   // Start reading → first unread chapter (or chapter 1)
   document.getElementById('btnStartReading')?.addEventListener('click', () => openChapterReader(0));
 
-  // Wire like + bookmark — only for Supabase books (legacy Appwrite books are read-only on web)
-  if (!book._appwrite) {
-    const likeBtn = document.getElementById('btnLikeBook');
-    const bookmarkBtn = document.getElementById('btnBookmarkBook');
-    likeBtn?.addEventListener('click', () => toggleBookLike(book.id));
-    bookmarkBtn?.addEventListener('click', () => toggleBookBookmark(book.id));
-    // Load initial state (whether the user has already liked/bookmarked)
-    loadBookActionState(book.id);
-  }
+  // Wire like + bookmark
+  const likeBtn = document.getElementById('btnLikeBook');
+  const bookmarkBtn = document.getElementById('btnBookmarkBook');
+  likeBtn?.addEventListener('click', () => toggleBookLike(book.id));
+  bookmarkBtn?.addEventListener('click', () => toggleBookBookmark(book.id));
+  // Load initial state (whether the user has already liked/bookmarked)
+  loadBookActionState(book.id);
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -4563,25 +4070,15 @@ async function openChapterReader(chapterIndex) {
   let chapterContent = '';
   let resolvedChapterId = chapter.id;
   try {
-    if (chapter._appwrite) {
-      // Appwrite chapter — we may already have content from the list call
-      if (chapter._content) {
-        chapterContent = chapter._content;
-      } else {
-        const doc = await appwriteGet(APPWRITE.chaptersCollection, chapter._appwriteId);
-        chapterContent = doc?.content || '';
-      }
-    } else {
-      const realChapterId = chapter.id.startsWith('sb_') ? chapter.id.slice(3) : chapter.id;
-      const { data, error } = await supabase
-        .from('chapters')
-        .select('id, chapter_number, title, content')
-        .eq('id', realChapterId)
-        .single();
-      if (error || !data) throw new Error(error?.message || 'Chapter not found');
-      chapterContent = data.content || '';
-      resolvedChapterId = data.id;
-    }
+    const realChapterId = chapter.id.startsWith('sb_') ? chapter.id.slice(3) : chapter.id;
+    const { data, error } = await supabase
+      .from('chapters')
+      .select('id, chapter_number, title, content')
+      .eq('id', realChapterId)
+      .single();
+    if (error || !data) throw new Error(error?.message || 'Chapter not found');
+    chapterContent = data.content || '';
+    resolvedChapterId = data.id;
   } catch (err) {
     content.innerHTML = `<div class="loading">Couldn't load chapter: ${escHTML(err.message)}</div>`;
     return;
@@ -4596,10 +4093,7 @@ async function openChapterReader(chapterIndex) {
   // Apply username watermark (re-run in case the user logged in/out since last read)
   applyReaderWatermark();
 
-  // Save reading progress (Supabase only — `book_reads` is a Supabase table)
-  if (!chapter._appwrite && !currentBookDetail.book._appwrite) {
-    saveReadingProgress(currentBookDetail.book.id, resolvedChapterId, chapter.chapter_number);
-  }
+  saveReadingProgress(currentBookDetail.book.id, resolvedChapterId, chapter.chapter_number);
 }
 
 // Normalize chapter content: if HTML-ish, render as-is; if plain text, wrap in <p>
@@ -4785,8 +4279,7 @@ const AUTONEXT_KEY = 'selebox_video_autonext';
 
 function _currentVideoIdForRoute() {
   if (!_currentVideoCtx) return null;
-  if (_currentVideoCtx.supabaseId) return 'sb_' + _currentVideoCtx.supabaseId;
-  return _currentVideoCtx.appwriteId || null;
+  return _currentVideoCtx.supabaseId ? 'sb_' + _currentVideoCtx.supabaseId : null;
 }
 
 function vcRewind() {
@@ -6250,7 +5743,7 @@ async function fetchSupabaseVideos() {
       return [];
     }
 
-    // Transform to match Appwrite video format so the rest of the code works.
+    // Map to the shape used throughout the app (videoStats, $id, $createdAt, etc.).
     // Filter out videos whose uploader is banned.
     return (data || [])
       .filter(v => !v.profiles?.is_banned)
@@ -6285,21 +5778,17 @@ async function loadVideos() {
   const grid = document.getElementById('videoGrid');
   grid.innerHTML = '<div class="loading">Loading videos...</div>';
 
-  await ensureVideoCache();
-
-// Merge in new Supabase uploads
-const supabaseVideos = await fetchSupabaseVideos();
-if (supabaseVideos.length) {
-  supabaseVideos.forEach(v => {
-    if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
-      allUploadersCache[v.uploader] = v._uploaderInfo;
-    }
-  });
-  const existingIds = new Set(allVideosCache.map(v => v.$id));
-  const newOnes = supabaseVideos.filter(v => !existingIds.has(v.$id));
-  allVideosCache = [...newOnes, ...allVideosCache];
-}
-window._cache = allVideosCache; // expose for debugging
+  // Populate cache from Supabase if empty (post-migration: Supabase is the only source)
+  if (!allVideosCache.length) {
+    const supabaseVideos = await fetchSupabaseVideos();
+    supabaseVideos.forEach(v => {
+      if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
+        allUploadersCache[v.uploader] = v._uploaderInfo;
+      }
+    });
+    allVideosCache = supabaseVideos;
+  }
+  window._cache = allVideosCache; // expose for debugging
 
   if (!allVideosCache.length) {
     grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
@@ -6397,35 +5886,6 @@ let allVideosCache = [];
 let allUploadersCache = {};
 let activeSearchQuery = '';
 let activeTagFilter = null;
-
-async function ensureVideoCache() {
-  if (allVideosCache.length) return;
-  try {
-    const result = await appwriteList(APPWRITE.videosCollection, [
-      JSON.stringify({ method: 'orderDesc', attribute: '$createdAt' }),
-      JSON.stringify({ method: 'limit', values: [200] })
-    ]);
-    allVideosCache = result.documents || [];
-
-    // Fetch all unique uploaders
-    const uploaderIds = [...new Set(allVideosCache.map(v => v.uploader).filter(Boolean))];
-    if (uploaderIds.length) {
-      // Appwrite has a 100 limit on equal() values, so we batch
-      for (let i = 0; i < uploaderIds.length; i += 100) {
-        const batch = uploaderIds.slice(i, i + 100);
-        try {
-          const res = await appwriteList(APPWRITE.usersCollection, [
-            JSON.stringify({ method: 'equal', attribute: '$id', values: batch }),
-            JSON.stringify({ method: 'limit', values: [100] })
-          ]);
-          res.documents.forEach(u => { allUploadersCache[u.$id] = u; });
-        } catch {}
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load video cache:', e);
-  }
-}
 
 function searchVideos(query, tagFilter) {
   query = (query || '').trim().toLowerCase();
@@ -6660,31 +6120,19 @@ async function playVideo(videoId) {
     let video = null;
     let uploader = null;
 
-    // Supabase videos are prefixed with 'sb_' and live in allVideosCache
-    // — never call Appwrite for them, that's why we were getting 400s.
-    if (videoId && videoId.startsWith('sb_')) {
-      // Make sure the cache is populated (in case the user navigated directly to #video/sb_...)
-      if (!allVideosCache.length) {
-        await ensureVideoCache();
-        const fresh = await fetchSupabaseVideos();
-        const existingIds = new Set(allVideosCache.map(v => v.$id));
-        fresh.forEach(v => { if (!existingIds.has(v.$id)) allVideosCache.push(v); });
-      }
-      const cached = allVideosCache.find(v => v.$id === videoId);
-      if (!cached) {
-        toast('Video not found', 'error');
-        return;
-      }
-      video = cached;
-      uploader = cached._uploaderInfo || null;
-    } else {
-      // Appwrite (mobile) video — fetch from Appwrite as before
-      video = await appwriteGet(APPWRITE.videosCollection, videoId);
-      if (!video) return;
-      if (video.uploader) {
-        try { uploader = await appwriteGet(APPWRITE.usersCollection, video.uploader); } catch {}
-      }
+    // All videos are now Supabase. Cache may be empty if the user navigated
+    // directly to #video/sb_... — populate it on demand.
+    if (!allVideosCache.length) {
+      const fresh = await fetchSupabaseVideos();
+      allVideosCache = fresh;
     }
+    const cached = allVideosCache.find(v => v.$id === videoId);
+    if (!cached) {
+      toast('Video not found', 'error');
+      return;
+    }
+    video = cached;
+    uploader = cached._uploaderInfo || null;
 
     showVideoPlayer();
     history.pushState(null, '', `#video/${videoId}`);
@@ -6930,9 +6378,8 @@ function resolveSupabaseVideoId(video) {
 }
 
 // Wire up the comment section on the video player page.
-// Works for BOTH Supabase-uploaded videos (UUID id) and legacy Appwrite videos
-// (text id). After migration_video_comments_legacy.sql, comments.video_id is text
-// so it can hold either format.
+// `video_id` in the comments table is a text column to support legacy
+// pre-migration formats; new comments always use the Supabase video UUID.
 function setupVideoComments(video) {
   const wrap = document.getElementById('videoCommentsWrap');
   if (!wrap) {
@@ -6957,7 +6404,7 @@ function setupVideoComments(video) {
 }
 
 // ── VIDEO ACTIONS: Like / Repost / Share ──
-let _currentVideoCtx = null;   // { supabaseId, appwriteId, title, post_id }
+let _currentVideoCtx = null;   // { supabaseId, title, post_id }
 
 async function setupVideoActions(video) {
   const actionsBar = document.getElementById('videoActions');
@@ -7044,9 +6491,9 @@ async function setupVideoActions(video) {
     };
   });
 
-  _currentVideoCtx = { supabaseId: supabaseVideoId, appwriteId: video?.$id || null, title: video?.title || '' };
+  _currentVideoCtx = { supabaseId: supabaseVideoId, title: video?.title || '' };
 
-  // Hide bookmark button for legacy (Appwrite-only) videos that have no Supabase row
+  // Defensive: hide bookmark button if the video has no Supabase row (shouldn't happen post-migration)
   const bmBtn = document.getElementById('videoBookmarkBtn');
   if (bmBtn) bmBtn.style.display = supabaseVideoId ? 'inline-flex' : 'none';
   if (supabaseVideoId) loadVideoBookmarkState(supabaseVideoId);
@@ -7311,12 +6758,9 @@ async function onNotificationClick(notifId) {
     const bookId = n.parent_target_type === 'book' ? n.parent_target_id : null;
     if (bookId) openBookDetail(bookId);
   } else if (n.target_type === 'video' || n.parent_target_type === 'video') {
-    // Supabase videos: target_id / parent_target_id is a UUID → prefix "sb_" for playVideo.
-    // Legacy videos: target/parent UUIDs are null; the Appwrite id rides in metadata.
+    // target_id / parent_target_id is a video UUID → prefix "sb_" for playVideo.
     const supabaseUuid = n.target_type === 'video' ? n.target_id : n.parent_target_id;
-    const legacyId     = n.metadata?.video_legacy_id || null;
-    if (supabaseUuid)      playVideo('sb_' + supabaseUuid);
-    else if (legacyId)     playVideo(legacyId);
+    if (supabaseUuid) playVideo('sb_' + supabaseUuid);
   } else if (n.parent_target_type === 'post' || n.target_type === 'post') {
     // We don't have post-detail pages yet — drop them on Home so they can find it
     setSidebarActive('btnHome');
