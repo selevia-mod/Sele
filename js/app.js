@@ -639,6 +639,151 @@ function renderLinkPreview(text) {
   } catch { return ''; }
 }
 
+// ── DM-specific link preview: Selebox-internal links get rich cards ──
+// Detects URLs of the form `…#video/UUID`, `…#book/UUID`, `…#profile/UUID`
+// and renders an in-app card with thumbnail/title/author. Async hydration
+// runs after renderMessages via hydrateDmInternalPreviews().
+function parseSeleboxInternalUrl(url) {
+  if (!url) return null;
+  const m = url.match(/#(video|book|profile)\/([a-z0-9-]+)/i);
+  if (!m) return null;
+  return { type: m[1].toLowerCase(), id: m[2] };
+}
+
+// In-memory cache so we don't refetch the same item on every render
+const _dmInternalPreviewCache = new Map(); // key = type:id, value = {title, thumb, sub}
+
+function renderDmLinkPreview(body) {
+  const url = firstUrlInText(body);
+  if (!url) return '';
+
+  // Selebox-internal: render placeholder, hydrator fills it in
+  const internal = parseSeleboxInternalUrl(url);
+  if (internal) {
+    const cacheKey = `${internal.type}:${internal.id}`;
+    const cached = _dmInternalPreviewCache.get(cacheKey);
+    return renderInternalPreviewCard(internal, cached);
+  }
+
+  // External: existing YouTube/generic preview (just wrap in dm-link-preview class for spacing)
+  const html = renderLinkPreview(body);
+  return html ? `<div class="dm-link-preview-wrap">${html}</div>` : '';
+}
+
+function renderInternalPreviewCard(internal, data) {
+  const { type, id } = internal;
+  const typeLabel = type === 'video' ? '🎬 Video' : type === 'book' ? '📖 Book' : '👤 Profile';
+  if (data) {
+    const thumb = data.thumb
+      ? `<img src="${escHTML(data.thumb)}" alt="" loading="lazy"/>`
+      : `<div class="dm-internal-placeholder">${type === 'profile' ? initials(data.title || '?') : (type === 'book' ? '📖' : '🎬')}</div>`;
+    const sub = data.sub ? `<div class="dm-internal-sub">${escHTML(data.sub)}</div>` : '';
+    return `
+      <button class="dm-internal-preview" data-internal-type="${type}" data-internal-id="${escHTML(id)}" type="button">
+        <div class="dm-internal-thumb">${thumb}</div>
+        <div class="dm-internal-meta">
+          <div class="dm-internal-platform">${typeLabel} on Selebox</div>
+          <div class="dm-internal-title">${escHTML(data.title || 'Untitled')}</div>
+          ${sub}
+        </div>
+        <div class="dm-internal-arrow">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+      </button>
+    `;
+  }
+  // Placeholder skeleton — gets filled in by hydrateDmInternalPreviews
+  return `
+    <button class="dm-internal-preview is-loading" data-internal-type="${type}" data-internal-id="${escHTML(id)}" data-pending="1" type="button">
+      <div class="dm-internal-thumb dm-internal-skel"></div>
+      <div class="dm-internal-meta">
+        <div class="dm-internal-platform">${typeLabel} on Selebox</div>
+        <div class="dm-internal-title dm-internal-skel-line"></div>
+        <div class="dm-internal-sub dm-internal-skel-line dm-internal-skel-line-short"></div>
+      </div>
+    </button>
+  `;
+}
+
+// Async fetch the actual content for any pending preview cards in the DOM.
+// Called after each renderMessages — only hits the network for unhydrated cards.
+async function hydrateDmInternalPreviews() {
+  const pending = document.querySelectorAll('.dm-internal-preview[data-pending="1"]');
+  if (!pending.length) return;
+
+  // Group by type for batched fetch
+  const byType = { video: new Set(), book: new Set(), profile: new Set() };
+  pending.forEach(el => {
+    const t = el.dataset.internalType;
+    const id = el.dataset.internalId;
+    if (byType[t]) byType[t].add(id);
+  });
+
+  // Fetch in parallel
+  const tasks = [];
+  if (byType.video.size) tasks.push(
+    supabase.from('videos')
+      .select('id, title, thumbnail_url, profiles!videos_uploader_id_fkey(username)')
+      .in('id', [...byType.video])
+      .then(({ data }) => (data || []).forEach(v => {
+        _dmInternalPreviewCache.set(`video:${v.id}`, {
+          title: v.title || 'Untitled video',
+          thumb: v.thumbnail_url,
+          sub: v.profiles?.username ? `by @${v.profiles.username}` : '',
+        });
+      }))
+  );
+  if (byType.book.size) tasks.push(
+    supabase.from('books')
+      .select('id, title, cover_url, profiles!books_author_id_fkey(username)')
+      .in('id', [...byType.book])
+      .then(({ data }) => (data || []).forEach(b => {
+        _dmInternalPreviewCache.set(`book:${b.id}`, {
+          title: b.title || 'Untitled book',
+          thumb: b.cover_url,
+          sub: b.profiles?.username ? `by @${b.profiles.username}` : '',
+        });
+      }))
+  );
+  if (byType.profile.size) tasks.push(
+    supabase.from('profiles')
+      .select('id, username, avatar_url, bio')
+      .in('id', [...byType.profile])
+      .then(({ data }) => (data || []).forEach(p => {
+        _dmInternalPreviewCache.set(`profile:${p.id}`, {
+          title: '@' + (p.username || 'unknown'),
+          thumb: p.avatar_url,
+          sub: (p.bio || '').slice(0, 60),
+        });
+      }))
+  );
+
+  await Promise.all(tasks);
+
+  // Now swap each pending placeholder with the real card
+  pending.forEach(el => {
+    const t = el.dataset.internalType;
+    const id = el.dataset.internalId;
+    const data = _dmInternalPreviewCache.get(`${t}:${id}`);
+    if (!data) return;
+    const replacement = document.createElement('div');
+    replacement.innerHTML = renderInternalPreviewCard({ type: t, id }, data).trim();
+    el.parentNode.replaceChild(replacement.firstChild, el);
+  });
+}
+
+// Click handler for internal preview cards (delegated)
+document.addEventListener('click', (e) => {
+  const card = e.target.closest('.dm-internal-preview');
+  if (!card || card.dataset.pending === '1') return;
+  e.stopPropagation();
+  const type = card.dataset.internalType;
+  const id = card.dataset.internalId;
+  if (type === 'video')   playVideo('sb_' + id);
+  else if (type === 'book')    openBookDetail(id);
+  else if (type === 'profile') openProfile(id);
+});
+
 // ── Premium confirmation dialog (replaces native confirm()) ──
 // Usage: const ok = await confirmDialog({ title, body, confirmLabel, danger });
 function confirmDialog({ title = 'Are you sure?', body = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = true } = {}) {
@@ -6739,6 +6884,12 @@ function notificationLabel(n, knownUsername) {
     case 'mention_comment':        return `${actorTag} mentioned you in a comment`;
     case 'mention_chapter_comment':return `${actorTag} mentioned you in a chapter comment`;
 
+    // ── Direct messages ──
+    case 'dm_message': {
+      const preview = n.metadata?.preview ? ` <em style="color:var(--text2)">"${escHTML(String(n.metadata.preview).slice(0, 80))}"</em>` : '';
+      return `${actorTag} sent you a message${preview}`;
+    }
+
     default:                       return `${actorTag} did something on Selebox`;
   }
 }
@@ -6760,6 +6911,16 @@ async function onNotificationClick(notifId) {
   closeNotifPanel();
 
   // Navigate to a sensible target
+  if (n.type === 'dm_message' || n.target_type === 'message' || n.parent_target_type === 'conversation') {
+    const convId = n.parent_target_type === 'conversation' ? n.parent_target_id : null;
+    if (convId) {
+      showMessages();
+      setTimeout(() => openConversation(convId), 50);
+    } else {
+      showMessages();
+    }
+    return;
+  }
   if (n.target_type === 'book' || n.parent_target_type === 'book') {
     const bookId = (n.target_type === 'book') ? n.target_id : n.parent_target_id;
     if (bookId) openBookDetail(bookId);
@@ -7258,9 +7419,11 @@ function renderConvItemHtml(c) {
   const senderPrefix = c.isGroup && c.lastMessageSender && !isMine
     ? (escHTML(senderUsernameInGroup(c, c.lastMessageSender) || 'Someone') + ': ')
     : (isMine ? 'You: ' : '');
-  const preview = c.lastMessagePreview
+  // If preview body is whitespace-only (image-only message), show generic label
+  const previewText = (c.lastMessagePreview || '').trim();
+  const preview = c.lastMessagePreview && previewText
     ? senderPrefix + escHTML(c.lastMessagePreview)
-    : '<em>No messages yet</em>';
+    : (c.lastMessageAt ? senderPrefix + '<em>📷 Sent an attachment</em>' : '<em>No messages yet</em>');
   const time = c.lastMessageAt ? timeAgo(c.lastMessageAt) : '';
   const isActive = c.id === dmState.activeConvId;
   const unreadCls = c.unread > 0 ? ' has-unread' : '';
@@ -7326,15 +7489,21 @@ async function openConversation(convId) {
   // Find conversation in cache (or refetch — also re-hydrate participants)
   let conv = dmState.conversations.find(c => c.id === convId);
   if (!conv) {
-    const { data } = await supabase.from('conversations').select('*').eq('id', convId).single();
-    if (!data) { toast('Conversation not found', 'error'); return; }
+    const { data, error: fetchErr } = await supabase.from('conversations').select('*').eq('id', convId).single();
+    if (fetchErr || !data) { toast('Conversation not found', 'error'); console.warn('[dm] conv fetch failed', fetchErr); return; }
     if (data.is_group) {
+      // 2-step fetch (no FK embed — more bulletproof)
       const { data: parts } = await supabase.from('conversation_participants')
-        .select('user_id, profiles:profiles!conversation_participants_user_id_fkey(id, username, avatar_url, is_guest)')
+        .select('user_id')
         .eq('conversation_id', convId);
-      const members = (parts || []).map(p => p.profiles).filter(Boolean);
+      const memberIds = (parts || []).map(p => p.user_id);
+      const { data: profs } = memberIds.length
+        ? await supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', memberIds)
+        : { data: [] };
+      const members = (profs || []);
       conv = {
-        id: data.id, isGroup: true, name: data.name || members.filter(m => m.id !== currentUser.id).slice(0,3).map(m => m.username).join(', '),
+        id: data.id, isGroup: true,
+        name: data.name || members.filter(m => m.id !== currentUser.id).slice(0,3).map(m => m.username).join(', '),
         members, memberCount: members.length, avatarUrl: data.avatar_url,
         lastMessageAt: data.last_message_at, lastMessagePreview: data.last_message_preview || '',
         unread: 0, muted: false, raw: data,
@@ -7410,11 +7579,11 @@ async function loadMessages(convId) {
   if (!wrap) return;
   wrap.innerHTML = '<div class="dm-loading">Loading messages…</div>';
 
-  // Fetch messages + reactions in parallel (include reply_to_id so we can render quotes)
+  // Fetch messages + reactions in parallel (include reply_to_id + image fields)
   const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
     supabase
       .from('messages')
-      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id')
+      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id, image_url, image_kind')
       .eq('conversation_id', convId)
       .order('created_at', { ascending: true })
       .limit(200),
@@ -7531,12 +7700,31 @@ function renderMessages() {
     // Build bubble content: deleted messages render as a static label (NOT through linkify),
     // otherwise escape body, convert newlines, then linkify URLs.
     let bubbleContent;
+    let linkPreviewHtml = '';
+    let imageHtml = '';
     if (isDeleted) {
       const who = mine ? 'You' : escHTML(dmState.activeOther?.username || 'User');
       bubbleContent = `<span class="dm-bubble-deleted">${who} unsent a message</span>`;
     } else {
-      const escaped = escHTML(m.body || '').replace(/\n/g, '<br>');
-      bubbleContent = linkify(escaped);
+      // Image attachment (uploaded photo OR GIF from picker)
+      if (m.image_url) {
+        const isGif = m.image_kind === 'gif' || /\.gif(\?|$)/i.test(m.image_url);
+        imageHtml = `
+          <div class="dm-bubble-image ${isGif ? 'is-gif' : ''}" data-img-url="${escHTML(m.image_url)}">
+            <img src="${escHTML(m.image_url)}" alt="Attachment" loading="lazy"/>
+            ${isGif ? '<span class="dm-bubble-image-tag">GIF</span>' : ''}
+          </div>
+        `;
+      }
+      // Body text (skip if message is image-only with whitespace body)
+      const trimmedBody = (m.body || '').trim();
+      if (trimmedBody) {
+        const escaped = escHTML(m.body || '').replace(/\n/g, '<br>');
+        bubbleContent = linkify(escaped);
+        linkPreviewHtml = renderDmLinkPreview(m.body || '');
+      } else {
+        bubbleContent = '';
+      }
     }
 
     const editedTag = (!isDeleted && m.edited_at) ? '<span class="dm-edited-tag" title="Edited">(edited)</span>' : '';
@@ -7568,8 +7756,9 @@ function renderMessages() {
       }</div>`;
     }
 
-    const canEditDelete = mine && !isDeleted;
+    const canEditDelete = mine && !isDeleted && !m.image_url; // can't inline-edit images
     const deletedCls = isDeleted ? ' is-deleted' : '';
+    const imageOnlyCls = (!isDeleted && imageHtml && !bubbleContent) ? ' is-image-only' : '';
 
     // Reply quote chip — show the quoted message above the bubble
     let replyQuoteHtml = '';
@@ -7598,9 +7787,11 @@ function renderMessages() {
         <div class="dm-bubble-wrap">
           ${senderNameHtml}
           ${replyQuoteHtml}
-          <div class="${bubbleCls}${deletedCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
-            ${bubbleContent}${editedTag ? ' ' + editedTag : ''}
+          <div class="${bubbleCls}${deletedCls}${imageOnlyCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
+            ${imageHtml}
+            ${bubbleContent ? `<div class="dm-bubble-text">${bubbleContent}${editedTag ? ' ' + editedTag : ''}</div>` : (editedTag && !imageHtml ? editedTag : '')}
           </div>
+          ${linkPreviewHtml}
           ${reactionsHtml}
         </div>
         ${mine ? readBadge : ''}
@@ -7623,6 +7814,9 @@ function renderMessages() {
   }
 
   wrap.innerHTML = html;
+
+  // Async-fill any Selebox-internal preview placeholders (videos/books/profiles)
+  hydrateDmInternalPreviews();
 }
 
 function formatMessageDateStamp(current, previous) {
@@ -8088,6 +8282,14 @@ async function copyMessageText(messageId) {
 
 // Bubble hover/click → show menu (works on mobile via tap)
 document.addEventListener('click', (e) => {
+  // Click on a DM image → open lightbox, don't open hover menu
+  const dmImg = e.target.closest('.dm-bubble-image');
+  if (dmImg) {
+    e.stopPropagation();
+    const url = dmImg.dataset.imgUrl;
+    if (url) window.openLightbox?.(url);
+    return;
+  }
   // Click on existing reaction pill → toggle
   const pill = e.target.closest('.dm-rx-pill');
   if (pill) {
@@ -8561,20 +8763,30 @@ function openNewConvModal() {
         if (error) throw error;
         convId = data;
       } else {
-        const { data, error } = await supabase.rpc('create_group_conversation', {
-          p_name: nameInput.value.trim() || null,
+        const payload = {
+          p_name: nameInput.value.trim() || '',
           p_participant_ids: selectedUsers.map(u => u.id),
-        });
-        if (error) throw error;
+        };
+        const { data, error } = await supabase.rpc('create_group_conversation', payload);
+        if (error) {
+          console.error('[dm] create_group_conversation failed', error, 'payload:', payload);
+          throw error;
+        }
+        if (!data) {
+          console.error('[dm] create_group_conversation returned no id', { data });
+          throw new Error('No conversation id returned from server');
+        }
         convId = data;
       }
+      if (!convId) throw new Error('Could not resolve conversation');
       close();
       await loadConversationList();
       await openConversation(convId);
     } catch (err) {
+      console.error('[dm] create chat failed', err);
       toast(err.message || 'Failed to create chat', 'error');
       createBtn.disabled = false;
-      createBtn.textContent = 'Start chat';
+      createBtn.textContent = selectedUsers.length >= 2 ? 'Start group chat' : 'Start chat';
     }
   };
 }
@@ -8659,4 +8871,416 @@ function highlightSearchMatch(body, query) {
   const safe = escHTML(text);
   const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig');
   return safe.replace(re, '<mark>$1</mark>');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DMs Phase 4 — image attachments (2.5 MB), GIF picker, emoji picker
+// ════════════════════════════════════════════════════════════════════════════
+
+const DM_MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;   // 2.5 MB
+const DM_BUCKET = 'dm-attachments';
+// Giphy public beta key (works for demo/dev — swap for your own key in prod)
+const DM_GIPHY_KEY = 'dc6zaTOxFJmzC';
+
+let _dmPendingAttachment = null;   // { file, dataUrl, kind: 'upload' | 'gif', gifUrl }
+let _dmAttachMenuEl = null;
+let _dmGifPickerEl = null;
+let _dmEmojiPickerEl = null;
+
+// ── + (attach) button → small menu: Photo · GIF ───────────────────────────
+function closeDmAttachMenu() {
+  if (_dmAttachMenuEl) { _dmAttachMenuEl.remove(); _dmAttachMenuEl = null; }
+}
+document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (_dmAttachMenuEl) { closeDmAttachMenu(); return; }
+  closeDmGifPicker();
+  closeDmEmojiPicker();
+
+  const btn = e.currentTarget;
+  const menu = document.createElement('div');
+  menu.className = 'dm-attach-menu';
+  menu.innerHTML = `
+    <button type="button" data-act="photo">
+      <span class="dm-attach-icon">🖼</span><span>Photo</span>
+    </button>
+    <button type="button" data-act="gif">
+      <span class="dm-attach-icon">GIF</span><span>GIF picker</span>
+    </button>
+  `;
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect();
+  menu.style.position = 'fixed';
+  menu.style.bottom = `${window.innerHeight - r.top + 6}px`;
+  menu.style.left   = `${r.left}px`;
+  _dmAttachMenuEl = menu;
+
+  menu.querySelectorAll('[data-act]').forEach(b => {
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      const act = b.dataset.act;
+      closeDmAttachMenu();
+      if (act === 'photo') document.getElementById('dmFileInput')?.click();
+      else if (act === 'gif') openDmGifPicker();
+    };
+  });
+
+  setTimeout(() => {
+    const onDoc = (ev) => {
+      if (!_dmAttachMenuEl?.contains(ev.target)) {
+        closeDmAttachMenu();
+        document.removeEventListener('click', onDoc);
+      }
+    };
+    document.addEventListener('click', onDoc);
+  }, 0);
+});
+
+// ── File picker → preview (with size check + JPEG compression for big photos) ──
+document.getElementById('dmFileInput')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = ''; // allow re-selecting same file later
+  if (!file) return;
+
+  // Hard reject anything way over the limit
+  if (file.size > DM_MAX_IMAGE_BYTES * 4) {
+    toast(`Image too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max 2.5 MB.`, 'error');
+    return;
+  }
+
+  let finalFile = file;
+  // Compress non-GIF static images that are over the cap (GIFs lose animation if compressed)
+  if (file.size > DM_MAX_IMAGE_BYTES && file.type !== 'image/gif') {
+    try {
+      finalFile = await compressImageToJpeg(file, DM_MAX_IMAGE_BYTES);
+    } catch (err) {
+      console.warn('[dm] compress failed, sending original', err);
+    }
+  }
+
+  if (finalFile.size > DM_MAX_IMAGE_BYTES) {
+    toast(`Image still ${(finalFile.size / 1024 / 1024).toFixed(1)} MB after compress. Try a smaller one (max 2.5 MB).`, 'error');
+    return;
+  }
+
+  // Build a data-URL preview (for the composer's preview strip)
+  const dataUrl = await fileToDataUrl(finalFile);
+  _dmPendingAttachment = { file: finalFile, dataUrl, kind: 'upload' };
+  showDmAttachPreview(dataUrl, finalFile.name, finalFile.size);
+  updateSendButton();
+});
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+// Canvas-based JPEG compression — reduces a photo to fit under maxBytes
+async function compressImageToJpeg(file, maxBytes) {
+  const dataUrl = await fileToDataUrl(file);
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = dataUrl;
+  });
+
+  // Step down quality until under cap (or stop at 0.5)
+  let quality = 0.85;
+  let scale = 1;
+  // Cap dimensions at 1920px for sanity
+  const maxDim = 1920;
+  if (img.width > maxDim || img.height > maxDim) {
+    scale = Math.min(maxDim / img.width, maxDim / img.height);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width  = Math.round(img.width  * scale);
+  canvas.height = Math.round(img.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality));
+    if (!blob) break;
+    if (blob.size <= maxBytes) {
+      return new File([blob], (file.name.replace(/\.[^.]+$/, '') || 'image') + '.jpg', { type: 'image/jpeg' });
+    }
+    quality -= 0.12;
+    if (quality < 0.5) break;
+  }
+  return file;
+}
+
+function showDmAttachPreview(src, name, size) {
+  const wrap = document.getElementById('dmAttachPreview');
+  document.getElementById('dmAttachPreviewImg').src = src;
+  document.getElementById('dmAttachPreviewName').textContent = name || 'Image';
+  document.getElementById('dmAttachPreviewSize').textContent = size ? `· ${formatBytes(size)}` : '';
+  if (wrap) wrap.style.display = '';
+}
+function hideDmAttachPreview() {
+  const wrap = document.getElementById('dmAttachPreview');
+  if (wrap) wrap.style.display = 'none';
+  _dmPendingAttachment = null;
+  updateSendButton();
+}
+function formatBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+document.getElementById('dmAttachCancel')?.addEventListener('click', hideDmAttachPreview);
+
+// ── Override sendDmMessage to handle attachments + GIFs ─────────────────
+// Rather than re-declaring the function, we wrap upload logic into a helper
+// that the existing sendDmMessage delegates to when an attachment is staged.
+// We do this by hooking into the send button click before it runs sendDmMessage.
+async function sendDmAttachment() {
+  if (!dmState.activeConvId || !_dmPendingAttachment) return false;
+  const att = _dmPendingAttachment;
+
+  let imageUrl = null;
+  let imageKind = att.kind;
+
+  if (att.kind === 'gif') {
+    imageUrl = att.gifUrl;
+  } else {
+    // Upload to Supabase Storage at {user_id}/{timestamp}-{name}
+    const ext = (att.file.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+    const path = `${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { error: upErr } = await supabase.storage.from(DM_BUCKET).upload(path, att.file, {
+      contentType: att.file.type,
+      cacheControl: '3600',
+      upsert: false,
+    });
+    if (upErr) {
+      console.error('[dm] upload failed', upErr);
+      toast(upErr.message || 'Upload failed', 'error');
+      return false;
+    }
+    const { data: urlData } = supabase.storage.from(DM_BUCKET).getPublicUrl(path);
+    imageUrl = urlData?.publicUrl;
+  }
+  if (!imageUrl) { toast('Failed to attach image', 'error'); return false; }
+
+  const input = document.getElementById('dmInput');
+  const body = (input?.value || '').trim();
+  const replyToId = dmState.replyingTo?.id || null;
+  dmState.replyingTo = null;
+  hideReplyPreview();
+
+  // Optimistic render
+  const tempId = 'temp-' + Date.now();
+  dmState.messages.push({
+    id: tempId,
+    conversation_id: dmState.activeConvId,
+    sender_id: currentUser.id,
+    body: body || '',
+    image_url: imageUrl,
+    image_kind: imageKind,
+    reply_to_id: replyToId,
+    created_at: new Date().toISOString(),
+    read_at: null,
+    _pending: true,
+  });
+  hideDmAttachPreview();
+  if (input) { input.value = ''; resizeDmInput(); updateSendButton(); }
+  renderMessages();
+  scrollMessagesToBottom();
+
+  const { data, error } = await supabase.from('messages').insert({
+    conversation_id: dmState.activeConvId,
+    sender_id: currentUser.id,
+    body: body || ' ',     // body has a NOT-NULL/length constraint; one-space passes
+    image_url: imageUrl,
+    image_kind: imageKind,
+    reply_to_id: replyToId,
+  }).select().single();
+  if (error) {
+    dmState.messages = dmState.messages.filter(m => m.id !== tempId);
+    renderMessages();
+    toast(error.message, 'error');
+    return false;
+  }
+  const idx = dmState.messages.findIndex(m => m.id === tempId);
+  if (idx >= 0) dmState.messages[idx] = data;
+  renderMessages();
+  return true;
+}
+
+// Intercept the send button: if an attachment is pending, send it via the
+// attachment path; otherwise fall through to the normal text send.
+document.getElementById('dmSendBtn')?.addEventListener('click', (e) => {
+  if (_dmPendingAttachment) {
+    e.stopImmediatePropagation();
+    sendDmAttachment();
+  }
+}, true);
+
+// Also intercept Enter key in textarea when an attachment is staged
+document.getElementById('dmInput')?.addEventListener('keydown', (e) => {
+  if (_dmPendingAttachment && e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    sendDmAttachment();
+  }
+}, true);
+
+// ── GIF picker (Giphy) ───────────────────────────────────────────────────
+function closeDmGifPicker() {
+  if (_dmGifPickerEl) { _dmGifPickerEl.remove(); _dmGifPickerEl = null; }
+}
+async function openDmGifPicker() {
+  if (_dmGifPickerEl) { closeDmGifPicker(); return; }
+  closeDmEmojiPicker();
+  closeDmAttachMenu();
+
+  const composer = document.getElementById('dmComposer');
+  if (!composer) return;
+  const picker = document.createElement('div');
+  picker.className = 'dm-gif-picker';
+  picker.innerHTML = `
+    <div class="dm-gif-header">
+      <input type="text" class="dm-gif-search" placeholder="Search GIFs…" id="dmGifSearch"/>
+      <button type="button" class="dm-gif-close" aria-label="Close">×</button>
+    </div>
+    <div class="dm-gif-grid" id="dmGifGrid">
+      <div class="dm-gif-loading">Loading trending…</div>
+    </div>
+  `;
+  document.body.appendChild(picker);
+  // Position above composer
+  const r = composer.getBoundingClientRect();
+  picker.style.position = 'fixed';
+  picker.style.bottom = `${window.innerHeight - r.top + 6}px`;
+  picker.style.left   = `${r.left}px`;
+  picker.style.width  = `${r.width}px`;
+  _dmGifPickerEl = picker;
+
+  picker.querySelector('.dm-gif-close').onclick = closeDmGifPicker;
+  const search = picker.querySelector('#dmGifSearch');
+  search.focus();
+
+  // Initial: trending
+  loadGifResults('', picker.querySelector('#dmGifGrid'));
+
+  let timer = null;
+  search.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      loadGifResults(search.value.trim(), picker.querySelector('#dmGifGrid'));
+    }, 250);
+  });
+}
+async function loadGifResults(query, gridEl) {
+  if (!gridEl) return;
+  gridEl.innerHTML = '<div class="dm-gif-loading">Loading…</div>';
+  const endpoint = query
+    ? `https://api.giphy.com/v1/gifs/search?api_key=${DM_GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=24&rating=pg-13`
+    : `https://api.giphy.com/v1/gifs/trending?api_key=${DM_GIPHY_KEY}&limit=24&rating=pg-13`;
+  try {
+    const res = await fetch(endpoint);
+    const json = await res.json();
+    const gifs = json?.data || [];
+    if (!gifs.length) {
+      gridEl.innerHTML = '<div class="dm-gif-loading">No GIFs found</div>';
+      return;
+    }
+    gridEl.innerHTML = gifs.map(g => {
+      // Use the small "fixed_height" preview for the picker grid + the standard URL for sending
+      const preview = g.images?.fixed_height_small?.url || g.images?.fixed_height?.url || g.images?.original?.url;
+      const send    = g.images?.fixed_height?.url   || g.images?.original?.url;
+      if (!preview || !send) return '';
+      return `<button class="dm-gif-tile" type="button" data-send="${escHTML(send)}" title="${escHTML(g.title || 'GIF')}">
+        <img src="${escHTML(preview)}" alt="${escHTML(g.title || 'GIF')}" loading="lazy"/>
+      </button>`;
+    }).join('');
+    gridEl.querySelectorAll('.dm-gif-tile').forEach(tile => {
+      tile.onclick = () => sendDmGif(tile.dataset.send);
+    });
+  } catch (err) {
+    console.error('[dm] giphy fetch failed', err);
+    gridEl.innerHTML = `<div class="dm-gif-loading">Couldn't load GIFs</div>`;
+  }
+}
+async function sendDmGif(gifUrl) {
+  if (!gifUrl) return;
+  closeDmGifPicker();
+  _dmPendingAttachment = { file: null, dataUrl: gifUrl, kind: 'gif', gifUrl };
+  await sendDmAttachment();
+}
+
+// ── Emoji picker ─────────────────────────────────────────────────────────
+const DM_EMOJI_GROUPS = [
+  { label: 'Smileys', emojis: '😀 😃 😄 😁 😆 😅 🤣 😂 🙂 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐'.split(' ') },
+  { label: 'Gestures', emojis: '👍 👎 👏 🙌 🤝 🙏 👋 🤚 ✋ 🖐 ✊ 👊 🤛 🤜 🫶 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝ 💪 🦾'.split(' ') },
+  { label: 'Hearts', emojis: '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❤️‍🔥 ❤️‍🩹 💖 💗 💓 💞 💕 💘 💝 💟'.split(' ') },
+  { label: 'Animals', emojis: '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦄 🐝'.split(' ') },
+  { label: 'Food', emojis: '🍕 🍔 🍟 🌭 🥪 🌮 🌯 🥗 🍝 🍜 🍣 🍱 🍤 🍙 🍘 🍚 🍛 🍦 🍰 🎂 🍩 🍪 🍫 🍬 🍭 ☕ 🍺'.split(' ') },
+  { label: 'Activities', emojis: '⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🏸 🥊 🎯 🎳 🎮 🎲 🎰 🎬 🎤 🎧 🎵 🎶 📚 ✏️ 📝 💻 📱'.split(' ') },
+  { label: 'Travel', emojis: '✈️ 🚗 🚕 🚙 🚌 🚎 🏎 🚓 🚑 🚒 🚐 🚚 🚛 🚜 🏍 🛵 🚲 🛴 🛹 🚂 🚆 🚇 ⛵ 🛳 🚀'.split(' ') },
+  { label: 'Symbols', emojis: '✨ 💫 ⭐ 🌟 💥 🔥 ⚡ 💧 🌈 ☀️ 🌙 🎉 🎊 🎁 🏆 🥇 ✅ ❌ ❗ ❓ 💯 ‼️ ⁉️ 💬 💭 🔔'.split(' ') },
+];
+function closeDmEmojiPicker() {
+  if (_dmEmojiPickerEl) { _dmEmojiPickerEl.remove(); _dmEmojiPickerEl = null; }
+}
+document.getElementById('dmEmojiBtn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (_dmEmojiPickerEl) { closeDmEmojiPicker(); return; }
+  closeDmGifPicker();
+  closeDmAttachMenu();
+
+  const trigger = e.currentTarget;
+  const picker = document.createElement('div');
+  picker.className = 'dm-emoji-picker';
+  picker.innerHTML = DM_EMOJI_GROUPS.map(g => `
+    <div class="dm-emoji-group">
+      <div class="dm-emoji-label">${g.label}</div>
+      <div class="dm-emoji-grid">
+        ${g.emojis.map(em => `<button type="button" class="dm-emoji-cell" data-emoji="${escHTML(em)}">${em}</button>`).join('')}
+      </div>
+    </div>
+  `).join('');
+  document.body.appendChild(picker);
+
+  const r = trigger.getBoundingClientRect();
+  picker.style.position = 'fixed';
+  picker.style.bottom = `${window.innerHeight - r.top + 8}px`;
+  picker.style.right  = `${Math.max(8, window.innerWidth - r.right)}px`;
+  _dmEmojiPickerEl = picker;
+
+  picker.querySelectorAll('.dm-emoji-cell').forEach(cell => {
+    cell.onclick = (ev) => {
+      ev.stopPropagation();
+      insertEmojiIntoComposer(cell.dataset.emoji);
+    };
+  });
+
+  setTimeout(() => {
+    const onDoc = (ev) => {
+      if (!_dmEmojiPickerEl?.contains(ev.target) && ev.target !== trigger) {
+        closeDmEmojiPicker();
+        document.removeEventListener('click', onDoc);
+      }
+    };
+    document.addEventListener('click', onDoc);
+  }, 0);
+});
+
+function insertEmojiIntoComposer(emoji) {
+  const input = document.getElementById('dmInput');
+  if (!input) return;
+  const start = input.selectionStart ?? input.value.length;
+  const end   = input.selectionEnd   ?? input.value.length;
+  input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
+  const newPos = start + emoji.length;
+  input.setSelectionRange(newPos, newPos);
+  input.focus();
+  resizeDmInput();
+  updateSendButton();
 }
