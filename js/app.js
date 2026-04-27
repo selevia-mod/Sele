@@ -1809,6 +1809,8 @@ async function openProfile(userId) {
   const editAvatarBtn = document.getElementById('editAvatarBtn');
   const editBannerBtn = document.getElementById('editBannerBtn');
 
+  // Show "Message" button only on others' profiles
+  const messageBtn = document.getElementById('profileMessageBtn');
   if (isOwn) {
     actionBtn.textContent = '⚙️ Edit profile';
     actionBtn.onclick = () => openEditProfile(profile);
@@ -1816,12 +1818,17 @@ async function openProfile(userId) {
     editAvatarBtn.style.visibility = 'visible';
     editBannerBtn.style.display = 'flex';
     editBannerBtn.style.visibility = 'visible';
+    if (messageBtn) messageBtn.style.display = 'none';
   } else {
     const isFollowing = !!followRes.data;
     actionBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
     actionBtn.onclick = () => toggleFollow(userId, isFollowing);
     editAvatarBtn.style.display = 'none';
     editBannerBtn.style.display = 'none';
+    if (messageBtn) {
+      messageBtn.style.display = '';
+      messageBtn.onclick = () => showMessages(userId);
+    }
   }
 
   // Wire profile menu (kebab) — share / report / snooze / block
@@ -3137,6 +3144,7 @@ const authorPage = document.getElementById('authorPage');
 const bookDetailPage = document.getElementById('bookDetailPage');
 const chapterReaderPage = document.getElementById('chapterReaderPage');
 const bookmarksPage = document.getElementById('bookmarksPage');  // Hoisted here (used by hideAllMainPages)
+const messagesPage = document.getElementById('messagesPage');
 
 // Hide every main content page; show functions call this first then set their own page to block.
 function hideAllMainPages() {
@@ -3152,6 +3160,7 @@ function hideAllMainPages() {
   if (bookDetailPage) bookDetailPage.style.display = 'none';
   if (chapterReaderPage) chapterReaderPage.style.display = 'none';
   if (bookmarksPage) bookmarksPage.style.display = 'none';
+  if (messagesPage) messagesPage.style.display = 'none';
   // Sibling sentinels (live outside the page divs) — also hide
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel) feedSentinel.style.display = 'none';
@@ -6992,3 +7001,593 @@ document.addEventListener('click', async (e) => {
   if (data?.id) openProfile(data.id);
   else toast(`User @${username} not found`, 'error');
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// DIRECT MESSAGES — Phase 1 (FB Messenger-style with purple)
+// Two-pane layout: conversation list on left, active thread on right.
+// Realtime via Supabase channel on `messages` table.
+// ════════════════════════════════════════════════════════════════════════════
+
+let dmState = {
+  conversations: [],            // [{ id, otherUser, lastMessageAt, lastMessagePreview, unread }]
+  activeConvId: null,           // currently-open conversation id
+  activeOther: null,            // { id, username, avatar_url, ... }
+  messages: [],                 // current thread's messages
+  realtimeChannel: null,        // active Realtime subscription
+  totalUnread: 0,
+  inboxChannel: null,           // realtime subscription for unread badge
+};
+
+async function showMessages(targetUserId = null) {
+  if (!currentUser) { toast('Please sign in', 'error'); return; }
+  hideAllMainPages();
+  if (messagesPage) messagesPage.style.display = 'block';
+  document.body.classList.remove('on-videos');
+  history.pushState(null, '', '#messages');
+  setSidebarActive('btnMessages');
+
+  await loadConversationList();
+
+  if (targetUserId) {
+    // Open or create conversation with this user
+    await openConversationWithUser(targetUserId);
+  }
+}
+
+// ── Conversation list ─────────────────────────────────────────────────────
+async function loadConversationList() {
+  const wrap = document.getElementById('dmConvList');
+  const empty = document.getElementById('dmEmptyList');
+  if (!wrap || !currentUser) return;
+
+  // Skeleton while loading
+  if (!dmState.conversations.length) {
+    wrap.innerHTML = `
+      <div class="dm-conv-skel"></div>
+      <div class="dm-conv-skel"></div>
+      <div class="dm-conv-skel"></div>
+    `;
+  }
+
+  // Fetch all conversations involving me
+  const { data: convs, error } = await supabase
+    .from('conversations')
+    .select('id, user_a, user_b, last_message_at, last_message_preview, last_message_sender, created_at')
+    .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`)
+    .order('last_message_at', { ascending: false, nullsFirst: false })
+    .limit(100);
+
+  if (error) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(error.message)}</div>`;
+    return;
+  }
+
+  if (!convs || !convs.length) {
+    wrap.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Hydrate the "other user" profile for each + count unread per convo
+  const otherIds = convs.map(c => c.user_a === currentUser.id ? c.user_b : c.user_a);
+  const [{ data: profiles }, unreadByConv] = await Promise.all([
+    supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', otherIds),
+    fetchUnreadCounts(convs.map(c => c.id)),
+  ]);
+
+  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
+  let totalUnread = 0;
+  dmState.conversations = convs.map(c => {
+    const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
+    const unread = unreadByConv[c.id] || 0;
+    totalUnread += unread;
+    return {
+      id: c.id,
+      otherUser: profileMap.get(otherId) || { id: otherId, username: 'Unknown', avatar_url: null },
+      lastMessageAt: c.last_message_at,
+      lastMessagePreview: c.last_message_preview || '',
+      lastMessageSender: c.last_message_sender,
+      unread,
+    };
+  });
+
+  renderConversationList();
+  updateUnreadBadge(totalUnread);
+}
+
+async function fetchUnreadCounts(conversationIds) {
+  if (!conversationIds.length) return {};
+  // Pull only unread messages where I'm NOT the sender, group client-side
+  const { data } = await supabase
+    .from('messages')
+    .select('conversation_id, sender_id')
+    .in('conversation_id', conversationIds)
+    .is('read_at', null)
+    .is('deleted_at', null)
+    .neq('sender_id', currentUser.id);
+  const counts = {};
+  (data || []).forEach(m => {
+    counts[m.conversation_id] = (counts[m.conversation_id] || 0) + 1;
+  });
+  return counts;
+}
+
+function renderConversationList() {
+  const wrap = document.getElementById('dmConvList');
+  const empty = document.getElementById('dmEmptyList');
+  if (!wrap) return;
+
+  if (!dmState.conversations.length) {
+    wrap.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  wrap.innerHTML = dmState.conversations.map(c => renderConvItemHtml(c)).join('');
+  // Wire clicks
+  wrap.querySelectorAll('.dm-conv-item').forEach(el => {
+    el.onclick = () => openConversation(el.dataset.convId);
+  });
+}
+
+function renderConvItemHtml(c) {
+  const { otherUser } = c;
+  const safeName = escHTML(otherUser.username || 'Unknown');
+  const avatar = otherUser.avatar_url
+    ? `<img src="${escHTML(otherUser.avatar_url)}" alt=""/>`
+    : `<span class="dm-avatar-initials">${initials(otherUser.username)}</span>`;
+  const isMine = c.lastMessageSender === currentUser.id;
+  const previewPrefix = isMine ? 'You: ' : '';
+  const preview = c.lastMessagePreview ? previewPrefix + escHTML(c.lastMessagePreview) : '<em>No messages yet</em>';
+  const time = c.lastMessageAt ? timeAgo(c.lastMessageAt) : '';
+  const isActive = c.id === dmState.activeConvId;
+  const unreadCls = c.unread > 0 ? ' has-unread' : '';
+  return `
+    <button class="dm-conv-item${isActive ? ' active' : ''}${unreadCls}" data-conv-id="${c.id}">
+      <div class="dm-conv-avatar">${avatar}</div>
+      <div class="dm-conv-meta">
+        <div class="dm-conv-row">
+          <span class="dm-conv-name">${safeName}</span>
+          <span class="dm-conv-time">${time}</span>
+        </div>
+        <div class="dm-conv-preview">${preview}</div>
+      </div>
+      ${c.unread > 0 ? `<span class="dm-conv-unread">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
+    </button>
+  `;
+}
+
+// ── Open a thread ─────────────────────────────────────────────────────────
+async function openConversationWithUser(otherUserId) {
+  // Resolve / create the conversation, then open it
+  const { data: convId, error } = await supabase
+    .rpc('get_or_create_conversation', { p_other_user_id: otherUserId });
+
+  if (error) {
+    if (/blocked/i.test(error.message)) toast('Cannot message blocked user', 'error');
+    else toast(error.message, 'error');
+    return;
+  }
+  await loadConversationList();
+  await openConversation(convId);
+}
+
+async function openConversation(convId) {
+  if (!convId || !currentUser) return;
+  dmState.activeConvId = convId;
+
+  // Find conversation in cache (or refetch)
+  let conv = dmState.conversations.find(c => c.id === convId);
+  if (!conv) {
+    // Fetch directly
+    const { data } = await supabase.from('conversations').select('*').eq('id', convId).single();
+    if (!data) { toast('Conversation not found', 'error'); return; }
+    const otherId = data.user_a === currentUser.id ? data.user_b : data.user_a;
+    const { data: prof } = await supabase.from('profiles').select('id, username, avatar_url, is_guest').eq('id', otherId).single();
+    conv = {
+      id: data.id,
+      otherUser: prof || { id: otherId, username: 'Unknown', avatar_url: null },
+      lastMessageAt: data.last_message_at,
+      lastMessagePreview: data.last_message_preview || '',
+      unread: 0,
+    };
+  }
+  dmState.activeOther = conv.otherUser;
+
+  // Show active panel, hide empty placeholder
+  document.getElementById('dmThreadEmpty').style.display = 'none';
+  document.getElementById('dmThreadActive').style.display = 'flex';
+
+  // Header
+  const av = document.getElementById('dmThreadAvatar');
+  const u = conv.otherUser;
+  av.innerHTML = (u.avatar_url
+    ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
+    : `<span class="dm-avatar-initials">${initials(u.username)}</span>`) +
+    `<span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>`;
+  av.onclick = () => openProfile(u.id);
+  const nameBtn = document.getElementById('dmThreadName');
+  nameBtn.textContent = u.username || 'Unknown';
+  nameBtn.onclick = () => openProfile(u.id);
+  document.getElementById('dmThreadStatus').textContent = '';
+
+  // Highlight in list
+  document.querySelectorAll('.dm-conv-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.convId === convId);
+  });
+
+  // Mobile: collapse list, show thread
+  document.querySelector('.dm-shell')?.classList.add('thread-open');
+
+  // Load messages
+  await loadMessages(convId);
+
+  // Mark as read (server-side) — fire-and-forget
+  supabase.rpc('mark_conversation_read', { p_conversation_id: convId }).then(() => {
+    // Refresh local unread count
+    const c = dmState.conversations.find(x => x.id === convId);
+    if (c) c.unread = 0;
+    renderConversationList();
+    const total = dmState.conversations.reduce((sum, x) => sum + (x.unread || 0), 0);
+    updateUnreadBadge(total);
+  });
+
+  // Subscribe to realtime updates for this conversation
+  subscribeToThread(convId);
+}
+
+async function loadMessages(convId) {
+  const wrap = document.getElementById('dmMessages');
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="dm-loading">Loading messages…</div>';
+
+  const { data, error } = await supabase
+    .from('messages')
+    .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at')
+    .eq('conversation_id', convId)
+    .order('created_at', { ascending: true })
+    .limit(200);
+
+  if (error) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load messages: ${escHTML(error.message)}</div>`;
+    return;
+  }
+  dmState.messages = data || [];
+  renderMessages();
+  scrollMessagesToBottom();
+}
+
+// ── Render messages with FB-style grouping ────────────────────────────────
+function renderMessages() {
+  const wrap = document.getElementById('dmMessages');
+  if (!wrap) return;
+
+  if (!dmState.messages.length) {
+    wrap.innerHTML = `
+      <div class="dm-thread-intro">
+        <div class="dm-thread-intro-avatar">${dmState.activeOther?.avatar_url
+          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
+          : initials(dmState.activeOther?.username)}</div>
+        <h3>${escHTML(dmState.activeOther?.username || '')}</h3>
+        <p>Say hello — your first message starts the conversation.</p>
+      </div>
+    `;
+    return;
+  }
+
+  // Identify the LAST message sent by ME that the OTHER has already read,
+  // so we can stick the read avatar to it (FB pattern).
+  let lastReadOfMine = null;
+  for (let i = dmState.messages.length - 1; i >= 0; i--) {
+    const m = dmState.messages[i];
+    if (m.sender_id === currentUser.id && m.read_at) { lastReadOfMine = m.id; break; }
+  }
+
+  let lastDateStamp = '';
+  let html = '';
+  for (let i = 0; i < dmState.messages.length; i++) {
+    const m = dmState.messages[i];
+    const prev = dmState.messages[i - 1];
+    const next = dmState.messages[i + 1];
+    const mine = m.sender_id === currentUser.id;
+
+    // Date separator (every ~30 min gap or new day)
+    const stamp = formatMessageDateStamp(m.created_at, prev?.created_at);
+    if (stamp && stamp !== lastDateStamp) {
+      html += `<div class="dm-date-sep">${stamp}</div>`;
+      lastDateStamp = stamp;
+    }
+
+    // Grouping: this message belongs to the same "burst" if same sender as prev/next AND within 5 min
+    const isFirstInGroup = !prev || prev.sender_id !== m.sender_id || (new Date(m.created_at) - new Date(prev.created_at)) > 5 * 60000;
+    const isLastInGroup  = !next || next.sender_id !== m.sender_id || (new Date(next.created_at) - new Date(m.created_at)) > 5 * 60000;
+
+    const bubbleCls = `dm-bubble ${mine ? 'mine' : 'theirs'}` +
+      (isFirstInGroup ? ' first-in-group' : '') +
+      (isLastInGroup  ? ' last-in-group'  : '');
+
+    const showAvatar = !mine && isLastInGroup;
+    const avatarHtml = showAvatar
+      ? `<div class="dm-bubble-avatar">${dmState.activeOther?.avatar_url
+          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
+          : initials(dmState.activeOther?.username)}</div>`
+      : '<div class="dm-bubble-avatar-spacer"></div>';
+
+    const body = m.deleted_at
+      ? `<em class="dm-bubble-deleted">Message deleted</em>`
+      : escHTML(m.body || '').replace(/\n/g, '<br>');
+
+    const readBadge = mine && m.id === lastReadOfMine
+      ? `<div class="dm-bubble-read" title="Seen ${timeAgo(m.read_at)}">
+          ${dmState.activeOther?.avatar_url
+            ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
+            : `<span>${initials(dmState.activeOther?.username)}</span>`}
+        </div>`
+      : '';
+
+    html += `
+      <div class="dm-bubble-row ${mine ? 'mine' : 'theirs'}" data-msg-id="${m.id}">
+        ${!mine ? avatarHtml : ''}
+        <div class="${bubbleCls}" title="${new Date(m.created_at).toLocaleString()}">
+          ${linkify(body)}
+        </div>
+        ${mine ? readBadge : ''}
+      </div>
+    `;
+  }
+  wrap.innerHTML = html;
+}
+
+function formatMessageDateStamp(current, previous) {
+  const cur = new Date(current);
+  if (!previous) {
+    // Always show stamp for the first message
+    return formatStampLabel(cur);
+  }
+  const prev = new Date(previous);
+  const gapMs = cur - prev;
+  if (gapMs > 30 * 60 * 1000 || cur.toDateString() !== prev.toDateString()) {
+    return formatStampLabel(cur);
+  }
+  return null;
+}
+
+function formatStampLabel(d) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+  const dayStart = new Date(d); dayStart.setHours(0,0,0,0);
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (dayStart.getTime() === today.getTime())     return `Today at ${t}`;
+  if (dayStart.getTime() === yesterday.getTime()) return `Yesterday at ${t}`;
+  // older
+  const dateStr = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  return `${dateStr} at ${t}`;
+}
+
+function scrollMessagesToBottom() {
+  const wrap = document.getElementById('dmMessages');
+  if (wrap) requestAnimationFrame(() => { wrap.scrollTop = wrap.scrollHeight; });
+}
+
+// ── Send a message ────────────────────────────────────────────────────────
+async function sendDmMessage() {
+  const input = document.getElementById('dmInput');
+  if (!input || !dmState.activeConvId) return;
+  const body = input.value.trim();
+  if (!body) {
+    // Empty composer + send click = thumbs-up emoji (FB classic)
+    return sendDmThumbsUp();
+  }
+
+  // Optimistic render
+  const tempId = 'temp-' + Date.now();
+  const optimistic = {
+    id: tempId,
+    conversation_id: dmState.activeConvId,
+    sender_id: currentUser.id,
+    body,
+    created_at: new Date().toISOString(),
+    read_at: null,
+    _pending: true,
+  };
+  dmState.messages.push(optimistic);
+  renderMessages();
+  scrollMessagesToBottom();
+  input.value = '';
+  resizeDmInput();
+  updateSendButton();
+
+  const { data, error } = await supabase.from('messages').insert({
+    conversation_id: dmState.activeConvId,
+    sender_id: currentUser.id,
+    body,
+  }).select().single();
+
+  if (error) {
+    // Rollback optimistic
+    dmState.messages = dmState.messages.filter(m => m.id !== tempId);
+    renderMessages();
+    toast(error.message, 'error');
+    return;
+  }
+  // Replace temp with real
+  const idx = dmState.messages.findIndex(m => m.id === tempId);
+  if (idx >= 0) dmState.messages[idx] = data;
+  renderMessages();
+}
+
+async function sendDmThumbsUp() {
+  if (!dmState.activeConvId) return;
+  const { data, error } = await supabase.from('messages').insert({
+    conversation_id: dmState.activeConvId,
+    sender_id: currentUser.id,
+    body: '👍',
+  }).select().single();
+  if (error) { toast(error.message, 'error'); return; }
+  dmState.messages.push(data);
+  renderMessages();
+  scrollMessagesToBottom();
+}
+
+function updateSendButton() {
+  const btn = document.getElementById('dmSendBtn');
+  const input = document.getElementById('dmInput');
+  if (!btn || !input) return;
+  const hasText = input.value.trim().length > 0;
+  btn.classList.toggle('has-text', hasText);
+}
+
+function resizeDmInput() {
+  const input = document.getElementById('dmInput');
+  if (!input) return;
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+}
+
+// ── Realtime ──────────────────────────────────────────────────────────────
+function subscribeToThread(convId) {
+  // Tear down previous channel
+  if (dmState.realtimeChannel) {
+    supabase.removeChannel(dmState.realtimeChannel);
+    dmState.realtimeChannel = null;
+  }
+  dmState.realtimeChannel = supabase
+    .channel(`dm-thread-${convId}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'messages',
+      filter: `conversation_id=eq.${convId}`,
+    }, (payload) => {
+      const newMsg = payload.new;
+      // Ignore if it's already in our list (we just inserted it locally)
+      if (dmState.messages.some(m => m.id === newMsg.id)) return;
+      dmState.messages.push(newMsg);
+      renderMessages();
+      scrollMessagesToBottom();
+      // If the new message isn't from me, mark conversation read immediately
+      if (newMsg.sender_id !== currentUser.id) {
+        supabase.rpc('mark_conversation_read', { p_conversation_id: convId });
+      }
+    })
+    .on('postgres_changes', {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'messages',
+      filter: `conversation_id=eq.${convId}`,
+    }, (payload) => {
+      // Read receipts / deletes / edits
+      const idx = dmState.messages.findIndex(m => m.id === payload.new.id);
+      if (idx >= 0) {
+        dmState.messages[idx] = payload.new;
+        renderMessages();
+      }
+    })
+    .subscribe();
+}
+
+// Inbox-wide subscription so the unread badge updates even when DMs page is closed
+function subscribeToInbox() {
+  if (!currentUser) return;
+  if (dmState.inboxChannel) supabase.removeChannel(dmState.inboxChannel);
+  dmState.inboxChannel = supabase
+    .channel(`dm-inbox-${currentUser.id}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'messages',
+    }, async (payload) => {
+      const m = payload.new;
+      if (m.sender_id === currentUser.id) return; // my own message
+      // Quick lookup: is this one of MY conversations?
+      const { data: c } = await supabase
+        .from('conversations')
+        .select('user_a, user_b')
+        .eq('id', m.conversation_id)
+        .single();
+      if (!c) return;
+      if (c.user_a !== currentUser.id && c.user_b !== currentUser.id) return;
+      // If we're already viewing this thread, the thread channel will mark it read.
+      if (dmState.activeConvId === m.conversation_id && messagesPage?.style.display === 'block') return;
+      // Otherwise bump unread
+      dmState.totalUnread++;
+      updateUnreadBadge(dmState.totalUnread);
+    })
+    .subscribe();
+}
+
+function updateUnreadBadge(total) {
+  dmState.totalUnread = total;
+  const badge = document.getElementById('messagesUnreadBadge');
+  if (!badge) return;
+  if (total > 0) {
+    badge.textContent = total > 99 ? '99+' : String(total);
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+// ── Wire up sidebar + composer + back button ─────────────────────────────
+document.getElementById('btnMessages')?.addEventListener('click', () => showMessages());
+
+document.getElementById('dmBackBtn')?.addEventListener('click', () => {
+  document.querySelector('.dm-shell')?.classList.remove('thread-open');
+  document.getElementById('dmThreadActive').style.display = 'none';
+  document.getElementById('dmThreadEmpty').style.display = 'flex';
+  if (dmState.realtimeChannel) {
+    supabase.removeChannel(dmState.realtimeChannel);
+    dmState.realtimeChannel = null;
+  }
+  dmState.activeConvId = null;
+  dmState.activeOther = null;
+});
+
+const dmInputEl = document.getElementById('dmInput');
+if (dmInputEl) {
+  dmInputEl.addEventListener('input', () => { resizeDmInput(); updateSendButton(); });
+  dmInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendDmMessage();
+    }
+  });
+}
+document.getElementById('dmSendBtn')?.addEventListener('click', () => sendDmMessage());
+
+// Conversation list search filter
+document.getElementById('dmSearchInput')?.addEventListener('input', (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  document.querySelectorAll('.dm-conv-item').forEach(el => {
+    const name = el.querySelector('.dm-conv-name')?.textContent.toLowerCase() || '';
+    const preview = el.querySelector('.dm-conv-preview')?.textContent.toLowerCase() || '';
+    el.style.display = (!q || name.includes(q) || preview.includes(q)) ? '' : 'none';
+  });
+});
+
+// Initial badge load + inbox subscription on app boot
+async function bootstrapDmBadge() {
+  if (!currentUser) return;
+  const { data: convs } = await supabase
+    .from('conversations')
+    .select('id')
+    .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`);
+  if (!convs?.length) { updateUnreadBadge(0); return; }
+  const counts = await fetchUnreadCounts(convs.map(c => c.id));
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  updateUnreadBadge(total);
+  subscribeToInbox();
+}
+
+// Run on initial sign-in (delayed so currentUser is set)
+setTimeout(() => bootstrapDmBadge(), 1500);
+
+// Hash routing
+window.addEventListener('hashchange', () => {
+  if (window.location.hash === '#messages') showMessages();
+});
+if (window.location.hash === '#messages') {
+  setTimeout(() => showMessages(), 600);
+}
