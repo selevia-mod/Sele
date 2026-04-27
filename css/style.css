@@ -75,10 +75,45 @@ button { font-family: var(--font); cursor: pointer; }
   display: flex; align-items: center; padding: 0 1.5rem;
   z-index: 100; gap: 1.5rem;
 }
-.topbar-logo { display: flex; flex-direction: column; color: #fff; font-weight: 800; font-size: 1.4rem; letter-spacing: 0.02em; line-height: 1; min-width: 200px; }
-.topbar-logo .brand { display: flex; align-items: center; gap: 6px; }
-.topbar-logo .brand::before { content: ''; width: 28px; height: 28px; background: #fff; border-radius: 6px; display: inline-block; mask: linear-gradient(135deg, transparent 48%, #000 50%, #000 52%, transparent 54%); -webkit-mask: linear-gradient(135deg, transparent 48%, #000 50%, #000 52%, transparent 54%); }
-.topbar-logo .sub { font-size: 0.65rem; font-weight: 400; color: rgba(255,255,255,0.85); margin-top: 3px; letter-spacing: 0.08em; text-transform: uppercase; margin-left: 36px; }
+/* Premium SELE logo — clickable button that returns to home + scroll-to-top */
+.topbar-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: row;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 4px;
+  margin: 0;
+  cursor: pointer;
+  border-radius: 16px;
+  font: inherit;
+  color: inherit;
+  letter-spacing: 0;
+  line-height: 0;
+  min-width: auto;
+  filter: drop-shadow(0 4px 14px rgba(76, 29, 149, 0.35));
+  transition: transform 0.18s cubic-bezier(.34, 1.56, .64, 1), filter 0.22s ease;
+}
+.topbar-logo svg {
+  height: 44px;
+  width: auto;
+  display: block;
+  border-radius: 12px;
+}
+.topbar-logo:hover {
+  transform: translateY(-1px) scale(1.05);
+  filter: drop-shadow(0 8px 24px rgba(167, 139, 250, 0.65));
+}
+.topbar-logo:active {
+  transform: scale(0.96);
+  transition: transform 0.08s ease;
+}
+.topbar-logo:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 3px;
+}
 
 .topbar-search { flex: 1; max-width: 560px; position: relative; }
 .topbar-search input {
@@ -2329,8 +2364,8 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 @media (max-width: 768px) {
   .sidebar { display: none; }
   .main-wrap { margin-left: 0; padding: 1rem; }
-  .topbar-logo .sub { display: none; }
-  .topbar-logo { min-width: auto; font-size: 1.1rem; }
+  .topbar-logo { min-width: auto; }
+  .topbar-logo svg { height: 36px; }
   .topbar-search { max-width: none; }
   .stories-row { padding: 0.75rem; gap: 0.75rem; }
   .story-avatar { width: 60px; height: 60px; font-size: 1.2rem; }
@@ -5288,32 +5323,44 @@ body:not(.light) .modal-actions .btn-ghost:hover {
 }
 
 .profile-menu-btn {
-  width: 34px;
-  height: 34px;
+  /* Pinned to the top-right of .profile-head (which is position:relative) */
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 36px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
-  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(124, 58, 237, 0.10);
   border-radius: 10px;
   color: #6b7280;
   cursor: pointer;
-  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
-  margin-left: 0.25rem;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.12s ease, box-shadow 0.18s ease;
+  z-index: 5;
 }
 .profile-menu-btn svg { width: 18px; height: 18px; display: block; }
 .profile-menu-btn:hover {
-  background: rgba(124, 58, 237, 0.10);
+  background: rgba(124, 58, 237, 0.12);
   color: #4c1d95;
-  border-color: rgba(124, 58, 237, 0.18);
+  border-color: rgba(124, 58, 237, 0.30);
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.15);
 }
 .profile-menu-btn:active { transform: scale(0.94); }
 
-body:not(.light) .profile-menu-btn { color: #9ca3af; }
+body:not(.light) .profile-menu-btn {
+  background: rgba(26, 20, 40, 0.6);
+  border-color: rgba(167, 139, 250, 0.14);
+  color: #d1d5db;
+}
 body:not(.light) .profile-menu-btn:hover {
-  background: rgba(167, 139, 250, 0.14);
+  background: rgba(167, 139, 250, 0.20);
   color: #ddd6fe;
-  border-color: rgba(167, 139, 250, 0.22);
+  border-color: rgba(167, 139, 250, 0.35);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.30);
 }
 
 .profile-action-menu { min-width: 200px; }
