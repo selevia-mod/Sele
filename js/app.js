@@ -2710,9 +2710,10 @@ async function fetchSupabaseBooks() {
         views_count, likes_count, chapters_count, word_count,
         published_at, created_at,
         author_id,
-        profiles!books_author_id_fkey ( id, username, avatar_url )
+        profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
       `)
       .eq('is_public', true)
+      .eq('is_hidden', false)
       .in('status', ['ongoing', 'completed'])
       .limit(80);
 
@@ -2725,13 +2726,16 @@ async function fetchSupabaseBooks() {
       return [];
     }
 
-    return (data || []).map(b => ({
-      ...b,
-      id: b.id,                                    // raw UUID, no prefix needed (FK shape used elsewhere)
-      $id: 'sb_' + b.id,
-      _supabase: true,
-      author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
-    }));
+    // Filter out books whose author is banned
+    return (data || [])
+      .filter(b => !b.profiles?.is_banned)
+      .map(b => ({
+        ...b,
+        id: b.id,                                    // raw UUID, no prefix needed (FK shape used elsewhere)
+        $id: 'sb_' + b.id,
+        _supabase: true,
+        author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
+      }));
   } catch (err) {
     console.error('fetchSupabaseBooks failed:', err);
     return [];
@@ -4798,39 +4802,45 @@ async function fetchSupabaseVideos() {
         profiles!videos_uploader_id_fkey (
           id,
           username,
-          avatar_url
+          avatar_url,
+          is_banned
         )
       `)
+      .eq('status', 'ready')
+      .eq('is_hidden', false)
       .order('created_at', { ascending: false })
       .limit(100);
-    
+
     if (error) {
       console.error('Supabase videos fetch error:', error);
       return [];
     }
-    
-    // Transform to match Appwrite video format so the rest of the code works
-    return (data || []).map(v => ({
-      $id: 'sb_' + v.id, // prefix so we can tell Supabase videos apart
-      _supabase: true,    // flag for special handling
-      _supabaseId: v.id,
-      title: v.title,
-      description: v.description || '',
-      tags: v.tags || [],
-      uploader: v.uploader_id,
-      thumbnail: v.thumbnail_url,
-      videoUrl: v.video_url,
-      uri: v.video_url,
-      videoStats: { views: v.views || 0, duration: v.duration || 0 },
-      status: 'ready',
-      $createdAt: v.created_at,
-      // Pre-populated uploader info (saves an extra fetch)
-      _uploaderInfo: v.profiles ? {
-        $id: v.profiles.id,
-        username: v.profiles.username,
-        avatar: v.profiles.avatar_url,
-      } : null,
-    }));
+
+    // Transform to match Appwrite video format so the rest of the code works.
+    // Filter out videos whose uploader is banned.
+    return (data || [])
+      .filter(v => !v.profiles?.is_banned)
+      .map(v => ({
+        $id: 'sb_' + v.id, // prefix so we can tell Supabase videos apart
+        _supabase: true,    // flag for special handling
+        _supabaseId: v.id,
+        title: v.title,
+        description: v.description || '',
+        tags: v.tags || [],
+        uploader: v.uploader_id,
+        thumbnail: v.thumbnail_url,
+        videoUrl: v.video_url,
+        uri: v.video_url,
+        videoStats: { views: v.views || 0, duration: v.duration || 0 },
+        status: 'ready',
+        $createdAt: v.created_at,
+        // Pre-populated uploader info (saves an extra fetch)
+        _uploaderInfo: v.profiles ? {
+          $id: v.profiles.id,
+          username: v.profiles.username,
+          avatar: v.profiles.avatar_url,
+        } : null,
+      }));
   } catch (err) {
     console.error('Failed to fetch Supabase videos:', err);
     return [];
