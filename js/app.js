@@ -3023,6 +3023,68 @@ document.getElementById('btnUploadVideo')?.addEventListener('click', () => {
 document.getElementById('closeVideoUploadModal')?.addEventListener('click', closeVideoUploadModal);
 document.getElementById('cancelVideoUpload')?.addEventListener('click', closeVideoUploadModal);
 
+// ════════════════════════════════════════════════════════════════════════════
+// VIDEO UPLOAD WIZARD — 4 phases (File → Details → Visibility → Upload)
+// ════════════════════════════════════════════════════════════════════════════
+
+let vuStep = 1;
+const VU_STEP_TITLES = {
+  1: { title: 'Upload video',         sub: 'Pick the file you want to share.' },
+  2: { title: 'Tell us about it',     sub: 'A great title helps people find your video.' },
+  3: { title: 'Visibility & schedule',sub: 'Choose when it goes public.' },
+  4: { title: 'Uploading…',           sub: 'Stay on this screen until it finishes.' },
+};
+
+function vuGotoStep(n) {
+  if (n < 1 || n > 4) return;
+  vuStep = n;
+  // Panels
+  document.querySelectorAll('.vu-panel').forEach(p => {
+    p.style.display = (Number(p.dataset.panel) === n) ? '' : 'none';
+  });
+  // Stepper highlights — past steps "done", current "active"
+  document.querySelectorAll('.vu-step-pill').forEach(s => {
+    const sn = Number(s.dataset.step);
+    s.classList.toggle('active', sn === n);
+    s.classList.toggle('done',   sn <  n);
+  });
+  document.querySelectorAll('.vu-step-line').forEach((l, i) => {
+    l.classList.toggle('done', (i + 1) < n);
+  });
+  // Header
+  const meta = VU_STEP_TITLES[n];
+  document.getElementById('vuTitle').textContent = meta.title;
+  document.getElementById('vuSubtitle').textContent = meta.sub;
+  // Footer buttons
+  vuRefreshFooter();
+}
+
+function vuRefreshFooter() {
+  const back = document.getElementById('vuFooterBack');
+  const next = document.getElementById('vuFooterNext');
+  const cancel = document.getElementById('cancelVideoUpload');
+  // Back: hidden on step 1; hidden during upload (step 4)
+  back.style.display = (vuStep === 1 || vuStep === 4) ? 'none' : '';
+  // Cancel: visible on steps 1-3, hidden during upload
+  cancel.style.display = (vuStep === 4) ? 'none' : '';
+
+  if (vuStep === 1) {
+    next.textContent = 'Continue';
+    next.disabled = !pendingVideoFile;
+  } else if (vuStep === 2) {
+    const title = document.getElementById('videoUploadTitle').value.trim();
+    next.textContent = 'Continue';
+    next.disabled = !title;
+  } else if (vuStep === 3) {
+    next.textContent = 'Upload';
+    next.disabled = false;
+  } else if (vuStep === 4) {
+    // During upload, the "next" slot becomes a Done/Close (filled in after success)
+    next.textContent = 'Uploading…';
+    next.disabled = true;
+  }
+}
+
 function closeVideoUploadModal() {
   document.getElementById('videoUploadModal').style.display = 'none';
   resetVideoUploadModal();
@@ -3030,149 +3092,233 @@ function closeVideoUploadModal() {
 
 function resetVideoUploadModal() {
   pendingVideoFile = null;
-  document.getElementById('videoUploadStep1').style.display = 'block';
-  document.getElementById('videoUploadStep2').style.display = 'none';
   document.getElementById('videoUploadFile').value = '';
+  document.getElementById('vuFileSummary').style.display = 'none';
+  document.getElementById('vuFileName').textContent = '';
+  document.getElementById('vuFileSize').textContent = '';
   document.getElementById('videoUploadTitle').value = '';
   document.getElementById('videoUploadDescription').value = '';
   document.getElementById('videoUploadTags').value = '';
   document.getElementById('videoUploadCategory').value = 'general';
-  document.getElementById('videoUploadProgress').classList.remove('active');
-  document.getElementById('videoUploadFill').style.width = '0%';
-  document.getElementById('confirmVideoUpload').disabled = true;
-  document.getElementById('confirmVideoUpload').textContent = 'Upload';
   document.getElementById('titleCharCount').textContent = '0';
   document.getElementById('descCharCount').textContent = '0';
+  document.getElementById('videoUploadFill').style.width = '0%';
+  document.getElementById('videoUploadPercent').textContent = '0%';
+  document.getElementById('videoUploadStatus').textContent = 'Preparing…';
+  document.getElementById('vuUploadBytes').style.display = 'none';
+  document.getElementById('vuUploadHeroTitle').textContent = 'Uploading your video';
+  document.getElementById('vuUploadHeroSub').textContent = "Hang tight — we're sending it to our servers.";
+  // Reset visibility radio
+  document.querySelectorAll('input[name="vuVisibility"]').forEach(r => { r.checked = (r.value === 'now'); });
+  document.querySelectorAll('.vu-radio').forEach(r => r.classList.toggle('active', r.dataset.vis === 'now'));
+  document.getElementById('vuScheduleInput').style.display = 'none';
+  document.getElementById('vuScheduleDatetime').value = '';
+  vuGotoStep(1);
 }
 
-// Handle file selection
-document.getElementById('videoUploadFile')?.addEventListener('change', (e) => {
-  const file = e.target.files[0];
+// ── Phase 1: File picker ─────────────────────────────────────────────────
+function vuHandleFile(file) {
   if (!file) return;
-  
-  // 2GB limit
   if (file.size > 2 * 1024 * 1024 * 1024) {
     toast('Video too large (max 2GB)', 'error');
     return;
   }
-  
   pendingVideoFile = file;
-  
-  // Show preview + form
   const preview = document.getElementById('videoUploadPreview');
   preview.src = URL.createObjectURL(file);
-  
-  document.getElementById('videoUploadStep1').style.display = 'none';
-  document.getElementById('videoUploadStep2').style.display = 'block';
-  
-  // Auto-fill title with filename (without extension)
+  document.getElementById('vuFileName').textContent = file.name;
+  document.getElementById('vuFileSize').textContent = formatBytes(file.size);
+  document.getElementById('vuFileSummary').style.display = '';
+  // Auto-fill title with filename (no extension)
   const titleInput = document.getElementById('videoUploadTitle');
   titleInput.value = file.name.replace(/\.[^.]+$/, '').slice(0, 100);
   document.getElementById('titleCharCount').textContent = titleInput.value.length;
-  document.getElementById('confirmVideoUpload').disabled = false;
+  vuRefreshFooter();
+}
+document.getElementById('videoUploadFile')?.addEventListener('change', (e) => {
+  vuHandleFile(e.target.files[0]);
 });
+document.getElementById('vuReplaceFile')?.addEventListener('click', () => {
+  document.getElementById('videoUploadFile').click();
+});
+// Drag & drop on the dropzone
+const vuDropzone = document.getElementById('videoFilePicker');
+if (vuDropzone) {
+  ['dragover', 'dragenter'].forEach(ev => vuDropzone.addEventListener(ev, (e) => {
+    e.preventDefault(); vuDropzone.classList.add('drag-over');
+  }));
+  ['dragleave', 'drop'].forEach(ev => vuDropzone.addEventListener(ev, (e) => {
+    e.preventDefault(); vuDropzone.classList.remove('drag-over');
+  }));
+  vuDropzone.addEventListener('drop', (e) => {
+    const f = e.dataTransfer?.files?.[0];
+    if (f && f.type.startsWith('video/')) vuHandleFile(f);
+  });
+}
 
-// Char counters
+// ── Phase 2: Details (live char counters) ────────────────────────────────
 document.getElementById('videoUploadTitle')?.addEventListener('input', (e) => {
   document.getElementById('titleCharCount').textContent = e.target.value.length;
-  document.getElementById('confirmVideoUpload').disabled = !e.target.value.trim();
+  if (vuStep === 2) vuRefreshFooter();
 });
 document.getElementById('videoUploadDescription')?.addEventListener('input', (e) => {
   document.getElementById('descCharCount').textContent = e.target.value.length;
 });
 
-// Handle upload
-document.getElementById('confirmVideoUpload')?.addEventListener('click', async () => {
-  if (!pendingVideoFile) return;
-  
-  const title = document.getElementById('videoUploadTitle').value.trim();
-  if (!title) {
-    toast('Please add a title', 'error');
-    return;
+// ── Phase 3: Visibility radios ───────────────────────────────────────────
+document.querySelectorAll('input[name="vuVisibility"]').forEach(input => {
+  input.addEventListener('change', () => {
+    document.querySelectorAll('.vu-radio').forEach(r => r.classList.toggle('active', r.dataset.vis === input.value));
+    document.getElementById('vuScheduleInput').style.display = (input.value === 'schedule') ? '' : 'none';
+    if (input.value === 'schedule' && !document.getElementById('vuScheduleDatetime').value) {
+      // Default to 1 hour from now (rounded to nearest 15 min)
+      const d = new Date(Date.now() + 60 * 60 * 1000);
+      d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
+      const pad = n => String(n).padStart(2, '0');
+      const localStr = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      document.getElementById('vuScheduleDatetime').value = localStr;
+    }
+  });
+});
+
+// ── Footer button wiring (Back / Continue / Upload) ──────────────────────
+document.getElementById('vuFooterBack')?.addEventListener('click', () => {
+  if (vuStep > 1 && vuStep < 4) vuGotoStep(vuStep - 1);
+});
+document.getElementById('vuFooterNext')?.addEventListener('click', async () => {
+  if (vuStep === 1) {
+    if (!pendingVideoFile) return;
+    vuGotoStep(2);
+  } else if (vuStep === 2) {
+    const title = document.getElementById('videoUploadTitle').value.trim();
+    if (!title) { toast('Please add a title', 'error'); return; }
+    vuGotoStep(3);
+  } else if (vuStep === 3) {
+    vuGotoStep(4);
+    await vuStartUpload();
   }
-  
+});
+
+async function vuStartUpload() {
+  if (!pendingVideoFile) return;
+  const title       = document.getElementById('videoUploadTitle').value.trim();
   const description = document.getElementById('videoUploadDescription').value.trim();
-  const tagsRaw = document.getElementById('videoUploadTags').value.trim();
-  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const category = document.getElementById('videoUploadCategory').value;
-  
-  const confirmBtn = document.getElementById('confirmVideoUpload');
-  const cancelBtn = document.getElementById('cancelVideoUpload');
-  const progress = document.getElementById('videoUploadProgress');
-  const fill = document.getElementById('videoUploadFill');
-  const percent = document.getElementById('videoUploadPercent');
+  const tagsRaw     = document.getElementById('videoUploadTags').value.trim();
+  const tags        = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const category    = document.getElementById('videoUploadCategory').value;
+  // Visibility
+  const visibility = document.querySelector('input[name="vuVisibility"]:checked')?.value || 'now';
+  let scheduledPublishAt = null;
+  if (visibility === 'schedule') {
+    const dtStr = document.getElementById('vuScheduleDatetime').value;
+    if (dtStr) {
+      const dt = new Date(dtStr);
+      if (!isNaN(dt.getTime()) && dt.getTime() > Date.now()) {
+        scheduledPublishAt = dt.toISOString();
+      }
+    }
+  }
+
+  const fill   = document.getElementById('videoUploadFill');
+  const pctEl  = document.getElementById('videoUploadPercent');
   const status = document.getElementById('videoUploadStatus');
-  
-  confirmBtn.disabled = true;
-  cancelBtn.disabled = true;
-  confirmBtn.textContent = 'Uploading...';
-  progress.classList.add('active');
-  
+  const bytesWrap = document.getElementById('vuUploadBytes');
+  const bytesSent = document.getElementById('vuBytesSent');
+  const bytesTotal= document.getElementById('vuBytesTotal');
+  const speedEl   = document.getElementById('vuUploadSpeed');
+  const heroIcon  = document.getElementById('vuUploadIcon');
+  const heroTitle = document.getElementById('vuUploadHeroTitle');
+  const heroSub   = document.getElementById('vuUploadHeroSub');
+  const next      = document.getElementById('vuFooterNext');
+
+  bytesTotal.textContent = formatBytes(pendingVideoFile.size);
+  bytesWrap.style.display = '';
+
+  let lastBytes = 0;
+  let lastTs = Date.now();
+
   try {
-    // 1. Get upload URL from Edge Function
-    status.textContent = 'Preparing upload...';
+    status.textContent = 'Preparing upload…';
     const uploadInfo = await callEdgeFunction('bunny-upload', { title });
-    
-    // 2. Upload file to Bunny via PUT with progress tracking
-    status.textContent = 'Uploading video...';
-    await uploadFileToBunny(pendingVideoFile, uploadInfo, (pct) => {
+
+    status.textContent = 'Uploading video…';
+    await uploadFileToBunny(pendingVideoFile, uploadInfo, (pct, loaded, total) => {
       fill.style.width = pct + '%';
-      percent.textContent = pct + '%';
+      pctEl.textContent = pct + '%';
+      bytesSent.textContent = formatBytes(loaded || 0);
+      // Speed (rolling, sampled every 500ms)
+      const now = Date.now();
+      if (now - lastTs > 500) {
+        const dBytes = (loaded || 0) - lastBytes;
+        const dSec = (now - lastTs) / 1000;
+        if (dSec > 0 && dBytes >= 0) {
+          const speed = dBytes / dSec;
+          speedEl.textContent = `· ${formatBytes(speed)}/s`;
+        }
+        lastBytes = loaded || 0;
+        lastTs = now;
+      }
     });
-    
-    // 3. Save metadata to Supabase (return the new row so we can link a post to it)
-    status.textContent = 'Saving...';
+
+    status.textContent = 'Saving…';
     const { data: newVideo, error } = await supabase.from('videos').insert({
       bunny_video_id: uploadInfo.videoId,
       bunny_library_id: uploadInfo.libraryId,
       video_url: uploadInfo.videoUrl,
       thumbnail_url: uploadInfo.thumbnailUrl,
-      title,
-      description,
-      tags,
-      category,
+      title, description, tags, category,
       uploader_id: currentUser.id,
       status: 'processing',
+      scheduled_publish_at: scheduledPublishAt,
     }).select().single();
-    
     if (error) throw error;
-    
-    // 4. Also create a post in the home feed linking to this video
-    const postBody = description?.trim() || title;
+
+    // Create the home-feed post but keep it hidden until the bunny webhook
+    // flips video.status to 'ready' (trigger flips post.is_hidden then).
+    const postBody = description || title;
     const { error: postError } = await supabase.from('posts').insert({
       user_id: currentUser.id,
       body: postBody,
       video_id: newVideo.id,
+      is_hidden: true,
     });
     if (postError) console.error('Failed to create feed post:', postError);
-    
-    status.textContent = 'Done!';
+
     fill.style.width = '100%';
-    percent.textContent = '100%';
-    
-    toast('Video uploaded! Processing in the background...', 'success');
-    setTimeout(() => {
+    pctEl.textContent = '100%';
+    status.textContent = 'Upload complete';
+    speedEl.textContent = '';
+
+    // Switch hero to the "now processing" state (FB-style)
+    heroIcon.outerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="vuUploadIcon"><polyline points="20 6 9 17 4 12"/></svg>`;
+    heroTitle.textContent = scheduledPublishAt ? 'Scheduled — processing in the background' : 'Done — processing in the background';
+    heroSub.textContent   = scheduledPublishAt
+      ? `It'll go live on ${new Date(scheduledPublishAt).toLocaleString()} once processing finishes.`
+      : 'Your video will appear publicly the moment Selebox finishes encoding it.';
+
+    // Footer becomes "Done"
+    next.disabled = false;
+    next.textContent = 'Done';
+    next.onclick = () => {
       closeVideoUploadModal();
-      // Refresh video page if open
-      if (videosPage.style.display === 'block') {
-        allVideosCache = [];
-        loadVideos();
-      }
-      // Refresh home feed if open
-      if (feedEl.style.display !== 'none') {
-        window.loadFeed();
-      }
-    }, 1500);
-    
+      if (videosPage.style.display === 'block') { allVideosCache = []; loadVideos(); }
+      if (feedEl.style.display !== 'none') window.loadFeed?.();
+    };
+
+    toast(scheduledPublishAt ? 'Scheduled — processing now' : 'Uploaded — processing now', 'success');
   } catch (err) {
     console.error('Upload failed:', err);
+    status.textContent = 'Upload failed';
+    speedEl.textContent = '';
+    heroIcon.outerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="vuUploadIcon"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
+    heroTitle.textContent = 'Upload failed';
+    heroSub.textContent = err.message || 'Something went wrong. Try again.';
+    next.disabled = false;
+    next.textContent = 'Try again';
+    next.onclick = () => { vuGotoStep(3); next.onclick = null; vuRefreshFooter(); };
     toast('Upload failed: ' + err.message, 'error');
-    confirmBtn.disabled = false;
-    cancelBtn.disabled = false;
-    confirmBtn.textContent = 'Try again';
-    progress.classList.remove('active');
   }
-});
+}
 
 // Helper: Upload file to Bunny with progress
 function uploadFileToBunny(file, info, onProgress) {
@@ -3185,7 +3331,7 @@ function uploadFileToBunny(file, info, onProgress) {
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) {
         const pct = Math.round((e.loaded / e.total) * 100);
-        onProgress(pct);
+        onProgress(pct, e.loaded, e.total);
       }
     });
     
@@ -5563,15 +5709,33 @@ let studioVideosCache = [];
 let studioSearchQuery = '';
 let studioEditingVideoId = null;
 
+// Lightweight client-side substitute for the scheduled-publish cron.
+// Fires `publish_due_scheduled_videos()` at most once per 5 min whenever
+// the user opens Studio — covers the case where no real cron is wired yet.
+let _lastSchedulePublishCheck = 0;
+function maybeFlushDueScheduledVideos() {
+  const now = Date.now();
+  if (now - _lastSchedulePublishCheck < 5 * 60 * 1000) return; // 5 min throttle
+  _lastSchedulePublishCheck = now;
+  // Fire-and-forget — never block UI on this.
+  supabase.rpc('publish_due_scheduled_videos').then(({ data, error }) => {
+    if (error) { console.warn('publish_due_scheduled_videos:', error.message); return; }
+    if (data && data > 0) console.log(`[schedule] flipped ${data} scheduled video post(s) to public`);
+  }).catch(() => {});
+}
+
 async function loadStudio() {
   const content = document.getElementById('studioContent');
   content.innerHTML = '<div class="empty"><h3>Loading your videos...</h3></div>';
-  
+
   if (!currentUser) {
     content.innerHTML = '<div class="empty"><h3>Please sign in</h3></div>';
     return;
   }
-  
+
+  // Background sweep: surface any scheduled videos whose publish time has passed.
+  maybeFlushDueScheduledVideos();
+
   const { data: videos, error } = await supabase
     .from('videos')
     .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id')
