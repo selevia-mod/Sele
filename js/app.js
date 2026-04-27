@@ -6745,6 +6745,8 @@ async function initNotifications() {
         filter: `recipient_id=eq.${currentUser.id}`,
       }, async (payload) => {
         const n = payload.new;
+        // Skip DM notifications — those use the Messages sidebar badge instead
+        if (n.type === 'dm_message') return;
         // Fetch the actor profile for nicer rendering
         await hydrateActorProfiles([n]);
         _notifications.unshift(n);
@@ -6769,6 +6771,7 @@ async function loadNotifications() {
     .from('notifications')
     .select('*')
     .eq('recipient_id', currentUser.id)
+    .neq('type', 'dm_message')             // DMs have their own badge in the sidebar — keep the bell clean
     .order('created_at', { ascending: false })
     .limit(NOTIF_PAGE_SIZE);
 
@@ -8879,8 +8882,14 @@ function highlightSearchMatch(body, query) {
 
 const DM_MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;   // 2.5 MB
 const DM_BUCKET = 'dm-attachments';
-// Giphy public beta key (works for demo/dev — swap for your own key in prod)
-const DM_GIPHY_KEY = 'dc6zaTOxFJmzC';
+
+// ─── GIF picker key ───────────────────────────────────────────────────────
+// Giphy retired their public beta key years ago, so the picker needs your own.
+// 1. Go to https://developers.giphy.com/dashboard/
+// 2. Create app (free, ~3 min) — choose "API" not "SDK"
+// 3. Copy the API Key and paste it below, replacing the empty string.
+// Free tier = 100k requests/day — plenty for a chat app.
+const DM_GIPHY_KEY = '';  // ← paste your Giphy API key here
 
 let _dmPendingAttachment = null;   // { file, dataUrl, kind: 'upload' | 'gif', gifUrl }
 let _dmAttachMenuEl = null;
@@ -9179,12 +9188,41 @@ async function openDmGifPicker() {
 }
 async function loadGifResults(query, gridEl) {
   if (!gridEl) return;
+
+  // No key configured → show setup instructions instead of empty results
+  if (!DM_GIPHY_KEY) {
+    gridEl.innerHTML = `
+      <div class="dm-gif-setup">
+        <div class="dm-gif-setup-icon">🔑</div>
+        <h4>GIF picker needs an API key</h4>
+        <p>Giphy's free public key was retired. Get your own (takes 3 min):</p>
+        <ol>
+          <li>Open <a href="https://developers.giphy.com/dashboard/" target="_blank" rel="noopener">developers.giphy.com</a></li>
+          <li>Create an API-type app</li>
+          <li>Copy your API key</li>
+          <li>Paste it into <code>DM_GIPHY_KEY</code> in app.js</li>
+        </ol>
+        <p class="dm-gif-setup-note">Free tier: 100,000 requests/day.</p>
+      </div>
+    `;
+    return;
+  }
+
   gridEl.innerHTML = '<div class="dm-gif-loading">Loading…</div>';
   const endpoint = query
     ? `https://api.giphy.com/v1/gifs/search?api_key=${DM_GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=24&rating=pg-13`
     : `https://api.giphy.com/v1/gifs/trending?api_key=${DM_GIPHY_KEY}&limit=24&rating=pg-13`;
   try {
     const res = await fetch(endpoint);
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      console.error('[dm] giphy non-OK', res.status, errBody);
+      const friendlyMsg = res.status === 401 || res.status === 403
+        ? 'Invalid Giphy API key — check the DM_GIPHY_KEY constant in app.js.'
+        : `Giphy returned ${res.status}. Try again later.`;
+      gridEl.innerHTML = `<div class="dm-gif-loading">${escHTML(friendlyMsg)}</div>`;
+      return;
+    }
     const json = await res.json();
     const gifs = json?.data || [];
     if (!gifs.length) {
@@ -9192,7 +9230,6 @@ async function loadGifResults(query, gridEl) {
       return;
     }
     gridEl.innerHTML = gifs.map(g => {
-      // Use the small "fixed_height" preview for the picker grid + the standard URL for sending
       const preview = g.images?.fixed_height_small?.url || g.images?.fixed_height?.url || g.images?.original?.url;
       const send    = g.images?.fixed_height?.url   || g.images?.original?.url;
       if (!preview || !send) return '';
@@ -9205,7 +9242,7 @@ async function loadGifResults(query, gridEl) {
     });
   } catch (err) {
     console.error('[dm] giphy fetch failed', err);
-    gridEl.innerHTML = `<div class="dm-gif-loading">Couldn't load GIFs</div>`;
+    gridEl.innerHTML = `<div class="dm-gif-loading">Couldn't load GIFs — ${escHTML(err.message || 'network error')}</div>`;
   }
 }
 async function sendDmGif(gifUrl) {
