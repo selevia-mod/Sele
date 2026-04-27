@@ -6361,6 +6361,10 @@ body:not(.light) .mutual-more {
   box-shadow: 0 1px 3px rgba(15, 10, 28, 0.04);
   cursor: default;
   position: relative;
+}
+/* Only newly-arriving bubbles animate in — existing bubbles stay put on
+   re-render so the list doesn't flash on every send / read receipt update. */
+.dm-bubble.is-new {
   animation: dmBubbleIn 0.18s ease-out;
 }
 @keyframes dmBubbleIn {
@@ -6409,9 +6413,9 @@ body:not(.light) .dm-bubble.is-deleted {
   border-color: rgba(167, 139, 250, 0.20);
 }
 
-/* Read receipt — tiny avatar at bottom-right of last-read mine bubble */
+/* Read receipt — tiny avatar UNDER the last-read mine bubble (FB pattern) */
 .dm-bubble-read {
-  width: 14px; height: 14px;
+  width: 16px; height: 16px;
   border-radius: 50%;
   overflow: hidden;
   background: linear-gradient(135deg, #7c3aed, #a78bfa);
@@ -6421,8 +6425,11 @@ body:not(.light) .dm-bubble.is-deleted {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 2px;
+  margin-top: 4px;             /* small gap between bubble and seen avatar */
+  margin-right: 2px;            /* nudge away from the very edge */
+  align-self: flex-end;         /* anchor to the right (mine side) */
   box-shadow: 0 0 0 2px var(--bg);
+  flex-shrink: 0;
 }
 .dm-bubble-read img { width: 100%; height: 100%; object-fit: cover; }
 
