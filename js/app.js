@@ -7009,9 +7009,10 @@ document.addEventListener('click', async (e) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 let dmState = {
-  conversations: [],            // [{ id, otherUser, lastMessageAt, lastMessagePreview, unread }]
+  conversations: [],            // [{ id, isGroup, name, otherUser?, members?, lastMessageAt, lastMessagePreview, unread }]
   activeConvId: null,           // currently-open conversation id
-  activeOther: null,            // { id, username, avatar_url, ... }
+  activeConv: null,             // full active conversation object (incl. is_group, name, members)
+  activeOther: null,            // for 1:1: the other user; for groups: null
   messages: [],                 // current thread's messages
   reactions: {},                // { messageId: [{ user_id, emoji }, ...] }
   realtimeChannel: null,        // active Realtime subscription (DB changes for active thread)
@@ -7019,13 +7020,17 @@ let dmState = {
   totalUnread: 0,
   inboxChannel: null,           // realtime subscription for unread badge
   otherIsTyping: false,         // is the other user currently typing?
+  typingUsers: {},              // groups: { userId: { name, lastSeen } } for "X is typing"
   otherTypingTimer: null,       // auto-clear typing if no broadcast for N seconds
   myTypingTimer: null,          // debounce my own typing broadcasts
   otherIsOnline: false,
   otherLastSeen: null,
   hoverMenuEl: null,            // currently-open bubble hover menu
   reactionPickerEl: null,       // currently-open reaction picker
+  convMenuEl: null,             // thread header ⋯ menu
   editingMessageId: null,       // bubble being inline-edited
+  replyingTo: null,             // { id, body, sender_id, sender_name } when composing a reply
+  globalSearchResults: null,    // { conversations: [], messages: [] } when global search is active
 };
 
 // Quick-reaction emojis (FB-style — these match the existing post REACTIONS set)
@@ -7069,11 +7074,29 @@ async function loadConversationList() {
     `;
   }
 
-  // Fetch all conversations involving me
+  // Fetch all conversations I'm a participant of (uses participant-based RLS).
+  // Two-step: get my participant rows, then load conversations for those ids.
+  const { data: myParts, error: partErr } = await supabase
+    .from('conversation_participants')
+    .select('conversation_id')
+    .eq('user_id', currentUser.id);
+
+  if (partErr) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(partErr.message)}</div>`;
+    return;
+  }
+  const convIds = (myParts || []).map(p => p.conversation_id);
+  if (!convIds.length) {
+    wrap.innerHTML = DM_EMPTY_HTML;
+    dmState.conversations = [];
+    updateUnreadBadge(0);
+    return;
+  }
+
   const { data: convs, error } = await supabase
     .from('conversations')
-    .select('id, user_a, user_b, last_message_at, last_message_preview, last_message_sender, created_at')
-    .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`)
+    .select('id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
+    .in('id', convIds)
     .order('last_message_at', { ascending: false, nullsFirst: false })
     .limit(100);
 
@@ -7084,34 +7107,106 @@ async function loadConversationList() {
 
   if (!convs || !convs.length) {
     wrap.innerHTML = DM_EMPTY_HTML;
+    dmState.conversations = [];
+    updateUnreadBadge(0);
     return;
   }
 
-  // Hydrate the "other user" profile for each + count unread per convo
-  const otherIds = convs.map(c => c.user_a === currentUser.id ? c.user_b : c.user_a);
+  // Filter out archived (per-side) conversations
+  const visibleConvs = convs.filter(c => {
+    if (c.is_group) return true; // archive on groups: TODO Phase 4
+    const archivedByMe = (c.user_a === currentUser.id && c.archived_by_a) ||
+                         (c.user_b === currentUser.id && c.archived_by_b);
+    return !archivedByMe;
+  });
+
+  // Pull all participants for groups so we can render stacked avatars
+  const groupConvIds = visibleConvs.filter(c => c.is_group).map(c => c.id);
+  const groupMembersByConv = {};
+  if (groupConvIds.length) {
+    const { data: members } = await supabase
+      .from('conversation_participants')
+      .select('conversation_id, user_id')
+      .in('conversation_id', groupConvIds);
+    (members || []).forEach(m => {
+      if (!groupMembersByConv[m.conversation_id]) groupMembersByConv[m.conversation_id] = [];
+      groupMembersByConv[m.conversation_id].push(m.user_id);
+    });
+  }
+
+  // Hydrate ALL profiles needed (1:1 partners + group members)
+  const allProfileIds = new Set();
+  visibleConvs.forEach(c => {
+    if (!c.is_group) {
+      const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
+      if (otherId) allProfileIds.add(otherId);
+    } else {
+      (groupMembersByConv[c.id] || []).forEach(id => allProfileIds.add(id));
+    }
+  });
   const [{ data: profiles }, unreadByConv] = await Promise.all([
-    supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', otherIds),
-    fetchUnreadCounts(convs.map(c => c.id)),
+    allProfileIds.size
+      ? supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', [...allProfileIds])
+      : Promise.resolve({ data: [] }),
+    fetchUnreadCounts(visibleConvs.map(c => c.id)),
   ]);
 
   const profileMap = new Map((profiles || []).map(p => [p.id, p]));
   let totalUnread = 0;
-  dmState.conversations = convs.map(c => {
-    const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
+  dmState.conversations = visibleConvs.map(c => {
     const unread = unreadByConv[c.id] || 0;
-    totalUnread += unread;
+    const isMutedNow = isConvMutedForMe(c);
+    if (!isMutedNow) totalUnread += unread;
+
+    if (c.is_group) {
+      const memberIds = (groupMembersByConv[c.id] || []).filter(id => id !== currentUser.id);
+      const members = memberIds.map(id => profileMap.get(id)).filter(Boolean);
+      const allMembers = (groupMembersByConv[c.id] || []).map(id => profileMap.get(id) || { id, username: 'Unknown' });
+      // Auto-name: "Alice, Bob, Carol" from up to 3 other members
+      const autoName = c.name || members.slice(0, 3).map(m => m.username).join(', ') || 'Group chat';
+      return {
+        id: c.id,
+        isGroup: true,
+        name: autoName,
+        members: allMembers,
+        memberCount: allMembers.length,
+        avatarUrl: c.avatar_url,
+        lastMessageAt: c.last_message_at,
+        lastMessagePreview: c.last_message_preview || '',
+        lastMessageSender: c.last_message_sender,
+        unread,
+        muted: isMutedNow,
+        raw: c,
+      };
+    }
+    const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
     return {
       id: c.id,
+      isGroup: false,
       otherUser: profileMap.get(otherId) || { id: otherId, username: 'Unknown', avatar_url: null },
       lastMessageAt: c.last_message_at,
       lastMessagePreview: c.last_message_preview || '',
       lastMessageSender: c.last_message_sender,
       unread,
+      muted: isMutedNow,
+      raw: c,
     };
   });
 
   renderConversationList();
   updateUnreadBadge(totalUnread);
+}
+
+// Returns true if the conversation is currently muted for the current user
+function isConvMutedForMe(c) {
+  if (!c) return false;
+  const my = currentUser?.id;
+  let until;
+  if (c.is_group) return false; // group mute TBD
+  if (c.user_a === my)      until = c.muted_until_a;
+  else if (c.user_b === my) until = c.muted_until_b;
+  if (!until) return false;
+  return new Date(until).getTime() > Date.now();
 }
 
 async function fetchUnreadCounts(conversationIds) {
@@ -7148,30 +7243,63 @@ function renderConversationList() {
 }
 
 function renderConvItemHtml(c) {
-  const { otherUser } = c;
-  const safeName = escHTML(otherUser.username || 'Unknown');
-  const avatar = otherUser.avatar_url
-    ? `<img src="${escHTML(otherUser.avatar_url)}" alt=""/>`
-    : `<span class="dm-avatar-initials">${initials(otherUser.username)}</span>`;
+  let safeName, avatarHtml;
+  if (c.isGroup) {
+    safeName = escHTML(c.name || 'Group chat');
+    avatarHtml = renderGroupAvatarHtml(c.members, 'list');
+  } else {
+    const u = c.otherUser;
+    safeName = escHTML(u.username || 'Unknown');
+    avatarHtml = `<div class="dm-conv-avatar">${u.avatar_url
+      ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
+      : `<span class="dm-avatar-initials">${initials(u.username)}</span>`}</div>`;
+  }
   const isMine = c.lastMessageSender === currentUser.id;
-  const previewPrefix = isMine ? 'You: ' : '';
-  const preview = c.lastMessagePreview ? previewPrefix + escHTML(c.lastMessagePreview) : '<em>No messages yet</em>';
+  const senderPrefix = c.isGroup && c.lastMessageSender && !isMine
+    ? (escHTML(senderUsernameInGroup(c, c.lastMessageSender) || 'Someone') + ': ')
+    : (isMine ? 'You: ' : '');
+  const preview = c.lastMessagePreview
+    ? senderPrefix + escHTML(c.lastMessagePreview)
+    : '<em>No messages yet</em>';
   const time = c.lastMessageAt ? timeAgo(c.lastMessageAt) : '';
   const isActive = c.id === dmState.activeConvId;
   const unreadCls = c.unread > 0 ? ' has-unread' : '';
+  const mutedIcon = c.muted ? '<span class="dm-conv-muted" title="Muted">🔕</span>' : '';
   return `
     <button class="dm-conv-item${isActive ? ' active' : ''}${unreadCls}" data-conv-id="${c.id}">
-      <div class="dm-conv-avatar">${avatar}</div>
+      ${avatarHtml}
       <div class="dm-conv-meta">
         <div class="dm-conv-row">
-          <span class="dm-conv-name">${safeName}</span>
+          <span class="dm-conv-name">${safeName}${mutedIcon}</span>
           <span class="dm-conv-time">${time}</span>
         </div>
         <div class="dm-conv-preview">${preview}</div>
       </div>
-      ${c.unread > 0 ? `<span class="dm-conv-unread">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
+      ${c.unread > 0 && !c.muted ? `<span class="dm-conv-unread">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
     </button>
   `;
+}
+
+function senderUsernameInGroup(conv, senderId) {
+  if (!conv?.members) return null;
+  const m = conv.members.find(p => p.id === senderId);
+  return m?.username || null;
+}
+
+// Stacked avatars for group conversations (list = small, header = large)
+function renderGroupAvatarHtml(members, variant = 'list') {
+  const others = (members || []).filter(m => m.id !== currentUser.id).slice(0, 2);
+  if (!others.length) {
+    return `<div class="dm-conv-avatar">👥</div>`;
+  }
+  const cls = variant === 'list' ? 'dm-conv-avatar dm-group-avatar' : 'dm-thread-avatar dm-group-avatar';
+  const tiles = others.map((m, i) => {
+    const safeAvatar = m.avatar_url ? escHTML(m.avatar_url) : '';
+    return `<span class="dm-group-tile dm-group-tile-${i}">${safeAvatar
+      ? `<img src="${safeAvatar}" alt=""/>`
+      : initials(m.username)}</span>`;
+  }).join('');
+  return `<div class="${cls}">${tiles}</div>`;
 }
 
 // ── Open a thread ─────────────────────────────────────────────────────────
@@ -7192,41 +7320,66 @@ async function openConversationWithUser(otherUserId) {
 async function openConversation(convId) {
   if (!convId || !currentUser) return;
   dmState.activeConvId = convId;
+  dmState.replyingTo = null;
+  hideReplyPreview();
 
-  // Find conversation in cache (or refetch)
+  // Find conversation in cache (or refetch — also re-hydrate participants)
   let conv = dmState.conversations.find(c => c.id === convId);
   if (!conv) {
-    // Fetch directly
     const { data } = await supabase.from('conversations').select('*').eq('id', convId).single();
     if (!data) { toast('Conversation not found', 'error'); return; }
-    const otherId = data.user_a === currentUser.id ? data.user_b : data.user_a;
-    const { data: prof } = await supabase.from('profiles').select('id, username, avatar_url, is_guest').eq('id', otherId).single();
-    conv = {
-      id: data.id,
-      otherUser: prof || { id: otherId, username: 'Unknown', avatar_url: null },
-      lastMessageAt: data.last_message_at,
-      lastMessagePreview: data.last_message_preview || '',
-      unread: 0,
-    };
+    if (data.is_group) {
+      const { data: parts } = await supabase.from('conversation_participants')
+        .select('user_id, profiles:profiles!conversation_participants_user_id_fkey(id, username, avatar_url, is_guest)')
+        .eq('conversation_id', convId);
+      const members = (parts || []).map(p => p.profiles).filter(Boolean);
+      conv = {
+        id: data.id, isGroup: true, name: data.name || members.filter(m => m.id !== currentUser.id).slice(0,3).map(m => m.username).join(', '),
+        members, memberCount: members.length, avatarUrl: data.avatar_url,
+        lastMessageAt: data.last_message_at, lastMessagePreview: data.last_message_preview || '',
+        unread: 0, muted: false, raw: data,
+      };
+    } else {
+      const otherId = data.user_a === currentUser.id ? data.user_b : data.user_a;
+      const { data: prof } = await supabase.from('profiles').select('id, username, avatar_url, is_guest').eq('id', otherId).single();
+      conv = {
+        id: data.id, isGroup: false,
+        otherUser: prof || { id: otherId, username: 'Unknown', avatar_url: null },
+        lastMessageAt: data.last_message_at,
+        lastMessagePreview: data.last_message_preview || '',
+        unread: 0, muted: isConvMutedForMe(data), raw: data,
+      };
+    }
   }
-  dmState.activeOther = conv.otherUser;
+  dmState.activeConv = conv;
+  dmState.activeOther = conv.isGroup ? null : conv.otherUser;
 
   // Show active panel, hide empty placeholder
   document.getElementById('dmThreadEmpty').style.display = 'none';
   document.getElementById('dmThreadActive').style.display = 'flex';
 
-  // Header
+  // Header — different rendering for groups vs 1:1
   const av = document.getElementById('dmThreadAvatar');
-  const u = conv.otherUser;
-  av.innerHTML = (u.avatar_url
-    ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
-    : `<span class="dm-avatar-initials">${initials(u.username)}</span>`) +
-    `<span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>`;
-  av.onclick = () => openProfile(u.id);
   const nameBtn = document.getElementById('dmThreadName');
-  nameBtn.textContent = u.username || 'Unknown';
-  nameBtn.onclick = () => openProfile(u.id);
-  document.getElementById('dmThreadStatus').textContent = '';
+  const statusEl = document.getElementById('dmThreadStatus');
+  if (conv.isGroup) {
+    av.innerHTML = renderGroupAvatarHtml(conv.members, 'list')
+      .replace('class="dm-conv-avatar dm-group-avatar"', 'class="dm-group-avatar dm-group-avatar-header"');
+    av.onclick = () => openConvActionsMenu(); // tap header avatar → menu (View members)
+    nameBtn.textContent = conv.name;
+    nameBtn.onclick = () => openConvActionsMenu();
+    statusEl.textContent = `${conv.memberCount} members`;
+  } else {
+    const u = conv.otherUser;
+    av.innerHTML = (u.avatar_url
+      ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
+      : `<span class="dm-avatar-initials">${initials(u.username)}</span>`) +
+      `<span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>`;
+    av.onclick = () => openProfile(u.id);
+    nameBtn.textContent = u.username || 'Unknown';
+    nameBtn.onclick = () => openProfile(u.id);
+    statusEl.textContent = '';
+  }
 
   // Highlight in list
   document.querySelectorAll('.dm-conv-item').forEach(el => {
@@ -7241,11 +7394,10 @@ async function openConversation(convId) {
 
   // Mark as read (server-side) — fire-and-forget
   supabase.rpc('mark_conversation_read', { p_conversation_id: convId }).then(() => {
-    // Refresh local unread count
     const c = dmState.conversations.find(x => x.id === convId);
     if (c) c.unread = 0;
     renderConversationList();
-    const total = dmState.conversations.reduce((sum, x) => sum + (x.unread || 0), 0);
+    const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
     updateUnreadBadge(total);
   });
 
@@ -7258,11 +7410,11 @@ async function loadMessages(convId) {
   if (!wrap) return;
   wrap.innerHTML = '<div class="dm-loading">Loading messages…</div>';
 
-  // Fetch messages + reactions in parallel
+  // Fetch messages + reactions in parallel (include reply_to_id so we can render quotes)
   const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
     supabase
       .from('messages')
-      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at')
+      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id')
       .eq('conversation_id', convId)
       .order('created_at', { ascending: true })
       .limit(200),
@@ -7306,17 +7458,30 @@ function renderMessages() {
   if (!wrap) return;
 
   if (!dmState.messages.length) {
-    wrap.innerHTML = `
-      <div class="dm-thread-intro">
-        <div class="dm-thread-intro-avatar">${dmState.activeOther?.avatar_url
-          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-          : initials(dmState.activeOther?.username)}</div>
-        <h3>${escHTML(dmState.activeOther?.username || '')}</h3>
-        <p>Say hello — your first message starts the conversation.</p>
-      </div>
-    `;
+    if (dmState.activeConv?.isGroup) {
+      wrap.innerHTML = `
+        <div class="dm-thread-intro">
+          <div class="dm-thread-intro-avatar">${renderGroupAvatarHtml(dmState.activeConv.members, 'list')}</div>
+          <h3>${escHTML(dmState.activeConv.name || 'Group chat')}</h3>
+          <p>${dmState.activeConv.memberCount} members. Send a message to get the chat going.</p>
+        </div>
+      `;
+    } else {
+      wrap.innerHTML = `
+        <div class="dm-thread-intro">
+          <div class="dm-thread-intro-avatar">${dmState.activeOther?.avatar_url
+            ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
+            : initials(dmState.activeOther?.username)}</div>
+          <h3>${escHTML(dmState.activeOther?.username || '')}</h3>
+          <p>Say hello — your first message starts the conversation.</p>
+        </div>
+      `;
+    }
     return;
   }
+  const isGroup = !!dmState.activeConv?.isGroup;
+  const memberMap = new Map();
+  if (isGroup) (dmState.activeConv.members || []).forEach(m => memberMap.set(m.id, m));
 
   // Identify the LAST message sent by ME that the OTHER has already read,
   // so we can stick the read avatar to it (FB pattern).
@@ -7349,18 +7514,32 @@ function renderMessages() {
       (isFirstInGroup ? ' first-in-group' : '') +
       (isLastInGroup  ? ' last-in-group'  : '');
 
+    // Avatar: in groups, show the SENDER's avatar (different per message); in 1:1, the activeOther's
+    const senderProfile = isGroup ? memberMap.get(m.sender_id) : dmState.activeOther;
     const showAvatar = !mine && isLastInGroup;
     const avatarHtml = showAvatar
-      ? `<div class="dm-bubble-avatar">${dmState.activeOther?.avatar_url
-          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-          : initials(dmState.activeOther?.username)}</div>`
+      ? `<div class="dm-bubble-avatar">${senderProfile?.avatar_url
+          ? `<img src="${escHTML(senderProfile.avatar_url)}"/>`
+          : initials(senderProfile?.username)}</div>`
       : '<div class="dm-bubble-avatar-spacer"></div>';
+    // In groups: show sender name above their FIRST bubble in a stretch
+    const senderNameHtml = (isGroup && !mine && isFirstInGroup && senderProfile)
+      ? `<div class="dm-sender-name">${escHTML(senderProfile.username || 'Unknown')}</div>`
+      : '';
 
-    const body = m.deleted_at
-      ? `<em class="dm-bubble-deleted">Message deleted</em>`
-      : escHTML(m.body || '').replace(/\n/g, '<br>');
+    const isDeleted = !!m.deleted_at;
+    // Build bubble content: deleted messages render as a static label (NOT through linkify),
+    // otherwise escape body, convert newlines, then linkify URLs.
+    let bubbleContent;
+    if (isDeleted) {
+      const who = mine ? 'You' : escHTML(dmState.activeOther?.username || 'User');
+      bubbleContent = `<span class="dm-bubble-deleted">${who} unsent a message</span>`;
+    } else {
+      const escaped = escHTML(m.body || '').replace(/\n/g, '<br>');
+      bubbleContent = linkify(escaped);
+    }
 
-    const editedTag = (!m.deleted_at && m.edited_at) ? '<span class="dm-edited-tag" title="Edited">(edited)</span>' : '';
+    const editedTag = (!isDeleted && m.edited_at) ? '<span class="dm-edited-tag" title="Edited">(edited)</span>' : '';
 
     const readBadge = mine && m.id === lastReadOfMine
       ? `<div class="dm-bubble-read" title="Seen ${timeAgo(m.read_at)}">
@@ -7389,13 +7568,38 @@ function renderMessages() {
       }</div>`;
     }
 
-    const canEditDelete = mine && !m.deleted_at;
+    const canEditDelete = mine && !isDeleted;
+    const deletedCls = isDeleted ? ' is-deleted' : '';
+
+    // Reply quote chip — show the quoted message above the bubble
+    let replyQuoteHtml = '';
+    if (m.reply_to_id) {
+      const parent = dmState.messages.find(x => x.id === m.reply_to_id);
+      if (parent) {
+        const parentSender = isGroup
+          ? memberMap.get(parent.sender_id)
+          : (parent.sender_id === currentUser.id ? { username: 'You' } : dmState.activeOther);
+        const parentName = parent.sender_id === currentUser.id ? 'You' : (parentSender?.username || 'Unknown');
+        const parentBody = parent.deleted_at ? '(unsent message)' : (parent.body || '').slice(0, 100);
+        replyQuoteHtml = `
+          <button class="dm-reply-quote ${mine ? 'mine' : 'theirs'}" data-jump-to="${parent.id}">
+            <span class="dm-reply-quote-name">${escHTML(parentName)}</span>
+            <span class="dm-reply-quote-body">${escHTML(parentBody)}</span>
+          </button>
+        `;
+      } else {
+        replyQuoteHtml = `<div class="dm-reply-quote ${mine ? 'mine' : 'theirs'} dm-reply-orphan">Original message unavailable</div>`;
+      }
+    }
+
     html += `
       <div class="dm-bubble-row ${mine ? 'mine' : 'theirs'}" data-msg-id="${m.id}">
         ${!mine ? avatarHtml : ''}
         <div class="dm-bubble-wrap">
-          <div class="${bubbleCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
-            ${linkify(body)}${editedTag ? ' ' + editedTag : ''}
+          ${senderNameHtml}
+          ${replyQuoteHtml}
+          <div class="${bubbleCls}${deletedCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
+            ${bubbleContent}${editedTag ? ' ' + editedTag : ''}
           </div>
           ${reactionsHtml}
         </div>
@@ -7462,6 +7666,11 @@ async function sendDmMessage() {
     return sendDmThumbsUp();
   }
 
+  // Capture & clear reply state up front
+  const replyToId = dmState.replyingTo?.id || null;
+  dmState.replyingTo = null;
+  if (typeof hideReplyPreview === 'function') hideReplyPreview();
+
   // Optimistic render
   const tempId = 'temp-' + Date.now();
   const optimistic = {
@@ -7469,6 +7678,7 @@ async function sendDmMessage() {
     conversation_id: dmState.activeConvId,
     sender_id: currentUser.id,
     body,
+    reply_to_id: replyToId,
     created_at: new Date().toISOString(),
     read_at: null,
     _pending: true,
@@ -7484,6 +7694,7 @@ async function sendDmMessage() {
     conversation_id: dmState.activeConvId,
     sender_id: currentUser.id,
     body,
+    reply_to_id: replyToId,
   }).select().single();
 
   if (error) {
@@ -7795,6 +8006,9 @@ function openHoverMenu(bubbleEl) {
     <button class="dm-hover-btn" data-act="react" title="React">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
     </button>
+    <button class="dm-hover-btn" data-act="reply" title="Reply">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+    </button>
     <button class="dm-hover-btn" data-act="copy" title="Copy text">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
     </button>
@@ -7826,6 +8040,7 @@ function openHoverMenu(bubbleEl) {
       const act = btn.dataset.act;
       closeHoverMenu();
       if      (act === 'react')  openReactionPicker(bubbleEl);
+      else if (act === 'reply')  startReplyToMessage(messageId);
       else if (act === 'copy')   copyMessageText(messageId);
       else if (act === 'edit')   startEditMessage(messageId);
       else if (act === 'delete') deleteMessage(messageId);
@@ -7880,9 +8095,11 @@ document.addEventListener('click', (e) => {
     toggleReaction(pill.dataset.msg, pill.dataset.emoji);
     return;
   }
-  // Click on bubble → open hover menu
+  // Click on bubble → open hover menu (skip typing/deleted bubbles)
   const bubble = e.target.closest('.dm-bubble');
-  if (bubble && bubble.dataset.msgId && !bubble.classList.contains('dm-typing-bubble')) {
+  if (bubble && bubble.dataset.msgId
+      && !bubble.classList.contains('dm-typing-bubble')
+      && !bubble.classList.contains('is-deleted')) {
     if (dmState.editingMessageId === bubble.dataset.msgId) return; // don't reopen while editing
     e.stopPropagation();
     openHoverMenu(bubble);
@@ -8009,4 +8226,437 @@ window.addEventListener('hashchange', () => {
 });
 if (window.location.hash === '#messages') {
   setTimeout(() => showMessages(), 600);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DMs Phase 3 — reply, conv menu, group creation, search
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Reply state ───────────────────────────────────────────────────────────
+function startReplyToMessage(messageId) {
+  const m = dmState.messages.find(x => x.id === messageId);
+  if (!m) return;
+  const senderProfile = m.sender_id === currentUser.id
+    ? { username: 'yourself' }
+    : (dmState.activeConv?.isGroup
+        ? (dmState.activeConv.members || []).find(p => p.id === m.sender_id)
+        : dmState.activeOther);
+  dmState.replyingTo = {
+    id: m.id,
+    body: m.body,
+    sender_id: m.sender_id,
+    sender_name: senderProfile?.username || 'Unknown',
+  };
+  showReplyPreview();
+  document.getElementById('dmInput')?.focus();
+}
+
+function showReplyPreview() {
+  const el = document.getElementById('dmReplyPreview');
+  if (!el || !dmState.replyingTo) return;
+  document.getElementById('dmReplyName').textContent = dmState.replyingTo.sender_name;
+  document.getElementById('dmReplyText').textContent = (dmState.replyingTo.body || '').slice(0, 140);
+  el.style.display = '';
+}
+function hideReplyPreview() {
+  const el = document.getElementById('dmReplyPreview');
+  if (el) el.style.display = 'none';
+}
+
+document.getElementById('dmReplyCancel')?.addEventListener('click', () => {
+  dmState.replyingTo = null;
+  hideReplyPreview();
+});
+
+
+// ── Conversation actions menu (thread header ⋯) ───────────────────────────
+function closeConvMenu() {
+  if (dmState.convMenuEl) { dmState.convMenuEl.remove(); dmState.convMenuEl = null; }
+}
+
+function openConvActionsMenu() {
+  closeConvMenu();
+  if (!dmState.activeConv) return;
+  const c = dmState.activeConv;
+  const isGroup = c.isGroup;
+  const isMuted = c.muted || isConvMutedForMe(c.raw);
+
+  const menu = document.createElement('div');
+  menu.className = 'post-action-menu dm-conv-menu';
+  menu.innerHTML = isGroup ? `
+    <button data-act="members">View members (${c.memberCount})</button>
+    <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
+    <button data-act="archive">Archive chat</button>
+    <button data-act="leave" class="pam-danger">Leave group</button>
+  ` : `
+    <button data-act="profile">View profile</button>
+    <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
+    <button data-act="archive">Archive chat</button>
+    <button data-act="report">Report user</button>
+    <button data-act="delete" class="pam-danger">Delete conversation</button>
+  `;
+  document.body.appendChild(menu);
+
+  // Position below the header ⋯ button
+  const trigger = document.getElementById('dmThreadMenu');
+  const r = trigger?.getBoundingClientRect() || { top: 80, right: window.innerWidth - 20 };
+  menu.style.position = 'fixed';
+  menu.style.top   = `${r.bottom + 6}px`;
+  menu.style.right = `${Math.max(12, window.innerWidth - r.right)}px`;
+  dmState.convMenuEl = menu;
+
+  menu.querySelectorAll('[data-act]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const act = btn.dataset.act;
+      closeConvMenu();
+      if      (act === 'profile')  openProfile(dmState.activeOther?.id);
+      else if (act === 'members')  showGroupMembersDialog();
+      else if (act === 'mute')     toggleConvMute(isMuted);
+      else if (act === 'archive')  archiveConversation();
+      else if (act === 'report')   openReportUserModal(dmState.activeOther?.id, dmState.activeOther?.username || 'this user');
+      else if (act === 'delete')   confirmDeleteConversation();
+      else if (act === 'leave')    confirmLeaveGroup();
+    };
+  });
+
+  setTimeout(() => {
+    const onDocClick = (ev) => {
+      if (!dmState.convMenuEl?.contains(ev.target)) {
+        closeConvMenu();
+        document.removeEventListener('click', onDocClick);
+      }
+    };
+    document.addEventListener('click', onDocClick);
+  }, 0);
+}
+
+document.getElementById('dmThreadMenu')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  openConvActionsMenu();
+});
+
+async function toggleConvMute(currentlyMuted) {
+  const c = dmState.activeConv;
+  if (!c || c.isGroup) { toast('Group mute coming soon', ''); return; }
+  const conv = c.raw;
+  const myCol = conv.user_a === currentUser.id ? 'muted_until_a' : 'muted_until_b';
+  const newVal = currentlyMuted ? null : new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // mute 7 days
+  const { error } = await supabase.from('conversations').update({ [myCol]: newVal }).eq('id', conv.id);
+  if (error) { toast(error.message, 'error'); return; }
+  toast(currentlyMuted ? 'Unmuted' : 'Muted for 7 days', 'success');
+  conv[myCol] = newVal;
+  c.muted = !currentlyMuted;
+  renderConversationList();
+  // Recompute unread badge
+  const total = dmState.conversations.reduce((s, x) => x.muted ? s : s + (x.unread || 0), 0);
+  updateUnreadBadge(total);
+}
+
+async function archiveConversation() {
+  const c = dmState.activeConv;
+  if (!c || c.isGroup) { toast('Group archive coming soon', ''); return; }
+  const conv = c.raw;
+  const myCol = conv.user_a === currentUser.id ? 'archived_by_a' : 'archived_by_b';
+  const { error } = await supabase.from('conversations').update({ [myCol]: true }).eq('id', conv.id);
+  if (error) { toast(error.message, 'error'); return; }
+  toast('Archived', 'success');
+  // Remove from list, close thread
+  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
+  document.getElementById('dmBackBtn')?.click();
+  renderConversationList();
+}
+
+async function confirmDeleteConversation() {
+  const c = dmState.activeConv;
+  if (!c) return;
+  const ok = await confirmDialog({
+    title: 'Delete this conversation?',
+    body: 'All messages will be removed for both of you. This can\'t be undone.',
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
+  const { error } = await supabase.from('conversations').delete().eq('id', c.id);
+  if (error) { toast(error.message, 'error'); return; }
+  toast('Deleted', 'success');
+  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
+  document.getElementById('dmBackBtn')?.click();
+  renderConversationList();
+}
+
+async function confirmLeaveGroup() {
+  const c = dmState.activeConv;
+  if (!c?.isGroup) return;
+  const ok = await confirmDialog({
+    title: 'Leave this group?',
+    body: 'You\'ll stop receiving messages and won\'t see new ones unless you\'re re-added.',
+    confirmLabel: 'Leave',
+  });
+  if (!ok) return;
+  const { error } = await supabase.rpc('leave_conversation', { p_conversation_id: c.id });
+  if (error) { toast(error.message, 'error'); return; }
+  toast('Left the group', 'success');
+  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
+  document.getElementById('dmBackBtn')?.click();
+  renderConversationList();
+}
+
+function showGroupMembersDialog() {
+  const c = dmState.activeConv;
+  if (!c?.isGroup) return;
+  document.querySelectorAll('.modal-backdrop[data-modal="group-members"]').forEach(m => m.remove());
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'group-members';
+  modal.innerHTML = `
+    <div class="modal-card follow-list-modal">
+      <div class="follow-list-header">
+        <h2>Members</h2>
+        <p class="modal-sub">${escHTML(c.name)} · ${c.memberCount} members</p>
+      </div>
+      <div class="follow-list-body">
+        ${c.members.map(m => `
+          <div class="follow-list-row">
+            <button class="follow-list-avatar" data-uid="${m.id}">
+              ${m.avatar_url ? `<img src="${escHTML(m.avatar_url)}"/>` : initials(m.username)}
+            </button>
+            <div class="follow-list-info">
+              <button class="follow-list-name" data-uid="${m.id}">@${escHTML(m.username || '')}</button>
+            </div>
+            ${m.id === currentUser.id ? '<span class="follow-list-you">You</span>' : ''}
+          </div>
+        `).join('')}
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" data-action="cancel">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector('[data-action="cancel"]').onclick = () => modal.remove();
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.remove(); });
+  modal.querySelectorAll('[data-uid]').forEach(el => {
+    el.onclick = () => { modal.remove(); openProfile(el.dataset.uid); };
+  });
+}
+
+// ── New conversation modal (1:1 OR group) ────────────────────────────────
+document.getElementById('dmNewBtn')?.addEventListener('click', () => openNewConvModal());
+
+function openNewConvModal() {
+  if (!currentUser) { toast('Please sign in', 'error'); return; }
+  document.querySelectorAll('.modal-backdrop[data-modal="dm-new"]').forEach(m => m.remove());
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'dm-new';
+  modal.innerHTML = `
+    <div class="modal-card dm-new-modal">
+      <h2>New message</h2>
+      <p class="modal-sub">Pick one person for a 1:1 chat, or 2+ for a group.</p>
+      <input type="text" class="dm-new-search" id="dmNewSearch" placeholder="Search users by username…" autocomplete="off"/>
+      <div class="dm-new-selected" id="dmNewSelected"></div>
+      <div class="dm-new-results" id="dmNewResults">
+        <div class="dm-new-hint">Start typing a username…</div>
+      </div>
+      <div class="dm-new-name-wrap" id="dmNewNameWrap" style="display:none">
+        <input type="text" class="dm-new-name" id="dmNewName" placeholder="Group name (optional)" maxlength="120"/>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" data-action="cancel">Cancel</button>
+        <button class="btn-primary" data-action="create" disabled>Start chat</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const selectedUsers = []; // [{id, username, avatar_url}]
+  const search = modal.querySelector('#dmNewSearch');
+  const results = modal.querySelector('#dmNewResults');
+  const selectedWrap = modal.querySelector('#dmNewSelected');
+  const nameWrap = modal.querySelector('#dmNewNameWrap');
+  const nameInput = modal.querySelector('#dmNewName');
+  const createBtn = modal.querySelector('[data-action="create"]');
+
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+
+  function refreshSelected() {
+    selectedWrap.innerHTML = selectedUsers.map(u => `
+      <span class="dm-new-chip" data-uid="${u.id}">
+        ${u.avatar_url ? `<img src="${escHTML(u.avatar_url)}"/>` : `<span class="dm-new-chip-init">${initials(u.username)}</span>`}
+        <span>@${escHTML(u.username)}</span>
+        <button class="dm-new-chip-x" aria-label="Remove">×</button>
+      </span>
+    `).join('');
+    selectedWrap.querySelectorAll('.dm-new-chip-x').forEach((btn, i) => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        const id = selectedUsers[i].id;
+        const idx = selectedUsers.findIndex(u => u.id === id);
+        if (idx >= 0) selectedUsers.splice(idx, 1);
+        refreshSelected();
+        updateButton();
+      };
+    });
+    nameWrap.style.display = selectedUsers.length >= 2 ? '' : 'none';
+  }
+  function updateButton() {
+    createBtn.disabled = selectedUsers.length === 0;
+    createBtn.textContent = selectedUsers.length >= 2 ? 'Start group chat' : 'Start chat';
+  }
+
+  let searchTimer = null;
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    const q = search.value.trim();
+    if (!q) {
+      results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
+      return;
+    }
+    searchTimer = setTimeout(async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('id, username, avatar_url, is_guest')
+        .ilike('username', `%${q}%`)
+        .neq('id', currentUser.id)
+        .limit(20);
+      if (!data?.length) {
+        results.innerHTML = '<div class="dm-new-hint">No users found.</div>';
+        return;
+      }
+      results.innerHTML = data.map(p => `
+        <button class="dm-new-result" data-uid="${p.id}" ${selectedUsers.some(u => u.id === p.id) ? 'data-already-selected="1"' : ''}>
+          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
+          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
+          ${selectedUsers.some(u => u.id === p.id) ? '<span class="dm-new-result-check">✓</span>' : ''}
+        </button>
+      `).join('');
+      results.querySelectorAll('[data-uid]').forEach(btn => {
+        btn.onclick = () => {
+          const uid = btn.dataset.uid;
+          const profile = data.find(p => p.id === uid);
+          const idx = selectedUsers.findIndex(u => u.id === uid);
+          if (idx >= 0) selectedUsers.splice(idx, 1);
+          else selectedUsers.push(profile);
+          refreshSelected();
+          updateButton();
+          search.dispatchEvent(new Event('input')); // re-render results with check state
+        };
+      });
+    }, 200);
+  });
+  search.focus();
+
+  createBtn.onclick = async () => {
+    if (!selectedUsers.length) return;
+    createBtn.disabled = true;
+    createBtn.textContent = 'Creating…';
+    try {
+      let convId;
+      if (selectedUsers.length === 1) {
+        const { data, error } = await supabase.rpc('get_or_create_conversation', {
+          p_other_user_id: selectedUsers[0].id,
+        });
+        if (error) throw error;
+        convId = data;
+      } else {
+        const { data, error } = await supabase.rpc('create_group_conversation', {
+          p_name: nameInput.value.trim() || null,
+          p_participant_ids: selectedUsers.map(u => u.id),
+        });
+        if (error) throw error;
+        convId = data;
+      }
+      close();
+      await loadConversationList();
+      await openConversation(convId);
+    } catch (err) {
+      toast(err.message || 'Failed to create chat', 'error');
+      createBtn.disabled = false;
+      createBtn.textContent = 'Start chat';
+    }
+  };
+}
+
+// ── Global search (across conversations + message bodies) ─────────────────
+let _dmSearchTimer = null;
+const _origSearchHandler = (e) => {
+  // Replace the simple-filter behavior with debounced server search if length > 1
+  const q = e.target.value.trim();
+  clearTimeout(_dmSearchTimer);
+  if (!q) {
+    dmState.globalSearchResults = null;
+    renderConversationList();
+    return;
+  }
+  // Quick local filter first (instant feedback)
+  document.querySelectorAll('.dm-conv-item').forEach(el => {
+    const name = el.querySelector('.dm-conv-name')?.textContent.toLowerCase() || '';
+    const preview = el.querySelector('.dm-conv-preview')?.textContent.toLowerCase() || '';
+    el.style.display = (name.includes(q.toLowerCase()) || preview.includes(q.toLowerCase())) ? '' : 'none';
+  });
+  // Then debounced server message search
+  _dmSearchTimer = setTimeout(async () => {
+    const { data: hits } = await supabase
+      .from('messages')
+      .select('id, conversation_id, sender_id, body, created_at')
+      .ilike('body', `%${q}%`)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (!hits?.length) return;
+    renderGlobalSearchResults(hits, q);
+  }, 280);
+};
+const dmSearchInput = document.getElementById('dmSearchInput');
+if (dmSearchInput) {
+  // Clear any prior listener by cloning & re-attaching is messier — just override behavior
+  dmSearchInput.removeEventListener?.('input', dmSearchInput._dmHandler);
+  dmSearchInput._dmHandler = _origSearchHandler;
+  dmSearchInput.addEventListener('input', _origSearchHandler);
+}
+
+function renderGlobalSearchResults(hits, query) {
+  const wrap = document.getElementById('dmConvList');
+  if (!wrap) return;
+  // Group hits by conversation
+  const byConv = {};
+  hits.forEach(h => {
+    if (!byConv[h.conversation_id]) byConv[h.conversation_id] = [];
+    byConv[h.conversation_id].push(h);
+  });
+  // Map convs we already have in state
+  const convsById = new Map(dmState.conversations.map(c => [c.id, c]));
+  const html = Object.entries(byConv).map(([cid, msgs]) => {
+    const conv = convsById.get(cid);
+    if (!conv) return '';
+    const name = conv.isGroup ? conv.name : conv.otherUser?.username;
+    return `
+      <div class="dm-search-group">
+        <div class="dm-search-group-name">${escHTML(name || 'Conversation')}</div>
+        ${msgs.map(m => `
+          <button class="dm-search-hit" data-conv="${cid}" data-msg="${m.id}">
+            <span class="dm-search-hit-time">${timeAgo(m.created_at)}</span>
+            <span class="dm-search-hit-body">${highlightSearchMatch(m.body, query)}</span>
+          </button>
+        `).join('')}
+      </div>
+    `;
+  }).join('');
+  wrap.innerHTML = `
+    <div class="dm-search-results">
+      ${html || '<div class="dm-empty-list"><h3>No matches</h3></div>'}
+    </div>
+  `;
+  wrap.querySelectorAll('.dm-search-hit').forEach(el => {
+    el.onclick = () => openConversation(el.dataset.conv);
+  });
+}
+
+function highlightSearchMatch(body, query) {
+  const text = (body || '').slice(0, 200);
+  const safe = escHTML(text);
+  const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig');
+  return safe.replace(re, '<mark>$1</mark>');
 }
