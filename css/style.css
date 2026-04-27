@@ -2032,8 +2032,52 @@ body.light .ql-editor { color: #1f2937; }
 /* ── REACTION COUNTS (above action bar) ── */
 .post-stats { display: flex; align-items: center; justify-content: space-between; padding: 0.25rem 0 0.5rem; font-size: 0.8rem; color: var(--text3); min-height: 20px; }
 .post-stats:empty { display: none; }
-.post-stats .rcount { display: flex; align-items: center; gap: 4px; }
+.post-stats .rcount { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 6px; transition: background 0.15s ease; }
+.post-stats .rcount:not(:empty) { cursor: pointer; }
+.post-stats .rcount:not(:empty):hover { background: rgba(124, 58, 237, 0.06); color: var(--text2); }
+.post-stats .ccount { padding: 2px 6px; border-radius: 6px; transition: background 0.15s ease; }
+.post-stats .ccount:not(:empty) { cursor: pointer; }
+.post-stats .ccount:not(:empty):hover { background: rgba(124, 58, 237, 0.06); color: var(--text2); text-decoration: underline; }
 .post-stats .rcount-emojis { display: inline-flex; font-size: 15px; letter-spacing: -2px; margin-right: 4px; }
+body:not(.light) .post-stats .rcount:not(:empty):hover { background: rgba(167, 139, 250, 0.10); }
+body:not(.light) .post-stats .ccount:not(:empty):hover { background: rgba(167, 139, 250, 0.10); }
+
+/* Reactor list modal tabs */
+.reactor-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.6rem 0 0.5rem;
+  border-bottom: 1px solid rgba(124, 58, 237, 0.08);
+  margin-bottom: 0.4rem;
+}
+.reactor-tab {
+  padding: 0.3rem 0.7rem;
+  background: transparent;
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  border-radius: 999px;
+  color: var(--text2);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.reactor-tab:hover { background: rgba(124, 58, 237, 0.06); color: #6d28d9; }
+.reactor-tab.active {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+  border-color: rgba(124, 58, 237, 0.6);
+  box-shadow: 0 2px 6px rgba(124, 58, 237, 0.30);
+}
+.reactor-emoji {
+  flex-shrink: 0;
+  font-size: 1.15rem;
+  margin-right: 0.4rem;
+}
+body:not(.light) .reactor-tabs { border-bottom-color: rgba(167, 139, 250, 0.10); }
+body:not(.light) .reactor-tab { border-color: rgba(167, 139, 250, 0.20); color: #9ca3af; }
+body:not(.light) .reactor-tab:hover { background: rgba(167, 139, 250, 0.10); color: #c4b5fd; }
 
 /* ── ACTION BAR (premium flat) ── */
 .post-actions {
