@@ -471,12 +471,15 @@
           </button>
           <div class="chapter-editor-bar-spacer"></div>
           <div class="chapter-editor-actions">
-            <label class="book-editor-publish-toggle">
-              <input type="checkbox" id="chapterEditorPublished">
-              <span class="toggle-slider"></span>
-              <span class="toggle-label" style="font-size:0.78rem">Published</span>
-            </label>
-            <button class="btn btn-purple btn-sm" id="btnSaveChapter">Save</button>
+            <span class="chapter-state-pill" id="chapterStatePill" data-state="draft">
+              <span class="chapter-state-dot"></span>
+              <span class="chapter-state-text">Draft</span>
+            </span>
+            <button class="btn btn-ghost btn-sm" id="btnSaveChapter" title="Save draft">Save</button>
+            <button class="btn btn-purple btn-sm" id="btnPublishChapter">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.3rem;vertical-align:-2px"><path d="M5 12l5 5L20 7"/></svg>
+              <span id="btnPublishChapterLabel">Publish</span>
+            </button>
           </div>
         </div>
 
@@ -1207,6 +1210,99 @@
           <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
         </svg>
         <span id="confirmOkLabel">Delete forever</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Chapter Publish dialog (Now / Schedule) ─── -->
+<div class="modal-overlay video-upload-overlay" id="chapterPublishModal" style="display:none">
+  <div class="vu-modal cp-modal">
+    <div class="vu-header">
+      <div class="vu-header-text">
+        <h2 class="vu-title">Publish chapter</h2>
+        <p class="vu-subtitle" id="cpSubtitle">Choose when this chapter goes live</p>
+      </div>
+      <button class="vu-close" id="cpClose" aria-label="Close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="vu-body">
+      <div class="vu-radio-row">
+        <label class="vu-radio active" data-cp-when="now">
+          <input type="radio" name="cpWhen" value="now" checked>
+          <div class="vu-radio-content">
+            <div class="vu-radio-title">Publish now</div>
+            <div class="vu-radio-sub">Readers can open this chapter the moment you click Publish.</div>
+          </div>
+        </label>
+        <label class="vu-radio" data-cp-when="schedule">
+          <input type="radio" name="cpWhen" value="schedule">
+          <div class="vu-radio-content">
+            <div class="vu-radio-title">Schedule for later</div>
+            <div class="vu-radio-sub">Goes live automatically at the time you pick.</div>
+            <div class="vu-schedule-input" id="cpScheduleWrap" style="display:none">
+              <input type="datetime-local" id="cpScheduleDatetime">
+            </div>
+          </div>
+        </label>
+      </div>
+      <div class="vu-fb-note">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        <span>Scheduled chapters stay private until their time arrives — even with the link.</span>
+      </div>
+    </div>
+    <div class="vu-footer">
+      <button class="vu-btn vu-btn-ghost" id="cpUnpublish" style="display:none">Unpublish</button>
+      <div class="vu-footer-right">
+        <button class="vu-btn vu-btn-ghost" id="cpCancel">Cancel</button>
+        <button class="vu-btn vu-btn-primary" id="cpCommit">Publish now</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Chapter Publish SUCCESS modal (Wattpad-style) ─── -->
+<div class="modal-overlay video-upload-overlay" id="chapterPublishSuccessModal" style="display:none">
+  <div class="vu-modal cp-success-modal">
+    <button class="vu-close cp-success-close" id="cpSuccessClose" aria-label="Close">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+
+    <!-- Burst hero -->
+    <div class="cp-success-hero">
+      <div class="cp-success-burst">
+        <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </div>
+      <h2 class="cp-success-title" id="cpSuccessTitle">Chapter published!</h2>
+      <p class="cp-success-sub"  id="cpSuccessSub">Your readers can dive in right now.</p>
+    </div>
+
+    <!-- Book card -->
+    <div class="cp-card">
+      <img class="cp-cover" id="cpSuccessCover" src="" alt="">
+      <div class="cp-card-meta">
+        <div class="cp-book-title" id="cpSuccessBookTitle">—</div>
+        <div class="cp-chapter-line">
+          <span class="cp-chapter-num"  id="cpSuccessChapterNum">Ch 1</span>
+          <span class="cp-chapter-title" id="cpSuccessChapterTitle">—</span>
+        </div>
+        <div class="cp-found-under">
+          <span class="cp-found-label">Found under</span>
+          <div class="cp-chips" id="cpSuccessChips"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="cp-success-actions">
+      <button class="cp-action-btn" id="cpSuccessShare">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+        <span>Share link</span>
+      </button>
+      <button class="cp-action-btn cp-action-btn-primary" id="cpSuccessPreview">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span>Preview</span>
       </button>
     </div>
   </div>
