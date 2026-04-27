@@ -6521,3 +6521,255 @@ body:not(.light) .dm-bubble-read { box-shadow: 0 0 0 2px var(--bg2); }
   .dm-shell.thread-open .dm-thread { display: flex; }
   .dm-back-btn { display: inline-flex; }
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   DMs Phase 2 — typing, presence, reactions, hover menu, edit
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Bubble wrap holds bubble + reactions stacked under it */
+.dm-bubble-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: min(540px, 70%);
+  position: relative;
+}
+.dm-bubble-row.mine .dm-bubble-wrap { align-items: flex-end; }
+.dm-bubble-wrap .dm-bubble { max-width: 100%; }
+
+/* Bubble interactions */
+.dm-bubble {
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.12s ease;
+}
+.dm-bubble:hover:not(.dm-typing-bubble) { filter: brightness(0.97); }
+.dm-bubble.mine:hover:not(.dm-typing-bubble) { filter: brightness(1.05); }
+
+/* Edited tag */
+.dm-edited-tag {
+  font-size: 0.68rem;
+  opacity: 0.65;
+  margin-left: 0.3rem;
+  font-style: italic;
+  white-space: nowrap;
+}
+.dm-bubble.mine .dm-edited-tag { color: rgba(255, 255, 255, 0.75); }
+.dm-bubble.theirs .dm-edited-tag { color: #6b7280; }
+
+/* ── Typing indicator bubble ─────────────────────────────────────────────── */
+.dm-typing-bubble {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  padding: 0.7rem 0.9rem !important;
+  background: #f3f4f6 !important;
+  cursor: default !important;
+}
+.dm-typing-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #9ca3af;
+  display: inline-block;
+  animation: dmTypingPulse 1.2s infinite ease-in-out;
+}
+.dm-typing-dot:nth-child(2) { animation-delay: 0.18s; }
+.dm-typing-dot:nth-child(3) { animation-delay: 0.36s; }
+@keyframes dmTypingPulse {
+  0%, 60%, 100% { transform: scale(0.8); opacity: 0.4; }
+  30%           { transform: scale(1.0); opacity: 1.0; }
+}
+body:not(.light) .dm-typing-bubble { background: #2a2440 !important; }
+body:not(.light) .dm-typing-dot { background: #6b7280; }
+
+/* ── Reaction pills (under bubble) ────────────────────────────────────────── */
+.dm-bubble-reactions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+.dm-rx-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px 2px 5px;
+  background: white;
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #4b5563;
+  cursor: pointer;
+  font-family: inherit;
+  transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+  box-shadow: 0 1px 3px rgba(15, 10, 28, 0.06);
+  line-height: 1.2;
+}
+.dm-rx-pill:hover {
+  transform: translateY(-1px) scale(1.05);
+  border-color: rgba(124, 58, 237, 0.35);
+}
+.dm-rx-pill.mine {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.10), rgba(167, 139, 250, 0.18));
+  border-color: rgba(124, 58, 237, 0.40);
+  color: #6d28d9;
+}
+.dm-rx-count { font-size: 0.7rem; }
+body:not(.light) .dm-rx-pill {
+  background: rgba(167, 139, 250, 0.10);
+  border-color: rgba(167, 139, 250, 0.20);
+  color: #d1d5db;
+}
+body:not(.light) .dm-rx-pill.mine {
+  background: rgba(167, 139, 250, 0.20);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #ddd6fe;
+}
+
+/* ── Hover action menu (above bubble) ───────────────────────────────────── */
+.dm-hover-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: white;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(15, 10, 28, 0.15), 0 2px 4px rgba(15, 10, 28, 0.06);
+  z-index: 9999;
+  animation: dmMenuFadeIn 0.14s ease;
+}
+@keyframes dmMenuFadeIn {
+  from { opacity: 0; transform: translateY(4px) scale(0.95); }
+  to   { opacity: 1; transform: translateY(0) scale(1);    }
+}
+.dm-hover-btn {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: #4b5563;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s, transform 0.12s ease;
+}
+.dm-hover-btn:hover {
+  background: rgba(124, 58, 237, 0.10);
+  color: #6d28d9;
+  transform: scale(1.1);
+}
+.dm-hover-btn.dm-hover-danger:hover { background: rgba(239, 68, 68, 0.10); color: #dc2626; }
+body:not(.light) .dm-hover-menu {
+  background: #1a1428;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+body:not(.light) .dm-hover-btn { color: #d1d5db; }
+body:not(.light) .dm-hover-btn:hover { background: rgba(167, 139, 250, 0.14); color: #ddd6fe; }
+body:not(.light) .dm-hover-btn.dm-hover-danger:hover { background: rgba(248, 113, 113, 0.10); color: #fca5a5; }
+
+/* ── Reaction picker ────────────────────────────────────────────────────── */
+.dm-reaction-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+  background: white;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(15, 10, 28, 0.18);
+  z-index: 10000;
+  animation: dmMenuFadeIn 0.14s ease;
+}
+.dm-rx-pick {
+  width: 38px; height: 38px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 1.3rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s cubic-bezier(.34,1.56,.64,1), background 0.12s;
+}
+.dm-rx-pick:hover {
+  transform: scale(1.35) translateY(-3px);
+  background: rgba(124, 58, 237, 0.06);
+}
+body:not(.light) .dm-reaction-picker {
+  background: #1a1428;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+body:not(.light) .dm-rx-pick:hover { background: rgba(167, 139, 250, 0.10); }
+
+/* ── Inline edit mode ───────────────────────────────────────────────────── */
+.dm-bubble:has(.dm-edit-textarea) {
+  padding: 0.5rem 0.6rem !important;
+}
+.dm-edit-textarea {
+  width: 100%;
+  min-width: 240px;
+  min-height: 60px;
+  max-height: 200px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(124, 58, 237, 0.30);
+  border-radius: 10px;
+  padding: 0.45rem 0.55rem;
+  color: #1f2937;
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.4;
+  outline: none;
+  resize: none;
+}
+.dm-bubble.theirs .dm-edit-textarea { background: white; }
+.dm-edit-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  justify-content: flex-end;
+}
+.dm-edit-cancel,
+.dm-edit-save {
+  padding: 0.35rem 0.85rem;
+  border: none;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.12s ease;
+}
+.dm-edit-cancel {
+  background: rgba(255, 255, 255, 0.20);
+  color: white;
+}
+.dm-bubble.theirs .dm-edit-cancel {
+  background: rgba(0, 0, 0, 0.06);
+  color: #4b5563;
+}
+.dm-edit-cancel:hover { background: rgba(255, 255, 255, 0.30); }
+.dm-bubble.theirs .dm-edit-cancel:hover { background: rgba(0, 0, 0, 0.10); }
+.dm-edit-save {
+  background: white;
+  color: #6d28d9;
+}
+.dm-bubble.theirs .dm-edit-save {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: white;
+}
+.dm-edit-save:hover { transform: translateY(-1px); }
+body:not(.light) .dm-edit-textarea {
+  background: rgba(0, 0, 0, 0.30);
+  color: #f3f4f6;
+  border-color: rgba(167, 139, 250, 0.45);
+}
+body:not(.light) .dm-bubble.theirs .dm-edit-textarea { background: rgba(0, 0, 0, 0.30); }
+
+/* Tighten bubble cursor when in edit mode (not clickable) */
+.dm-bubble:has(.dm-edit-textarea) { cursor: default; }
+.dm-bubble:has(.dm-edit-textarea):hover { filter: none; }
