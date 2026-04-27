@@ -68,14 +68,14 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 a { text-decoration: none; color: inherit; }
 button { font-family: var(--font); cursor: pointer; }
 
-/* ── TOP HEADER ── */
+/* â”€â”€ TOP HEADER â”€â”€ */
 .topbar {
   position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
   background: var(--purple-grad);
   display: flex; align-items: center; padding: 0 1.5rem;
   z-index: 100; gap: 1.5rem;
 }
-/* Premium SELE logo — clickable button that returns to home + scroll-to-top */
+/* Premium SELE logo â€” clickable button that returns to home + scroll-to-top */
 .topbar-logo {
   display: inline-flex;
   align-items: center;
@@ -103,6 +103,10 @@ button { font-family: var(--font); cursor: pointer; }
   border-radius: 10px;
   user-select: none;
   -webkit-user-drag: none;
+  /* Drops the white background of the PNG so it blends into the purple topbar.
+     For a 100% clean version long-term, re-export logo.png with a transparent
+     background â€” but this works perfectly against any solid colored topbar. */
+  mix-blend-mode: multiply;
 }
 .topbar-logo:hover {
   transform: translateY(-1px) scale(1.05);
@@ -158,7 +162,7 @@ button { font-family: var(--font); cursor: pointer; }
 .topbar-icon-btn:hover { background: rgba(255,255,255,0.25); }
 .topbar-icon-btn svg { width: 18px; height: 18px; }
 
-/* ── NOTIFICATION BELL ── */
+/* â”€â”€ NOTIFICATION BELL â”€â”€ */
 .topbar-bell-wrap { position: relative; }
 .topbar-bell { position: relative; }
 .topbar-bell.has-unread svg {
@@ -196,7 +200,7 @@ body.light .topbar-bell-badge { border-color: #ffffff; }
   100% { transform: scale(1);   opacity: 1; }
 }
 
-/* ── NOTIFICATIONS DROPDOWN ── */
+/* â”€â”€ NOTIFICATIONS DROPDOWN â”€â”€ */
 .notifications-panel {
   position: absolute;
   top: calc(100% + 12px);
@@ -395,7 +399,7 @@ body.light .notification-item:hover { background: rgba(124, 58, 237, 0.06); }
 }
 .notification-item.unread .notification-dot { display: block; }
 
-/* ── @MENTION AUTOCOMPLETE ── */
+/* â”€â”€ @MENTION AUTOCOMPLETE â”€â”€ */
 .mention-dropdown {
   position: fixed;
   z-index: 700;
@@ -457,7 +461,7 @@ body.light .mention-item.active {
 .mention-name strong { color: #c4b5fd; font-weight: 600; }
 body.light .mention-name strong { color: #7c3aed; }
 
-/* ── VIDEO ACTION BAR (Like / Repost / Share) ── */
+/* â”€â”€ VIDEO ACTION BAR (Like / Repost / Share) â”€â”€ */
 .video-actions {
   display: flex;
   align-items: center;
@@ -470,7 +474,7 @@ body.light .mention-name strong { color: #7c3aed; }
   flex-wrap: wrap;
 }
 
-/* Override the post-style centered picker — for the video action bar we
+/* Override the post-style centered picker â€” for the video action bar we
    left-align the picker to the trigger so it never clips off-screen. */
 .video-actions .reaction-picker {
   left: 0 !important;
@@ -480,7 +484,7 @@ body.light .mention-name strong { color: #7c3aed; }
   transform: translateY(0) scale(1);
 }
 
-/* Secondary info block — uploader + description, after the actions bar */
+/* Secondary info block â€” uploader + description, after the actions bar */
 .video-info-secondary {
   margin-bottom: 1.25rem;
 }
@@ -521,7 +525,7 @@ body.light .mention-name strong { color: #7c3aed; }
 .btn-follow-creator:active { transform: scale(0.97); }
 .btn-follow-creator:disabled { opacity: 0.6; cursor: progress; }
 
-/* Following state — flat, with red accent on hover (suggesting "click to unfollow") */
+/* Following state â€” flat, with red accent on hover (suggesting "click to unfollow") */
 .btn-follow-creator.following {
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
@@ -581,7 +585,7 @@ body.light .btn-follow-creator.following:hover:not(:disabled) {
 body.light .video-description-toggle { color: #7c3aed; }
 body.light .video-description-toggle:hover { color: #4c1d95; }
 
-/* ── VIDEO COMMENTS SECTION ── */
+/* â”€â”€ VIDEO COMMENTS SECTION â”€â”€ */
 .video-comments-wrap {
   margin-top: 1.5rem;
   padding: 1.25rem 1.4rem 1rem;
@@ -635,7 +639,7 @@ body.light .mention-token:hover { color: #4c1d95; }
 }
 .topbar-avatar img { width: 100%; height: 100%; object-fit: cover; }
 
-/* ── LEFT SIDEBAR (premium) ── */
+/* â”€â”€ LEFT SIDEBAR (premium) â”€â”€ */
 .sidebar {
   position: fixed; top: var(--header-h); left: 0; bottom: 0; width: var(--sidebar-w);
   background: linear-gradient(180deg, var(--bg) 0%, rgba(15, 8, 30, 0.65) 100%);
@@ -685,7 +689,7 @@ body.light .sidebar {
   text-overflow: ellipsis;
 }
 
-/* Active state — purple gradient + glowing left-edge stripe */
+/* Active state â€” purple gradient + glowing left-edge stripe */
 .sidebar-item.active {
   background: linear-gradient(135deg, rgba(124, 58, 237, 0.22) 0%, rgba(167, 139, 250, 0.10) 100%);
   color: #ffffff;
@@ -715,7 +719,7 @@ body.light .sidebar-item.active .sidebar-icon {
   font-weight: 600;
 }
 
-/* Logout — red hover (destructive cue) */
+/* Logout â€” red hover (destructive cue) */
 .sidebar-item-logout:hover {
   background: rgba(239, 68, 68, 0.10);
   color: #fca5a5;
@@ -739,7 +743,7 @@ body.light .sidebar-item-logout:hover .sidebar-icon {
   border: 0;
 }
 
-/* ── BOOK / AUTHOR PAGE HERO ── */
+/* â”€â”€ BOOK / AUTHOR PAGE HERO â”€â”€ */
 .page-hero {
   position: relative;
   display: flex;
@@ -854,7 +858,7 @@ body.light .page-empty-icon { color: #7c3aed; }
 }
 body.light .page-empty-body strong { color: #7c3aed; }
 
-/* ── BOOK BROWSE TOOLBAR ── */
+/* â”€â”€ BOOK BROWSE TOOLBAR â”€â”€ */
 .book-toolbar {
   display: flex;
   align-items: center;
@@ -862,7 +866,7 @@ body.light .page-empty-body strong { color: #7c3aed; }
   gap: 1rem;
   margin-bottom: 1.5rem;
   flex-wrap: wrap;
-  /* Sticky toolbar — stays at top while scrolling books grid (like Spotify/Netflix) */
+  /* Sticky toolbar â€” stays at top while scrolling books grid (like Spotify/Netflix) */
   position: sticky;
   top: var(--header-h, 0);
   z-index: 20;
@@ -887,7 +891,7 @@ body:not(.light) .book-toolbar {
   overflow-x: auto;
   overflow-y: hidden;
   scroll-behavior: smooth;
-  /* Hide scrollbar — feels cleaner on a horizontal pill rail (Twitter/YouTube style) */
+  /* Hide scrollbar â€” feels cleaner on a horizontal pill rail (Twitter/YouTube style) */
   scrollbar-width: none;
   -ms-overflow-style: none;
   /* Subtle fade at right edge to hint at scroll */
@@ -896,7 +900,7 @@ body:not(.light) .book-toolbar {
   padding-right: 0.5rem;
 }
 .book-genre-chips::-webkit-scrollbar { display: none; }
-/* Premium purple chip — used by books + videos for consistency */
+/* Premium purple chip â€” used by books + videos for consistency */
 .book-chip,
 .search-tag-pill {
   background: #ffffff;
@@ -983,7 +987,7 @@ body.light .book-sort-select {
 .book-sort-select:hover { border-color: rgba(139, 92, 246, 0.45); }
 .book-sort-select:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.15); }
 
-/* ── BOOK GRID ── */
+/* â”€â”€ BOOK GRID â”€â”€ */
 .book-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -1007,7 +1011,7 @@ body.light .book-sort-select {
   margin: 1.25rem 0 0.25rem;
 }
 .book-grid-loadmore {
-  /* Reset .loading defaults — minimalist pill */
+  /* Reset .loading defaults â€” minimalist pill */
   display: inline-flex !important;
   align-items: center;
   gap: 0.5rem;
@@ -1154,7 +1158,7 @@ body.light .book-card:hover .book-card-title { color: #7c3aed; }
   margin: 0;
 }
 
-/* ── BOOK DETAIL PAGE ── */
+/* â”€â”€ BOOK DETAIL PAGE â”€â”€ */
 .book-detail {
   display: grid;
   grid-template-columns: 240px 1fr;
@@ -1269,7 +1273,7 @@ body.light .chapter-row {
 .chapter-row-title { flex: 1; font-size: 0.92rem; font-weight: 500; color: var(--text); margin: 0 1rem; }
 .chapter-row-meta { font-size: 0.78rem; color: var(--text2); }
 
-/* ── CHAPTER READER ── */
+/* â”€â”€ CHAPTER READER â”€â”€ */
 .reader-bar {
   display: flex;
   align-items: center;
@@ -1390,7 +1394,7 @@ body.light .reader-content { color: #1f2937; }
 .reader-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .reader-progress { font-size: 0.82rem; color: var(--text2); font-variant-numeric: tabular-nums; }
 
-/* ── AUTHOR DASHBOARD ── */
+/* â”€â”€ AUTHOR DASHBOARD â”€â”€ */
 .author-stats {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1520,7 +1524,7 @@ body.light .author-book-row { border-bottom-color: #e5e7eb; }
 .author-book-action-btn:hover { background: rgba(139, 92, 246, 0.12); border-color: rgba(139, 92, 246, 0.4); color: #c4b5fd; }
 .author-book-action-btn-danger:hover { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.4); color: #fca5a5; }
 
-/* ── BOOK EDITOR (metadata + chapter list) ── */
+/* â”€â”€ BOOK EDITOR (metadata + chapter list) â”€â”€ */
 .book-editor-grid {
   display: grid;
   grid-template-columns: 200px 1fr;
@@ -1628,7 +1632,7 @@ body.light .author-chapter-row { background: #ffffff; border-color: #e5e7eb; }
 .author-chapter-pub-draft     { background: rgba(156, 163, 175, 0.12); color: var(--text2); border: 1px solid rgba(156,163,175,0.3); }
 .author-chapter-actions { display: flex; gap: 0.3rem; }
 
-/* ── CHAPTER EDITOR (Quill) ── */
+/* â”€â”€ CHAPTER EDITOR (Quill) â”€â”€ */
 .chapter-editor-bar {
   display: flex;
   align-items: center;
@@ -1646,7 +1650,7 @@ body.light .author-chapter-row { background: #ffffff; border-color: #e5e7eb; }
 body.light .chapter-editor-bar { background: rgba(255, 255, 255, 0.85); border-color: #e5e7eb; }
 .chapter-editor-bar-spacer { flex: 1; }
 
-/* ─── Premium boxed title input ─── */
+/* â”€â”€â”€ Premium boxed title input â”€â”€â”€ */
 .chapter-title-box {
   margin: 0 0 0.7rem;
   padding: 0.85rem 1.1rem;
@@ -1700,7 +1704,7 @@ body.light .chapter-title-input-boxed::placeholder { color: #9ca3af; }
   .chapter-title-box { padding: 0.7rem 0.9rem; }
 }
 
-/* ─── Meta strip: save status + word count below title ─── */
+/* â”€â”€â”€ Meta strip: save status + word count below title â”€â”€â”€ */
 .chapter-meta-strip {
   display: flex;
   align-items: center;
@@ -1731,7 +1735,7 @@ body.light .chapter-title-input-boxed::placeholder { color: #9ca3af; }
   flex-shrink: 0;
 }
 
-/* ─── Chapter cover (Wattpad-style hero above title) ─── */
+/* â”€â”€â”€ Chapter cover (Wattpad-style hero above title) â”€â”€â”€ */
 /* The chapter-cover ITSELF is the dropzone when empty. No nested borders. */
 .chapter-cover {
   position: relative;
@@ -1840,13 +1844,13 @@ body:not(.light) .chapter-cover-empty small { color: #6b7280; }
   border-color: rgba(220, 38, 38, 0.95);
 }
 
-/* ─── Inline images inside chapter content (long screenshots OK) ─── */
+/* â”€â”€â”€ Inline images inside chapter content (long screenshots OK) â”€â”€â”€ */
 #chapterEditorQuill .ql-editor img,
 .chapter-content img {
   display: block;
   max-width: 100%;
   height: auto;            /* preserves aspect ratio for tall images */
-  /* No max-height — long scrollable screenshots flow naturally */
+  /* No max-height â€” long scrollable screenshots flow naturally */
   margin: 1rem auto;
   border-radius: 10px;
   box-shadow: 0 2px 12px rgba(15, 10, 28, 0.10);
@@ -1903,7 +1907,7 @@ body.light .ql-editor { color: #1f2937; }
   color: var(--text2);
 }
 
-/* ── MAIN LAYOUT ── */
+/* â”€â”€ MAIN LAYOUT â”€â”€ */
 .main-wrap {
   margin-top: var(--header-h); margin-left: var(--sidebar-w);
   min-height: calc(100vh - var(--header-h));
@@ -1920,7 +1924,7 @@ body.light .ql-editor { color: #1f2937; }
   #videosPage, #videoPlayerPage { margin: 0; }
 }
 
-/* ── STORIES ROW (user avatars) ── */
+/* â”€â”€ STORIES ROW (user avatars) â”€â”€ */
 .stories-row {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
   padding: 0.75rem; margin-bottom: 0.4rem;
@@ -1948,7 +1952,7 @@ body.light .ql-editor { color: #1f2937; }
 .stories-scroll-btn:hover { background: var(--purple); }
 .stories-scroll-btn svg { width: 16px; height: 16px; }
 
-/* ── COMPOSE BOX ── */
+/* â”€â”€ COMPOSE BOX â”€â”€ */
 .compose {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
   padding: 0.9rem 1rem; margin-bottom: 0.4rem;
@@ -1975,7 +1979,7 @@ body.light .ql-editor { color: #1f2937; }
 .char-count { font-size: 0.75rem; color: var(--text3); }
 .char-count.warn { color: #f59e0b; } .char-count.over { color: var(--red); }
 
-/* ── BUTTONS ── */
+/* â”€â”€ BUTTONS â”€â”€ */
 .btn {
   padding: 0.7rem 1.5rem; border-radius: 99px; font-size: 0.85rem; font-weight: 600;
   border: none; transition: all 0.15s; display: inline-flex; align-items: center;
@@ -1990,7 +1994,7 @@ body.light .ql-editor { color: #1f2937; }
 .btn-google:hover { background: #f0f0f0; }
 .btn-sm { padding: 0.5rem 1.1rem; font-size: 0.8rem; }
 
-/* ── AVATAR ── */
+/* â”€â”€ AVATAR â”€â”€ */
 .avatar {
   width: 42px; height: 42px; border-radius: 50%;
   background: var(--purple); color: #fff; font-weight: 600; font-size: 0.8rem;
@@ -2000,7 +2004,7 @@ body.light .ql-editor { color: #1f2937; }
 .avatar.sm { width: 32px; height: 32px; font-size: 0.65rem; }
 .avatar.xs { width: 26px; height: 26px; font-size: 0.6rem; }
 
-/* ── POST CARD ── */
+/* â”€â”€ POST CARD â”€â”€ */
 .post-card {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
   padding: 1rem 1.1rem; margin-bottom: 0.4rem; animation: fadeUp 0.3s ease both;
@@ -2017,7 +2021,7 @@ body.light .ql-editor { color: #1f2937; }
 .post-image img { width: 100%; max-height: 500px; object-fit: cover; display: block; transition: transform 0.2s; }
 .post-image:hover img { transform: scale(1.01); }
 
-/* ── REPOSTED ── */
+/* â”€â”€ REPOSTED â”€â”€ */
 .reposted-banner { display: flex; align-items: center; gap: 6px; color: var(--text3); font-size: 0.75rem; margin-bottom: 0.75rem; }
 .reposted-banner svg { width: 12px; height: 12px; }
 .reposted-card { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: 0.75rem; }
@@ -2025,13 +2029,13 @@ body.light .ql-editor { color: #1f2937; }
 .reposted-card .avatar { width: 34px; height: 34px; font-size: 0.7rem; }
 .reposted-card .post-body { font-size: 0.85rem; margin-bottom: 0.5rem; }
 
-/* ── REACTION COUNTS (above action bar) ── */
+/* â”€â”€ REACTION COUNTS (above action bar) â”€â”€ */
 .post-stats { display: flex; align-items: center; justify-content: space-between; padding: 0.25rem 0 0.5rem; font-size: 0.8rem; color: var(--text3); min-height: 20px; }
 .post-stats:empty { display: none; }
 .post-stats .rcount { display: flex; align-items: center; gap: 4px; }
 .post-stats .rcount-emojis { display: inline-flex; font-size: 15px; letter-spacing: -2px; margin-right: 4px; }
 
-/* ── ACTION BAR (premium flat) ── */
+/* â”€â”€ ACTION BAR (premium flat) â”€â”€ */
 .post-actions {
   display: flex; gap: 0.35rem; align-items: center;
   padding-top: 0.55rem; border-top: 1px solid var(--border);
@@ -2067,7 +2071,7 @@ body.light .ql-editor { color: #1f2937; }
 body.light .action-btn:hover  { background: rgba(124, 58, 237, 0.08); }
 body.light .action-btn.reacted { color: #db2777; background: rgba(219, 39, 119, 0.08); }
 
-/* Universal reaction icon container — fixed size so emoji ↔ svg swap never resizes the row */
+/* Universal reaction icon container â€” fixed size so emoji â†” svg swap never resizes the row */
 .r-icon {
   display: inline-flex;
   align-items: center;
@@ -2082,7 +2086,7 @@ body.light .action-btn.reacted { color: #db2777; background: rgba(219, 39, 119, 
 .comment-action-btn .r-icon  { width: 16px; height: 16px; font-size: 14px; }
 .action-btn svg              { width: 18px; height: 18px; }
 
-/* ── REACTION PICKER (premium flat) ── */
+/* â”€â”€ REACTION PICKER (premium flat) â”€â”€ */
 .reaction-wrap { position: relative; }
 .reaction-picker {
   position: absolute; bottom: calc(100% + 10px); left: 50%;
@@ -2119,7 +2123,7 @@ body.light .reaction-picker {
 .r-emoji { font-size: 24px; line-height: 1; display: block; }
 .r-label { font-size: 9px; color: var(--text3); letter-spacing: 0.02em; }
 
-/* ── SHARE MENU ── */
+/* â”€â”€ SHARE MENU â”€â”€ */
 .share-menu {
   position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
   background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-sm);
@@ -2134,7 +2138,7 @@ body.light .reaction-picker {
 }
 .share-option:hover { background: var(--bg3); }
 
-/* ── COMMENTS ── */
+/* â”€â”€ COMMENTS â”€â”€ */
 .comments-section { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
 .comment-item { display: flex; gap: 0.6rem; margin-bottom: 0.85rem; }
 .comment-body { flex: 1; min-width: 0; }
@@ -2194,7 +2198,7 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 }
 .btn-send:hover { background: var(--purple-lt); }
 
-/* ── IMAGE UPLOAD ── */
+/* â”€â”€ IMAGE UPLOAD â”€â”€ */
 .image-upload-btn {
   background: none; border: none; color: var(--text2); cursor: pointer;
   padding: 6px 10px; border-radius: var(--radius-sm);
@@ -2213,7 +2217,7 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
   display: flex; align-items: center; justify-content: center; font-size: 16px;
 }
 
-/* ── AUTH SCREEN ── */
+/* â”€â”€ AUTH SCREEN â”€â”€ */
 .auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem;
   background: radial-gradient(ellipse at top, rgba(124,58,237,0.2) 0%, transparent 60%), var(--bg); }
 .auth-card {
@@ -2226,7 +2230,7 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 .auth-divider { display: flex; align-items: center; gap: 1rem; margin: 1.25rem 0; color: var(--text3); font-size: 0.75rem; }
 .auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: var(--border2); }
 
-/* ── MODAL ── */
+/* â”€â”€ MODAL â”€â”€ */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 1500; display: none; align-items: center; justify-content: center; padding: 1rem; }
 .modal-overlay.open { display: flex; animation: fadeIn 0.2s; }
 .modal-box { background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-lg); padding: 1.5rem; max-width: 520px; width: 100%; max-height: 90vh; overflow-y: auto; animation: slideUp 0.2s ease; }
@@ -2243,7 +2247,7 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 .repost-preview img { max-height: 180px; border-radius: 8px; width: 100%; object-fit: cover; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 0.5rem; }
 
-/* ── PREMIUM CONFIRM MODAL ── */
+/* â”€â”€ PREMIUM CONFIRM MODAL â”€â”€ */
 .confirm-modal-overlay { position: fixed; inset: 0; background: rgba(8, 4, 20, 0.78); backdrop-filter: blur(6px); z-index: 2200; align-items: center; justify-content: center; padding: 1rem; }
 .confirm-modal-overlay.open { display: flex; animation: fadeIn 0.18s ease; }
 .confirm-modal {
@@ -2340,13 +2344,13 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 .confirm-btn-danger:active { transform: scale(0.98); }
 .confirm-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
-/* ── LIGHTBOX ── */
+/* â”€â”€ LIGHTBOX â”€â”€ */
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 2000; display: none; align-items: center; justify-content: center; padding: 2rem; cursor: pointer; }
 .lightbox.open { display: flex; animation: fadeIn 0.2s; }
 .lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--radius-sm); }
 .lightbox-close { position: absolute; top: 1rem; right: 1rem; width: 40px; height: 40px; border-radius: 50%; background: rgba(255,255,255,0.1); border: none; color: #fff; font-size: 1.5rem; cursor: pointer; }
 
-/* ── TOAST ── */
+/* â”€â”€ TOAST â”€â”€ */
 .toast { position: fixed; bottom: 2rem; right: 2rem; background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius); padding: 0.85rem 1.25rem; font-size: 0.85rem; color: var(--text); box-shadow: 0 12px 32px rgba(0,0,0,0.5); z-index: 2500; animation: slideIn 0.2s ease; }
 .toast.success { border-color: var(--success); color: #6ee7b7; }
 .toast.error { border-color: var(--red); color: #fca5a5; }
@@ -2356,13 +2360,13 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 .empty { text-align: center; padding: 4rem 2rem; color: var(--text3); }
 .empty h3 { font-size: 1.3rem; color: var(--text2); margin-bottom: 0.5rem; font-weight: 600; }
 
-/* ── SCROLLBAR ── */
+/* â”€â”€ SCROLLBAR â”€â”€ */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--purple); }
 
-/* ── RESPONSIVE ── */
+/* â”€â”€ RESPONSIVE â”€â”€ */
 @media (max-width: 768px) {
   .sidebar { display: none; }
   .main-wrap { margin-left: 0; padding: 1rem; }
@@ -2375,7 +2379,7 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
   .action-btn span { display: none; }
 }
 
-/* ── PROFILE PAGE ── */
+/* â”€â”€ PROFILE PAGE â”€â”€ */
 .profile-banner {
   height: 220px; border-radius: var(--radius-lg);
   background: linear-gradient(135deg, #5b21b6 0%, #7c3aed 50%, #ec4899 100%);
@@ -2451,7 +2455,7 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 .profile-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
 
 /* Profile tabs */
-/* ── PREMIUM PROFILE TABS ── */
+/* â”€â”€ PREMIUM PROFILE TABS â”€â”€ */
 .profile-tabs {
   display: flex;
   gap: 0.15rem;
@@ -2593,11 +2597,11 @@ body.light .profile-empty-icon { color: #7c3aed; }
 body.light .profile-banner { background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 50%, #f472b6 100%); }
 body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d97706; }
 
-/* ── Image cropper ── */
+/* â”€â”€ Image cropper â”€â”€ */
 .crop-container { max-height: 500px; background: #000; border-radius: var(--radius-sm); overflow: hidden; }
 .crop-container img { display: block; max-width: 100%; }
 
-/* ── VIDEO GRID (Premium) ── */
+/* â”€â”€ VIDEO GRID (Premium) â”€â”€ */
 .videos-header {
   display: flex; justify-content: space-between; align-items: center;
   margin-bottom: 1.5rem;
@@ -2826,12 +2830,12 @@ body.on-videos .main-wrap {
 .video-search-tags::-webkit-scrollbar { display: none; }
 .video-search-tags:empty { display: none; }
 
-/* search-tag-pill — styling consolidated with .book-chip block above for consistency */
+/* search-tag-pill â€” styling consolidated with .book-chip block above for consistency */
 .search-tag-pill-all { font-weight: 600; }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   VIDEO PLAYER — Premium nav controls (Prev / Rewind / FFWD / Next + Autoplay)
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   VIDEO PLAYER â€” Premium nav controls (Prev / Rewind / FFWD / Next + Autoplay)
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .video-nav-controls {
   display: flex;
@@ -2905,7 +2909,7 @@ body:not(.light) .vc-skip-num {
 
 .vc-spacer { flex: 1; min-width: 0; }
 
-/* Autoplay toggle — premium switch */
+/* Autoplay toggle â€” premium switch */
 .vc-autonext {
   display: inline-flex;
   align-items: center;
@@ -2960,16 +2964,16 @@ body:not(.light) .vc-autonext-label { color: #9ca3af; }
 }
 body:not(.light) .vc-autonext input:checked ~ .vc-autonext-label { color: #c4b5fd; }
 
-/* Mobile — hide button labels, keep icons + skip numbers */
+/* Mobile â€” hide button labels, keep icons + skip numbers */
 @media (max-width: 700px) {
   .vc-btn span:not(.vc-skip-num) { display: none; }
   .video-nav-controls { gap: 0.25rem; padding: 0.5rem 0.6rem; }
   .vc-btn { padding: 0.45rem 0.7rem; }
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   BOOKMARKS PAGE — Saved videos + saved books
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   BOOKMARKS PAGE â€” Saved videos + saved books
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .bookmarks-header {
   margin: 0 0 1.2rem;
@@ -3084,9 +3088,9 @@ body:not(.light) .bookmarks-empty {
 }
 .bookmarks-empty .btn { margin-top: 0.6rem; }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   BOOK DETAIL — Like + Bookmark active states
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   BOOK DETAIL â€” Like + Bookmark active states
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 .book-action-btn {
   display: inline-flex;
   align-items: center;
@@ -3110,7 +3114,7 @@ body:not(.light) .book-action-count {
   color: #ddd6fe;
 }
 
-/* LIKE — when active, heart fills with red/pink */
+/* LIKE â€” when active, heart fills with red/pink */
 .book-action-btn[data-active="1"]#btnLikeBook {
   color: #ec4899;
   border-color: rgba(236, 72, 153, 0.4);
@@ -3128,7 +3132,7 @@ body:not(.light) .book-action-count {
   border-color: rgba(236, 72, 153, 0.55);
 }
 
-/* BOOKMARK — when active, fills with purple */
+/* BOOKMARK â€” when active, fills with purple */
 .book-action-btn[data-active="1"]#btnBookmarkBook {
   color: #7c3aed;
   border-color: rgba(124, 58, 237, 0.4);
@@ -3158,7 +3162,7 @@ body:not(.light) .book-action-count {
 }
 .video-search-empty h3 { color: var(--text); margin-bottom: 0.5rem; }
 
-/* ── Premium Topbar Search ── */
+/* â”€â”€ Premium Topbar Search â”€â”€ */
 .topbar {
   display: flex; align-items: center; gap: 1rem;
   padding: 0 1.25rem;
@@ -3331,9 +3335,9 @@ body.light .topbar-search input { color: #111; }
   transition: width 0.3s;
 }
 
-/* ═══════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    PREMIUM VIDEO UPLOAD MODAL
-   ═══════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .video-upload-overlay {
   position: fixed;
@@ -3714,10 +3718,10 @@ body.light .vu-btn-ghost:hover {
   box-shadow: none;
 }
 
-/* ═══════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    PREMIUM STUDIO EDIT MODAL
    (uses .vu-modal / .vu-label / .vu-input / .vu-textarea / .vu-btn-secondary)
-   ═══════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .vu-modal {
   position: relative;
@@ -3737,7 +3741,7 @@ body.light .vu-btn-ghost:hover {
   animation: vuSlideIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* Top accent ribbon — subtle purple glow stripe */
+/* Top accent ribbon â€” subtle purple glow stripe */
 .vu-modal::before {
   content: '';
   position: absolute;
@@ -3867,7 +3871,7 @@ select.vu-input {
   font-variant-numeric: tabular-nums;
 }
 
-/* Studio edit thumbnail preview — refined frame */
+/* Studio edit thumbnail preview â€” refined frame */
 #studioEditModal .vu-preview-box {
   background: rgba(0, 0, 0, 0.35);
   border: 1px solid rgba(139, 92, 246, 0.18);
@@ -3886,7 +3890,7 @@ select.vu-input {
   display: block;
 }
 
-/* Secondary button (Cancel) — used in studio edit modal footer */
+/* Secondary button (Cancel) â€” used in studio edit modal footer */
 .vu-btn-secondary {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border, rgba(255,255,255,0.10));
@@ -4043,9 +4047,9 @@ body.light .vu-btn-secondary {
 }
 
 
-/* ════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    CREATOR STUDIO
-   ════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 #studioPage {
   padding: 1.5rem 1.75rem 3rem;
@@ -4080,7 +4084,7 @@ body.light .vu-btn-secondary {
   font-size: 0.93rem;
 }
 
-/* ─── Stats grid ─── */
+/* â”€â”€â”€ Stats grid â”€â”€â”€ */
 .studio-stats {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -4131,7 +4135,7 @@ body.light .vu-btn-secondary {
   font-weight: 500;
 }
 
-/* ─── Toolbar (search + count) ─── */
+/* â”€â”€â”€ Toolbar (search + count) â”€â”€â”€ */
 .studio-toolbar {
   display: flex;
   align-items: center;
@@ -4180,7 +4184,7 @@ body.light .vu-btn-secondary {
   font-weight: 500;
 }
 
-/* ─── Table ─── */
+/* â”€â”€â”€ Table â”€â”€â”€ */
 .studio-table-wrap {
   background: white;
   border-radius: 14px;
@@ -4241,7 +4245,7 @@ body.light .vu-btn-secondary {
   font-size: 0.88rem;
 }
 
-/* ─── Video cell ─── */
+/* â”€â”€â”€ Video cell â”€â”€â”€ */
 .studio-row-video {
   display: flex;
   gap: 0.9rem;
@@ -4312,7 +4316,7 @@ body.light .vu-btn-secondary {
   overflow: hidden;
 }
 
-/* ─── Status badges ─── */
+/* â”€â”€â”€ Status badges â”€â”€â”€ */
 .studio-badge {
   display: inline-flex;
   align-items: center;
@@ -4344,7 +4348,7 @@ body.light .vu-btn-secondary {
 .studio-dot-green { background: #22c55e; }
 .studio-dot-yellow { background: #eab308; }
 
-/* ─── Action buttons ─── */
+/* â”€â”€â”€ Action buttons â”€â”€â”€ */
 .studio-actions {
   display: flex;
   gap: 0.35rem;
@@ -4376,7 +4380,7 @@ body.light .vu-btn-secondary {
   color: #dc2626;
 }
 
-/* ─── Empty state ─── */
+/* â”€â”€â”€ Empty state â”€â”€â”€ */
 .studio-empty {
   text-align: center;
   padding: 4rem 2rem;
@@ -4407,7 +4411,7 @@ body.light .vu-btn-secondary {
   font-size: 0.93rem;
 }
 
-/* ─── Responsive ─── */
+/* â”€â”€â”€ Responsive â”€â”€â”€ */
 @media (max-width: 900px) {
   .studio-stats {
     grid-template-columns: repeat(2, 1fr);
@@ -4435,9 +4439,9 @@ body.light .vu-btn-secondary {
   }
 }
 
-/* ════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    DARK MODE
-   ════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 body:not(.light) .studio-header {
   border-bottom-color: rgba(168, 85, 247, 0.18);
@@ -4553,10 +4557,10 @@ body:not(.light) .studio-empty-icon {
   color: #c084fc;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   POST ACTION MENU — kebab (⋮) on all posts (own gets Pin/Delete menu)
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   POST ACTION MENU â€” kebab (â‹®) on all posts (own gets Pin/Delete menu)
    + REPORT MODAL
-   ════════════════════════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .post-menu-btn {
   flex-shrink: 0;
@@ -4594,7 +4598,7 @@ body:not(.light) .post-menu-btn:hover {
   color: #ddd6fe;
 }
 
-/* Floating dropdown menu — minimalist, premium */
+/* Floating dropdown menu â€” minimalist, premium */
 .post-action-menu {
   background: white;
   border: 1px solid rgba(17, 24, 39, 0.06);
@@ -4651,9 +4655,9 @@ body:not(.light) .post-action-menu button.pam-danger {
 }
 body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(248, 113, 113, 0.10); color: #fca5a5; }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   LINK PREVIEWS — YouTube thumbnail + generic favicon card
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   LINK PREVIEWS â€” YouTube thumbnail + generic favicon card
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .link-preview {
   display: block;
@@ -4672,7 +4676,7 @@ body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(24
   box-shadow: 0 4px 14px rgba(15, 10, 28, 0.06);
 }
 
-/* ─── YouTube preview ─── */
+/* â”€â”€â”€ YouTube preview â”€â”€â”€ */
 .link-preview-youtube { padding: 0; }
 .link-preview-thumb {
   position: relative;
@@ -4729,7 +4733,7 @@ body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(24
   text-transform: uppercase;
 }
 
-/* ─── Generic favicon preview ─── */
+/* â”€â”€â”€ Generic favicon preview â”€â”€â”€ */
 .link-preview-generic {
   display: flex;
   align-items: center;
@@ -4772,14 +4776,14 @@ body:not(.light) .post-action-menu button.pam-danger:hover { background: rgba(24
   margin-top: 0.1rem;
 }
 
-/* ─── Inside comment bubbles, slightly tighter ─── */
+/* â”€â”€â”€ Inside comment bubbles, slightly tighter â”€â”€â”€ */
 .comment-bubble + .link-preview {
   margin-top: 0.5rem;
   margin-left: 0;
   max-width: 360px;
 }
 
-/* ─── Dark mode ─── */
+/* â”€â”€â”€ Dark mode â”€â”€â”€ */
 body:not(.light) .link-preview {
   background: rgba(255, 255, 255, 0.03);
   border-color: rgba(255, 255, 255, 0.08);
@@ -4795,9 +4799,9 @@ body:not(.light) .link-preview-favicon {
 body:not(.light) .link-preview-host { color: #e5e7eb; }
 body:not(.light) .link-preview-url  { color: #9ca3af; }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   BOOKS — minimalist premium header
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   BOOKS â€” minimalist premium header
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .books-header-min {
   margin: 0 0 1.4rem;
@@ -4818,9 +4822,9 @@ body:not(.light) .link-preview-url  { color: #9ca3af; }
   .books-title-min { font-size: 1.35rem; }
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   BOOK RECOMMENDATIONS — horizontal carousel above the main browse grid
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   BOOK RECOMMENDATIONS â€” horizontal carousel above the main browse grid
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .book-recommend-rail {
   margin: 0 0 1.4rem;
@@ -4861,7 +4865,7 @@ body:not(.light) .book-recommend-sub { color: #9ca3af; }
   padding: 0.4rem 0.1rem 0.85rem;
   scrollbar-width: thin;
   scrollbar-color: rgba(124, 58, 237, 0.28) transparent;
-  /* Right-edge fade — visual cue that there's more */
+  /* Right-edge fade â€” visual cue that there's more */
   -webkit-mask-image: linear-gradient(90deg, black 0%, black 94%, transparent 100%);
           mask-image: linear-gradient(90deg, black 0%, black 94%, transparent 100%);
 }
@@ -4946,9 +4950,9 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
   .recommend-card { width: 124px; }
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   GENRE PICKER v2 — premium 3-line scrollable, purple-accented
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   GENRE PICKER v2 â€” premium 3-line scrollable, purple-accented
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .genre-picker {
   position: relative;
@@ -4967,7 +4971,7 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
   box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
 }
 
-/* ─── Sticky counter header ─── */
+/* â”€â”€â”€ Sticky counter header â”€â”€â”€ */
 .genre-picker-counter {
   display: flex;
   align-items: center;
@@ -5005,20 +5009,20 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
 .genre-picker-counter:has(.genre-picker-count:not(:empty)) .genre-picker-count {
   transform: scale(1);
 }
-/* Bounce on count change is just nice — done via JS class toggle, but baseline is here */
+/* Bounce on count change is just nice â€” done via JS class toggle, but baseline is here */
 
-/* ─── Scrollable chip area — exactly 3 rows visible ─── */
+/* â”€â”€â”€ Scrollable chip area â€” exactly 3 rows visible â”€â”€â”€ */
 .genre-picker-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
   padding: 0.7rem 0.95rem 0.85rem;
-  max-height: 138px;          /* 3 rows × ~38px (chip + gap) + padding */
+  max-height: 138px;          /* 3 rows Ã— ~38px (chip + gap) + padding */
   overflow-y: auto;
   scroll-behavior: smooth;
   scrollbar-width: thin;
   scrollbar-color: rgba(124, 58, 237, 0.28) transparent;
-  /* Subtle fade at bottom edge — visual cue there's more to scroll */
+  /* Subtle fade at bottom edge â€” visual cue there's more to scroll */
   -webkit-mask-image: linear-gradient(180deg, black 0%, black 88%, rgba(0,0,0,0.4) 100%);
           mask-image: linear-gradient(180deg, black 0%, black 88%, rgba(0,0,0,0.4) 100%);
 }
@@ -5036,7 +5040,7 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
   background: linear-gradient(180deg, #a78bfa, #7c3aed);
 }
 
-/* ─── Dark mode shell ─── */
+/* â”€â”€â”€ Dark mode shell â”€â”€â”€ */
 body:not(.light) .genre-picker {
   background:
     linear-gradient(180deg, rgba(167, 139, 250, 0.10) 0%, rgba(124, 58, 237, 0.04) 100%),
@@ -5126,7 +5130,7 @@ body:not(.light) .genre-chip-active:hover {
   box-shadow: 0 6px 18px rgba(124, 58, 237, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
-/* ─── Generic modal (used by Report) ─── */
+/* â”€â”€â”€ Generic modal (used by Report) â”€â”€â”€ */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -5313,9 +5317,9 @@ body:not(.light) .modal-actions .btn-ghost:hover {
   color: #ddd6fe;
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   PROFILE — kebab menu button + share modal
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   PROFILE â€” kebab menu button + share modal
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 .profile-name-row {
   display: flex;
@@ -5367,7 +5371,7 @@ body:not(.light) .profile-menu-btn:hover {
 
 .profile-action-menu { min-width: 200px; }
 
-/* ── Share modal ───────────────────────────────────────────────── */
+/* â”€â”€ Share modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .share-modal { max-width: 460px; }
 
 .share-link-row {
@@ -5460,11 +5464,11 @@ body:not(.light) .share-option:hover {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.30);
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   PROFILE Phase 2 — skeletons, earned badges, tab counts, follow list modal
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   PROFILE Phase 2 â€” skeletons, earned badges, tab counts, follow list modal
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
-/* ── Skeleton shimmer ──────────────────────────────────────────────── */
+/* â”€â”€ Skeleton shimmer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 @keyframes skelShimmer {
   0%   { background-position: -400px 0; }
   100% { background-position:  400px 0; }
@@ -5493,7 +5497,7 @@ body:not(.light) .skeleton-row {
   background-size: 800px 100%;
 }
 
-/* ── Earned badges (Creator / Writer / Pioneer / Verified / Staff) ── */
+/* â”€â”€ Earned badges (Creator / Writer / Pioneer / Verified / Staff) â”€â”€ */
 .profile-badges-extra {
   display: inline-flex;
   flex-wrap: wrap;
@@ -5520,28 +5524,28 @@ body:not(.light) .skeleton-row {
 .earned-badge:hover { transform: translateY(-1px); }
 .earned-badge-icon { font-size: 0.78rem; line-height: 1; }
 
-/* Creator — purple gradient (Selebox primary) */
+/* Creator â€” purple gradient (Selebox primary) */
 .earned-badge.badge-creator {
   background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
   color: white;
   border-color: rgba(124, 58, 237, 0.4);
   box-shadow: 0 2px 8px rgba(124, 58, 237, 0.25);
 }
-/* Writer — emerald (books vibe) */
+/* Writer â€” emerald (books vibe) */
 .earned-badge.badge-writer {
   background: linear-gradient(135deg, #059669 0%, #34d399 100%);
   color: white;
   border-color: rgba(5, 150, 105, 0.35);
   box-shadow: 0 2px 8px rgba(5, 150, 105, 0.22);
 }
-/* Pioneer — amber/gold rare-feeling */
+/* Pioneer â€” amber/gold rare-feeling */
 .earned-badge.badge-pioneer {
   background: linear-gradient(135deg, #d97706 0%, #fbbf24 100%);
   color: #422006;
   border-color: rgba(217, 119, 6, 0.4);
   box-shadow: 0 2px 8px rgba(217, 119, 6, 0.22);
 }
-/* Verified — blue */
+/* Verified â€” blue */
 .earned-badge.badge-verified {
   background: linear-gradient(135deg, #2563eb 0%, #60a5fa 100%);
   color: white;
@@ -5549,14 +5553,14 @@ body:not(.light) .skeleton-row {
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.22);
 }
 .earned-badge.badge-verified .earned-badge-icon { font-weight: 900; font-size: 0.85rem; }
-/* Staff — slate (admin team) */
+/* Staff â€” slate (admin team) */
 .earned-badge.badge-staff {
   background: linear-gradient(135deg, #1f2937 0%, #4b5563 100%);
   color: white;
   border-color: rgba(31, 41, 55, 0.4);
 }
 
-/* ── Tab count pills ───────────────────────────────────────────────── */
+/* â”€â”€ Tab count pills â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .profile-tab .tab-count {
   display: inline-flex;
   align-items: center;
@@ -5583,7 +5587,7 @@ body:not(.light) .profile-tab .tab-count {
   color: #c4b5fd;
 }
 
-/* ── Follow list modal ─────────────────────────────────────────────── */
+/* â”€â”€ Follow list modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .follow-list-modal {
   max-width: 480px;
   width: 100%;
@@ -5753,11 +5757,11 @@ body:not(.light) .follow-list-you {
 }
 body:not(.light) .follow-list-empty { color: #9ca3af; }
 
-/* ════════════════════════════════════════════════════════════════════════════
-   PROFILE Phase 3 — Pinned posts + Mutual followers strip
-   ════════════════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   PROFILE Phase 3 â€” Pinned posts + Mutual followers strip
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
-/* ── Pinned post tag (📌 sits above the post header) ──────────────── */
+/* â”€â”€ Pinned post tag (ðŸ“Œ sits above the post header) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .post-card.is-pinned {
   border: 1px solid rgba(124, 58, 237, 0.18);
   background: linear-gradient(180deg, rgba(124, 58, 237, 0.025) 0%, transparent 60px);
@@ -5789,7 +5793,7 @@ body:not(.light) .post-pinned-tag {
   color: #c4b5fd;
 }
 
-/* ── Section header (Pinned / Posts dividers on profile feed) ─────── */
+/* â”€â”€ Section header (Pinned / Posts dividers on profile feed) â”€â”€â”€â”€â”€â”€â”€ */
 .profile-section-header {
   display: flex;
   align-items: center;
@@ -5806,7 +5810,7 @@ body:not(.light) .post-pinned-tag {
 .profile-section-header svg { display: block; opacity: 0.85; }
 body:not(.light) .profile-section-header { color: #c4b5fd; }
 
-/* ── Mutual followers strip ────────────────────────────────────────── */
+/* â”€â”€ Mutual followers strip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .profile-mutuals {
   display: flex;
   align-items: center;
