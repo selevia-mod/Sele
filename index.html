@@ -924,15 +924,15 @@
   </div>
 </div>
 
-<!-- Video Upload Modal (Premium) -->
+<!-- Video Upload Modal (Premium 4-phase wizard) -->
 <div class="modal-overlay video-upload-overlay" id="videoUploadModal" style="display:none">
-  <div class="video-upload-modal-premium">
-    
+  <div class="video-upload-modal-premium vu-wizard">
+
     <!-- Header -->
     <div class="vu-header">
       <div class="vu-header-text">
-        <h2>Upload video</h2>
-        <p class="vu-subtitle">Share your story with the world</p>
+        <h2 id="vuTitle">Upload video</h2>
+        <p class="vu-subtitle" id="vuSubtitle">Share your story with the world</p>
       </div>
       <button class="vu-close" id="closeVideoUploadModal" aria-label="Close">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -941,12 +941,23 @@
         </svg>
       </button>
     </div>
-    
+
+    <!-- Stepper -->
+    <div class="vu-stepper" id="vuStepper">
+      <div class="vu-step-pill active" data-step="1"><span class="vu-step-num">1</span><span class="vu-step-label">File</span></div>
+      <div class="vu-step-line"></div>
+      <div class="vu-step-pill"        data-step="2"><span class="vu-step-num">2</span><span class="vu-step-label">Details</span></div>
+      <div class="vu-step-line"></div>
+      <div class="vu-step-pill"        data-step="3"><span class="vu-step-num">3</span><span class="vu-step-label">Visibility</span></div>
+      <div class="vu-step-line"></div>
+      <div class="vu-step-pill"        data-step="4"><span class="vu-step-num">4</span><span class="vu-step-label">Upload</span></div>
+    </div>
+
     <!-- Body -->
     <div class="vu-body">
-      
-      <!-- Step 1: File picker -->
-      <div id="videoUploadStep1">
+
+      <!-- Phase 1: File picker -->
+      <div class="vu-panel" data-panel="1">
         <label class="vu-dropzone" id="videoFilePicker">
           <div class="vu-dropzone-icon">
             <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -960,19 +971,22 @@
           <span class="vu-cta-pill">Select file</span>
           <input type="file" accept="video/*" id="videoUploadFile" style="display:none">
         </label>
-      </div>
-      
-      <!-- Step 2: Form -->
-      <div id="videoUploadStep2" style="display:none">
-        
-        <!-- Video preview -->
-        <div class="vu-preview-box">
-          <video id="videoUploadPreview" controls></video>
+        <!-- Selected-file summary, shown after a file is picked -->
+        <div class="vu-file-summary" id="vuFileSummary" style="display:none">
+          <div class="vu-preview-box compact">
+            <video id="videoUploadPreview" muted playsinline></video>
+          </div>
+          <div class="vu-file-meta">
+            <div class="vu-file-name" id="vuFileName">video.mp4</div>
+            <div class="vu-file-size" id="vuFileSize">0 MB</div>
+            <button type="button" class="vu-replace-btn" id="vuReplaceFile">Replace file</button>
+          </div>
         </div>
-        
-        <!-- Form -->
+      </div>
+
+      <!-- Phase 2: Details -->
+      <div class="vu-panel" data-panel="2" style="display:none">
         <div class="vu-form">
-          
           <div class="vu-field">
             <div class="vu-field-header">
               <label>Title <span class="vu-required">*</span></label>
@@ -980,15 +994,15 @@
             </div>
             <input type="text" id="videoUploadTitle" maxlength="100" placeholder="Add a catchy title">
           </div>
-          
+
           <div class="vu-field">
             <div class="vu-field-header">
               <label>Description</label>
               <span class="vu-counter"><span id="descCharCount">0</span>/2000</span>
             </div>
-            <textarea id="videoUploadDescription" maxlength="2000" rows="3" placeholder="Tell viewers about your video..."></textarea>
+            <textarea id="videoUploadDescription" maxlength="2000" rows="4" placeholder="Tell viewers about your video..."></textarea>
           </div>
-          
+
           <div class="vu-field">
             <div class="vu-field-header">
               <label>Tags</label>
@@ -996,11 +1010,9 @@
             </div>
             <input type="text" id="videoUploadTags" placeholder="romance, drama, story">
           </div>
-          
+
           <div class="vu-field">
-            <div class="vu-field-header">
-              <label>Category</label>
-            </div>
+            <div class="vu-field-header"><label>Category</label></div>
             <select id="videoUploadCategory">
               <option value="general">General</option>
               <option value="romance">Romance</option>
@@ -1017,36 +1029,107 @@
               <option value="reels">Reels</option>
             </select>
           </div>
-          
         </div>
-        
-        <!-- Progress -->
-        <div class="vu-progress" id="videoUploadProgress">
+      </div>
+
+      <!-- Phase 3: Monetization + Schedule -->
+      <div class="vu-panel" data-panel="3" style="display:none">
+        <!-- Monetization (disabled — coming soon) -->
+        <div class="vu-card">
+          <div class="vu-card-header">
+            <div>
+              <div class="vu-card-title">
+                Monetization
+                <span class="vu-badge-soon">Coming soon</span>
+              </div>
+              <div class="vu-card-sub">Earn from ads, tips, and subscriptions on this video.</div>
+            </div>
+            <label class="vu-toggle disabled" title="Monetization is not available yet">
+              <input type="checkbox" disabled>
+              <span class="vu-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="vu-card-body muted">
+            We're rolling this out gradually. You'll get an email when it's available for your account.
+          </div>
+        </div>
+
+        <!-- Schedule -->
+        <div class="vu-card">
+          <div class="vu-card-header">
+            <div>
+              <div class="vu-card-title">Visibility</div>
+              <div class="vu-card-sub">Choose when this video goes public.</div>
+            </div>
+          </div>
+          <div class="vu-card-body">
+            <div class="vu-radio-row">
+              <label class="vu-radio active" data-vis="now">
+                <input type="radio" name="vuVisibility" value="now" checked>
+                <div class="vu-radio-content">
+                  <div class="vu-radio-title">Publish when ready</div>
+                  <div class="vu-radio-sub">Goes live as soon as Selebox finishes processing.</div>
+                </div>
+              </label>
+              <label class="vu-radio" data-vis="schedule">
+                <input type="radio" name="vuVisibility" value="schedule">
+                <div class="vu-radio-content">
+                  <div class="vu-radio-title">Schedule for later</div>
+                  <div class="vu-radio-sub">Pick a date and time. Stays hidden until then.</div>
+                </div>
+              </label>
+            </div>
+            <div class="vu-schedule-input" id="vuScheduleInput" style="display:none">
+              <input type="datetime-local" id="vuScheduleDatetime"/>
+            </div>
+          </div>
+        </div>
+
+        <p class="vu-fb-note">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          Your video stays hidden until Selebox finishes processing — exactly like Facebook. You'll see it in Studio while it processes.
+        </p>
+      </div>
+
+      <!-- Phase 4: Upload progress -->
+      <div class="vu-panel" data-panel="4" style="display:none">
+        <div class="vu-upload-hero" id="vuUploadHero">
+          <div class="vu-upload-icon-wrap">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" id="vuUploadIcon">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <h3 class="vu-upload-title" id="vuUploadHeroTitle">Uploading your video</h3>
+          <p class="vu-upload-sub" id="vuUploadHeroSub">Hang tight — we're sending it to our servers.</p>
+        </div>
+        <div class="vu-progress active" id="videoUploadProgress">
           <div class="vu-progress-row">
-            <span class="vu-progress-status" id="videoUploadStatus">Preparing...</span>
+            <span class="vu-progress-status" id="videoUploadStatus">Preparing…</span>
             <span class="vu-progress-percent" id="videoUploadPercent">0%</span>
           </div>
           <div class="vu-progress-bar">
             <div class="vu-progress-fill" id="videoUploadFill"></div>
           </div>
         </div>
-        
+        <div class="vu-upload-bytes" id="vuUploadBytes" style="display:none">
+          <span id="vuBytesSent">0 MB</span> / <span id="vuBytesTotal">0 MB</span>
+          <span class="vu-upload-speed" id="vuUploadSpeed"></span>
+        </div>
       </div>
+
     </div>
-    
+
     <!-- Footer -->
     <div class="vu-footer">
-      <button class="vu-btn vu-btn-ghost" id="cancelVideoUpload">Cancel</button>
-      <button class="vu-btn vu-btn-primary" id="confirmVideoUpload" disabled>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-          <polyline points="17 8 12 3 7 8"/>
-          <line x1="12" y1="3" x2="12" y2="15"/>
-        </svg>
-        Publish video
-      </button>
+      <button class="vu-btn vu-btn-ghost" id="vuFooterBack">Back</button>
+      <div class="vu-footer-right">
+        <button class="vu-btn vu-btn-ghost" id="cancelVideoUpload">Cancel</button>
+        <button class="vu-btn vu-btn-primary" id="vuFooterNext" disabled>Continue</button>
+      </div>
     </div>
-    
+
   </div>
 </div>
 
