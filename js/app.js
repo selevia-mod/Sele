@@ -7218,6 +7218,11 @@ let dmState = {
 // Quick-reaction emojis (FB-style — these match the existing post REACTIONS set)
 const DM_QUICK_REACTIONS = ['❤️','😂','😮','😢','😡','👍'];
 
+// IDs of messages already painted to the DOM. Used in renderMessages to skip
+// the entrance animation on bubbles that already existed — prevents the whole
+// list from flashing every time we re-render (sends, reactions, read receipts).
+const _renderedMessageIds = new Set();
+
 async function showMessages(targetUserId = null) {
   if (!currentUser) { toast('Please sign in', 'error'); return; }
   hideAllMainPages();
@@ -7599,6 +7604,8 @@ async function loadMessages(convId) {
   const wrap = document.getElementById('dmMessages');
   if (!wrap) return;
   wrap.innerHTML = '<div class="dm-loading">Loading messages…</div>';
+  // Fresh conversation → reset the "already-animated" tracker so first paint animates in
+  _renderedMessageIds.clear();
 
   // Fetch messages + reactions in parallel (include reply_to_id + image fields)
   const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
@@ -7700,9 +7707,13 @@ function renderMessages() {
     const isFirstInGroup = !prev || prev.sender_id !== m.sender_id || (new Date(m.created_at) - new Date(prev.created_at)) > 5 * 60000;
     const isLastInGroup  = !next || next.sender_id !== m.sender_id || (new Date(next.created_at) - new Date(m.created_at)) > 5 * 60000;
 
+    // Only animate bubbles we haven't rendered before — prevents the whole
+    // list from flashing on every re-render (e.g. after optimistic→real swap).
+    const isNewBubble = !_renderedMessageIds.has(m.id);
     const bubbleCls = `dm-bubble ${mine ? 'mine' : 'theirs'}` +
       (isFirstInGroup ? ' first-in-group' : '') +
-      (isLastInGroup  ? ' last-in-group'  : '');
+      (isLastInGroup  ? ' last-in-group'  : '') +
+      (isNewBubble    ? ' is-new'         : '');
 
     // Avatar: in groups, show the SENDER's avatar (different per message); in 1:1, the activeOther's
     const senderProfile = isGroup ? memberMap.get(m.sender_id) : dmState.activeOther;
@@ -7814,8 +7825,8 @@ function renderMessages() {
           </div>
           ${linkPreviewHtml}
           ${reactionsHtml}
+          ${mine ? readBadge : ''}
         </div>
-        ${mine ? readBadge : ''}
       </div>
     `;
   }
@@ -7835,6 +7846,11 @@ function renderMessages() {
   }
 
   wrap.innerHTML = html;
+
+  // Mark all currently-rendered message ids as "seen" so future re-renders
+  // don't re-trigger the entrance animation on existing bubbles.
+  _renderedMessageIds.clear();
+  dmState.messages.forEach(m => _renderedMessageIds.add(m.id));
 
   // Async-fill any Selebox-internal preview placeholders (videos/books/profiles)
   hydrateDmInternalPreviews();
@@ -7919,10 +7935,19 @@ async function sendDmMessage() {
     toast(error.message, 'error');
     return;
   }
-  // Replace temp with real
+  // Replace temp with real — transfer the "already-rendered" status so the
+  // bubble doesn't re-animate (otherwise the whole list would flash).
   const idx = dmState.messages.findIndex(m => m.id === tempId);
   if (idx >= 0) dmState.messages[idx] = data;
-  renderMessages();
+  if (_renderedMessageIds.has(tempId)) {
+    _renderedMessageIds.delete(tempId);
+    _renderedMessageIds.add(data.id);
+  }
+  // Also update the DOM in place so we don't need a full re-render at all.
+  // The bubble keeps its position + animation state; we just swap the IDs.
+  document.querySelectorAll(`[data-msg-id="${tempId}"]`).forEach(el => {
+    el.dataset.msgId = data.id;
+  });
 }
 
 async function sendDmThumbsUp() {
@@ -9142,13 +9167,22 @@ async function sendDmAttachment() {
   }).select().single();
   if (error) {
     dmState.messages = dmState.messages.filter(m => m.id !== tempId);
+    _renderedMessageIds.delete(tempId);
     renderMessages();
     toast(error.message, 'error');
     return false;
   }
+  // Replace temp with real — transfer the "already-rendered" status so the
+  // bubble doesn't re-animate (would cause the whole list to flash).
   const idx = dmState.messages.findIndex(m => m.id === tempId);
   if (idx >= 0) dmState.messages[idx] = data;
-  renderMessages();
+  if (_renderedMessageIds.has(tempId)) {
+    _renderedMessageIds.delete(tempId);
+    _renderedMessageIds.add(data.id);
+  }
+  document.querySelectorAll(`[data-msg-id="${tempId}"]`).forEach(el => {
+    el.dataset.msgId = data.id;
+  });
   return true;
 }
 
