@@ -210,20 +210,48 @@
         </div>
       </div>
 
-      <!-- Genre / sort bar -->
+      <!-- Recommended for you carousel (logged-in only, populated by JS) -->
+      <div class="book-recommend-rail" id="bookRecommendRail" style="display:none">
+        <div class="book-recommend-head">
+          <h3 class="book-recommend-title">Recommended for you</h3>
+          <span class="book-recommend-sub" id="bookRecommendSub">Based on your reading taste</span>
+        </div>
+        <div class="book-recommend-track" id="bookRecommendTrack"></div>
+      </div>
+
+      <!-- Genre / sort bar — single-line horizontal scroll -->
       <div class="book-toolbar">
         <div class="book-genre-chips" id="bookGenreChips">
           <button class="book-chip active" data-genre="">All</button>
           <button class="book-chip" data-genre="romance">Romance</button>
           <button class="book-chip" data-genre="hot-romance">Hot Romance</button>
+          <button class="book-chip" data-genre="dark-romance">Dark Romance</button>
+          <button class="book-chip" data-genre="mafia-boss">Mafia Boss</button>
+          <button class="book-chip" data-genre="billionaire">Billionaire</button>
+          <button class="book-chip" data-genre="enemies-to-lovers">Enemies to Lovers</button>
+          <button class="book-chip" data-genre="ceo">CEO</button>
+          <button class="book-chip" data-genre="forbidden-love">Forbidden Love</button>
+          <button class="book-chip" data-genre="arranged-marriage">Arranged Marriage</button>
+          <button class="book-chip" data-genre="contract-marriage">Contract Marriage</button>
+          <button class="book-chip" data-genre="second-chance">Second Chance</button>
+          <button class="book-chip" data-genre="werewolf">Werewolf</button>
+          <button class="book-chip" data-genre="vampire">Vampire</button>
+          <button class="book-chip" data-genre="boy-love-bl">Boy Love</button>
+          <button class="book-chip" data-genre="girl-love-gl">Girl Love</button>
           <button class="book-chip" data-genre="thriller">Thriller</button>
           <button class="book-chip" data-genre="horror">Horror</button>
           <button class="book-chip" data-genre="fantasy">Fantasy</button>
+          <button class="book-chip" data-genre="mystery">Mystery</button>
           <button class="book-chip" data-genre="comedy">Comedy</button>
           <button class="book-chip" data-genre="anime">Anime</button>
           <button class="book-chip" data-genre="adventure">Adventure</button>
+          <button class="book-chip" data-genre="action">Action</button>
+          <button class="book-chip" data-genre="sci-fi">Sci-fi</button>
           <button class="book-chip" data-genre="drama">Drama</button>
-          <button class="book-chip" data-genre="mystery">Mystery</button>
+          <button class="book-chip" data-genre="historical">Historical</button>
+          <button class="book-chip" data-genre="teen-fiction">Teen Fiction</button>
+          <button class="book-chip" data-genre="contemporary">Contemporary</button>
+          <button class="book-chip" data-genre="general-fiction">General Fiction</button>
         </div>
         <div class="book-sort">
           <select id="bookSortSelect" class="book-sort-select" title="Sort books">
