@@ -4430,6 +4430,29 @@ body:not(.light) .link-preview-host { color: #e5e7eb; }
 body:not(.light) .link-preview-url  { color: #9ca3af; }
 
 /* ════════════════════════════════════════════════════════════════════════════
+   BOOKS — minimalist premium header
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.books-header-min {
+  margin: 0 0 1.4rem;
+  padding: 0.4rem 0.1rem 0;
+}
+.books-title-min {
+  margin: 0;
+  font-size: 1.65rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  display: inline-block;
+}
+@media (max-width: 700px) {
+  .books-title-min { font-size: 1.35rem; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
    BOOK RECOMMENDATIONS — horizontal carousel above the main browse grid
    ════════════════════════════════════════════════════════════════════════════ */
 
