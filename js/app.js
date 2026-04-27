@@ -3547,14 +3547,27 @@ function formatCompact(n) {
 document.getElementById('bookGenreChips')?.addEventListener('click', (e) => {
   const chip = e.target.closest('.book-chip');
   if (!chip) return;
+  // Prevent default focus-scroll-into-view behavior that snaps the page to the chip rail
+  e.preventDefault();
+  chip.blur();
+
   document.querySelectorAll('#bookGenreChips .book-chip').forEach(c => c.classList.remove('active'));
   chip.classList.add('active');
   bookGenreFilter = chip.dataset.genre || '';
-  loadBooks();
+
+  // Preserve scroll position across the re-render (loadBooks resets grid → page collapses → browser jumps)
+  const savedY = window.scrollY;
+  loadBooks().then(() => {
+    // Restore scroll on next tick (after layout settles)
+    requestAnimationFrame(() => window.scrollTo({ top: savedY, behavior: 'instant' }));
+  });
 });
 document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
   bookSortBy = e.target.value;
-  loadBooks();
+  const savedY = window.scrollY;
+  loadBooks().then(() => {
+    requestAnimationFrame(() => window.scrollTo({ top: savedY, behavior: 'instant' }));
+  });
 });
 
 // ── Book detail page ──
