@@ -64,6 +64,7 @@ function switchTab(name) {
   if (name === 'users')   lazyInit('usersSearch',   typeof initUsersTab   === 'function' ? initUsersTab   : null, typeof loadUsers          === 'function' ? loadUsers          : null);
   if (name === 'bans')    lazyInit('bansFilter',    typeof initBansTab    === 'function' ? initBansTab    : null, typeof loadBans           === 'function' ? loadBans           : null);
   if (name === 'content') lazyInit('contentFilter', typeof initContentTab === 'function' ? initContentTab : null, typeof loadHiddenContent  === 'function' ? loadHiddenContent  : null);
+  if (name === 'wallet')  lazyInit('btnAddPack',    typeof initWalletTab  === 'function' ? initWalletTab  : null, typeof loadWalletPacks    === 'function' ? loadWalletPacks    : null);
 }
 
 document.querySelectorAll('.admin-tab').forEach(t => {
@@ -883,6 +884,402 @@ function toast(msg) {
   el.classList.add('show');
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// WALLET TAB — coin packs CRUD, user wallet lookup + adjust, default config
+// ════════════════════════════════════════════════════════════════════════════
+
+// Sub-tab switching inside the Wallet panel
+function switchWalletSubtab(name) {
+  document.querySelectorAll('.admin-subtab').forEach(t => t.classList.toggle('active', t.dataset.subtab === name));
+  document.querySelectorAll('.admin-subtab-content').forEach(s => {
+    s.style.display = s.dataset.subtabContent === name ? 'block' : 'none';
+  });
+  if (name === 'packs')        loadWalletPacks();
+  if (name === 'walletconfig') loadWalletConfig();
+  // userwallets is search-driven; nothing to load by default
+}
+
+function initWalletTab() {
+  document.querySelectorAll('.admin-subtab').forEach(t => {
+    t.addEventListener('click', () => switchWalletSubtab(t.dataset.subtab));
+  });
+  document.getElementById('btnAddPack')?.addEventListener('click', () => openPackEditor(null));
+  // Wallet search wiring (debounced)
+  const search = document.getElementById('walletSearch');
+  let t = null;
+  search?.addEventListener('input', () => {
+    clearTimeout(t);
+    const q = search.value.trim();
+    if (!q) {
+      document.getElementById('walletSearchResults').style.display = 'none';
+      document.getElementById('walletDetail').style.display = 'none';
+      document.getElementById('walletEmpty').style.display = '';
+      return;
+    }
+    t = setTimeout(() => searchUsersForWallet(q), 220);
+  });
+}
+
+// ─── PACKS ──────────────────────────────────────────────────────────────────
+async function loadWalletPacks() {
+  const listEl = document.getElementById('packsList');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="admin-empty">Loading packs…</div>';
+  const { data: packs, error } = await supabase
+    .from('coin_packages')
+    .select('*')
+    .order('sort_order', { ascending: true });
+  if (error) {
+    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
+    return;
+  }
+  if (!packs?.length) {
+    listEl.innerHTML = '<div class="admin-empty">No packs yet — click "Add pack" to create one.</div>';
+    return;
+  }
+  listEl.innerHTML = '';
+  for (const p of packs) {
+    const total = p.base_coins + p.bonus_coins;
+    const bonusPct = p.base_coins > 0 ? Math.round((p.bonus_coins / p.base_coins) * 100) : 0;
+    const row = document.createElement('div');
+    row.className = 'admin-pack-row' + (p.is_active ? '' : ' is-inactive');
+    row.innerHTML = `
+      <div class="admin-pack-icon">🪙</div>
+      <div class="admin-pack-meta">
+        <div class="admin-pack-name">
+          ${esc(p.name)}
+          ${p.is_best_value ? '<span class="admin-pack-tag admin-pack-tag-best">Best Value</span>' : ''}
+          ${p.is_active ? '' : '<span class="admin-pack-tag admin-pack-tag-off">Hidden</span>'}
+        </div>
+        <div class="admin-pack-sub">
+          ${p.base_coins} + ${p.bonus_coins} bonus = <b>${total} coins</b>
+          ${bonusPct > 0 ? ` · BONUS ${bonusPct}%` : ''}
+          · sort ${p.sort_order}
+        </div>
+      </div>
+      <div class="admin-pack-price">${formatPrice(p.price_minor, p.currency)}</div>
+      <div class="admin-pack-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="edit">Edit</button>
+        <button class="admin-btn admin-btn-ghost" data-act="toggle">${p.is_active ? 'Hide' : 'Show'}</button>
+        <button class="admin-btn admin-btn-danger-ghost" data-act="delete">Delete</button>
+      </div>
+    `;
+    row.querySelector('[data-act="edit"]').onclick   = () => openPackEditor(p);
+    row.querySelector('[data-act="toggle"]').onclick = () => togglePackActive(p);
+    row.querySelector('[data-act="delete"]').onclick = () => deletePack(p);
+    listEl.appendChild(row);
+  }
+}
+
+function formatPrice(minor, currency = 'PHP') {
+  const major = (minor / 100).toFixed(2);
+  const symbol = currency === 'PHP' ? '₱' : (currency + ' ');
+  return `${symbol}${Number(major).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+}
+
+function openPackEditor(pack) {
+  const isNew = !pack;
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>${isNew ? 'Add coin pack' : 'Edit pack'}</h3>
+      <div class="admin-form">
+        <label>Name <input id="pkName" type="text" value="${esc(pack?.name || '')}"/></label>
+        <div class="admin-form-row">
+          <label>Base coins <input id="pkBase" type="number" min="1" value="${pack?.base_coins ?? ''}"/></label>
+          <label>Bonus coins <input id="pkBonus" type="number" min="0" value="${pack?.bonus_coins ?? 0}"/></label>
+        </div>
+        <div class="admin-form-row">
+          <label>Price (₱) <input id="pkPrice" type="number" step="0.01" min="0.01" value="${pack ? (pack.price_minor / 100).toFixed(2) : ''}"/></label>
+          <label>Sort order <input id="pkSort" type="number" value="${pack?.sort_order ?? 0}"/></label>
+        </div>
+        <div class="admin-form-row admin-form-toggles">
+          <label class="admin-checkbox"><input id="pkActive" type="checkbox" ${pack?.is_active !== false ? 'checked' : ''}/> Active</label>
+          <label class="admin-checkbox"><input id="pkBest" type="checkbox" ${pack?.is_best_value ? 'checked' : ''}/> Best value</label>
+        </div>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-primary" data-act="save">${isNew ? 'Create' : 'Save'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="save"]').onclick = async () => {
+    const name  = modal.querySelector('#pkName').value.trim();
+    const base  = parseInt(modal.querySelector('#pkBase').value, 10);
+    const bonus = parseInt(modal.querySelector('#pkBonus').value, 10) || 0;
+    const price = parseFloat(modal.querySelector('#pkPrice').value);
+    const sort  = parseInt(modal.querySelector('#pkSort').value, 10) || 0;
+    const active = modal.querySelector('#pkActive').checked;
+    const best   = modal.querySelector('#pkBest').checked;
+    if (!name || !(base > 0) || !(price > 0)) {
+      toast('Name, base coins, and price are required');
+      return;
+    }
+    const payload = {
+      name, base_coins: base, bonus_coins: bonus,
+      price_minor: Math.round(price * 100), currency: 'PHP',
+      sort_order: sort, is_active: active, is_best_value: best,
+      updated_at: new Date().toISOString(),
+    };
+    let result;
+    if (isNew) {
+      result = await supabase.from('coin_packages').insert(payload).select().single();
+    } else {
+      result = await supabase.from('coin_packages').update(payload).eq('id', pack.id).select().single();
+    }
+    if (result.error) { toast(result.error.message); return; }
+    close();
+    loadWalletPacks();
+    toast(isNew ? 'Pack created' : 'Pack updated');
+  };
+}
+
+async function togglePackActive(pack) {
+  const { error } = await supabase.from('coin_packages')
+    .update({ is_active: !pack.is_active, updated_at: new Date().toISOString() })
+    .eq('id', pack.id);
+  if (error) { toast(error.message); return; }
+  loadWalletPacks();
+}
+
+async function deletePack(pack) {
+  if (!confirm(`Delete "${pack.name}"? This is permanent.`)) return;
+  const { error } = await supabase.from('coin_packages').delete().eq('id', pack.id);
+  if (error) { toast(error.message); return; }
+  loadWalletPacks();
+  toast('Pack deleted');
+}
+
+// ─── USER WALLETS ──────────────────────────────────────────────────────────
+let _walletRealtimeChannel = null;
+
+async function searchUsersForWallet(q) {
+  const resultsEl = document.getElementById('walletSearchResults');
+  resultsEl.style.display = '';
+  resultsEl.innerHTML = '<div class="admin-empty">Searching…</div>';
+  document.getElementById('walletDetail').style.display = 'none';
+  document.getElementById('walletEmpty').style.display = 'none';
+
+  // Search by username OR email
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, username, email, avatar_url, role')
+    .or(`username.ilike.%${q}%,email.ilike.%${q}%`)
+    .limit(20);
+
+  if (error) {
+    resultsEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
+    return;
+  }
+  if (!data?.length) {
+    resultsEl.innerHTML = '<div class="admin-empty">No users found.</div>';
+    return;
+  }
+  resultsEl.innerHTML = '';
+  for (const u of data) {
+    const row = document.createElement('div');
+    row.className = 'admin-user-row admin-user-row-compact';
+    row.innerHTML = `
+      <div class="admin-user-avatar">${u.avatar_url ? `<img src="${esc(u.avatar_url)}"/>` : esc(initials(u.username || 'U'))}</div>
+      <div class="admin-user-meta">
+        <div class="admin-user-name">${esc(u.username || '(no username)')}</div>
+        <div class="admin-user-sub">${esc(u.email || '')} · ${esc(u.role)}</div>
+      </div>
+      <button class="admin-btn admin-btn-ghost">View wallet →</button>
+    `;
+    row.onclick = () => openWalletDetail(u);
+    resultsEl.appendChild(row);
+  }
+}
+
+async function openWalletDetail(user) {
+  document.getElementById('walletSearchResults').style.display = 'none';
+  document.getElementById('walletEmpty').style.display = 'none';
+  const detailEl = document.getElementById('walletDetail');
+  detailEl.style.display = '';
+  detailEl.innerHTML = '<div class="admin-empty">Loading wallet…</div>';
+
+  const [{ data: wallet }, { data: coinTx }, { data: starTx }] = await Promise.all([
+    supabase.from('wallets').select('*').eq('user_id', user.id).maybeSingle(),
+    supabase.from('coin_transactions').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50),
+    supabase.from('star_transactions').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50),
+  ]);
+
+  const w = wallet || { coin_balance: 0, star_balance: 0 };
+  detailEl.innerHTML = `
+    <div class="admin-wallet-header">
+      <div class="admin-user-avatar admin-user-avatar-lg">${user.avatar_url ? `<img src="${esc(user.avatar_url)}"/>` : esc(initials(user.username || 'U'))}</div>
+      <div class="admin-wallet-user">
+        <div class="admin-wallet-username">${esc(user.username || '(no username)')}</div>
+        <div class="admin-wallet-email">${esc(user.email || '')} · ${esc(user.role)}</div>
+      </div>
+      <button class="admin-btn admin-btn-ghost" data-act="back">← Back to search</button>
+    </div>
+    <div class="admin-wallet-balances">
+      <div class="admin-wallet-balance-card">
+        <div class="admin-wallet-balance-label">Coins</div>
+        <div class="admin-wallet-balance-value" id="walletCoinValue">${w.coin_balance.toLocaleString()}</div>
+        <button class="admin-btn admin-btn-primary" data-adjust="coin">Adjust coins</button>
+      </div>
+      <div class="admin-wallet-balance-card">
+        <div class="admin-wallet-balance-label">Stars</div>
+        <div class="admin-wallet-balance-value" id="walletStarValue">${w.star_balance.toLocaleString()}</div>
+        <button class="admin-btn admin-btn-primary" data-adjust="star">Adjust stars</button>
+      </div>
+    </div>
+    <div class="admin-wallet-tx-cols">
+      <div class="admin-wallet-tx-col">
+        <h4>Recent coin transactions</h4>
+        ${renderTxList(coinTx, 'coin')}
+      </div>
+      <div class="admin-wallet-tx-col">
+        <h4>Recent star transactions</h4>
+        ${renderTxList(starTx, 'star')}
+      </div>
+    </div>
+  `;
+  detailEl.querySelector('[data-act="back"]').onclick = () => {
+    teardownWalletRealtime();
+    detailEl.style.display = 'none';
+    document.getElementById('walletEmpty').style.display = '';
+    document.getElementById('walletSearch').value = '';
+  };
+  detailEl.querySelector('[data-adjust="coin"]').onclick = () => openAdjustModal(user, 'coin');
+  detailEl.querySelector('[data-adjust="star"]').onclick = () => openAdjustModal(user, 'star');
+
+  // Live updates: subscribe to wallet changes for this user only
+  setupWalletRealtime(user.id);
+}
+
+function renderTxList(rows, currency) {
+  if (!rows?.length) return '<div class="admin-empty admin-empty-tiny">No transactions yet.</div>';
+  return `<div class="admin-wallet-tx">${rows.map(r => `
+    <div class="admin-wallet-tx-row ${r.delta > 0 ? 'is-credit' : 'is-debit'}">
+      <div class="admin-wallet-tx-meta">
+        <div class="admin-wallet-tx-type">${esc(r.type.replaceAll('_', ' '))}</div>
+        <div class="admin-wallet-tx-sub">${timeAgo(r.created_at)}${r.reference_type ? ' · ' + esc(r.reference_type) : ''}${r.metadata?.reason ? ' · ' + esc(r.metadata.reason) : ''}</div>
+      </div>
+      <div class="admin-wallet-tx-delta">${r.delta > 0 ? '+' : ''}${r.delta}</div>
+      <div class="admin-wallet-tx-balance">→ ${r.balance_after}</div>
+    </div>
+  `).join('')}</div>`;
+}
+
+function setupWalletRealtime(userId) {
+  teardownWalletRealtime();
+  _walletRealtimeChannel = supabase
+    .channel(`admin-wallet-${userId}`)
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'wallets', filter: `user_id=eq.${userId}` },
+      (payload) => {
+        const w = payload.new;
+        const c = document.getElementById('walletCoinValue');
+        const s = document.getElementById('walletStarValue');
+        if (c) { c.textContent = w.coin_balance.toLocaleString(); c.classList.add('is-pulse'); setTimeout(() => c.classList.remove('is-pulse'), 600); }
+        if (s) { s.textContent = w.star_balance.toLocaleString(); s.classList.add('is-pulse'); setTimeout(() => s.classList.remove('is-pulse'), 600); }
+      })
+    .subscribe();
+}
+function teardownWalletRealtime() {
+  if (_walletRealtimeChannel) {
+    supabase.removeChannel(_walletRealtimeChannel);
+    _walletRealtimeChannel = null;
+  }
+}
+
+function openAdjustModal(user, currency) {
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>Adjust ${currency === 'coin' ? 'coins' : 'stars'} — ${esc(user.username || user.email)}</h3>
+      <p class="admin-modal-sub">Use a positive number to credit, negative to debit. Reason is logged in the audit trail.</p>
+      <div class="admin-form">
+        <label>Delta (signed)
+          <input id="adjDelta" type="number" placeholder="e.g. -50 to debit, 100 to credit"/>
+        </label>
+        <label>Reason (required)
+          <textarea id="adjReason" rows="3" placeholder="e.g. Refund for failed transaction xyz / Investigated suspected scam #42 / Compensation for outage"></textarea>
+        </label>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-primary" data-act="save">Apply adjustment</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="save"]').onclick = async () => {
+    const delta  = parseInt(modal.querySelector('#adjDelta').value, 10);
+    const reason = modal.querySelector('#adjReason').value.trim();
+    if (!Number.isFinite(delta) || delta === 0) { toast('Enter a non-zero delta'); return; }
+    if (!reason) { toast('Reason is required'); return; }
+    const { data, error } = await supabase.rpc('admin_adjust_balance', {
+      p_target_user_id: user.id,
+      p_currency: currency,
+      p_delta: delta,
+      p_reason: reason,
+    });
+    if (error) { toast(error.message); return; }
+    if (data?.ok === false) { toast(data.error || 'Adjustment failed'); return; }
+    close();
+    toast(`Adjusted ${currency} by ${delta > 0 ? '+' : ''}${delta}. New balance: ${data.balance_after}`);
+    // Reload tx list so the new entry appears immediately
+    openWalletDetail(user);
+  };
+}
+
+// ─── DEFAULTS (app_config) ─────────────────────────────────────────────────
+async function loadWalletConfig() {
+  const listEl = document.getElementById('walletConfigList');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="admin-empty">Loading defaults…</div>';
+  const { data: cfg, error } = await supabase
+    .from('app_config')
+    .select('*')
+    .order('key', { ascending: true });
+  if (error) {
+    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
+    return;
+  }
+  if (!cfg?.length) {
+    listEl.innerHTML = '<div class="admin-empty">No config rows yet.</div>';
+    return;
+  }
+  listEl.innerHTML = '';
+  for (const c of cfg) {
+    const row = document.createElement('div');
+    row.className = 'admin-config-row';
+    row.innerHTML = `
+      <div class="admin-config-meta">
+        <div class="admin-config-key">${esc(c.key)}</div>
+        <div class="admin-config-desc">${esc(c.description || '')}</div>
+      </div>
+      <input class="admin-input admin-config-input" type="number" value="${c.value_int}" data-key="${esc(c.key)}"/>
+      <button class="admin-btn admin-btn-ghost" data-save="${esc(c.key)}">Save</button>
+    `;
+    row.querySelector(`[data-save="${c.key}"]`).onclick = async () => {
+      const v = parseInt(row.querySelector('input').value, 10);
+      if (!Number.isFinite(v) || v < 0) { toast('Value must be a non-negative integer'); return; }
+      const { error: e2 } = await supabase
+        .from('app_config')
+        .update({ value_int: v, updated_at: new Date().toISOString(), updated_by: currentMod.id })
+        .eq('key', c.key);
+      if (e2) { toast(e2.message); return; }
+      toast(`Updated ${c.key} → ${v}`);
+    };
+    listEl.appendChild(row);
+  }
 }
 
 // ─── boot ────────────────────────────────────────────────────────────────────
