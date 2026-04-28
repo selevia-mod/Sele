@@ -7358,63 +7358,97 @@ document.getElementById('kycSubmit')?.addEventListener('click', async () => {
   await loadAuthorEarnings();
 });
 
-// ── Withdrawal modal wiring ─────────────────────────────────────────────
+// ── Withdrawal modal wiring (strict — server pulls saved Payments Info) ─
+const PAYMENT_METHOD_LABELS = { gcash: 'GCash', maya: 'Maya', bank: 'Bank transfer', gotyme: 'GoTyme' };
+
 document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
+  // Always re-derive these from cache so admin rate changes are reflected
+  const minPhpMinor   = _walletConfigDefaults.min_payout_php_minor || 10000;
+  const availPhpMinor = _authorBalance?._computed_available_minor ??
+                        (_authorBalance?.available_php_minor || 0);
+
+  // ── Below minimum → friendly explainer popup (not silent disabled) ──
+  if (availPhpMinor < minPhpMinor) {
+    const haveStr = formatPhpFromMinor(availPhpMinor);
+    const minStr  = formatPhpFromMinor(minPhpMinor);
+    const needStr = formatPhpFromMinor(Math.max(0, minPhpMinor - availPhpMinor));
+    document.getElementById('minPayoutMsg').innerHTML =
+      `You need at least <strong>${minStr}</strong> available to request a payout. Keep earning and you'll unlock withdrawals soon.`;
+    document.getElementById('minPayoutHave').textContent = haveStr;
+    document.getElementById('minPayoutMin').textContent  = minStr;
+    document.getElementById('minPayoutNeed').textContent = needStr;
+    document.getElementById('minPayoutModal').style.display = 'flex';
+    return;
+  }
+
+  // ── No saved Payments Info → direct them to fill it in first ──
+  if (!_authorKyc?.payment_method) {
+    toast('Save your Payments Info first (Earnings → Payments Info)', 'error');
+    return;
+  }
+
+  // ── Open the simple modal ──
   const m = document.getElementById('withdrawalModal');
   if (!m) return;
-  const avail = _authorBalance?.available_coins || 0;
-  const min   = _walletConfigDefaults.author_payout_min_coins || 500;
-  document.getElementById('withdrawalAmount').value = avail;
-  document.getElementById('withdrawalAmount').min   = min;
-  document.getElementById('withdrawalAmount').max   = avail;
-  const rate = _walletConfigDefaults.coin_to_php_minor || 100;
+
+  const amountInput = document.getElementById('withdrawalAmount');
+  amountInput.min  = (minPhpMinor / 100).toFixed(2);
+  amountInput.max  = (availPhpMinor / 100).toFixed(2);
+  amountInput.value = (availPhpMinor / 100).toFixed(2);   // default to full balance
+  amountInput.step = '0.01';
   document.getElementById('withdrawalAmountHint').textContent =
-    `Minimum ${min} coins. ₱${(rate / 100).toFixed(2)} per coin. Max available: ${avail.toLocaleString()}.`;
-  document.getElementById('withdrawalAccountName').value   = '';
-  document.getElementById('withdrawalAccountNumber').value = '';
-  document.getElementById('withdrawalBankName').value      = '';
-  syncWithdrawalBankField();
+    `Minimum ${formatPhpFromMinor(minPhpMinor)}. Max available: ${formatPhpFromMinor(availPhpMinor)}.`;
+
+  // Read-only saved account display
+  const methodLabel = PAYMENT_METHOD_LABELS[_authorKyc.payment_method] || _authorKyc.payment_method;
+  document.getElementById('withdrawalAccountMethod').textContent = methodLabel;
+  document.getElementById('withdrawalAccountName').textContent   = _authorKyc.full_name || '(no name on file)';
+
   m.style.display = 'flex';
 });
-function syncWithdrawalBankField() {
-  const method = document.getElementById('withdrawalMethod')?.value;
-  const isBank = method === 'bank';
-  const lbl = document.getElementById('withdrawalBankNameLabel');
-  const inp = document.getElementById('withdrawalBankName');
-  if (lbl) lbl.style.display = isBank ? '' : 'none';
-  if (inp) inp.style.display = isBank ? '' : 'none';
-}
-document.getElementById('withdrawalMethod')?.addEventListener('change', syncWithdrawalBankField);
+
+// Min-payout popup close handlers
+['minPayoutClose', 'minPayoutOk'].forEach(id => {
+  document.getElementById(id)?.addEventListener('click', () => {
+    document.getElementById('minPayoutModal').style.display = 'none';
+  });
+});
+document.getElementById('minPayoutModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'minPayoutModal') document.getElementById('minPayoutModal').style.display = 'none';
+});
+
 document.getElementById('withdrawalClose')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
 document.getElementById('withdrawalCancel')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
 document.getElementById('withdrawalSubmit')?.addEventListener('click', async () => {
-  const amount       = parseInt(document.getElementById('withdrawalAmount').value, 10);
-  const method       = document.getElementById('withdrawalMethod').value;
-  const accountName  = document.getElementById('withdrawalAccountName').value.trim();
-  const accountNum   = document.getElementById('withdrawalAccountNumber').value.trim();
-  const bankName     = document.getElementById('withdrawalBankName').value.trim();
-  const min          = _walletConfigDefaults.author_payout_min_coins || 500;
-  if (!Number.isFinite(amount) || amount < min) { toast(`Enter at least ${min} coins`, 'error'); return; }
-  if (!accountName || !accountNum) { toast('Account name and number are required', 'error'); return; }
-  if (method === 'bank' && !bankName) { toast('Bank name is required', 'error'); return; }
-  const details = { account_name: accountName, account_number: accountNum };
-  if (method === 'bank') details.bank_name = bankName;
+  const amountPhp   = parseFloat(document.getElementById('withdrawalAmount').value);
+  const minPhpMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
+
+  if (!Number.isFinite(amountPhp) || amountPhp <= 0) { toast('Enter a valid amount', 'error'); return; }
+  const amountMinor = Math.round(amountPhp * 100);
+  if (amountMinor < minPhpMinor) {
+    toast(`Need at least ${formatPhpFromMinor(minPhpMinor)}`, 'error');
+    return;
+  }
 
   const btn = document.getElementById('withdrawalSubmit');
   btn.disabled = true; btn.textContent = 'Submitting…';
-  const { data, error } = await supabase.rpc('request_author_withdrawal', {
-    p_amount_coins:   amount,
-    p_payout_method:  method,
-    p_payout_details: details,
+
+  // Strict: server pulls payment_method + account details from author_kyc.
+  // Client only provides the amount.
+  const { data, error } = await supabase.rpc('request_author_withdrawal_php', {
+    p_amount_php_minor: amountMinor,
   });
+
   btn.disabled = false; btn.textContent = 'Submit request';
   if (error) { toast(error.message, 'error'); return; }
   if (data?.ok === false) {
-    const msg = data.error === 'kyc_not_approved' ? 'KYC must be approved first.' :
-                data.error === 'kyc_not_submitted' ? 'Submit KYC first.' :
-                data.error === 'below_minimum'     ? `Need at least ${data.minimum_coins} coins.` :
-                data.error === 'insufficient_available' ? `Only ${data.available_coins} coins available.` :
-                data.error === 'withdrawal_in_progress' ? 'You already have a pending or approved request.' :
+    const msg = data.error === 'kyc_not_approved'         ? 'KYC must be approved first.' :
+                data.error === 'kyc_not_submitted'        ? 'Submit Payments Info first.' :
+                data.error === 'no_payment_method_saved'  ? 'Save a payment method in Payments Info first.' :
+                data.error === 'below_minimum'            ? `Need at least ${formatPhpFromMinor(data.minimum_php_minor || minPhpMinor)}.` :
+                data.error === 'insufficient_available'   ? `Only ${formatPhpFromMinor(data.available_php_minor || 0)} available.` :
+                data.error === 'withdrawal_in_progress'   ? 'You already have a pending or approved request.' :
+                data.error === 'no_eligible_earnings'     ? 'No eligible earnings yet — your balance might still be in the hold period.' :
                 data.error || 'Failed';
     toast(msg, 'error');
     return;
