@@ -1057,6 +1057,70 @@ body.light { background: var(--admin-bg); }
   font-weight: 700;
   word-break: break-word;
 }
+
+/* Change request diff layout */
+.cr-reason {
+  font-size: 0.85rem;
+  color: var(--admin-text, #111827);
+  margin: 0.4rem 0 0.7rem;
+  padding: 0.5rem 0.7rem;
+  background: rgba(0,0,0,0.025);
+  border-radius: 8px;
+  line-height: 1.4;
+}
+.cr-diff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0.85rem;
+}
+.cr-diff {
+  display: grid;
+  grid-template-columns: 130px 1fr 24px 1fr;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.84rem;
+  padding: 0.45rem 0.6rem;
+  background: rgba(124, 58, 237, 0.04);
+  border-radius: 6px;
+}
+.cr-diff-key {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-weight: 700;
+  color: var(--admin-text-2, #6b7280);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.cr-diff-old {
+  color: var(--admin-text-2, #6b7280);
+  text-decoration: line-through;
+  font-size: 0.84rem;
+  word-break: break-word;
+}
+.cr-diff-arrow {
+  color: #7c3aed;
+  font-weight: 700;
+  text-align: center;
+}
+.cr-diff-new {
+  color: #166534;
+  font-weight: 600;
+  word-break: break-word;
+}
+.cr-rejection {
+  margin-top: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  background: rgba(220, 38, 38, 0.06);
+  border-left: 3px solid #dc2626;
+  border-radius: 6px;
+  font-size: 0.84rem;
+  color: #991b1b;
+}
+@media (max-width: 700px) {
+  .cr-diff { grid-template-columns: 1fr; gap: 0.2rem; }
+  .cr-diff-arrow { display: none; }
+}
 .admin-config-desc {
   font-size: 0.78rem;
   color: var(--admin-text-2);
