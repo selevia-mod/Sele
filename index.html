@@ -7,6 +7,48 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css"/>
   <link rel="stylesheet" href="css/style.css"/>
+
+  <!-- ─── Google Analytics ─────────────────────────────────────────────── -->
+  <!-- Replace G-XXXXXXXXXX with your real Measurement ID from
+       https://analytics.google.com → Admin → Data Streams → Web → Measurement ID -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-4NS9B6V1N6"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-4NS9B6V1N6', {
+      // Strip query params from page paths so we don't leak ids/tokens to GA
+      page_path: location.pathname,
+      anonymize_ip: true,
+    });
+  </script>
+
+  <!-- ─── Sentry error tracking ────────────────────────────────────────── -->
+  <!-- Replace YOUR_DSN_HERE with your Sentry project DSN from
+       https://sentry.io → Project → Settings → Client Keys (DSN) -->
+  <script src="https://browser.sentry-cdn.com/7.114.0/bundle.tracing.min.js"
+          integrity="sha384-2QlkpY1gEaDvgkxUhpzTWtQ7Sg9EzmA3mSj8wcQu+xNsXkgcUhAekvPoUBBR9JEW"
+          crossorigin="anonymous"></script>
+  <script>
+    if (window.Sentry && 'https://c4c2052a29b745326b96a31bfe9f30f9@o4511298030862336.ingest.us.sentry.io/4511298037022720' !== 'YOUR_DSN_HERE') {
+      Sentry.init({
+        dsn: 'https://c4c2052a29b745326b96a31bfe9f30f9@o4511298030862336.ingest.us.sentry.io/4511298037022720',
+        environment: location.hostname.includes('vercel.app') ? 'staging' : 'production',
+        tracesSampleRate: 0.1,
+        // Don't capture noisy non-issues
+        ignoreErrors: [
+          'ResizeObserver loop',
+          'Non-Error promise rejection captured',
+          'Network request failed',           // user is offline — not our bug
+        ],
+        beforeSend(event) {
+          // Strip the access token from URLs accidentally captured in breadcrumbs
+          if (event.request?.url) event.request.url = event.request.url.replace(/access_token=[^&]+/, 'access_token=[redacted]');
+          return event;
+        },
+      });
+    }
+  </script>
 </head>
 <body>
 
@@ -1888,6 +1930,28 @@
 </div>
 
 <div id="toast" style="display:none"></div>
+
+<!-- Site footer (always visible at bottom) -->
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <div class="site-footer-brand">
+      <strong>Selebox</strong>
+      <span class="site-footer-tagline">Stories, videos &amp; voices — by Filipinos, for Filipinos.</span>
+    </div>
+    <div class="site-footer-contact">
+      <a href="mailto:support@selebox.com">support@selebox.com</a>
+      <span class="site-footer-sep">·</span>
+      <a href="mailto:admin@selebox.com">admin@selebox.com</a>
+    </div>
+    <div class="site-footer-links">
+      <a href="terms.html">Terms</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="refund.html">Refund</a>
+      <a href="health.html">System status</a>
+    </div>
+    <div class="site-footer-copy">© <span id="footerYear">2026</span> TOS Web Publishing. All rights reserved.</div>
+  </div>
+</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
