@@ -1706,32 +1706,57 @@
       </button>
     </div>
     <div class="vu-body">
-      <label class="vu-label">Amount in coins</label>
-      <input type="number" id="withdrawalAmount" class="vu-input" min="500" step="1" placeholder="500"/>
-      <div class="vu-hint" id="withdrawalAmountHint">Minimum 500 coins. ₱1.00 per coin.</div>
+      <label class="vu-label">Amount (PHP)</label>
+      <input type="number" id="withdrawalAmount" class="vu-input" min="100" step="0.01" placeholder="100.00"/>
+      <div class="vu-hint" id="withdrawalAmountHint">Minimum ₱100.00.</div>
 
-      <label class="vu-label">Payout method</label>
-      <select id="withdrawalMethod" class="vu-input">
-        <option value="gcash">GCash</option>
-        <option value="maya">Maya</option>
-        <option value="bank">Bank transfer</option>
-        <option value="other">Other (we'll contact you)</option>
-      </select>
-
-      <label class="vu-label">Account name</label>
-      <input type="text" id="withdrawalAccountName" class="vu-input" placeholder="Name registered on the account" maxlength="120"/>
-
-      <label class="vu-label">Account number / phone number</label>
-      <input type="text" id="withdrawalAccountNumber" class="vu-input" placeholder="11-digit GCash/Maya number, or bank account number" maxlength="64"/>
-
-      <label class="vu-label" id="withdrawalBankNameLabel" style="display:none">Bank name</label>
-      <input type="text" id="withdrawalBankName" class="vu-input" placeholder="e.g. BDO, BPI, UnionBank" maxlength="80" style="display:none"/>
+      <!-- Read-only summary of saved Payments Info — payouts are STRICT to
+           this saved account (no override). To change, use Payments Info → Request changes. -->
+      <div class="payout-account-card" id="withdrawalAccountCard">
+        <div class="payout-account-head">SENDING TO</div>
+        <div class="payout-account-method" id="withdrawalAccountMethod">—</div>
+        <div class="payout-account-name" id="withdrawalAccountName">—</div>
+        <div class="payout-account-foot">From your saved Payments Info. To change, go to Earnings → Payments Info → Request changes.</div>
+      </div>
 
       <p class="vu-hint">Funds are sent within 1–3 business days after admin approval. We'll email you a confirmation when paid.</p>
     </div>
     <div class="vu-footer">
       <button class="vu-btn vu-btn-secondary" id="withdrawalCancel">Cancel</button>
       <button class="vu-btn vu-btn-primary" id="withdrawalSubmit">Submit request</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Min Payout Notice (popup when balance below minimum) ─── -->
+<div class="modal-overlay" id="minPayoutModal" style="display:none">
+  <div class="modal-box" style="max-width:440px">
+    <div class="modal-header">
+      <div class="modal-title">Not enough to withdraw yet</div>
+      <button class="modal-close-btn" id="minPayoutClose">×</button>
+    </div>
+    <div class="min-payout-body">
+      <div class="min-payout-icon">💸</div>
+      <p class="min-payout-msg" id="minPayoutMsg">
+        You need at least <strong>₱100.00</strong> available to request a payout. Keep earning and you'll unlock withdrawals soon.
+      </p>
+      <div class="min-payout-progress">
+        <div class="min-payout-progress-row">
+          <span>You have</span>
+          <strong id="minPayoutHave">₱0.00</strong>
+        </div>
+        <div class="min-payout-progress-row">
+          <span>Minimum</span>
+          <strong id="minPayoutMin">₱100.00</strong>
+        </div>
+        <div class="min-payout-progress-row min-payout-progress-row-need">
+          <span>Need</span>
+          <strong id="minPayoutNeed">₱100.00</strong>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-purple btn-sm" id="minPayoutOk">Got it</button>
     </div>
   </div>
 </div>
