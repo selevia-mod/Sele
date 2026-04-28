@@ -8984,3 +8984,96 @@ body:not(.light) .store-migrate-text h3 { color: #c4b5fd; }
   color: #fca5a5;
   border-color: rgba(220, 38, 38, 0.35);
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   AUTH SCREEN — Terms-acceptance checkbox gate
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.auth-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin: 1.1rem 0 1.9rem;     /* extra breathing room before "Continue with Google" */
+  padding: 0.75rem 0.85rem;
+  background: rgba(124, 58, 237, 0.04);
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  border-radius: 10px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+.auth-consent:hover { background: rgba(124, 58, 237, 0.07); }
+.auth-consent.is-checked { background: rgba(124, 58, 237, 0.10); border-color: var(--purple, #7c3aed); }
+
+.auth-consent input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.auth-consent-box {
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  margin-top: 1px;
+  border: 1.5px solid rgba(124, 58, 237, 0.35);
+  border-radius: 5px;
+  background: #fff;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+.auth-consent-box svg {
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.12s ease, transform 0.18s cubic-bezier(.34, 1.56, .64, 1);
+}
+.auth-consent.is-checked .auth-consent-box {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  border-color: #7c3aed;
+}
+.auth-consent.is-checked .auth-consent-box svg {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.auth-consent-text {
+  font-size: 0.76rem;          /* −1 step (was 0.82rem) */
+  line-height: 1.5;
+  color: var(--text2, #4b5563);
+}
+.auth-consent-text a {
+  color: var(--purple, #7c3aed);
+  font-weight: 600;
+  text-decoration: none;
+}
+.auth-consent-text a:hover { text-decoration: underline; }
+
+/* Disabled sign-in buttons (until consent checked) */
+#btnGoogle:disabled,
+#btnGuest:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.5);
+  transform: none !important;
+  box-shadow: none !important;
+}
+#btnGoogle:disabled:hover,
+#btnGuest:disabled:hover {
+  background: inherit;
+}
+
+/* Dark-mode variants */
+body:not(.light) .auth-consent {
+  background: rgba(167, 139, 250, 0.06);
+  border-color: rgba(167, 139, 250, 0.22);
+}
+body:not(.light) .auth-consent:hover { background: rgba(167, 139, 250, 0.12); }
+body:not(.light) .auth-consent.is-checked {
+  background: rgba(167, 139, 250, 0.16);
+  border-color: rgba(167, 139, 250, 0.55);
+}
+body:not(.light) .auth-consent-box {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(167, 139, 250, 0.45);
+}
