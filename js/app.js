@@ -4052,6 +4052,7 @@ async function vuStartUpload() {
     });
 
     status.textContent = 'Saving…';
+    const isMonetized = document.getElementById('vuMonetized')?.checked || false;
     const { data: newVideo, error } = await supabase.from('videos').insert({
       bunny_video_id: uploadInfo.videoId,
       bunny_library_id: uploadInfo.libraryId,
@@ -4061,6 +4062,7 @@ async function vuStartUpload() {
       uploader_id: currentUser.id,
       status: 'processing',
       scheduled_publish_at: scheduledPublishAt,
+      is_monetized: isMonetized,
     }).select().single();
     if (error) throw error;
 
@@ -4584,7 +4586,7 @@ function searchBooks(query) {
   });
 }
 
-function runBookSearch() {
+async function runBookSearch() {
   const grid = document.getElementById('bookGrid');
   const sentinel = document.getElementById('bookGridSentinel');
   const empty = document.getElementById('bookEmpty');
@@ -4611,7 +4613,20 @@ function runBookSearch() {
     return;
   }
 
-  const filtered = searchBooks(activeBookSearchQuery);
+  // Local cache filter first (matches title, desc, tags, genre, author)
+  let filtered = searchBooks(activeBookSearchQuery);
+
+  // If local cache misses (pagination — author may have books outside the
+  // first 80), hit the server: books matching title/description AND books
+  // whose author's username matches.
+  if (filtered.length < 6) {
+    const serverHits = await fetchBooksServerSearch(activeBookSearchQuery);
+    // Dedupe — local cache wins for already-known ids
+    const seen = new Set(filtered.map(b => b.id));
+    for (const b of serverHits) {
+      if (!seen.has(b.id)) { filtered.push(b); seen.add(b.id); }
+    }
+  }
   empty.style.display = 'none';
   grid.style.display = 'grid';
 
@@ -4925,6 +4940,73 @@ async function fetchSupabaseBooks(offset = 0, limit = 80) {
   }
 }
 
+// Server-side book search — hits both content (title/description) AND
+// matching author usernames. Used as a fallback when the local cache misses
+// because pagination only loaded the first 80 books.
+async function fetchBooksServerSearch(query) {
+  if (!query || !query.trim()) return [];
+  const q = query.trim().replace(/[%_\\]/g, '\\$&');
+  try {
+    // Two parallel queries: content match + author username match
+    const [contentRes, authorRes] = await Promise.all([
+      supabase.from('books')
+        .select(`
+          id, title, description, cover_url, genre, tags,
+          views_count, likes_count, chapters_count, word_count,
+          published_at, created_at, author_id,
+          profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
+        `)
+        .eq('is_public', true)
+        .eq('is_hidden', false)
+        .in('status', ['ongoing', 'completed'])
+        .or(`title.ilike.%${q}%,description.ilike.%${q}%`)
+        .limit(40),
+      // Find matching author profiles, then look up their books
+      supabase.from('profiles')
+        .select('id')
+        .ilike('username', `%${q}%`)
+        .limit(20)
+    ]);
+
+    let authorBooks = [];
+    if (authorRes.data?.length) {
+      const ids = authorRes.data.map(p => p.id);
+      const { data } = await supabase.from('books')
+        .select(`
+          id, title, description, cover_url, genre, tags,
+          views_count, likes_count, chapters_count, word_count,
+          published_at, created_at, author_id,
+          profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
+        `)
+        .in('author_id', ids)
+        .eq('is_public', true)
+        .eq('is_hidden', false)
+        .in('status', ['ongoing', 'completed'])
+        .limit(40);
+      authorBooks = data || [];
+    }
+
+    // Merge + dedupe + filter banned authors + reshape (matches fetchSupabaseBooks)
+    const merged = [...(contentRes.data || []), ...authorBooks];
+    const seen = new Set();
+    return merged
+      .filter(b => {
+        if (b.profiles?.is_banned) return false;
+        if (seen.has(b.id)) return false;
+        seen.add(b.id);
+        return true;
+      })
+      .map(b => ({
+        ...b,
+        $id: 'sb_' + b.id,
+        author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
+      }));
+  } catch (err) {
+    console.warn('fetchBooksServerSearch failed:', err);
+    return [];
+  }
+}
+
 function renderBooks() {
   const grid = document.getElementById('bookGrid');
   const empty = document.getElementById('bookEmpty');
@@ -5129,10 +5211,10 @@ function renderBookDetail() {
       <div class="book-detail-cover">${cover}</div>
       <div class="book-detail-info">
         <h1>${escHTML(book.title || 'Untitled')}</h1>
-        <div class="book-detail-author">
+        <button class="book-detail-author book-detail-author-link" data-author-id="${escHTML(book.profiles?.id || book.author_id || '')}" type="button" title="View author profile">
           <div class="avatar">${authorAvatar ? `<img src="${escHTML(authorAvatar)}"/>` : initials(authorName)}</div>
           <span>by <strong>${escHTML(authorName)}</strong></span>
-        </div>
+        </button>
         <div class="book-detail-meta">
           <span><strong>${(book.chapters_count || chapters.length).toLocaleString()}</strong> chapters</span>
           <span><strong>${(book.word_count || 0).toLocaleString()}</strong> words</span>
@@ -5171,6 +5253,12 @@ function renderBookDetail() {
   // Wire chapter rows
   content.querySelectorAll('.chapter-row').forEach((row, i) => {
     row.addEventListener('click', () => openChapterReader(i));
+  });
+
+  // Wire clickable author → opens their profile
+  content.querySelector('.book-detail-author-link')?.addEventListener('click', (e) => {
+    const authorId = e.currentTarget.dataset.authorId;
+    if (authorId) openProfile(authorId);
   });
 
   // Bulk-unlock button — opens a modal with coin/star choice + final price
@@ -6538,15 +6626,15 @@ async function saveBookMetadata() {
   const status = document.getElementById('bookEditorBookStatus').value;
   const isPublic = document.getElementById('bookEditorPublic').checked;
 
-  // Lock-from-chapter (book-level). Range-validated client-side; server has
-  // a CHECK constraint at >= 5 plus a 90-day-no-removal trigger.
+  // Lock-from-chapter (book-level). Must be in {5..10}; server has matching
+  // CHECK constraint plus a 90-day-no-removal trigger.
   const lockEnabled = document.getElementById('bookLockEnabled')?.checked || false;
   const lockFromRaw = document.getElementById('bookLockFromChapter')?.value;
   let lockFromChapter = null;
   if (lockEnabled && lockFromRaw) {
     const n = parseInt(lockFromRaw, 10);
-    if (!Number.isFinite(n) || n < 5) {
-      toast('Lock-from-chapter must be 5 or higher', 'error');
+    if (!Number.isFinite(n) || n < 5 || n > 10) {
+      toast('Lock-from-chapter must be between 5 and 10', 'error');
       btn.disabled = false; btn.textContent = 'Save';
       return;
     }
