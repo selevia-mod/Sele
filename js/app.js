@@ -2,7 +2,7 @@ import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supa
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
-const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at, display_name_changed_at';
+const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at';
 
 // Reset window scroll across all common scroll containers (covers Safari edge
 // cases where `body` vs `documentElement` is the scrolling element).
@@ -3565,7 +3565,20 @@ async function openEditProfile(profile) {
   }
 
   // ── Display-name cooldown UI ──
-  const lastChange = profile.display_name_changed_at ? new Date(profile.display_name_changed_at) : null;
+  // Fetch the cooldown timestamp on-demand. Tolerates the column being absent
+  // (returns null) so the rest of the app still works before the migration runs.
+  let dnChangedAt = profile.display_name_changed_at || null;
+  if (!dnChangedAt) {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('display_name_changed_at')
+        .eq('id', currentUser.id)
+        .single();
+      if (!error && data) dnChangedAt = data.display_name_changed_at || null;
+    } catch {} // column doesn't exist yet — treat as never-changed
+  }
+  const lastChange = dnChangedAt ? new Date(dnChangedAt) : null;
   const cooldownMs = (cfg.display_name_change_cooldown_days || 60) * 86400 * 1000;
   const nextAllowed = lastChange ? new Date(lastChange.getTime() + cooldownMs) : null;
   const onCooldown = nextAllowed && nextAllowed > new Date();
