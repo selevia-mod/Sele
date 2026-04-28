@@ -48,6 +48,7 @@
       <button class="admin-tab" data-tab="content">Content</button>
       <button class="admin-tab" data-tab="bans">Bans</button>
       <button class="admin-tab" data-tab="wallet">Wallet</button>
+      <button class="admin-tab" data-tab="payouts">Payouts</button>
       <button class="admin-tab" data-tab="activity">Activity</button>
     </nav>
 
@@ -198,6 +199,56 @@
           </div>
           <div id="walletConfigList" class="admin-list">
             <div class="admin-empty">Loading defaults…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PAYOUTS (Phase 7 — author withdrawals + KYC) -->
+      <section class="admin-tab-content" data-tab-content="payouts" style="display:none">
+        <nav class="admin-subtabs">
+          <button class="admin-subtab active" data-subtab="withdrawals">Withdrawals</button>
+          <button class="admin-subtab" data-subtab="kyc">KYC review</button>
+        </nav>
+
+        <div class="admin-subtab-content" data-subtab-content="withdrawals">
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>Author withdrawals</h2>
+              <span class="admin-toolbar-sub" id="payoutsSub">Pending and approved requests at the top</span>
+            </div>
+            <div class="admin-toolbar-right">
+              <select id="payoutsFilter" class="admin-select">
+                <option value="open">Pending + approved</option>
+                <option value="pending">Pending only</option>
+                <option value="approved">Approved only</option>
+                <option value="paid">Paid</option>
+                <option value="rejected">Rejected</option>
+                <option value="all">All</option>
+              </select>
+            </div>
+          </div>
+          <div id="payoutsList" class="admin-list">
+            <div class="admin-empty">Loading…</div>
+          </div>
+        </div>
+
+        <div class="admin-subtab-content" data-subtab-content="kyc" style="display:none">
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>KYC submissions</h2>
+              <span class="admin-toolbar-sub">Verify before approving payouts</span>
+            </div>
+            <div class="admin-toolbar-right">
+              <select id="kycFilter" class="admin-select">
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="all">All</option>
+              </select>
+            </div>
+          </div>
+          <div id="kycList" class="admin-list">
+            <div class="admin-empty">Loading…</div>
           </div>
         </div>
       </section>
