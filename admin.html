@@ -47,6 +47,7 @@
       <button class="admin-tab" data-tab="users">Users</button>
       <button class="admin-tab" data-tab="content">Content</button>
       <button class="admin-tab" data-tab="bans">Bans</button>
+      <button class="admin-tab" data-tab="wallet">Wallet</button>
       <button class="admin-tab" data-tab="activity">Activity</button>
     </nav>
 
@@ -144,6 +145,60 @@
         </div>
         <div id="bansList" class="admin-list">
           <div class="admin-empty">Loading…</div>
+        </div>
+      </section>
+
+      <!-- WALLET -->
+      <section class="admin-tab-content" data-tab-content="wallet" style="display:none">
+        <nav class="admin-subtabs">
+          <button class="admin-subtab active" data-subtab="packs">Coin packs</button>
+          <button class="admin-subtab" data-subtab="userwallets">User wallets</button>
+          <button class="admin-subtab" data-subtab="walletconfig">Defaults</button>
+        </nav>
+
+        <!-- Packs sub-tab -->
+        <div class="admin-subtab-content" data-subtab-content="packs">
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>Coin packs</h2>
+              <span class="admin-toolbar-sub" id="packsSubtitle">The catalog users see in the Store</span>
+            </div>
+            <div class="admin-toolbar-right">
+              <button class="admin-btn admin-btn-primary" id="btnAddPack">+ Add pack</button>
+            </div>
+          </div>
+          <div id="packsList" class="admin-list">
+            <div class="admin-empty">Loading packs…</div>
+          </div>
+        </div>
+
+        <!-- User wallets sub-tab -->
+        <div class="admin-subtab-content" data-subtab-content="userwallets" style="display:none">
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>User wallets</h2>
+              <span class="admin-toolbar-sub">Search a user to see live balance + recent transactions</span>
+            </div>
+            <div class="admin-toolbar-right">
+              <input type="search" id="walletSearch" class="admin-input" placeholder="Username or email…" autocomplete="off"/>
+            </div>
+          </div>
+          <div id="walletSearchResults" class="admin-list" style="display:none"></div>
+          <div id="walletDetail" class="admin-wallet-detail" style="display:none"></div>
+          <div id="walletEmpty" class="admin-empty">Search for a user to view their wallet.</div>
+        </div>
+
+        <!-- Defaults sub-tab -->
+        <div class="admin-subtab-content" data-subtab-content="walletconfig" style="display:none">
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>Defaults</h2>
+              <span class="admin-toolbar-sub">Platform-wide unlock prices and limits. Per-content overrides win.</span>
+            </div>
+          </div>
+          <div id="walletConfigList" class="admin-list">
+            <div class="admin-empty">Loading defaults…</div>
+          </div>
         </div>
       </section>
 
