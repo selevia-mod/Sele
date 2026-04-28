@@ -9184,6 +9184,11 @@ document.getElementById('btnStudioUpload')?.addEventListener('click', () => {
 function showVideoPlayer() {
   hideAllMainPages();
   videoPlayerPage.style.display = 'block';
+  // CRITICAL: enables full-bleed layout (body.on-videos .main-wrap rule).
+  // Without this the player gets the default narrow main-wrap width when
+  // navigating from a user's wall (skipping showVideos), leaving big empty
+  // gutters left/right of the video.
+  document.body.classList.add('on-videos');
 }
 
 document.getElementById('btnVideos').addEventListener('click', () => {
