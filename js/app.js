@@ -5598,7 +5598,7 @@ function renderBookDetail() {
             <span class="book-action-label">Bookmark</span>
           </button>
           ${(currentProfile?.role === 'admin' || currentProfile?.role === 'moderator') ? `
-            <button class="btn btn-sm book-action-btn book-editors-pick-btn ${book.is_editors_pick ? 'is-picked' : ''}" id="btnEditorsPick" data-picked="${book.is_editors_pick ? '1' : '0'}" title="${book.is_editors_pick ? 'Remove Editor\\'s Pick' : 'Mark as Editor\\'s Pick'}">
+            <button class="btn btn-sm book-action-btn book-editors-pick-btn ${book.is_editors_pick ? 'is-picked' : ''}" id="btnEditorsPick" data-picked="${book.is_editors_pick ? '1' : '0'}" title="${book.is_editors_pick ? "Remove Editor's Pick" : "Mark as Editor's Pick"}">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="${book.is_editors_pick ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
               <span class="book-action-label">${book.is_editors_pick ? "Editor's Pick" : 'Pick'}</span>
             </button>
