@@ -9673,6 +9673,65 @@ body:not(.light) .video-monet-countdown-text strong { color: #c4b5fd; }
 /* PRO badge for monetized books in My Books list — gold→purple gradient
    matching the studio video monetize button, but as a text pill to fit the
    horizontal action row */
+/* ════════════════════════════════════════════════════════════════════════════
+   Site footer — always visible at bottom of every page
+   ════════════════════════════════════════════════════════════════════════════ */
+.site-footer {
+  margin-top: 3rem;
+  padding: 1.6rem 1.5rem 2rem;
+  background: rgba(124, 58, 237, 0.03);
+  border-top: 1px solid rgba(124, 58, 237, 0.10);
+  /* Account for the left sidebar so the footer aligns with main content */
+  padding-left: calc(var(--sidebar-w, 240px) + 1.5rem);
+}
+.site-footer-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  align-items: center;
+  text-align: center;
+}
+.site-footer-brand strong {
+  font-size: 1rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-right: 0.5rem;
+}
+.site-footer-tagline {
+  font-size: 0.82rem;
+  color: var(--text2);
+}
+.site-footer-contact a,
+.site-footer-links a {
+  color: var(--text2);
+  text-decoration: none;
+  font-size: 0.84rem;
+  font-weight: 500;
+  margin: 0 0.3rem;
+  transition: color 0.15s ease;
+}
+.site-footer-contact a:hover,
+.site-footer-links a:hover { color: #7c3aed; text-decoration: underline; }
+.site-footer-sep { color: var(--text2); margin: 0 0.2rem; }
+.site-footer-links { display: flex; gap: 0.2rem; flex-wrap: wrap; justify-content: center; }
+.site-footer-copy {
+  font-size: 0.74rem;
+  color: var(--text2);
+  margin-top: 0.3rem;
+}
+body:not(.light) .site-footer {
+  background: rgba(167, 139, 250, 0.04);
+  border-top-color: rgba(167, 139, 250, 0.15);
+}
+@media (max-width: 900px) {
+  .site-footer { padding-left: 1.5rem; padding-right: 1.5rem; }
+}
+
 .author-book-pro-tag {
   display: inline-flex;
   align-items: center;
