@@ -29,10 +29,14 @@ let posts = [];
 let _wallet = { coin_balance: 0, star_balance: 0 };
 const _userUnlocks = new Set();   // keys like "video:UUID" or "chapter:aw_xyz"
 let _walletConfigDefaults = {     // mirrors app_config; loaded once on signin
-  default_chapter_unlock_coins: 3,
-  default_chapter_unlock_stars: 3,
-  default_video_unlock_coins:   1,
-  default_video_unlock_stars:   1,
+  default_chapter_unlock_coins:    3,
+  default_chapter_unlock_stars:    3,
+  default_video_unlock_coins:      1,
+  default_video_unlock_stars:      1,
+  star_daily_cap:                  20,
+  book_bulk_unlock_discount_pct:   15,   // Phase 6
+  video_initial_unlock_seconds:    180,  // Phase 6 — 3 min before first video unlock
+  video_recurring_unlock_seconds:  600,  // Phase 6 — 10 min star window
 };
 let _walletChannel = null;
 
@@ -378,6 +382,246 @@ function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
       renderTopbarCoinPill();
       close();
       toast(data.already_unlocked ? 'Already unlocked' : `Unlocked! −${data.cost} ${currency}${data.cost === 1 ? '' : 's'}`, 'success');
+      if (typeof onUnlocked === 'function') onUnlocked();
+    });
+  });
+}
+
+// ── Phase 6: time-based video monetization gate ─────────────────────────
+//
+// Attaches a `timeupdate` listener to the video player. When the user crosses
+// the next paid threshold (180s initially, then every 600s), pauses the
+// video and prompts: "1 coin to unlock forever, or 1 star for the next 10
+// minutes." Coin path → permanent unlock recorded in `unlocks` table; the
+// listener's nextThreshold is set to Infinity so it never fires again. Star
+// path → bumps nextThreshold by `recurring_window` and waits for the next
+// crossing. Re-watching below paid_through_seconds is always free.
+let _videoMonetGate = null;  // { videoId, listener }
+
+async function setupVideoMonetGate(player, sbId, video) {
+  // Tear down any previous listener
+  teardownVideoMonetGate(player);
+
+  const initialSec   = _walletConfigDefaults.video_initial_unlock_seconds   || 180;
+  const recurringSec = _walletConfigDefaults.video_recurring_unlock_seconds || 600;
+
+  // Fetch the user's progress for this video. Legacy aw_/sb_ prefixed ids
+  // don't have a UUID and aren't tracked in video_progress (the FK target),
+  // so we fall back to "no prior progress" — every threshold is fresh.
+  let paidThrough = 0;
+  const isLegacy = sbId.startsWith('aw_') || sbId.startsWith('sb_');
+  if (!isLegacy && currentUser) {
+    const { data: prog } = await supabase
+      .from('video_progress')
+      .select('paid_through_seconds')
+      .eq('user_id', currentUser.id)
+      .eq('video_id', sbId)
+      .maybeSingle();
+    paidThrough = prog?.paid_through_seconds || 0;
+  }
+
+  const computeNext = (paid) => {
+    if (paid < initialSec) return initialSec;
+    return initialSec + Math.ceil((paid - initialSec + 1) / recurringSec) * recurringSec;
+  };
+  let nextThreshold = computeNext(paidThrough);
+  let modalOpen = false;
+
+  const listener = () => {
+    // Stale listener guard — if user navigated to a different video, no-op
+    if (!_videoMonetGate || _videoMonetGate.videoId !== sbId) return;
+    if (modalOpen) return;
+    if (player.currentTime < nextThreshold) return;
+
+    modalOpen = true;
+    player.pause();
+    openVideoMonetThresholdDialog({
+      videoTitle: video.title,
+      videoId:    sbId,
+      threshold:  nextThreshold,
+      onSuccess: (result) => {
+        modalOpen = false;
+        if (result.mode === 'permanent') {
+          // Coin path — never prompt again for this video
+          _userUnlocks.add(`video:${sbId}`);
+          nextThreshold = Infinity;
+        } else if (result.mode === 'window') {
+          // Star path — paid through end of this window; advance to next
+          paidThrough = nextThreshold + recurringSec - 1;
+          nextThreshold = computeNext(paidThrough);
+        }
+        renderTopbarCoinPill();
+        player.play().catch(() => {});
+      },
+      onCancel: () => {
+        // Modal closed without payment — leave video paused. User can hit
+        // play again, which will re-fire timeupdate and re-prompt.
+        modalOpen = false;
+      },
+    });
+  };
+
+  player.addEventListener('timeupdate', listener);
+  _videoMonetGate = { videoId: sbId, listener };
+}
+
+function teardownVideoMonetGate(player) {
+  if (_videoMonetGate?.listener && player) {
+    player.removeEventListener('timeupdate', _videoMonetGate.listener);
+  }
+  _videoMonetGate = null;
+}
+
+// Threshold-crossing dialog — visually distinct from the one-time unlock
+// modal because the choice has different consequences (one-time forever vs
+// pay-as-you-go window).
+function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSuccess, onCancel }) {
+  const coinCost = _walletConfigDefaults.default_video_unlock_coins || 1;
+  const starCost = _walletConfigDefaults.default_video_unlock_stars || 1;
+  const canCoin = _wallet.coin_balance >= coinCost;
+  const canStar = _wallet.star_balance >= starCost;
+  const recurringMin = Math.round((_walletConfigDefaults.video_recurring_unlock_seconds || 600) / 60);
+
+  document.querySelector('.unlock-modal-backdrop')?.remove();
+  const modal = document.createElement('div');
+  modal.className = 'unlock-modal-backdrop';
+  modal.innerHTML = `
+    <div class="unlock-modal video-monet-modal" role="dialog" aria-modal="true">
+      <button class="unlock-modal-close" aria-label="Close">×</button>
+      <div class="unlock-modal-icon">▶️</div>
+      <h2>Keep watching</h2>
+      ${videoTitle ? `<p class="unlock-modal-title">${escHTML(videoTitle)}</p>` : ''}
+      <p class="unlock-modal-sub">You've enjoyed the first ${Math.floor(threshold / 60)} minutes. Pick how to continue:</p>
+      <div class="video-monet-options">
+        <button class="video-monet-option video-monet-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
+          <div class="video-monet-option-icon">
+            <svg viewBox="0 0 24 24" width="36" height="36"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+          </div>
+          <div class="video-monet-option-cost">${coinCost} <small>coin${coinCost === 1 ? '' : 's'}</small></div>
+          <div class="video-monet-option-mode">One-time forever</div>
+          <div class="video-monet-option-hint">${canCoin ? 'No more deductions ever' : `You have ${_wallet.coin_balance}`}</div>
+        </button>
+        <button class="video-monet-option video-monet-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
+          <div class="video-monet-option-icon">
+            <svg viewBox="0 0 24 24" width="36" height="36"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
+          </div>
+          <div class="video-monet-option-cost">${starCost} <small>star${starCost === 1 ? '' : 's'}</small></div>
+          <div class="video-monet-option-mode">${recurringMin}-min window</div>
+          <div class="video-monet-option-hint">${canStar ? `Charged again every ${recurringMin} min` : `You have ${_wallet.star_balance}`}</div>
+        </button>
+      </div>
+      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Out of coins and stars. Top up in the Store, or watch ads in the mobile app to earn stars.</p>' : ''}
+    </div>
+  `;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = (cancelled) => {
+    modal.classList.remove('open');
+    setTimeout(() => modal.remove(), 180);
+    if (cancelled && typeof onCancel === 'function') onCancel();
+  };
+  modal.querySelector('.unlock-modal-close').onclick = () => close(true);
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(true); });
+
+  modal.querySelectorAll('.video-monet-option').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      const currency = btn.dataset.cur;
+      btn.classList.add('is-loading');
+      const { data, error } = await supabase.rpc('unlock_video_threshold', {
+        p_video_id:          videoId,
+        p_currency:          currency,
+        p_threshold_seconds: threshold,
+      });
+      btn.classList.remove('is-loading');
+      if (error) { toast(error.message, 'error'); return; }
+      if (!data?.ok) {
+        toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
+        return;
+      }
+      // Update local balance optimistically (Realtime will sync too)
+      if (currency === 'coin') _wallet.coin_balance = data.balance_after;
+      else                     _wallet.star_balance = data.balance_after;
+      renderTopbarCoinPill();
+      close(false);
+      toast(data.mode === 'permanent' ? `Unlocked forever! −${data.cost} coin` : `Continuing for ${recurringMin} more min · −${data.cost} star`, 'success');
+      onSuccess({ mode: data.mode || (currency === 'coin' ? 'permanent' : 'window') });
+    });
+  });
+}
+
+// ── Bulk book unlock dialog (Phase 6) ─────────────────────────────────────
+function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, starCost, discountPct, onUnlocked }) {
+  const canCoin = _wallet.coin_balance >= coinCost;
+  const canStar = _wallet.star_balance >= starCost;
+
+  document.querySelector('.unlock-modal-backdrop')?.remove();
+  const modal = document.createElement('div');
+  modal.className = 'unlock-modal-backdrop';
+  modal.innerHTML = `
+    <div class="unlock-modal" role="dialog" aria-modal="true">
+      <button class="unlock-modal-close" aria-label="Close">×</button>
+      <div class="unlock-modal-icon">📚</div>
+      <h2>Unlock the whole book</h2>
+      <p class="unlock-modal-title">${escHTML(bookTitle)}</p>
+      <p class="unlock-modal-sub">${lockedCount} locked chapter${lockedCount === 1 ? '' : 's'} · ${discountPct}% off vs unlocking individually</p>
+      <div class="unlock-options">
+        <button class="unlock-option unlock-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
+          <span class="unlock-option-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+          </span>
+          <span class="unlock-option-cost">${coinCost}</span>
+          <span class="unlock-option-label">Coin${coinCost === 1 ? '' : 's'}</span>
+          <span class="unlock-option-hint">${canCoin ? 'Tap to unlock all' : `You have ${_wallet.coin_balance}`}</span>
+        </button>
+        <div class="unlock-or">or</div>
+        <button class="unlock-option unlock-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
+          <span class="unlock-option-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
+          </span>
+          <span class="unlock-option-cost">${starCost}</span>
+          <span class="unlock-option-label">Star${starCost === 1 ? '' : 's'}</span>
+          <span class="unlock-option-hint">${canStar ? 'Tap to unlock all' : `You have ${_wallet.star_balance}`}</span>
+        </button>
+      </div>
+      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Not enough coins or stars yet. Open the Store to top up.</p>' : ''}
+    </div>
+  `;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 180); };
+  modal.querySelector('.unlock-modal-close').onclick = close;
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+  modal.querySelectorAll('.unlock-option').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      const currency = btn.dataset.cur;
+      btn.classList.add('is-loading');
+      const { data, error } = await supabase.rpc('unlock_book_bulk', {
+        p_book_id:  bookId,
+        p_currency: currency,
+      });
+      btn.classList.remove('is-loading');
+      if (error) { toast(error.message, 'error'); return; }
+      if (!data?.ok) {
+        toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
+        return;
+      }
+      // Update local state — Realtime will push too, but avoid flicker.
+      if (currency === 'coin') _wallet.coin_balance = data.balance_after;
+      else                     _wallet.star_balance = data.balance_after;
+      // Refresh unlocks set from server (cheaper than refetching all)
+      const { data: unlocks } = await supabase.from('unlocks')
+        .select('target_type, target_id').eq('user_id', currentUser.id);
+      _userUnlocks.clear();
+      for (const u of (unlocks || [])) _userUnlocks.add(`${u.target_type}:${u.target_id}`);
+      renderTopbarCoinPill();
+      close();
+      const saved = data.cost_before_discount - data.cost;
+      toast(`Unlocked ${data.chapters_unlocked} chapter${data.chapters_unlocked === 1 ? '' : 's'} — saved ${saved} ${currency}${saved === 1 ? '' : 's'}`, 'success');
       if (typeof onUnlocked === 'function') onUnlocked();
     });
   });
@@ -4783,7 +5027,7 @@ async function openBookDetail(bookId) {
         .select(`
           id, title, description, cover_url, genre, tags,
           views_count, likes_count, chapters_count, word_count, status,
-          published_at, created_at,
+          published_at, created_at, lock_from_chapter, locked_at,
           author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
         `)
         .eq('id', realId)
@@ -4824,10 +5068,24 @@ function renderBookDetail() {
     `<button class="book-chip" data-tag="${escHTML(t)}" type="button">${escHTML(t)}</button>`
   ).join('');
 
+  // A chapter is locked if EITHER the book has a book-level lock that includes
+  // its chapter_number, OR it has the per-chapter is_locked flag (legacy /
+  // power-user override). Already-unlocked chapters skip the badge.
+  const lockFrom = book.lock_from_chapter || null;
+  const lockedChapterCount = chapters.filter(c => {
+    if (!lockFrom && !c.is_locked) return false;
+    const isAtOrAfterLockPoint = lockFrom != null && c.chapter_number >= lockFrom;
+    if (!isAtOrAfterLockPoint && !c.is_locked) return false;
+    const realId = c.id.startsWith('sb_') ? c.id.slice(3) : c.id;
+    return !isUnlocked('chapter', realId);
+  }).length;
+
   const chaptersHtml = chapters.length
     ? chapters.map(c => {
         const realId = c.id.startsWith('sb_') ? c.id.slice(3) : c.id;
-        const locked = c.is_locked && !isUnlocked('chapter', realId);
+        const isAtOrAfterLockPoint = lockFrom != null && c.chapter_number >= lockFrom;
+        const isLockedDef = isAtOrAfterLockPoint || c.is_locked;
+        const locked = isLockedDef && !isUnlocked('chapter', realId);
         const lockBadge = locked
           ? `<span class="chapter-row-lock" title="Locked — tap to unlock">
                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
@@ -4844,6 +5102,27 @@ function renderBookDetail() {
         `;
       }).join('')
     : '<div style="color:var(--text2);padding:1rem 0">No chapters published yet.</div>';
+
+  // Bulk unlock CTA — shown only when at least 1 chapter is currently locked
+  const bulkDiscount = _walletConfigDefaults.book_bulk_unlock_discount_pct ?? 15;
+  const perChapterCoin = _walletConfigDefaults.default_chapter_unlock_coins ?? 3;
+  const perChapterStar = _walletConfigDefaults.default_chapter_unlock_stars ?? 3;
+  const bulkBefore = perChapterCoin * lockedChapterCount;
+  const bulkCoin   = Math.max(1, bulkBefore - Math.floor((bulkBefore * bulkDiscount) / 100));
+  const bulkStarBefore = perChapterStar * lockedChapterCount;
+  const bulkStar   = Math.max(1, bulkStarBefore - Math.floor((bulkStarBefore * bulkDiscount) / 100));
+  const bulkUnlockCard = lockedChapterCount > 0 ? `
+    <div class="book-bulk-unlock">
+      <div class="book-bulk-unlock-icon">📚</div>
+      <div class="book-bulk-unlock-meta">
+        <div class="book-bulk-unlock-title">Unlock all <strong>${lockedChapterCount}</strong> locked chapter${lockedChapterCount === 1 ? '' : 's'}</div>
+        <div class="book-bulk-unlock-sub">Save ${bulkDiscount}% vs unlocking one by one</div>
+      </div>
+      <button class="btn btn-purple" id="btnBulkUnlockBook" data-locked-count="${lockedChapterCount}" data-coin="${bulkCoin}" data-star="${bulkStar}">
+        ${bulkCoin} coin${bulkCoin === 1 ? '' : 's'} or ${bulkStar} star${bulkStar === 1 ? '' : 's'}
+      </button>
+    </div>
+  ` : '';
 
   content.innerHTML = `
     <div class="book-detail">
@@ -4880,6 +5159,7 @@ function renderBookDetail() {
           </button>
         </div>
         <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
+        ${bulkUnlockCard}
         <div class="chapter-list">
           <div class="chapter-list-title">Chapters</div>
           ${chaptersHtml}
@@ -4891,6 +5171,19 @@ function renderBookDetail() {
   // Wire chapter rows
   content.querySelectorAll('.chapter-row').forEach((row, i) => {
     row.addEventListener('click', () => openChapterReader(i));
+  });
+
+  // Bulk-unlock button — opens a modal with coin/star choice + final price
+  document.getElementById('btnBulkUnlockBook')?.addEventListener('click', () => {
+    openBulkBookUnlockDialog({
+      bookId:        book.id,
+      bookTitle:     book.title || 'this book',
+      lockedCount:   parseInt(document.getElementById('btnBulkUnlockBook').dataset.lockedCount, 10) || lockedChapterCount,
+      coinCost:      parseInt(document.getElementById('btnBulkUnlockBook').dataset.coin, 10) || bulkCoin,
+      starCost:      parseInt(document.getElementById('btnBulkUnlockBook').dataset.star, 10) || bulkStar,
+      discountPct:   bulkDiscount,
+      onUnlocked:    () => openBookDetail(book.id),
+    });
   });
   // Start reading → first unread chapter (or chapter 1)
   document.getElementById('btnStartReading')?.addEventListener('click', () => openChapterReader(0));
@@ -5860,6 +6153,9 @@ async function loadBookEditor(bookId) {
   document.getElementById('bookEditorPublic').checked = !!book.is_public;
   document.getElementById('bookEditorStatusBadge').textContent = book.is_public ? 'Visible to readers' : 'Hidden draft';
 
+  // Book-level lock state
+  setBookLockUI(book.lock_from_chapter, book.locked_at);
+
   // Build / refresh genre picker. Seed from book.tags first (where curated genres live),
   // fall back to book.genre (single legacy slug). Unknown freeform tags go to the Custom tags input.
   const allTags = Array.isArray(book.tags) ? book.tags : [];
@@ -5961,8 +6257,24 @@ async function saveBookMetadata() {
   const status = document.getElementById('bookEditorBookStatus').value;
   const isPublic = document.getElementById('bookEditorPublic').checked;
 
+  // Lock-from-chapter (book-level). Range-validated client-side; server has
+  // a CHECK constraint at >= 5 plus a 90-day-no-removal trigger.
+  const lockEnabled = document.getElementById('bookLockEnabled')?.checked || false;
+  const lockFromRaw = document.getElementById('bookLockFromChapter')?.value;
+  let lockFromChapter = null;
+  if (lockEnabled && lockFromRaw) {
+    const n = parseInt(lockFromRaw, 10);
+    if (!Number.isFinite(n) || n < 5) {
+      toast('Lock-from-chapter must be 5 or higher', 'error');
+      btn.disabled = false; btn.textContent = 'Save';
+      return;
+    }
+    lockFromChapter = n;
+  }
+
   const update = {
     title, description, genre, tags, status, is_public: isPublic,
+    lock_from_chapter: lockFromChapter,
     updated_at: new Date().toISOString(),
   };
   // Set published_at the first time the book becomes public
@@ -5974,10 +6286,64 @@ async function saveBookMetadata() {
   const { error } = await supabase.from('books').update(update).eq('id', editingBookId);
   btn.disabled = false; btn.textContent = 'Save';
 
-  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  if (error) {
+    // 90-day-grace trigger raises P0001 with a friendly message
+    if (/90 days/i.test(error.message)) toast(error.message, 'error');
+    else toast('Failed: ' + error.message, 'error');
+    return;
+  }
   toast('Saved', 'success');
   document.getElementById('bookEditorStatusBadge').textContent = isPublic ? 'Visible to readers' : 'Hidden draft';
+
+  // Re-fetch to update locked_at after a fresh lock
+  if (lockFromChapter !== null) {
+    const { data: refreshed } = await supabase.from('books')
+      .select('lock_from_chapter, locked_at').eq('id', editingBookId).single();
+    if (refreshed) setBookLockUI(refreshed.lock_from_chapter, refreshed.locked_at);
+  }
 }
+
+// ── Book lock UI helpers ────────────────────────────────────────────────
+function setBookLockUI(lockFromChapter, lockedAt) {
+  const cb       = document.getElementById('bookLockEnabled');
+  const inp      = document.getElementById('bookLockFromChapter');
+  const status   = document.getElementById('bookLockStatus');
+  const warning  = document.getElementById('bookLockWarning');
+  if (!cb || !inp) return;
+
+  const isLocked = lockFromChapter != null;
+  cb.checked = isLocked;
+  inp.value  = isLocked ? lockFromChapter : '';
+  inp.disabled = !isLocked;
+
+  if (isLocked && lockedAt) {
+    const lockedDate    = new Date(lockedAt);
+    const eligibleDate  = new Date(lockedDate.getTime() + 90 * 24 * 60 * 60 * 1000);
+    const now           = new Date();
+    const fmt = (d) => d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    if (now < eligibleDate) {
+      const days = Math.ceil((eligibleDate - now) / (24 * 60 * 60 * 1000));
+      status.style.display = '';
+      status.innerHTML = `<strong>Locked since ${fmt(lockedDate)}.</strong> You can disable this lock starting <strong>${fmt(eligibleDate)}</strong> (${days} day${days === 1 ? '' : 's'} from now).`;
+      if (warning) warning.style.display = 'none';
+    } else {
+      status.style.display = '';
+      status.innerHTML = `<strong>Locked since ${fmt(lockedDate)}.</strong> The 90-day window has passed — you can disable the lock anytime.`;
+      if (warning) warning.style.display = 'none';
+    }
+  } else {
+    status.style.display = 'none';
+    if (warning) warning.style.display = '';
+  }
+}
+
+// Toggle the input enable state when the checkbox flips
+document.getElementById('bookLockEnabled')?.addEventListener('change', (e) => {
+  const inp = document.getElementById('bookLockFromChapter');
+  if (!inp) return;
+  inp.disabled = !e.target.checked;
+  if (e.target.checked && !inp.value) inp.value = '5';
+});
 document.getElementById('btnSaveBook')?.addEventListener('click', saveBookMetadata);
 document.getElementById('btnBackToDashboard')?.addEventListener('click', showAuthor);
 
@@ -6664,7 +7030,7 @@ async function loadStudio() {
 
   const { data: videos, error } = await supabase
     .from('videos')
-    .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id, is_locked, unlock_cost_coins, unlock_cost_stars')
+    .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars')
     .eq('uploader_id', currentUser.id)
     .order('created_at', { ascending: false });
   
@@ -6885,26 +7251,12 @@ function openStudioEditModal(videoId) {
   document.getElementById('studioEditTitleCount').textContent = `${(v.title || '').length} / 100`;
   document.getElementById('studioEditDescCount').textContent = `${(v.description || '').length} / 2000`;
 
-  // Lock controls
-  const lockCb        = document.getElementById('studioEditLockEnabled');
-  const lockCostRow   = document.getElementById('studioEditLockCostRow');
-  const lockCoinsInp  = document.getElementById('studioEditLockCoins');
-  const lockStarsInp  = document.getElementById('studioEditLockStars');
-  if (lockCb) {
-    lockCb.checked = !!v.is_locked;
-    if (lockCostRow)  lockCostRow.style.display = v.is_locked ? '' : 'none';
-    if (lockCoinsInp) lockCoinsInp.value = v.unlock_cost_coins || '';
-    if (lockStarsInp) lockStarsInp.value = v.unlock_cost_stars || '';
-  }
+  // Monetization toggle (Phase 6: time-based, not gated-from-start)
+  const monCb = document.getElementById('studioEditMonetized');
+  if (monCb) monCb.checked = !!v.is_monetized;
 
   document.getElementById('studioEditModal').style.display = 'flex';
 }
-
-// Toggle cost row when the lock checkbox flips
-document.getElementById('studioEditLockEnabled')?.addEventListener('change', (e) => {
-  const costRow = document.getElementById('studioEditLockCostRow');
-  if (costRow) costRow.style.display = e.target.checked ? '' : 'none';
-});
 
 function closeStudioEditModal() {
   document.getElementById('studioEditModal').style.display = 'none';
@@ -6943,20 +7295,14 @@ async function saveStudioEdit() {
 
   const tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t);
 
-  // Lock fields
-  const isLocked = document.getElementById('studioEditLockEnabled')?.checked || false;
-  const lockCoinsRaw = document.getElementById('studioEditLockCoins')?.value;
-  const lockStarsRaw = document.getElementById('studioEditLockStars')?.value;
-  const unlockCostCoins = isLocked && lockCoinsRaw ? parseInt(lockCoinsRaw, 10) || null : null;
-  const unlockCostStars = isLocked && lockStarsRaw ? parseInt(lockStarsRaw, 10) || null : null;
+  // Monetization toggle (Phase 6 replaces is_locked for new videos)
+  const isMonetized = document.getElementById('studioEditMonetized')?.checked || false;
 
   const { error } = await supabase
     .from('videos')
     .update({
       title, description, tags, category,
-      is_locked: isLocked,
-      unlock_cost_coins: unlockCostCoins,
-      unlock_cost_stars: unlockCostStars,
+      is_monetized: isMonetized,
       updated_at: new Date().toISOString(),
     })
     .eq('id', studioEditingVideoId);
@@ -7618,7 +7964,7 @@ async function playVideo(videoId) {
       const rawId = videoId.startsWith('sb_') ? videoId.slice(3) : videoId;
       const { data, error } = await supabase
         .from('videos')
-        .select(`id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, status, is_hidden, is_locked, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`)
+        .select(`id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, status, is_hidden, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`)
         .eq('id', rawId)
         .maybeSingle();
       if (error || !data) {
@@ -7647,6 +7993,7 @@ async function playVideo(videoId) {
         status: data.status || 'ready',
         $createdAt: data.created_at,
         is_locked:         data.is_locked,
+        is_monetized:      data.is_monetized,
         unlock_cost_coins: data.unlock_cost_coins,
         unlock_cost_stars: data.unlock_cost_stars,
         _uploaderInfo: data.profiles ? { $id: data.profiles.id, username: data.profiles.username, avatar: data.profiles.avatar_url } : null,
@@ -7692,6 +8039,19 @@ async function playVideo(videoId) {
       return;
     }
     if (paywallEl) paywallEl.style.display = 'none';
+
+    // PHASE 6 — time-based monetization. Independent of the legacy is_locked
+    // gated-from-start paywall above. If video.is_monetized is true and the
+    // viewer has NOT permanently unlocked (no `unlocks` row), set up a
+    // timeupdate listener that pauses + prompts at thresholds (180, 780,
+    // 1380, 1980, …). Coin = permanent. Star = 10-min window only.
+    if (video.is_monetized && !isOwner && !isUnlocked('video', sbId)) {
+      // sbId may be 'aw_xxx' for legacy videos; setupVideoMonetGate handles
+      // both UUID and legacy ids by skipping video_progress writes for legacy.
+      await setupVideoMonetGate(player, sbId, video);
+    } else {
+      teardownVideoMonetGate(player);
+    }
 
     const resumeFrom = getResumeTime(videoId);
 
@@ -10989,4 +11349,3 @@ function insertEmojiIntoComposer(emoji) {
   resizeDmInput();
   updateSendButton();
 }
-
