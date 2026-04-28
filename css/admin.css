@@ -1041,7 +1041,7 @@ body.light { background: var(--admin-bg); }
 /* Defaults rows */
 .admin-config-row {
   display: grid;
-  grid-template-columns: 1fr 120px auto;
+  grid-template-columns: minmax(0, 1fr) 110px 90px;
   align-items: center;
   gap: 0.9rem;
   padding: 0.85rem 1rem;
@@ -1050,17 +1050,39 @@ body.light { background: var(--admin-bg); }
   border-radius: 10px;
   margin-bottom: 0.55rem;
 }
+.admin-config-meta { min-width: 0; }
 .admin-config-key {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 0.85rem;
   font-weight: 700;
+  word-break: break-word;
 }
 .admin-config-desc {
   font-size: 0.78rem;
   color: var(--admin-text-2);
   margin-top: 0.15rem;
 }
-.admin-config-input { width: 100%; text-align: right; font-variant-numeric: tabular-nums; }
+.admin-config-input {
+  /* Self-contained: not piggybacking on .admin-input's 220px min-width */
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--admin-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--admin-text);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.admin-config-input:focus {
+  outline: 2px solid rgba(124,58,237,0.3);
+  border-color: var(--admin-purple);
+}
+.admin-config-save { width: 100%; }
 
 /* ─── Mobile ─── */
 @media (max-width: 640px) {
