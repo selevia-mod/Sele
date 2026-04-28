@@ -6977,14 +6977,18 @@ function renderAuthorKycBanner() {
 function syncAuthorPayoutButton() {
   const btn = document.getElementById('btnRequestPayout');
   if (!btn) return;
-  // Gate on PHP minimum (₱100 default) instead of coin count — simpler for
-  // authors to understand and matches what they see in the dashboard.
-  const minPhpMinor  = _walletConfigDefaults.min_payout_php_minor || 10000;
+  // Always keep the button ENABLED — when the user can't withdraw, the click
+  // handler shows a friendly popup explaining why (need to fill Payments Info,
+  // or below ₱100 minimum). A silently-disabled button just confuses people.
+  btn.disabled = false;
+
+  const minPhpMinor   = _walletConfigDefaults.min_payout_php_minor || 10000;
   const availPhpMinor = _authorBalance?._computed_available_minor ?? (_authorBalance?.available_php_minor || 0);
   const kycOk = !_walletConfigDefaults.author_payout_kyc_required ||
                 _authorKyc?.status === 'approved';
-  btn.disabled = availPhpMinor < minPhpMinor || !kycOk;
-  if (availPhpMinor < minPhpMinor) btn.title = `Need at least ${formatPhpFromMinor(minPhpMinor)} available`;
+  // Tooltip is just a hint — actual blocking happens in the click handler
+  if (!_authorKyc?.payment_method)  btn.title = 'Fill in your Payments Info first';
+  else if (availPhpMinor < minPhpMinor) btn.title = `Need at least ${formatPhpFromMinor(minPhpMinor)} available`;
   else if (!kycOk)                 btn.title = 'KYC must be approved first';
   else                             btn.title = '';
 }
@@ -7367,7 +7371,24 @@ document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
   const availPhpMinor = _authorBalance?._computed_available_minor ??
                         (_authorBalance?.available_php_minor || 0);
 
-  // ── Below minimum → friendly explainer popup (not silent disabled) ──
+  // ── PRIORITY 1: No Payments Info saved → walk them to it ──
+  // Even if they have ₱0 they should know payment info is required.
+  if (!_authorKyc?.payment_method) {
+    document.getElementById('minPayoutMsg').innerHTML =
+      "You haven't saved your Payments Info yet — we need that before sending money. It only takes a minute.";
+    document.getElementById('minPayoutModal').dataset.action = 'go-to-payments-info';
+    // Reuse the popup with a different CTA: "Open Payments Info"
+    const okBtn = document.getElementById('minPayoutOk');
+    okBtn.textContent = 'Open Payments Info';
+    okBtn.dataset.action = 'go-to-payments-info';
+    // Hide the progress block — irrelevant when no Payments Info exists
+    document.querySelector('#minPayoutModal .min-payout-progress').style.display = 'none';
+    document.querySelector('#minPayoutModal .modal-title').textContent = 'Add Payments Info first';
+    document.getElementById('minPayoutModal').style.display = 'flex';
+    return;
+  }
+
+  // ── PRIORITY 2: Below minimum → friendly explainer popup ──
   if (availPhpMinor < minPhpMinor) {
     const haveStr = formatPhpFromMinor(availPhpMinor);
     const minStr  = formatPhpFromMinor(minPhpMinor);
@@ -7377,13 +7398,13 @@ document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
     document.getElementById('minPayoutHave').textContent = haveStr;
     document.getElementById('minPayoutMin').textContent  = minStr;
     document.getElementById('minPayoutNeed').textContent = needStr;
+    // Reset to the standard "Got it" button
+    const okBtn = document.getElementById('minPayoutOk');
+    okBtn.textContent = 'Got it';
+    okBtn.dataset.action = 'close';
+    document.querySelector('#minPayoutModal .min-payout-progress').style.display = '';
+    document.querySelector('#minPayoutModal .modal-title').textContent = 'Not enough to withdraw yet';
     document.getElementById('minPayoutModal').style.display = 'flex';
-    return;
-  }
-
-  // ── No saved Payments Info → direct them to fill it in first ──
-  if (!_authorKyc?.payment_method) {
-    toast('Save your Payments Info first (Earnings → Payments Info)', 'error');
     return;
   }
 
@@ -7407,11 +7428,16 @@ document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
   m.style.display = 'flex';
 });
 
-// Min-payout popup close handlers
-['minPayoutClose', 'minPayoutOk'].forEach(id => {
-  document.getElementById(id)?.addEventListener('click', () => {
-    document.getElementById('minPayoutModal').style.display = 'none';
-  });
+// Min-payout popup — close button always closes
+document.getElementById('minPayoutClose')?.addEventListener('click', () => {
+  document.getElementById('minPayoutModal').style.display = 'none';
+});
+// OK button — if action is "go-to-payments-info", switch to that tab; else just close
+document.getElementById('minPayoutOk')?.addEventListener('click', (e) => {
+  document.getElementById('minPayoutModal').style.display = 'none';
+  if (e.currentTarget.dataset.action === 'go-to-payments-info') {
+    if (typeof switchEarningsTab === 'function') switchEarningsTab('payments');
+  }
 });
 document.getElementById('minPayoutModal')?.addEventListener('click', (e) => {
   if (e.target.id === 'minPayoutModal') document.getElementById('minPayoutModal').style.display = 'none';
