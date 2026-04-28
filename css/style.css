@@ -9678,7 +9678,7 @@ body:not(.light) .video-monet-countdown-text strong { color: #c4b5fd; }
    ════════════════════════════════════════════════════════════════════════════ */
 .site-footer {
   margin-top: 1.5rem;
-  padding: 0.8rem 1.5rem 1rem;
+  padding: 0.7rem 1.5rem;
   background: rgba(124, 58, 237, 0.03);
   border-top: 1px solid rgba(124, 58, 237, 0.10);
   /* Account for the left sidebar so the footer aligns with main content */
@@ -9690,48 +9690,44 @@ body.is-auth .site-footer { display: none; }
   max-width: 1100px;
   margin: 0 auto;
   display: flex;
-  flex-direction: column;
-  gap: 0.28rem;
+  flex-direction: row;
+  flex-wrap: wrap;
   align-items: center;
-  text-align: center;
+  justify-content: center;
+  gap: 0.55rem;
+  font-size: 0.78rem;
+  color: var(--text2);
+  line-height: 1.4;
 }
-.site-footer-brand strong {
-  font-size: 1rem;
+.site-footer-brand-name {
+  font-size: 0.85rem;
   font-weight: 800;
   background: linear-gradient(135deg, #7c3aed, #a78bfa);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-  margin-right: 0.5rem;
+  letter-spacing: 0.01em;
 }
-.site-footer-tagline {
-  font-size: 0.82rem;
-  color: var(--text2);
-}
-.site-footer-contact a,
-.site-footer-links a {
+.site-footer-inner a {
   color: var(--text2);
   text-decoration: none;
-  font-size: 0.84rem;
   font-weight: 500;
-  margin: 0 0.3rem;
   transition: color 0.15s ease;
 }
-.site-footer-contact a:hover,
-.site-footer-links a:hover { color: #7c3aed; text-decoration: underline; }
-.site-footer-sep { color: var(--text2); margin: 0 0.2rem; }
-.site-footer-links { display: flex; gap: 0.2rem; flex-wrap: wrap; justify-content: center; }
-.site-footer-copy {
-  font-size: 0.74rem;
+.site-footer-inner a:hover { color: #7c3aed; }
+.site-footer-sep {
   color: var(--text2);
-  margin-top: 0.15rem;
+  opacity: 0.45;
+  user-select: none;
 }
+.site-footer-copy { color: var(--text2); opacity: 0.85; }
 body:not(.light) .site-footer {
   background: rgba(167, 139, 250, 0.04);
   border-top-color: rgba(167, 139, 250, 0.15);
 }
 @media (max-width: 900px) {
   .site-footer { padding-left: 1.5rem; padding-right: 1.5rem; }
+  .site-footer-inner { font-size: 0.74rem; gap: 0.4rem; }
 }
 
 .author-book-pro-tag {
