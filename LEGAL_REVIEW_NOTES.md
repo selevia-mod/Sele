@@ -17,10 +17,10 @@ This document is for the Philippine attorney reviewing Selebox's `terms.html`, `
 
 These appear as `[BRACKETS]` in the documents and need to be filled before going live:
 
-1. **`[REGISTERED_BUSINESS_NAME]`** — DTI sole proprietorship, SEC corporation, or other legal entity name.
-2. **`[BUSINESS_ADDRESS]`** — physical registered business address (required by PH DPA for transparency, and for receipts under BIR rules).
-3. **`[DPO_NAME]`** — Data Protection Officer name. PH businesses processing personal data must designate and register a DPO with the National Privacy Commission. If Selebox has not done this, do it before launch (`npc.gov.ph` → Register a DPO).
-4. **`[CITY OF JURISDICTION]`** in Terms §16 — typically the city where the business is registered (e.g. Quezon City, Makati, Pasig).
+1. **`TOS WEB PUBLISHING`** — DTI sole proprietorship, SEC corporation, or other legal entity name.
+2. **`MALOLOS, BULACAN`** — physical registered business address (required by PH DPA for transparency, and for receipts under BIR rules).
+3. **`CHARLES SANTOS`** — Data Protection Officer name. PH businesses processing personal data must designate and register a DPO with the National Privacy Commission. If Selebox has not done this, do it before launch (`npc.gov.ph` → Register a DPO).
+4. **`BULACAN`** in Terms §16 — typically the city where the business is registered (e.g. Quezon City, Makati, Pasig).
 5. **Author monetization clause in Terms §7** — Currently says "[NOT YET AVAILABLE / SUBJECT TO A SEPARATE AUTHOR EARNINGS POLICY]". Decide which version to keep based on whether Authors can withdraw earnings.
 
 ## Items the lawyer should confirm
