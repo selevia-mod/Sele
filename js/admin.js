@@ -65,6 +65,7 @@ function switchTab(name) {
   if (name === 'bans')    lazyInit('bansFilter',    typeof initBansTab    === 'function' ? initBansTab    : null, typeof loadBans           === 'function' ? loadBans           : null);
   if (name === 'content') lazyInit('contentFilter', typeof initContentTab === 'function' ? initContentTab : null, typeof loadHiddenContent  === 'function' ? loadHiddenContent  : null);
   if (name === 'wallet')  lazyInit('btnAddPack',    typeof initWalletTab  === 'function' ? initWalletTab  : null, typeof loadWalletPacks    === 'function' ? loadWalletPacks    : null);
+  if (name === 'payouts') lazyInit('payoutsFilter', typeof initPayoutsTab === 'function' ? initPayoutsTab : null, typeof loadPayouts        === 'function' ? loadPayouts        : null);
 }
 
 document.querySelectorAll('.admin-tab').forEach(t => {
@@ -1279,6 +1280,218 @@ async function loadWalletConfig() {
       toast(`Updated ${c.key} → ${v}`);
     };
     listEl.appendChild(row);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PAYOUTS TAB (Phase 7) — author withdrawal requests + KYC review
+// ════════════════════════════════════════════════════════════════════════════
+
+function initPayoutsTab() {
+  document.querySelectorAll('[data-tab-content="payouts"] .admin-subtab').forEach(t => {
+    t.addEventListener('click', () => switchPayoutsSubtab(t.dataset.subtab));
+  });
+  document.getElementById('payoutsFilter')?.addEventListener('change', loadPayouts);
+  document.getElementById('kycFilter')?.addEventListener('change', loadKycList);
+}
+
+function switchPayoutsSubtab(name) {
+  document.querySelectorAll('[data-tab-content="payouts"] .admin-subtab').forEach(t => t.classList.toggle('active', t.dataset.subtab === name));
+  document.querySelectorAll('[data-tab-content="payouts"] .admin-subtab-content').forEach(s => {
+    s.style.display = s.dataset.subtabContent === name ? 'block' : 'none';
+  });
+  if (name === 'withdrawals') loadPayouts();
+  if (name === 'kyc')         loadKycList();
+}
+
+// ─── Withdrawals ───────────────────────────────────────────────────────
+async function loadPayouts() {
+  const listEl = document.getElementById('payoutsList');
+  const subEl  = document.getElementById('payoutsSub');
+  const filter = document.getElementById('payoutsFilter')?.value || 'open';
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  let q = supabase
+    .from('author_withdrawals')
+    .select('id, author_id, amount_coins, amount_php_minor, status, payout_method, payout_details, rejection_reason, hitpay_payout_ref, requested_at, approved_at, paid_at')
+    .order('requested_at', { ascending: false })
+    .limit(200);
+
+  if (filter === 'open')          q = q.in('status', ['pending', 'approved']);
+  else if (filter !== 'all')      q = q.eq('status', filter);
+
+  const { data: rows, error } = await q;
+  if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
+  if (!rows?.length) {
+    listEl.innerHTML = `<div class="admin-empty">No ${filter === 'all' ? '' : filter + ' '}withdrawals.</div>`;
+    if (subEl) subEl.textContent = '0 requests';
+    return;
+  }
+
+  // Hydrate author info
+  const authorIds = [...new Set(rows.map(r => r.author_id))];
+  const { data: authors } = await supabase.from('profiles')
+    .select('id, username, email, avatar_url, role')
+    .in('id', authorIds);
+  const aMap = Object.fromEntries((authors || []).map(a => [a.id, a]));
+
+  if (subEl) subEl.textContent = `${rows.length} ${filter === 'open' ? 'open' : filter} request${rows.length === 1 ? '' : 's'}`;
+  listEl.innerHTML = '';
+
+  for (const w of rows) {
+    const a = aMap[w.author_id];
+    const detailsObj = w.payout_details || {};
+    const phpFmt = '₱' + (w.amount_php_minor / 100).toLocaleString('en-PH', { minimumFractionDigits: 2 });
+    const card = document.createElement('div');
+    card.className = `payout-card payout-status-${w.status}`;
+    card.innerHTML = `
+      <div class="payout-card-head">
+        <div class="payout-author">
+          <div class="user-row-avatar">${a?.avatar_url ? `<img src="${esc(a.avatar_url)}"/>` : esc(initials(a?.username || 'A'))}</div>
+          <div>
+            <div class="payout-author-name">${esc(a?.username || '(unknown)')}</div>
+            <div class="payout-author-email">${esc(a?.email || '')}</div>
+          </div>
+        </div>
+        <div class="payout-amount">
+          <div class="payout-amount-coins">${w.amount_coins.toLocaleString()} coins</div>
+          <div class="payout-amount-php">${phpFmt}</div>
+        </div>
+        <span class="payout-status-badge payout-status-badge-${w.status}">${esc(w.status)}</span>
+      </div>
+      <div class="payout-details">
+        <div><strong>Method:</strong> ${esc(w.payout_method)}</div>
+        <div><strong>Account name:</strong> ${esc(detailsObj.account_name || '—')}</div>
+        <div><strong>Account #:</strong> ${esc(detailsObj.account_number || '—')}</div>
+        ${detailsObj.bank_name ? `<div><strong>Bank:</strong> ${esc(detailsObj.bank_name)}</div>` : ''}
+        <div><strong>Requested:</strong> ${timeAgo(w.requested_at)}</div>
+        ${w.approved_at ? `<div><strong>Approved:</strong> ${timeAgo(w.approved_at)}</div>` : ''}
+        ${w.paid_at ? `<div><strong>Paid:</strong> ${timeAgo(w.paid_at)}${w.hitpay_payout_ref ? ' · ref ' + esc(w.hitpay_payout_ref) : ''}</div>` : ''}
+        ${w.rejection_reason ? `<div><strong>Rejection reason:</strong> ${esc(w.rejection_reason)}</div>` : ''}
+      </div>
+      <div class="payout-actions">
+        ${w.status === 'pending'
+          ? `<button class="admin-btn admin-btn-primary" data-act="approve">Approve</button>
+             <button class="admin-btn admin-btn-danger-ghost" data-act="reject">Reject</button>`
+          : ''}
+        ${w.status === 'approved' || w.status === 'pending'
+          ? `<button class="admin-btn admin-btn-primary" data-act="mark-paid">Mark as paid</button>`
+          : ''}
+      </div>
+    `;
+    card.querySelector('[data-act="approve"]')?.addEventListener('click', async () => {
+      if (!confirm(`Approve ${w.amount_coins} coins (${phpFmt}) payout to ${a?.username || 'this author'}? You'll mark as paid after sending the money.`)) return;
+      const { data, error } = await supabase.rpc('admin_approve_withdrawal', { p_withdrawal_id: w.id });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast('Approved.');
+      loadPayouts();
+    });
+    card.querySelector('[data-act="reject"]')?.addEventListener('click', async () => {
+      const reason = prompt('Reject reason (visible to author):');
+      if (!reason) return;
+      const { data, error } = await supabase.rpc('admin_reject_withdrawal', {
+        p_withdrawal_id: w.id, p_reason: reason,
+      });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast('Rejected.');
+      loadPayouts();
+    });
+    card.querySelector('[data-act="mark-paid"]')?.addEventListener('click', async () => {
+      const ref = prompt('Optional external reference (e.g. GCash transaction ID, bank ref):') || null;
+      if (!confirm(`Confirm: ${a?.username || 'author'} has been sent ${phpFmt} via ${w.payout_method}?`)) return;
+      const { data, error } = await supabase.rpc('admin_mark_withdrawal_paid', {
+        p_withdrawal_id: w.id, p_external_ref: ref,
+      });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast('Marked as paid.');
+      loadPayouts();
+    });
+    listEl.appendChild(card);
+  }
+}
+
+// ─── KYC review ─────────────────────────────────────────────────────────
+async function loadKycList() {
+  const listEl = document.getElementById('kycList');
+  const filter = document.getElementById('kycFilter')?.value || 'pending';
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  let q = supabase
+    .from('author_kyc')
+    .select('user_id, full_name, date_of_birth, id_type, id_number, id_document_url, selfie_url, status, rejection_reason, submitted_at, reviewed_at')
+    .order('submitted_at', { ascending: false })
+    .limit(200);
+  if (filter !== 'all') q = q.eq('status', filter);
+
+  const { data: rows, error } = await q;
+  if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
+  if (!rows?.length) {
+    listEl.innerHTML = `<div class="admin-empty">No ${filter} KYC submissions.</div>`;
+    return;
+  }
+
+  const userIds = [...new Set(rows.map(r => r.user_id))];
+  const { data: users } = await supabase.from('profiles')
+    .select('id, username, email, avatar_url')
+    .in('id', userIds);
+  const uMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+
+  listEl.innerHTML = '';
+  for (const r of rows) {
+    const u = uMap[r.user_id];
+    const card = document.createElement('div');
+    card.className = `kyc-card kyc-status-${r.status}`;
+    card.innerHTML = `
+      <div class="payout-card-head">
+        <div class="payout-author">
+          <div class="user-row-avatar">${u?.avatar_url ? `<img src="${esc(u.avatar_url)}"/>` : esc(initials(u?.username || 'U'))}</div>
+          <div>
+            <div class="payout-author-name">${esc(u?.username || '(unknown)')}</div>
+            <div class="payout-author-email">${esc(u?.email || '')}</div>
+          </div>
+        </div>
+        <span class="payout-status-badge payout-status-badge-${r.status}">${esc(r.status)}</span>
+      </div>
+      <div class="payout-details">
+        <div><strong>Full name:</strong> ${esc(r.full_name)}</div>
+        ${r.date_of_birth ? `<div><strong>DOB:</strong> ${esc(r.date_of_birth)}</div>` : ''}
+        <div><strong>ID type:</strong> ${esc(r.id_type || '—')}</div>
+        <div><strong>ID number:</strong> ${esc(r.id_number || '—')}</div>
+        <div><strong>Submitted:</strong> ${timeAgo(r.submitted_at)}</div>
+        ${r.reviewed_at ? `<div><strong>Reviewed:</strong> ${timeAgo(r.reviewed_at)}</div>` : ''}
+        ${r.rejection_reason ? `<div><strong>Rejection reason:</strong> ${esc(r.rejection_reason)}</div>` : ''}
+      </div>
+      <div class="payout-actions">
+        ${r.status === 'pending'
+          ? `<button class="admin-btn admin-btn-primary" data-act="kyc-approve">Approve</button>
+             <button class="admin-btn admin-btn-danger-ghost" data-act="kyc-reject">Reject</button>`
+          : r.status === 'rejected'
+            ? `<button class="admin-btn admin-btn-primary" data-act="kyc-approve">Approve anyway</button>`
+            : ''}
+      </div>
+    `;
+    card.querySelector('[data-act="kyc-approve"]')?.addEventListener('click', async () => {
+      if (!confirm(`Approve KYC for ${u?.username || 'this user'}?`)) return;
+      const { data, error } = await supabase.rpc('admin_set_kyc_status', {
+        p_user_id: r.user_id, p_status: 'approved', p_reason: null,
+      });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast('KYC approved.');
+      loadKycList();
+    });
+    card.querySelector('[data-act="kyc-reject"]')?.addEventListener('click', async () => {
+      const reason = prompt('Reject reason (visible to user):');
+      if (!reason) return;
+      const { data, error } = await supabase.rpc('admin_set_kyc_status', {
+        p_user_id: r.user_id, p_status: 'rejected', p_reason: reason,
+      });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast('KYC rejected.');
+      loadKycList();
+    });
+    listEl.appendChild(card);
   }
 }
 
