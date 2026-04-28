@@ -651,6 +651,8 @@ function switchEarningsTab(name) {
   document.querySelectorAll('.earnings-tab-content').forEach(s => {
     s.style.display = s.dataset.etabContent === name ? 'block' : 'none';
   });
+  // Pre-fill the Payments Info form when switched to (uses _authorKyc snapshot)
+  if (name === 'payments') fillPaymentsInfoForm();
 }
 
 document.querySelectorAll('.earnings-tab').forEach(t => {
@@ -6412,23 +6414,149 @@ function syncAuthorPayoutButton() {
   else                    btn.title = '';
 }
 
-// ── KYC modal wiring ────────────────────────────────────────────────────
+// ── Payments Info form (inline, replaces the old modal) ─────────────────
+//
+// Click on the "Submit info" banner in the Earnings tab → switch to the
+// Payments Info tab where the full form lives.
 document.getElementById('btnSubmitKyc')?.addEventListener('click', () => {
-  const m = document.getElementById('kycModal');
-  if (!m) return;
-  // Pre-fill from existing KYC (lets users refine after rejection)
-  if (_authorKyc) {
-    document.getElementById('kycFullName').value  = _authorKyc.full_name || '';
-    document.getElementById('kycDob').value       = _authorKyc.date_of_birth ? _authorKyc.date_of_birth.slice(0, 10) : '';
-    document.getElementById('kycIdType').value    = _authorKyc.id_type || 'philsys';
-    document.getElementById('kycIdNumber').value  = _authorKyc.id_number || '';
-  } else {
-    document.getElementById('kycFullName').value  = '';
-    document.getElementById('kycDob').value       = '';
-    document.getElementById('kycIdType').value    = 'philsys';
-    document.getElementById('kycIdNumber').value  = '';
-  }
-  m.style.display = 'flex';
+  switchEarningsTab('payments');
+});
+
+// File picker → upload to private kyc-uploads bucket → preview thumbnail
+async function uploadKycImage(file, kind /* 'qr' | 'id' | 'sig' */) {
+  if (!file || !currentUser) return null;
+  if (file.size > 5 * 1024 * 1024) { toast('File too large (max 5 MB)', 'error'); return null; }
+  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+  const path = `${currentUser.id}/${kind}-${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+  const { error } = await supabase.storage.from('kyc-uploads').upload(path, file, { upsert: false });
+  if (error) { toast('Upload failed: ' + error.message, 'error'); return null; }
+  return path;  // private bucket — store the path, not a public URL
+}
+
+// Wire each upload box: clicking it opens the file picker; on file pick,
+// upload + show preview.
+function wireKycUpload(boxId, fileId, textId, previewId, kind, urlSetter) {
+  const box     = document.getElementById(boxId);
+  const fileInp = document.getElementById(fileId);
+  const textEl  = document.getElementById(textId);
+  const prevEl  = document.getElementById(previewId);
+  if (!box || !fileInp) return;
+  // The label wraps the input so click is automatic.
+  fileInp.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    box.classList.add('is-uploading');
+    if (textEl) textEl.textContent = 'Uploading…';
+    const path = await uploadKycImage(file, kind);
+    box.classList.remove('is-uploading');
+    if (!path) {
+      if (textEl) textEl.textContent = `Tap to upload ${kind === 'qr' ? 'qr code' : kind === 'id' ? 'valid id' : 'signature'}`;
+      return;
+    }
+    urlSetter(path);
+    if (file.type.startsWith('image/')) {
+      // Local preview (from the file blob — server URL is private)
+      const reader = new FileReader();
+      reader.onload = () => { if (prevEl) { prevEl.src = reader.result; prevEl.style.display = ''; } };
+      reader.readAsDataURL(file);
+    }
+    if (textEl) textEl.textContent = 'Replace';
+  });
+}
+
+// State for the in-flight form (paths only; uploaded immediately on file pick)
+const _piUploads = { qr: null, id: null, sig: null };
+
+// Pre-fill the form when the Payments Info tab loads (idempotent — safe to
+// call any time _authorKyc is fresh).
+function fillPaymentsInfoForm() {
+  const k = _authorKyc;
+  document.getElementById('piFullName').value = k?.full_name || '';
+  document.getElementById('piPhone').value    = k?.phone || '';
+  document.getElementById('piEmail').value    = k?.email || currentUser?.email || '';
+  document.getElementById('piDob').value      = k?.date_of_birth ? String(k.date_of_birth).slice(0, 10) : '';
+  document.getElementById('piAddress').value  = k?.address || '';
+  // Method
+  document.querySelectorAll('input[name="piMethod"]').forEach(r => {
+    r.checked = (k?.payment_method === r.value);
+  });
+  // Existing uploads — show "Uploaded ✓" but no preview (file is private)
+  const hint = (id, has, kindLabel) => {
+    const t = document.getElementById(id);
+    if (t) t.textContent = has ? `Uploaded — tap to replace ${kindLabel}` : `Tap to upload ${kindLabel}`;
+  };
+  hint('piQrText',  !!k?.payment_qr_url,  'qr code');
+  hint('piIdText',  !!k?.id_document_url, 'valid id');
+  hint('piSigText', !!k?.signature_url,   'signature');
+  // Reset uploads buffer so a fresh edit starts clean
+  _piUploads.qr  = null;
+  _piUploads.id  = null;
+  _piUploads.sig = null;
+}
+
+// Wire each upload control once at module load
+wireKycUpload('piQrUploadBox',  'piQrFile',  'piQrText',  'piQrPreview',  'qr',  (p) => { _piUploads.qr  = p; });
+wireKycUpload('piIdUploadBox',  'piIdFile',  'piIdText',  'piIdPreview',  'id',  (p) => { _piUploads.id  = p; });
+wireKycUpload('piSigUploadBox', 'piSigFile', 'piSigText', 'piSigPreview', 'sig', (p) => { _piUploads.sig = p; });
+
+// Method-pill visual selection
+document.querySelectorAll('input[name="piMethod"]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.querySelectorAll('.pi-method-pill').forEach(p => p.classList.toggle('is-checked', p.querySelector('input').checked));
+  });
+});
+
+// Save button — validates + submits + reloads earnings
+document.getElementById('piSaveBtn')?.addEventListener('click', async () => {
+  const fullName = document.getElementById('piFullName').value.trim();
+  const phone    = document.getElementById('piPhone').value.trim();
+  const email    = document.getElementById('piEmail').value.trim();
+  const dob      = document.getElementById('piDob').value;
+  const address  = document.getElementById('piAddress').value.trim();
+  const method   = document.querySelector('input[name="piMethod"]:checked')?.value;
+
+  if (!fullName) { toast('Full name is required', 'error'); return; }
+  if (!phone)    { toast('Phone number is required', 'error'); return; }
+  if (!email)    { toast('Email is required', 'error'); return; }
+  if (!dob)      { toast('Date of birth is required', 'error'); return; }
+  if (!address)  { toast('Address is required', 'error'); return; }
+  if (!method)   { toast('Pick a payment method', 'error'); return; }
+
+  // QR / ID / Signature — required on first submit, optional on re-edit
+  // (we keep the existing upload paths if the user didn't pick new files).
+  const qr  = _piUploads.qr  || _authorKyc?.payment_qr_url  || null;
+  const id  = _piUploads.id  || _authorKyc?.id_document_url || null;
+  const sig = _piUploads.sig || _authorKyc?.signature_url   || null;
+  if (!qr)  { toast('Upload your payment QR code', 'error'); return; }
+  if (!id)  { toast('Upload a valid government ID', 'error'); return; }
+  if (!sig) { toast('Upload your signature', 'error'); return; }
+
+  const btn = document.getElementById('piSaveBtn');
+  btn.disabled = true; btn.querySelector('span').textContent = 'Saving…';
+
+  const { data, error } = await supabase.rpc('submit_author_kyc', {
+    p_full_name:        fullName,
+    p_date_of_birth:    dob,
+    p_id_type:          null,           // legacy — not collected by this form
+    p_id_number:        null,           // legacy — not collected by this form
+    p_id_document_url:  id,
+    p_selfie_url:       null,           // legacy
+    p_phone:            phone,
+    p_email:            email,
+    p_address:          address,
+    p_payment_method:   method,
+    p_payment_qr_url:   qr,
+    p_signature_url:    sig,
+  });
+
+  btn.disabled = false; btn.querySelector('span').textContent = 'Save Information';
+
+  if (error) { toast(error.message, 'error'); return; }
+  if (data?.ok === false) { toast(data.error || 'Failed', 'error'); return; }
+
+  toast('Submitted — we\'ll review within 1–2 business days.', 'success');
+  await loadAuthorEarnings();
+  fillPaymentsInfoForm();
 });
 document.getElementById('kycClose')?.addEventListener('click', () => { document.getElementById('kycModal').style.display = 'none'; });
 document.getElementById('kycCancel')?.addEventListener('click', () => { document.getElementById('kycModal').style.display = 'none'; });
