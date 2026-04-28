@@ -8381,15 +8381,31 @@ body:not(.light) .lock-cost-row input { background: rgba(255,255,255,0.06); bord
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   margin-left: 0.5rem;
-  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
   border-radius: 999px;
-  color: #92400e;
+  color: #fff;
   flex-shrink: 0;
+  box-shadow:
+    0 4px 12px rgba(124, 58, 237, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.20);
+  transition: transform 0.12s ease, box-shadow 0.18s ease;
+}
+.chapter-row:hover .chapter-row-lock {
+  transform: scale(1.05);
+  box-shadow:
+    0 6px 16px rgba(124, 58, 237, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
 }
 .chapter-row-lock svg { width: 14px; height: 14px; }
+body:not(.light) .chapter-row-lock {
+  background: linear-gradient(135deg, #a78bfa 0%, #c4b5fd 100%);
+  box-shadow:
+    0 4px 14px rgba(167, 139, 250, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
 
 /* ── Reader paywall ────────────────────────────────────────────────────── */
 .reader-paywall {
