@@ -7371,20 +7371,23 @@ document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
   const availPhpMinor = _authorBalance?._computed_available_minor ??
                         (_authorBalance?.available_php_minor || 0);
 
+  const minModal = document.getElementById('minPayoutModal');
+
   // ── PRIORITY 1: No Payments Info saved → walk them to it ──
   // Even if they have ₱0 they should know payment info is required.
   if (!_authorKyc?.payment_method) {
     document.getElementById('minPayoutMsg').innerHTML =
       "You haven't saved your Payments Info yet — we need that before sending money. It only takes a minute.";
-    document.getElementById('minPayoutModal').dataset.action = 'go-to-payments-info';
-    // Reuse the popup with a different CTA: "Open Payments Info"
     const okBtn = document.getElementById('minPayoutOk');
     okBtn.textContent = 'Open Payments Info';
     okBtn.dataset.action = 'go-to-payments-info';
-    // Hide the progress block — irrelevant when no Payments Info exists
-    document.querySelector('#minPayoutModal .min-payout-progress').style.display = 'none';
-    document.querySelector('#minPayoutModal .modal-title').textContent = 'Add Payments Info first';
-    document.getElementById('minPayoutModal').style.display = 'flex';
+    const progress = minModal.querySelector('.min-payout-progress');
+    if (progress) progress.style.display = 'none';
+    const title = minModal.querySelector('.modal-title');
+    if (title) title.textContent = 'Add Payments Info first';
+    // Show with both inline display + .open class to be safe across themes
+    minModal.style.display = 'flex';
+    minModal.classList.add('open');
     return;
   }
 
@@ -7398,13 +7401,15 @@ document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
     document.getElementById('minPayoutHave').textContent = haveStr;
     document.getElementById('minPayoutMin').textContent  = minStr;
     document.getElementById('minPayoutNeed').textContent = needStr;
-    // Reset to the standard "Got it" button
     const okBtn = document.getElementById('minPayoutOk');
     okBtn.textContent = 'Got it';
     okBtn.dataset.action = 'close';
-    document.querySelector('#minPayoutModal .min-payout-progress').style.display = '';
-    document.querySelector('#minPayoutModal .modal-title').textContent = 'Not enough to withdraw yet';
-    document.getElementById('minPayoutModal').style.display = 'flex';
+    const progress = minModal.querySelector('.min-payout-progress');
+    if (progress) progress.style.display = '';
+    const title = minModal.querySelector('.modal-title');
+    if (title) title.textContent = 'Not enough to withdraw yet';
+    minModal.style.display = 'flex';
+    minModal.classList.add('open');
     return;
   }
 
@@ -7428,19 +7433,23 @@ document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
   m.style.display = 'flex';
 });
 
-// Min-payout popup — close button always closes
-document.getElementById('minPayoutClose')?.addEventListener('click', () => {
-  document.getElementById('minPayoutModal').style.display = 'none';
-});
-// OK button — if action is "go-to-payments-info", switch to that tab; else just close
+// Min-payout popup helpers — close fully (both inline display + .open class)
+function _closeMinPayoutModal() {
+  const m = document.getElementById('minPayoutModal');
+  if (!m) return;
+  m.style.display = 'none';
+  m.classList.remove('open');
+}
+document.getElementById('minPayoutClose')?.addEventListener('click', _closeMinPayoutModal);
 document.getElementById('minPayoutOk')?.addEventListener('click', (e) => {
-  document.getElementById('minPayoutModal').style.display = 'none';
-  if (e.currentTarget.dataset.action === 'go-to-payments-info') {
+  const action = e.currentTarget.dataset.action;
+  _closeMinPayoutModal();
+  if (action === 'go-to-payments-info') {
     if (typeof switchEarningsTab === 'function') switchEarningsTab('payments');
   }
 });
 document.getElementById('minPayoutModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'minPayoutModal') document.getElementById('minPayoutModal').style.display = 'none';
+  if (e.target.id === 'minPayoutModal') _closeMinPayoutModal();
 });
 
 document.getElementById('withdrawalClose')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
