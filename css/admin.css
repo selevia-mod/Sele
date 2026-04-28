@@ -772,6 +772,296 @@ body.light { background: var(--admin-bg); }
   font-style: italic;
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   WALLET TAB — coin packs CRUD, user wallets, defaults
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Sub-tab nav inside Wallet panel */
+.admin-subtabs {
+  display: flex;
+  gap: 0.4rem;
+  border-bottom: 1px solid var(--admin-border);
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.25rem;
+}
+.admin-subtab {
+  background: transparent;
+  border: 0;
+  padding: 0.55rem 0.95rem;
+  font: inherit; font-weight: 600; font-size: 0.92rem;
+  color: var(--admin-text-2);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.admin-subtab:hover { background: rgba(17,24,39,0.04); color: var(--admin-text); }
+.admin-subtab.active {
+  background: linear-gradient(135deg, rgba(124,58,237,0.12), rgba(167,139,250,0.12));
+  color: var(--admin-purple);
+}
+
+/* Pack rows */
+.admin-pack-row {
+  display: grid;
+  grid-template-columns: 44px 1fr auto auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.95rem 1.1rem;
+  background: var(--admin-card);
+  border: 1px solid var(--admin-border);
+  border-radius: 12px;
+  margin-bottom: 0.6rem;
+  transition: border-color 0.15s ease, transform 0.1s ease;
+}
+.admin-pack-row:hover { border-color: rgba(124,58,237,0.35); }
+.admin-pack-row.is-inactive { opacity: 0.55; }
+.admin-pack-icon {
+  width: 44px; height: 44px;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, #fde68a, #fbbf24);
+  border-radius: 12px;
+  font-size: 1.4rem;
+}
+.admin-pack-name {
+  font-weight: 700; font-size: 1.02rem;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.admin-pack-sub {
+  margin-top: 0.18rem;
+  font-size: 0.83rem;
+  color: var(--admin-text-2);
+}
+.admin-pack-tag {
+  display: inline-block;
+  padding: 0.16rem 0.5rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 999px;
+}
+.admin-pack-tag-best { background: #dcfce7; color: #15803d; }
+.admin-pack-tag-off  { background: #f3f4f6; color: var(--admin-text-2); }
+.admin-pack-price {
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--admin-text);
+  font-variant-numeric: tabular-nums;
+}
+.admin-pack-actions {
+  display: flex; gap: 0.3rem;
+}
+
+/* Wallet detail */
+.admin-wallet-detail {
+  background: var(--admin-card);
+  border: 1px solid var(--admin-border);
+  border-radius: 14px;
+  padding: 1.4rem;
+}
+.admin-wallet-header {
+  display: flex; align-items: center; gap: 0.9rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--admin-border);
+  margin-bottom: 1.3rem;
+}
+.admin-user-avatar-lg { width: 56px; height: 56px; font-size: 1.1rem; }
+.admin-wallet-user { flex: 1; }
+.admin-wallet-username { font-weight: 700; font-size: 1.1rem; }
+.admin-wallet-email { color: var(--admin-text-2); font-size: 0.86rem; margin-top: 0.15rem; }
+
+.admin-wallet-balances {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1.6rem;
+}
+.admin-wallet-balance-card {
+  padding: 1.2rem;
+  border: 1px solid var(--admin-border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fff 0%, #fafaf9 100%);
+}
+.admin-wallet-balance-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--admin-text-2);
+  margin-bottom: 0.4rem;
+}
+.admin-wallet-balance-value {
+  font-size: 2.1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 0.7rem;
+  transition: color 0.3s ease, transform 0.3s ease;
+}
+.admin-wallet-balance-value.is-pulse {
+  color: var(--admin-purple);
+  transform: scale(1.04);
+}
+
+/* Transaction columns */
+.admin-wallet-tx-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.2rem;
+}
+.admin-wallet-tx-col h4 {
+  margin: 0 0 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--admin-text-2);
+}
+.admin-wallet-tx { max-height: 380px; overflow-y: auto; }
+.admin-wallet-tx-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--admin-border);
+  font-size: 0.88rem;
+}
+.admin-wallet-tx-type {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.admin-wallet-tx-sub {
+  font-size: 0.75rem;
+  color: var(--admin-text-2);
+  margin-top: 0.1rem;
+}
+.admin-wallet-tx-delta {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.admin-wallet-tx-row.is-credit .admin-wallet-tx-delta { color: var(--admin-ok); }
+.admin-wallet-tx-row.is-debit  .admin-wallet-tx-delta { color: var(--admin-danger); }
+.admin-wallet-tx-balance {
+  font-size: 0.78rem;
+  color: var(--admin-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Compact user row used in wallet search results */
+.admin-user-row-compact { cursor: pointer; }
+
+/* Empty state — tiny variant for inside cards */
+.admin-empty-tiny { padding: 1rem; font-size: 0.85rem; }
+
+/* Modal */
+.admin-modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(17,24,39,0.55);
+  display: grid; place-items: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+.admin-modal {
+  background: var(--admin-card);
+  border-radius: 14px;
+  padding: 1.4rem;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.18);
+}
+.admin-modal h3 { margin: 0 0 0.4rem; font-size: 1.15rem; }
+.admin-modal-sub { margin: 0 0 1rem; color: var(--admin-text-2); font-size: 0.9rem; }
+.admin-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.2rem;
+}
+
+/* Form layout */
+.admin-form { display: grid; gap: 0.85rem; }
+.admin-form label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.83rem;
+  font-weight: 600;
+  color: var(--admin-text-2);
+}
+.admin-form input,
+.admin-form textarea {
+  font: inherit;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--admin-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--admin-text);
+  font-weight: 500;
+}
+.admin-form input:focus,
+.admin-form textarea:focus {
+  outline: 2px solid rgba(124,58,237,0.3);
+  border-color: var(--admin-purple);
+}
+.admin-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
+.admin-form-toggles { gap: 1.2rem; }
+.admin-checkbox {
+  display: flex; align-items: center; gap: 0.45rem;
+  cursor: pointer;
+  font-weight: 600; font-size: 0.9rem;
+  color: var(--admin-text);
+}
+
+/* Buttons */
+.admin-btn {
+  font: inherit;
+  font-weight: 600; font-size: 0.88rem;
+  padding: 0.5rem 0.85rem;
+  border-radius: 8px;
+  border: 0;
+  cursor: pointer;
+  transition: background 0.12s ease, transform 0.05s ease;
+}
+.admin-btn:active { transform: translateY(1px); }
+.admin-btn-primary {
+  background: linear-gradient(135deg, var(--admin-purple), var(--admin-purple-lt));
+  color: #fff;
+}
+.admin-btn-primary:hover { filter: brightness(1.04); }
+.admin-btn-ghost {
+  background: rgba(17,24,39,0.05);
+  color: var(--admin-text);
+}
+.admin-btn-ghost:hover { background: rgba(17,24,39,0.1); }
+.admin-btn-danger-ghost {
+  background: rgba(220,38,38,0.08);
+  color: var(--admin-danger);
+}
+.admin-btn-danger-ghost:hover { background: rgba(220,38,38,0.16); }
+
+/* Defaults rows */
+.admin-config-row {
+  display: grid;
+  grid-template-columns: 1fr 120px auto;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.85rem 1rem;
+  background: var(--admin-card);
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  margin-bottom: 0.55rem;
+}
+.admin-config-key {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.admin-config-desc {
+  font-size: 0.78rem;
+  color: var(--admin-text-2);
+  margin-top: 0.15rem;
+}
+.admin-config-input { width: 100%; text-align: right; font-variant-numeric: tabular-nums; }
+
 /* ─── Mobile ─── */
 @media (max-width: 640px) {
   .admin-header { padding: 0.85rem 1rem; }
@@ -781,4 +1071,17 @@ body.light { background: var(--admin-bg); }
   .report-actions { justify-content: flex-start; }
   .admin-user-filters { width: 100%; }
   .admin-input { min-width: 0; flex: 1; }
+  .admin-wallet-balances,
+  .admin-wallet-tx-cols { grid-template-columns: 1fr; }
+  .admin-pack-row {
+    grid-template-columns: 44px 1fr;
+    grid-template-areas: "icon meta" "price price" "actions actions";
+    gap: 0.5rem 0.9rem;
+  }
+  .admin-pack-icon    { grid-area: icon; }
+  .admin-pack-meta    { grid-area: meta; }
+  .admin-pack-price   { grid-area: price; text-align: right; }
+  .admin-pack-actions { grid-area: actions; justify-content: flex-end; flex-wrap: wrap; }
+  .admin-form-row { grid-template-columns: 1fr; }
+  .admin-config-row { grid-template-columns: 1fr; }
 }
