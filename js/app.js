@@ -56,11 +56,27 @@ async function initAuth() {
   else showAuth();
 
   let isFirstAuthEvent = true;
-  supabase.auth.onAuthStateChange(async (event, session) => {
-    // Skip the initial event — we already handled the session above
+  // CRITICAL: this callback must NOT be async and must NOT await any Supabase
+  // calls. Supabase holds an internal auth lock while this runs; awaiting
+  // queries here deadlocks the whole client (every subsequent query hangs
+  // forever). The symptom is "every page stuck on Loading…, fixed by a hard
+  // refresh, returns ~1h later when the token refreshes". See:
+  // https://github.com/supabase/auth-js/issues/762
+  //
+  // We defer real work with setTimeout(0) so the callback returns and the
+  // lock releases before any query runs. We also only re-init on actual
+  // sign-in / sign-out — TOKEN_REFRESHED and USER_UPDATED fire periodically
+  // and don't need full re-init (Supabase already swapped the token
+  // internally; re-running onSignedIn would just re-fetch profile + reroute).
+  supabase.auth.onAuthStateChange((event, session) => {
     if (isFirstAuthEvent) { isFirstAuthEvent = false; return; }
-    if (session) await onSignedIn(session.user);
-    else showAuth();
+    if (event === 'SIGNED_IN' && session) {
+      setTimeout(() => { onSignedIn(session.user); }, 0);
+    } else if (event === 'SIGNED_OUT') {
+      // showAuth() touches DOM only — safe to call directly.
+      showAuth();
+    }
+    // TOKEN_REFRESHED / USER_UPDATED / PASSWORD_RECOVERY: intentional no-op.
   });
 }
 
@@ -832,6 +848,12 @@ async function hydrateDmInternalPreviews() {
 
   await Promise.all(tasks);
 
+  // Snapshot scroll position BEFORE we mutate — if the user was at the bottom,
+  // we re-pin AFTER the swap so the latest message stays in view (the
+  // skeleton→full-card replacement can grow each bubble by a few px).
+  const wrap = document.getElementById('dmMessages');
+  const wasAtBottom = wrap ? isDmAtBottom(wrap) : false;
+
   // Now swap each pending placeholder with the real card
   pending.forEach(el => {
     const t = el.dataset.internalType;
@@ -842,6 +864,8 @@ async function hydrateDmInternalPreviews() {
     replacement.innerHTML = renderInternalPreviewCard({ type: t, id }, data).trim();
     el.parentNode.replaceChild(replacement.firstChild, el);
   });
+
+  if (wasAtBottom) scrollMessagesToBottom();
 }
 
 // Click handler for internal preview cards (delegated)
@@ -8489,7 +8513,8 @@ async function loadMessages(convId) {
   dmState.messages = (msgs || []).slice().reverse();
   dmState.reactions = reactionsByMsg;
   renderMessages();
-  scrollMessagesToBottom();
+  // Initial open of a thread → always pin to bottom regardless of prior scroll.
+  scrollMessagesToBottom({ force: true });
 }
 
 // Fetch all reactions for messages in this conversation, indexed by message_id
@@ -8746,9 +8771,48 @@ function formatStampLabel(d) {
   return `${dateStr} at ${t}`;
 }
 
-function scrollMessagesToBottom() {
+// True when the messages pane is scrolled to (or within 80px of) the bottom.
+function isDmAtBottom(wrap) {
+  if (!wrap) return false;
+  return wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
+}
+
+// Pin the messages pane to the latest message.
+//
+// Why this is more involved than a one-shot scrollTop: bubbles can grow AFTER
+// the initial pin — lazy-loaded image attachments, link-preview thumbnails
+// (favicons / YouTube), and the hydrated internal-preview cards (skeleton →
+// full card swap). Each of those landings nudges the latest message above
+// the fold. So we re-pin in a few passes as content settles, AND once per
+// <img> load.
+//
+// Pass `{ force: true }` for "I just opened the thread / I just sent" — those
+// must pin regardless of prior scroll position. Without `force`, we only
+// re-pin when the user was already at the bottom (so we don't yank them
+// back if they've scrolled up to read older messages).
+function scrollMessagesToBottom(opts = {}) {
   const wrap = document.getElementById('dmMessages');
-  if (wrap) requestAnimationFrame(() => { wrap.scrollTop = wrap.scrollHeight; });
+  if (!wrap) return;
+  const force = !!opts.force;
+  // Capture once: was the user at the bottom at the moment of this call?
+  // Subsequent stick() calls honor that snapshot so we don't fight the user
+  // if they scroll up between passes.
+  const wasAtBottom = force || isDmAtBottom(wrap);
+  const stick = () => {
+    if (wasAtBottom) wrap.scrollTop = wrap.scrollHeight;
+  };
+  requestAnimationFrame(stick);
+  // Re-pin as async content settles (link previews, hydrated cards, fonts).
+  setTimeout(stick, 80);
+  setTimeout(stick, 300);
+  setTimeout(stick, 800);
+  // Pin once each not-yet-loaded <img> finishes — covers slower networks
+  // where attachments / link thumbnails arrive long after the timeouts.
+  wrap.querySelectorAll('img').forEach(img => {
+    if (img.complete && img.naturalWidth > 0) return;
+    img.addEventListener('load',  stick, { once: true });
+    img.addEventListener('error', stick, { once: true });
+  });
 }
 
 // ── Send a message ────────────────────────────────────────────────────────
@@ -8780,7 +8844,8 @@ async function sendDmMessage() {
   };
   dmState.messages.push(optimistic);
   renderMessages();
-  scrollMessagesToBottom();
+  // Sending my own message → always pin so I see it land.
+  scrollMessagesToBottom({ force: true });
   input.value = '';
   resizeDmInput();
   updateSendButton();
@@ -8824,7 +8889,8 @@ async function sendDmThumbsUp() {
   if (error) { toast(error.message, 'error'); return; }
   dmState.messages.push(data);
   renderMessages();
-  scrollMessagesToBottom();
+  // Sending my own thumbs-up → always pin.
+  scrollMessagesToBottom({ force: true });
 }
 
 function updateSendButton() {
@@ -10016,7 +10082,8 @@ async function sendDmAttachment() {
   hideDmAttachPreview();
   if (input) { input.value = ''; resizeDmInput(); updateSendButton(); }
   renderMessages();
-  scrollMessagesToBottom();
+  // Image/GIF I just sent → always pin so it lands in view.
+  scrollMessagesToBottom({ force: true });
 
   const { data, error } = await supabase.from('messages').insert({
     conversation_id: dmState.activeConvId,
