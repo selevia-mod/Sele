@@ -922,19 +922,14 @@
               <span class="author-earnings-label">Available to withdraw</span>
             </div>
             <div class="author-earnings-amount-php" id="earningsAvailablePhp">₱0.00</div>
-            <div class="author-earnings-amount-sub">
-              <span id="earningsAvailableCoins">0</span> coins · <span id="earningsAvailableStars">0</span> stars
-            </div>
             <button class="btn btn-purple author-earnings-payout-btn" id="btnRequestPayout" disabled>Request payout</button>
+            <div class="author-earnings-foot" id="earningsMinPayoutHint">Minimum payout: ₱100.00</div>
           </div>
           <div class="author-earnings-card author-earnings-pending">
             <div class="author-earnings-card-head">
               <span class="author-earnings-label">Pending (hold period)</span>
             </div>
             <div class="author-earnings-amount-php" id="earningsPendingPhp">₱0.00</div>
-            <div class="author-earnings-amount-sub">
-              <span id="earningsPendingCoins">0</span> coins · <span id="earningsPendingStars">0</span> stars
-            </div>
             <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 1–3 days after they're earned.</div>
           </div>
         </div>
@@ -1306,7 +1301,7 @@
     <input class="form-input" id="editUsername" placeholder="Your name" maxlength="40"/>
     <div class="edit-profile-hint" id="editUsernameHint">Letters, numbers and basic punctuation only — no emoji. You can change this once every 60 days.</div>
     <label class="form-label">Bio</label>
-    <textarea class="form-input" id="editBio" rows="5" placeholder="Tell us about yourself..."></textarea>
+    <textarea class="form-input" id="editBio" rows="5" placeholder="Tell us about yourself..." maxlength="200"></textarea>
     <div class="edit-profile-counter"><span id="editBioCount">0 / 200</span><span id="editBioLines">1 / 5 lines</span></div>
     <label class="form-label">Location</label>
     <div class="edit-location-row">
@@ -1318,8 +1313,7 @@
       </select>
       <input class="form-input" id="editCityInput" placeholder="City" maxlength="60"/>
     </div>
-    <label class="form-label">Website</label>
-    <input class="form-input" id="editWebsite" placeholder="https://..." maxlength="200"/>
+    <input type="hidden" id="editWebsite" value=""/>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" id="editProfileCancel">Cancel</button>
       <button class="btn btn-purple btn-sm" id="editProfileSave">Save</button>
