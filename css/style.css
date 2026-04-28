@@ -9721,26 +9721,25 @@ body:not(.light) .pi-pending-banner {
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   Home Feed v1 — For You / Following / Discover tabs
+   Home Feed v1 — For You / Following / Discover tabs (compact)
    ════════════════════════════════════════════════════════════════════════════ */
 .feed-tabs {
   display: flex;
-  gap: 0.4rem;
-  padding: 0.5rem 0 0.85rem;
-  margin-bottom: 0.75rem;
-  border-bottom: 1px solid rgba(17, 24, 39, 0.06);
+  gap: 0.3rem;
+  padding: 0.2rem 0 0.5rem;
+  margin: 0.4rem 0 0.5rem;
 }
 .feed-tab {
   background: transparent;
   border: none;
-  padding: 0.55rem 1.1rem;
+  padding: 0.32rem 0.8rem;
   border-radius: 999px;
   font: inherit;
-  font-size: 0.92rem;
+  font-size: 0.8rem;
   font-weight: 700;
   color: var(--text2);
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, transform 0.08s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .feed-tab:hover {
   background: rgba(124, 58, 237, 0.06);
@@ -9749,15 +9748,14 @@ body:not(.light) .pi-pending-banner {
 .feed-tab.active {
   background: linear-gradient(135deg, #7c3aed, #a78bfa);
   color: #fff;
-  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.24);
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.20);
 }
-body:not(.light) .feed-tabs { border-bottom-color: rgba(255, 255, 255, 0.06); }
 body:not(.light) .feed-tab { color: rgba(255, 255, 255, 0.65); }
 body:not(.light) .feed-tab:hover { background: rgba(167, 139, 250, 0.12); color: #ddd6fe; }
 body:not(.light) .feed-tab.active { background: linear-gradient(135deg, #a78bfa, #c4b5fd); color: #1a1428; }
 
 @media (max-width: 600px) {
-  .feed-tab { padding: 0.5rem 0.85rem; font-size: 0.86rem; }
+  .feed-tab { padding: 0.3rem 0.7rem; font-size: 0.76rem; }
 }
 
 body:not(.light) .earnings-row { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
