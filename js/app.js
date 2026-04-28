@@ -5233,7 +5233,8 @@ async function renderBookChips() {
   if (currentUser) {
     try {
       const [{ data: reads }, { data: likes }] = await Promise.all([
-        supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30),
+        // book_reads has `last_read_at`, not `created_at`
+        supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(30),
         supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30),
       ]);
       const seedIds = [...new Set([...(reads || []), ...(likes || [])].map(r => r.book_id))].slice(0, 30);
@@ -5308,7 +5309,7 @@ async function loadBookRecommendations() {
   try {
     // Pull user's recent reads + likes for the interest signal
     const [{ data: reads }, { data: likes }] = await Promise.all([
-      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
+      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(50),
       supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
     ]);
 
@@ -6934,40 +6935,45 @@ function renderAuthorKycBanner() {
   const banner  = document.getElementById('authorKycBanner');
   const titleEl = document.getElementById('authorKycTitle');
   const subEl   = document.getElementById('authorKycSub');
+  // btnSubmitKyc was removed from HTML when Payments Info became inline —
+  // kept a defensive null check so rendering doesn't crash if the element
+  // is ever missing again. The "Submit Payments Info" CTA now lives in the
+  // Payments Info tab button itself.
   const btn     = document.getElementById('btnSubmitKyc');
+  const setBtn = (txt, show) => { if (!btn) return; if (txt != null) btn.textContent = txt; btn.style.display = show ? '' : 'none'; };
+  const setText = (el, txt) => { if (el) el.textContent = txt; };
+
   if (!banner) return;
 
   const k = _authorKyc;
   if (!k) {
-    titleEl.textContent = 'Complete KYC to enable payouts';
-    subEl.textContent   = 'We need to verify your identity before sending you money. One-time step required by Philippine law.';
-    btn.textContent     = 'Submit KYC';
-    btn.style.display   = '';
+    setText(titleEl, 'Complete Payments Info to enable payouts');
+    setText(subEl, 'We need to verify your identity before sending you money. One-time step required by Philippine law.');
+    setBtn('Submit Payments Info', true);
     banner.style.display = '';
     banner.className = 'author-kyc-banner is-required';
     return;
   }
   if (k.status === 'pending') {
-    titleEl.textContent = 'KYC under review';
-    subEl.textContent   = 'Submitted ' + timeAgo(k.submitted_at) + '. Usually approved within 1-2 business days.';
-    btn.style.display   = 'none';
+    setText(titleEl, 'Payments Info under review');
+    setText(subEl, 'Submitted ' + timeAgo(k.submitted_at) + '. Usually approved within 1-2 business days.');
+    setBtn(null, false);
     banner.className = 'author-kyc-banner is-pending';
     banner.style.display = '';
     return;
   }
   if (k.status === 'approved') {
-    titleEl.textContent = 'KYC approved ✓';
-    subEl.textContent   = 'You\'re cleared for payouts. You can request a withdrawal whenever your available balance hits the minimum.';
-    btn.style.display   = 'none';
+    setText(titleEl, 'Payments Info approved ✓');
+    setText(subEl, 'You\'re cleared for payouts. You can request a withdrawal whenever your available balance hits the minimum.');
+    setBtn(null, false);
     banner.className = 'author-kyc-banner is-approved';
     banner.style.display = '';
     return;
   }
   if (k.status === 'rejected') {
-    titleEl.textContent = 'KYC rejected';
-    subEl.textContent   = 'Reason: ' + (k.rejection_reason || 'unspecified') + '. Click Resubmit to update your details.';
-    btn.textContent     = 'Resubmit KYC';
-    btn.style.display   = '';
+    setText(titleEl, 'Payments Info rejected');
+    setText(subEl, 'Reason: ' + (k.rejection_reason || 'unspecified') + '. Open Payments Info to update your details.');
+    setBtn('Update Payments Info', true);
     banner.className = 'author-kyc-banner is-rejected';
     banner.style.display = '';
     return;
