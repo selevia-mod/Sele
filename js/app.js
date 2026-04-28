@@ -532,83 +532,42 @@ async function purchasePack(packId, btnEl) {
 }
 
 // ── Phase 3: rewarded ads for stars ────────────────────────────────────────
+//
+// Decision (April 2026): web does NOT host rewarded ads. AdMob's mobile units
+// don't render in browsers; AdSense forbids incentivized ad views; GAM
+// rewarded requires 100k+ users we don't have yet. So stars are
+// **mobile-only earnings** — users watch ads in the Selebox mobile app and
+// the wallet (which is unified across both surfaces) shows the balance.
+// Spending stars works on either platform.
+//
+// The "Watch ad" button on the Store stays clickable but only shows a
+// friendly redirect toast — it doesn't credit any stars on web.
+//
+// The credit_star_for_ad RPC, ad_watches table, and the playRewardedAd()
+// helper are intentionally kept in the codebase. When/if we add a real web
+// ad provider (e.g. self-served promo videos), only this section needs to
+// change.
 
-let _adDailyCap = 20;            // synced from app_config.star_daily_cap
-let _adsWatchedToday = 0;        // count for the current PH-day
-
-async function renderStoreAdProgress() {
-  if (!currentUser) return;
-  _adDailyCap = _walletConfigDefaults.star_daily_cap || 20;
-
-  // Count today's completed ad watches (PH time anchor — matches server RPC)
-  // Server-side day-rollover is "Asia/Manila" via the credit_star_for_ad RPC.
-  // Client-side we anchor to the same TZ so the displayed count matches what
-  // the server would credit if the user watches now.
-  const todayPh = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
-  todayPh.setHours(0, 0, 0, 0);
-
-  const { count, error } = await supabase
-    .from('ad_watches')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', currentUser.id)
-    .eq('status', 'completed')
-    .gte('watched_at', todayPh.toISOString());
-
-  _adsWatchedToday = error ? 0 : (count || 0);
-  paintAdProgress();
-}
-
-function paintAdProgress() {
+function renderStoreAdProgress() {
+  // Mobile-only mode: hide the progress bar (X/20 isn't tracked on web) and
+  // swap the messaging to point at the mobile app.
   const sub  = document.getElementById('storeAdSub');
-  const fill = document.getElementById('storeAdProgressFill');
+  const bar  = document.querySelector('#storePage .store-ad-progress');
   const text = document.getElementById('storeAdProgressText');
   const btn  = document.getElementById('btnWatchAd');
-  const remaining = Math.max(0, _adDailyCap - _adsWatchedToday);
-  const pct = Math.min(100, (_adsWatchedToday / _adDailyCap) * 100);
 
-  if (sub)  sub.textContent  = remaining > 0
-    ? `Watch a short ad to earn 1 Star. ${remaining} left today.`
-    : 'You\'ve hit today\'s ad limit. Come back tomorrow for more stars.';
-  if (fill) fill.style.width = `${pct}%`;
-  if (text) text.textContent = `${_adsWatchedToday} / ${_adDailyCap} watched today`;
+  if (sub)  sub.textContent  = 'Watch ads in the Selebox mobile app to earn stars. Your balance works in both apps.';
+  if (bar)  bar.style.display = 'none';
+  if (text) text.style.display = 'none';
   if (btn)  {
-    btn.disabled    = remaining <= 0;
-    btn.textContent = remaining > 0 ? 'Watch ad' : 'Limit reached';
+    btn.disabled    = false;
+    btn.textContent = 'Open mobile app';
   }
 }
 
-document.getElementById('btnWatchAd')?.addEventListener('click', async () => {
-  if (!currentUser) { toast('Sign in to earn stars', 'error'); return; }
-  if (_adsWatchedToday >= _adDailyCap) { toast('Daily ad limit reached', ''); return; }
-  try {
-    const ad = await playRewardedAd();
-    if (!ad?.completed) { return; /* user closed early — no credit */ }
-
-    const { data, error } = await supabase.rpc('credit_star_for_ad', {
-      p_ad_provider: ad.provider,
-      p_ad_id:       ad.adId,
-    });
-    if (error) { toast(error.message, 'error'); return; }
-    if (!data?.ok) {
-      if (data?.error === 'daily_cap_reached') {
-        _adsWatchedToday = _adDailyCap;
-        paintAdProgress();
-        toast('Daily limit reached.', '');
-      } else {
-        toast(data?.error || 'Could not credit star', 'error');
-      }
-      return;
-    }
-    _wallet.star_balance = data.balance_after;
-    _adsWatchedToday    += 1;
-    renderTopbarCoinPill();
-    renderStoreBalances();
-    paintAdProgress();
-    toast('+1 ⭐ Star earned!', 'success');
-  } catch (err) {
-    console.warn('[ad] error', err);
-    toast(err.message || 'Ad failed to play', 'error');
-  }
+document.getElementById('btnWatchAd')?.addEventListener('click', () => {
+  // Web is intentionally not crediting stars. Friendly redirect message.
+  toast('Use the Selebox mobile app to watch ads and earn stars.', '');
 });
 
 // ─────────────────────────────────────────────────────────────────────────
