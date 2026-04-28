@@ -9677,8 +9677,8 @@ body:not(.light) .video-monet-countdown-text strong { color: #c4b5fd; }
    Site footer — always visible at bottom of every page
    ════════════════════════════════════════════════════════════════════════════ */
 .site-footer {
-  margin-top: 3rem;
-  padding: 1.6rem 1.5rem 2rem;
+  margin-top: 1.5rem;
+  padding: 0.8rem 1.5rem 1rem;
   background: rgba(124, 58, 237, 0.03);
   border-top: 1px solid rgba(124, 58, 237, 0.10);
   /* Account for the left sidebar so the footer aligns with main content */
@@ -9691,7 +9691,7 @@ body.is-auth .site-footer { display: none; }
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
+  gap: 0.28rem;
   align-items: center;
   text-align: center;
 }
@@ -9724,7 +9724,7 @@ body.is-auth .site-footer { display: none; }
 .site-footer-copy {
   font-size: 0.74rem;
   color: var(--text2);
-  margin-top: 0.3rem;
+  margin-top: 0.15rem;
 }
 body:not(.light) .site-footer {
   background: rgba(167, 139, 250, 0.04);
