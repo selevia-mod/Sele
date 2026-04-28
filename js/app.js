@@ -1020,7 +1020,30 @@ function handleStoreReturn() {
 }
 // Run on initial load (after auth has had a chance to mount).
 setTimeout(handleStoreReturn, 800);
-document.getElementById('btnSignOut').addEventListener('click', signOut);
+// Sign-out confirmation: show a modal, only sign out on explicit confirm.
+// Prevents the awkward case where someone misclicks the sidebar Logout entry.
+function _openSignOutModal() {
+  const m = document.getElementById('signOutModal');
+  if (!m) { signOut(); return; }   // graceful fallback if modal HTML is missing
+  m.style.display = 'flex';
+  m.classList.add('open');
+}
+function _closeSignOutModal() {
+  const m = document.getElementById('signOutModal');
+  if (!m) return;
+  m.style.display = 'none';
+  m.classList.remove('open');
+}
+document.getElementById('btnSignOut')?.addEventListener('click', _openSignOutModal);
+document.getElementById('signOutClose')?.addEventListener('click', _closeSignOutModal);
+document.getElementById('signOutCancel')?.addEventListener('click', _closeSignOutModal);
+document.getElementById('signOutConfirm')?.addEventListener('click', () => {
+  _closeSignOutModal();
+  signOut();
+});
+document.getElementById('signOutModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'signOutModal') _closeSignOutModal();
+});
 
 // ── Compose ──
 const composeText = document.getElementById('composeText');
@@ -1262,8 +1285,63 @@ window.loadFeed = async function() {
   });
 
   setupFeedLazyLoaders(feed);
+  setupCollapsibleBodies(feed);
   if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
 };
+
+// ── Collapsible post bodies (Facebook-style "See more / less") ──
+// Auto-detects bodies that overflow ~6 lines and lets users tap the text
+// itself to expand/collapse. Short posts get no toggle. Per-session state
+// in `_expandedPosts` so toggle persists while scrolling but resets on refresh.
+const _expandedPosts = new Set();
+function setupCollapsibleBodies(root) {
+  if (!root) return;
+  const bodies = root.querySelectorAll('.collapsible-body:not([data-collapse-checked])');
+  bodies.forEach(el => {
+    el.dataset.collapseChecked = '1';
+    const id = el.dataset.postId;
+
+    // First pass: collapse and measure. If content fits without overflow, leave it.
+    el.classList.add('is-collapsed');
+    requestAnimationFrame(() => {
+      const overflows = el.scrollHeight > el.clientHeight + 2;
+      if (!overflows) {
+        // Short post — no toggle needed.
+        el.classList.remove('is-collapsed');
+        return;
+      }
+
+      // Restore expanded state if user already opened this post earlier this session
+      if (id && _expandedPosts.has(id)) {
+        el.classList.remove('is-collapsed');
+        el.classList.add('is-expanded');
+      }
+
+      // Append the See more / See less label inside the body itself
+      const more = document.createElement('span');
+      more.className = 'collapsible-toggle';
+      more.textContent = el.classList.contains('is-expanded') ? 'See less' : 'See more';
+      el.appendChild(more);
+
+      // Tap anywhere on the body toggles — but ignore real links/buttons/images
+      el.addEventListener('click', (e) => {
+        const targetIsLink = e.target.tagName === 'A' || e.target.closest('a');
+        const targetIsBtn  = e.target.tagName === 'BUTTON' || e.target.closest('button');
+        const targetIsImg  = e.target.tagName === 'IMG' || e.target.closest('img');
+        if (targetIsLink || targetIsBtn || targetIsImg) return;
+        e.stopPropagation();
+        const expanded = !el.classList.contains('is-expanded');
+        el.classList.toggle('is-expanded', expanded);
+        el.classList.toggle('is-collapsed', !expanded);
+        more.textContent = expanded ? 'See less' : 'See more';
+        if (id) {
+          if (expanded) _expandedPosts.add(id);
+          else          _expandedPosts.delete(id);
+        }
+      });
+    });
+  });
+}
 
 // Wire feed mode tabs (For You / Following / Discover)
 document.querySelectorAll('#feedTabs .feed-tab').forEach(tab => {
@@ -1310,6 +1388,8 @@ async function loadMoreFeed() {
         if (_feedPostObserver) _feedPostObserver.observe(el);
         el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
       });
+      // Apply collapsible logic to the newly-appended posts
+      setupCollapsibleBodies(feed);
       posts = posts.concat(more);
     }
 
@@ -1507,7 +1587,7 @@ function renderPost(post) {
       </div>
     ` : ''}
 
-    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
+    ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id}">${linkify(post.body)}</div>` : ''}
     ${post.body ? renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
     ${post.videos ? `
@@ -1525,7 +1605,7 @@ function renderPost(post) {
             <div class="post-time">${timeAgo(post.original.created_at)}</div>
           </div>
         </div>
-        ${post.original.body ? `<div class="post-body">${linkify(post.original.body)}</div>` : ''}
+        ${post.original.body ? `<div class="post-body collapsible-body" data-post-id="${post.original.id}">${linkify(post.original.body)}</div>` : ''}
         ${post.original.body ? renderLinkPreview(post.original.body) : ''}
         ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
         ${post.original.videos ? `
@@ -2820,7 +2900,7 @@ window.repostPost = (postId) => {
       <div class="avatar">${avatarHTML}</div>
       <div><span class="post-author">${escHTML(name)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
     </div>
-    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
+    ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id || post.$id || ''}">${linkify(post.body)}</div>` : ''}
     ${post.body ? renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div style="border-radius:8px;overflow:hidden;margin-top:0.5rem"><img src="${post.image_url}"/></div>` : ''}
   `;
@@ -3429,6 +3509,8 @@ async function loadProfilePosts(userId) {
     if (_feedPostObserver) _feedPostObserver.observe(el);
     el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
   });
+  // Apply Facebook-style collapsing to long post bodies
+  setupCollapsibleBodies(wrap);
   // Fall back: if no observers (first time), load eagerly
   if (!_feedPostObserver) {
     wrap.querySelectorAll('.post-card').forEach(c => triggerPostLazyLoad(c));
@@ -8774,16 +8856,62 @@ function renderStudio() {
     });
   }
   
-  // Wire up edit/delete buttons via delegation
+  // Wire up monetize/edit/delete buttons via delegation
   content.querySelectorAll('[data-studio-action]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const action = btn.dataset.studioAction;
       const id = btn.dataset.id;
-      if (action === 'edit') openStudioEditModal(id);
-      else if (action === 'delete') deleteStudioVideo(id);
+      if (action === 'edit')          openStudioEditModal(id);
+      else if (action === 'delete')   deleteStudioVideo(id);
+      else if (action === 'monetize') toggleStudioMonetize(id, btn);
     });
   });
+}
+
+// Inline monetize toggle from the studio list — no need to open the edit modal.
+// Same gate as the modal: video duration must be ≥ 3 min (else show why).
+async function toggleStudioMonetize(videoId, btn) {
+  const v = studioVideosCache.find(x => x.id === videoId);
+  if (!v) return;
+  const minSec = _walletConfigDefaults.video_initial_unlock_seconds || 180;
+
+  // Already monetized → just turn it off (no gate needed)
+  if (v.is_monetized) {
+    btn.disabled = true;
+    const { error } = await supabase.from('videos').update({ is_monetized: false }).eq('id', videoId);
+    btn.disabled = false;
+    if (error) { toast(error.message, 'error'); return; }
+    v.is_monetized = false;
+    btn.classList.remove('is-on');
+    btn.title = 'Toggle monetization';
+    toast('Monetization disabled', 'success');
+    return;
+  }
+
+  // Turning on → check duration. If 0 (legacy/migrated), prompt them to open
+  // edit modal which auto-probes the file for actual duration.
+  if (!v.duration || v.duration === 0) {
+    toast('Open Edit to read this video\'s duration first, then toggle monetization there.', 'error');
+    openStudioEditModal(videoId);
+    return;
+  }
+  if (v.duration < minSec) {
+    const mins = Math.floor(v.duration / 60);
+    const secs = Math.floor(v.duration % 60);
+    toast(`Video must be at least ${minSec/60} min to monetize. This one is ${mins}m ${secs}s.`, 'error');
+    return;
+  }
+
+  // Eligible — flip it on
+  btn.disabled = true;
+  const { error } = await supabase.from('videos').update({ is_monetized: true }).eq('id', videoId);
+  btn.disabled = false;
+  if (error) { toast(error.message, 'error'); return; }
+  v.is_monetized = true;
+  btn.classList.add('is-on');
+  btn.title = 'Monetized — click to disable';
+  toast('Monetization enabled 💰', 'success');
 }
 
 function renderStudioRow(v) {
@@ -8819,6 +8947,13 @@ function renderStudioRow(v) {
       <td>${(v.likes || 0).toLocaleString()}</td>
       <td>
         <div class="studio-actions">
+          <button class="studio-btn studio-btn-monetize ${v.is_monetized ? 'is-on' : ''}" data-studio-action="monetize" data-id="${v.id}" title="${v.is_monetized ? 'Monetized — click to disable' : 'Toggle monetization'}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9"/>
+              <path d="M14.8 9.5c-.4-1-1.4-1.5-2.8-1.5-1.7 0-3 1-3 2.5 0 1.4 1.3 2 2.7 2.4 1.6.4 3.3.9 3.3 2.6 0 1.5-1.3 2.5-3 2.5-1.6 0-2.8-.6-3.2-1.7"/>
+              <path d="M12 6v2"/><path d="M12 16v2"/>
+            </svg>
+          </button>
           <button class="studio-btn" data-studio-action="edit" data-id="${v.id}" title="Edit details">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
           </button>
@@ -8860,18 +8995,53 @@ function openStudioEditModal(videoId) {
   const monCb     = document.getElementById('studioEditMonetized');
   const monLabel  = monCb?.closest('.lock-toggle');
   const minSec    = _walletConfigDefaults.video_initial_unlock_seconds || 180;
-  const eligible  = (v.duration || 0) >= minSec;
-  if (monCb) {
+
+  // Helper: render the gate state given a duration in seconds.
+  const applyGate = (duration) => {
+    const eligible = (duration || 0) >= minSec;
+    if (!monCb) return;
     monCb.checked  = !!v.is_monetized && eligible;
     monCb.disabled = !eligible;
     if (monLabel) monLabel.classList.toggle('is-disabled', !eligible);
-    // Update sub-text to explain the gate
     const subEl = monLabel?.querySelector('.lock-toggle-sub');
-    if (subEl) {
-      subEl.innerHTML = eligible
-        ? 'Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.'
-        : `Video must be at least ${Math.floor(minSec/60)} minute${minSec/60 === 1 ? '' : 's'} long to monetize. This one is ${Math.floor((v.duration||0)/60)}m ${Math.floor((v.duration||0)%60)}s.`;
+    if (!subEl) return;
+    if (duration == null) {
+      subEl.textContent = 'Reading video duration…';
+    } else if (eligible) {
+      subEl.innerHTML = 'Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.';
+    } else {
+      subEl.textContent = `Video must be at least ${Math.floor(minSec/60)} minute${minSec/60 === 1 ? '' : 's'} long to monetize. This one is ${Math.floor((duration||0)/60)}m ${Math.floor((duration||0)%60)}s.`;
     }
+  };
+
+  // Initial render with whatever the DB has (may be 0 for legacy/migrated videos)
+  applyGate(v.duration || 0);
+
+  // Backfill from the actual video file if duration is missing or zero.
+  // Reads metadata client-side, then UPDATEs the videos row so the gate works
+  // immediately and stays correct on future opens.
+  if (!v.duration && (v.video_url || v.videoUrl)) {
+    const probe = document.createElement('video');
+    probe.preload = 'metadata';
+    probe.muted   = true;
+    probe.crossOrigin = 'anonymous';
+    probe.style.display = 'none';
+    probe.src = v.video_url || v.videoUrl;
+    const cleanup = () => probe.remove();
+    probe.onloadedmetadata = async () => {
+      const real = Math.round(probe.duration || 0);
+      if (real > 0) {
+        v.duration = real;       // patch in-memory cache so save sees the right value
+        applyGate(real);
+        // Persist back to DB so we don't probe again on next open
+        try {
+          await supabase.from('videos').update({ duration: real }).eq('id', studioEditingVideoId);
+        } catch {}
+      }
+      cleanup();
+    };
+    probe.onerror = () => { applyGate(0); cleanup(); };
+    document.body.appendChild(probe);
   }
 
   document.getElementById('studioEditModal').style.display = 'flex';
