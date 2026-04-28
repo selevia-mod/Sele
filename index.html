@@ -11,12 +11,12 @@
   <!-- ─── Google Analytics ─────────────────────────────────────────────── -->
   <!-- Replace G-XXXXXXXXXX with your real Measurement ID from
        https://analytics.google.com → Admin → Data Streams → Web → Measurement ID -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-4NS9B6V1N6"></script>
   <script>
     window.dataLayer = window.dataLayer || [];
     function gtag(){dataLayer.push(arguments);}
     gtag('js', new Date());
-    gtag('config', 'G-XXXXXXXXXX', {
+    gtag('config', 'G-4NS9B6V1N6', {
       // Strip query params from page paths so we don't leak ids/tokens to GA
       page_path: location.pathname,
       anonymize_ip: true,
@@ -30,9 +30,9 @@
           integrity="sha384-2QlkpY1gEaDvgkxUhpzTWtQ7Sg9EzmA3mSj8wcQu+xNsXkgcUhAekvPoUBBR9JEW"
           crossorigin="anonymous"></script>
   <script>
-    if (window.Sentry && 'YOUR_DSN_HERE' !== 'YOUR_DSN_HERE') {
+    if (window.Sentry && 'https://c4c2052a29b745326b96a31bfe9f30f9@o4511298030862336.ingest.us.sentry.io/4511298037022720' !== 'YOUR_DSN_HERE') {
       Sentry.init({
-        dsn: 'YOUR_DSN_HERE',
+        dsn: 'https://c4c2052a29b745326b96a31bfe9f30f9@o4511298030862336.ingest.us.sentry.io/4511298037022720',
         environment: location.hostname.includes('vercel.app') ? 'staging' : 'production',
         tracesSampleRate: 0.1,
         // Don't capture noisy non-issues
