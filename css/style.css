@@ -8407,6 +8407,185 @@ body:not(.light) .chapter-row-lock {
     inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   Editor's Pick badge — premium gold-purple gradient, top-left of book card
+   ════════════════════════════════════════════════════════════════════════════ */
+.book-editors-pick-badge {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.28rem 0.6rem 0.28rem 0.5rem;
+  background: linear-gradient(135deg, #fbbf24 0%, #a78bfa 60%, #7c3aed 100%);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  box-shadow:
+    0 4px 12px rgba(124, 58, 237, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  z-index: 2;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.book-editors-pick-badge svg {
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.4));
+}
+
+/* Admin/mod pick button on book detail */
+.book-editors-pick-btn {
+  background: rgba(124, 58, 237, 0.06);
+  border: 1.5px solid rgba(124, 58, 237, 0.30);
+  color: #6b21a8;
+}
+.book-editors-pick-btn:hover {
+  background: rgba(124, 58, 237, 0.12);
+  border-color: rgba(124, 58, 237, 0.55);
+}
+.book-editors-pick-btn.is-picked {
+  background: linear-gradient(135deg, #fbbf24 0%, #a78bfa 60%, #7c3aed 100%);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.32);
+}
+.book-editors-pick-btn.is-picked:hover {
+  filter: brightness(1.05);
+}
+body:not(.light) .book-editors-pick-btn {
+  background: rgba(167, 139, 250, 0.10);
+  border-color: rgba(167, 139, 250, 0.32);
+  color: #ddd6fe;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Video search — Creator channel cards (top of search results)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.video-creators-header {
+  grid-column: 1 / -1;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text2);
+  margin: 0.35rem 0.25rem -0.25rem;
+}
+
+.video-creators-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-bottom: 0.6rem;
+}
+
+.creator-channel-card {
+  flex: 1 1 320px;
+  min-width: 280px;
+  max-width: 480px;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.85rem 1rem;
+  background: linear-gradient(135deg, rgba(124,58,237,0.05), rgba(167,139,250,0.06));
+  border: 1.5px solid rgba(124,58,237,0.20);
+  border-radius: 14px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: transform 0.12s ease, border-color 0.18s ease, box-shadow 0.2s ease, background 0.18s ease;
+}
+.creator-channel-card:hover {
+  transform: translateY(-1px);
+  background: linear-gradient(135deg, rgba(124,58,237,0.10), rgba(167,139,250,0.10));
+  border-color: rgba(124,58,237,0.45);
+  box-shadow: 0 6px 18px rgba(124,58,237,0.18);
+}
+
+.creator-channel-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 800;
+  font-size: 1.4rem;
+}
+.creator-channel-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.creator-channel-avatar-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: #fff;
+}
+
+.creator-channel-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.creator-channel-name {
+  font-weight: 800;
+  font-size: 1rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.creator-channel-meta {
+  font-size: 0.78rem;
+  color: var(--text2);
+  font-weight: 600;
+  margin-top: 0.15rem;
+}
+.creator-channel-bio {
+  font-size: 0.78rem;
+  color: var(--text2);
+  margin-top: 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.creator-channel-cta {
+  flex-shrink: 0;
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: #7c3aed;
+  white-space: nowrap;
+}
+
+body:not(.light) .creator-channel-card {
+  background: linear-gradient(135deg, rgba(167,139,250,0.07), rgba(124,58,237,0.08));
+  border-color: rgba(167,139,250,0.22);
+}
+body:not(.light) .creator-channel-card:hover {
+  background: linear-gradient(135deg, rgba(167,139,250,0.14), rgba(124,58,237,0.16));
+  border-color: rgba(167,139,250,0.45);
+}
+body:not(.light) .creator-channel-cta { color: #c4b5fd; }
+
+@media (max-width: 600px) {
+  .creator-channel-card { min-width: 100%; max-width: 100%; }
+  .creator-channel-cta { display: none; }
+}
+
 /* ── Reader paywall ────────────────────────────────────────────────────── */
 .reader-paywall {
   text-align: center;
