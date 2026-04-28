@@ -2734,13 +2734,29 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 .video-card-info .avatar.video-card-creator-clickable:hover { border-color: var(--purple-lt); transform: scale(1.05); }
 .video-card-info .avatar.video-card-creator-clickable { transition: transform 0.15s ease, border-color 0.15s ease; }
 
-/* Video player page (keep premium look) */
+/* Video player page (keep premium look).
+   No fixed aspect-ratio — let the video drive its own height so portrait
+   uploads (9:16) don't get letterboxed and landscape (16:9) doesn't get
+   chopped. min-aspect prevents tiny squares from looking weird. */
 .video-player-wrap {
-  background: #000; border-radius: 12px; overflow: hidden;
-  margin-bottom: 1rem; aspect-ratio: 16 / 9; max-height: 70vh;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  max-height: 75vh;
   box-shadow: 0 8px 24px rgba(0,0,0,0.3);
 }
-.video-player-wrap video { width: 100%; height: 100%; display: block; }
+.video-player-wrap video {
+  width: 100%;
+  height: auto;
+  max-height: 75vh;
+  display: block;
+  object-fit: contain;
+}
 
 .video-info { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
 .video-title-big { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.5rem; }
