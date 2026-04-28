@@ -635,7 +635,7 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
 document.getElementById('topbarCoinPill')?.addEventListener('click', () => showStore());
 
 // ── Earnings page (Phase 7 — own sidebar entry, tabs) ────────────────────
-function showEarnings() {
+function showEarnings(forceReload = false) {
   hideAllMainPages();
   if (!earningsPage) return;
   earningsPage.style.display = 'block';
@@ -643,7 +643,15 @@ function showEarnings() {
   setSidebarActive('btnEarnings');
   // Default to the Earnings tab on every open
   switchEarningsTab('earnings');
-  loadAuthorEarnings();
+  // Earnings reloads on every visit by default — withdrawal status changes
+  // matter and the user expects the most recent figures. But if it's a quick
+  // tab-flick (reload < 30 seconds ago), skip the network call.
+  const now = Date.now();
+  const stale = !window._earningsLoadedAt || (now - window._earningsLoadedAt) > 30_000;
+  if (forceReload || stale) {
+    loadAuthorEarnings();
+    window._earningsLoadedAt = now;
+  }
 }
 
 function switchEarningsTab(name) {
@@ -4733,19 +4741,26 @@ function showVideos(forceReload = false) {
   }
 }
 
-function showStudio() {
+function showStudio(forceReload = false) {
   hideAllMainPages();
   studioPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#studio');
-  loadStudio();
+  // Studio shows the user's own uploads — those don't change unless they
+  // upload something new, so skip reload if we already rendered.
+  const grid = document.getElementById('studioGrid') || studioPage.querySelector('.video-grid, .studio-grid');
+  const alreadyRendered = grid && grid.children.length > 0 && !grid.querySelector('.loading');
+  if (forceReload || !alreadyRendered) {
+    loadStudio();
+  }
 }
 
 // ════════════════════════════════════════
 // BOOK / READER
 // ════════════════════════════════════════
-let allBooksCache = [];
+let allBooksCache = [];     // filtered + sorted view (what's rendered)
+let allBooksRaw   = [];     // unfiltered raw books fetched from server (for fast tab switching)
 let bookGenreFilter = '';
 let bookSortBy = 'trending';
 let activeBookSearchQuery = '';
@@ -4754,13 +4769,16 @@ let currentChapterIndex = 0;
 let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
 
 // ── Book (Reader) page ──
-function showBook() {
+function showBook(forceReload = false) {
   hideAllMainPages();
   bookPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#book');
-  loadBooks();
+  // Only reload if cache is empty or forced — instant return when revisiting
+  if (forceReload || !allBooksRaw.length) {
+    loadBooks();
+  }
 }
 
 // ── Pagination state for the public Book browse page ──
@@ -4793,6 +4811,9 @@ async function loadBooks() {
     if (books.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
     _booksOffset = books.length;
 
+    // Keep both caches: raw (unfiltered) for fast tab switching,
+    // and filtered+sorted view for rendering.
+    allBooksRaw = books;
     let merged = applyBookFilterAndSort(books);
     allBooksCache = merged;
 
@@ -4872,6 +4893,10 @@ async function loadMoreBooks() {
     _booksOffset += more.length;
 
     if (more.length) {
+      // Append to raw cache (deduped) — used by sort-tab switches without re-fetch.
+      const seenIds = new Set(allBooksRaw.map(b => b.id));
+      for (const b of more) if (!seenIds.has(b.id)) allBooksRaw.push(b);
+
       // Merge into cache, re-apply current filter/sort to keep order consistent
       const allMerged = applyBookFilterAndSort([...allBooksCache, ...more]);
       allBooksCache = allMerged;
@@ -5444,11 +5469,50 @@ document.getElementById('bookGenreChips')?.addEventListener('click', (e) => {
 });
 document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
   bookSortBy = e.target.value;
+
+  // Fast path: we already have raw books cached. Just re-derive the
+  // filtered+sorted view and swap the grid in one shot — no server round-trip,
+  // no "Loading…" flash, no staggered fade-in cascade.
+  if (allBooksRaw.length > 0) {
+    allBooksCache = applyBookFilterAndSort(allBooksRaw);
+    renderBooksFast();
+    return;
+  }
+
+  // Cold path: cache empty (page just opened) — fall back to full load.
   const savedY = window.scrollY;
   loadBooks().then(() => {
     requestAnimationFrame(() => window.scrollTo({ top: savedY, behavior: 'instant' }));
   });
 });
+
+// Fast renderer — no entrance animation, no flash. Used for in-place re-sorts
+// when the user switches tabs (Trending / Newest / Most Loved / etc.).
+function renderBooksFast() {
+  const grid = document.getElementById('bookGrid');
+  const empty = document.getElementById('bookEmpty');
+
+  if (!allBooksCache.length) {
+    grid.style.display = 'none';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  grid.style.display = 'grid';
+  empty.style.display = 'none';
+
+  // Build new content off-DOM, then swap atomically so the user never sees
+  // an empty grid mid-render. Skip the staggered cascade that renderBooks()
+  // uses on first load.
+  const frag = document.createDocumentFragment();
+  for (const b of allBooksCache) {
+    const card = renderBookCard(b);
+    card.style.animationDelay = '0s';
+    card.style.animation = 'none';
+    frag.appendChild(card);
+  }
+  grid.replaceChildren(frag);
+}
 
 // ── Book detail page ──
 async function openBookDetail(bookId) {
@@ -6033,14 +6097,21 @@ document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => 
 });
 
 // ── Author (Manuscript Studio) page ──
-function showAuthor() {
+function showAuthor(forceReload = false) {
   hideAllMainPages();
   authorPage.style.display = 'block';
   setAuthorView('dashboard');
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#author');
-  loadAuthorDashboard();
+  // Author dashboard shows their books — reload on first visit, or after
+  // 60 seconds for freshness. Quick tab-flicks reuse the rendered DOM.
+  const now = Date.now();
+  const stale = !window._authorLoadedAt || (now - window._authorLoadedAt) > 60_000;
+  if (forceReload || stale) {
+    loadAuthorDashboard();
+    window._authorLoadedAt = now;
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -6152,13 +6223,20 @@ else vcInitControls();
 // ════════════════════════════════════════════════════════════════════════════
 let _bookmarksActiveTab = 'videos';
 
-function showBookmarks() {
+function showBookmarks(forceReload = false) {
   hideAllMainPages();
   if (bookmarksPage) bookmarksPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#bookmarks');
-  loadBookmarks();
+  // Reload on first visit or after 60 seconds (bookmarks change rarely
+  // but the user expects them to be current).
+  const now = Date.now();
+  const stale = !window._bookmarksLoadedAt || (now - window._bookmarksLoadedAt) > 60_000;
+  if (forceReload || stale) {
+    loadBookmarks();
+    window._bookmarksLoadedAt = now;
+  }
 }
 
 async function loadBookmarks() {
@@ -10276,7 +10354,17 @@ async function showMessages(targetUserId = null) {
   history.pushState(null, '', '#messages');
   setSidebarActive('btnMessages');
 
-  await loadConversationList();
+  // DMs have a realtime subscription that keeps the list fresh — so on a
+  // quick tab-flick the list is already up to date. Only re-fetch on first
+  // load, when forced (targetUserId), or after 30 seconds.
+  const dmList = document.getElementById('dmList') || messagesPage?.querySelector('.dm-list');
+  const alreadyRendered = dmList && dmList.children.length > 0 && !dmList.querySelector('.loading');
+  const now = Date.now();
+  const stale = !window._dmListLoadedAt || (now - window._dmListLoadedAt) > 30_000;
+  if (!alreadyRendered || stale || targetUserId) {
+    await loadConversationList();
+    window._dmListLoadedAt = now;
+  }
 
   if (targetUserId) {
     // Open or create conversation with this user
