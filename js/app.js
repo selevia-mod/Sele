@@ -111,8 +111,11 @@ async function initAuth() {
 
 async function onSignedIn(user) {
   currentUser = user;
-  const { data: profile } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
-  currentProfile = profile;
+  // Defensive: if the profile row doesn't exist yet (rare race on first sign-in),
+  // keep currentProfile null so downstream code can short-circuit cleanly.
+  const { data: profile, error: profileErr } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
+  if (profileErr) console.warn('Profile fetch failed on sign-in:', profileErr.message);
+  currentProfile = profile || null;
   updateTopbarUser();
   showApp();
 
@@ -232,12 +235,50 @@ document.getElementById('btnGuest').addEventListener('click', async () => {
 });
 
 async function signOut() {
+  // Tear down ALL user-scoped realtime channels BEFORE auth.signOut() so we
+  // don't leak callbacks that try to write into stale state for the next
+  // session. Public broadcast channels (e.g. 'public-feed') stay subscribed.
+  const teardown = (ch) => { try { if (ch) supabase.removeChannel(ch); } catch {} };
+
+  // Wallet
+  teardown(_walletChannel);              _walletChannel = null;
+  // Notifications
+  teardown(_notifChannel);               _notifChannel = null;
+  // DMs (inbox + per-thread + presence)
+  if (typeof dmState !== 'undefined' && dmState) {
+    teardown(dmState.inboxChannel);      dmState.inboxChannel = null;
+    teardown(dmState.realtimeChannel);   dmState.realtimeChannel = null;
+    teardown(dmState.presenceChannel);   dmState.presenceChannel = null;
+  }
+
   await supabase.auth.signOut();
-  currentUser = null; currentProfile = null; posts = [];
-  // Tear down wallet realtime
-  if (_walletChannel) { supabase.removeChannel(_walletChannel); _walletChannel = null; }
+
+  // Reset all user-scoped state — leaving stale data in memory was causing
+  // the next signed-in user to briefly see the previous user's wallet/profile.
+  currentUser = null;
+  currentProfile = null;
+  posts = [];
   _wallet = { coin_balance: 0, star_balance: 0 };
   _userUnlocks.clear();
+  // Reset book caches so the next user doesn't see prior browsing state
+  if (typeof allBooksCache !== 'undefined') allBooksCache = [];
+  if (typeof allBooksRaw   !== 'undefined') allBooksRaw   = [];
+  // Reset user-taste cache (book reads + likes) — would otherwise show
+  // previous user's reading interests in the Discover ribbon.
+  if (typeof _userBookTasteCache !== 'undefined') {
+    _userBookTasteCache = null;
+    _userBookTasteAt = 0;
+  }
+  // Personalised book recs cache is also user-scoped
+  if (typeof _bookRecsCache !== 'undefined') {
+    _bookRecsCache = null;
+    _bookRecsTimestamp = 0;
+  }
+  // Earnings/withdrawal/bookmarks page-load timestamps so the next user
+  // doesn't inherit "we already loaded this" stale gates.
+  ['_earningsLoadedAt', '_authorLoadedAt', '_bookmarksLoadedAt', '_dmListLoadedAt'].forEach(k => {
+    if (k in window) window[k] = 0;
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3848,7 +3889,7 @@ document.getElementById('editProfileSave').addEventListener('click', async () =>
   toast('Profile updated!', 'success');
   closeEditProfile();
   const { data: updated } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
-  currentProfile = updated;
+  if (updated) currentProfile = updated;   // keep stale on fetch fail rather than nulling
   updateTopbarUser();
   openProfile(currentUser.id);
 });
@@ -3979,8 +4020,10 @@ async function openMyProfile() {
   }
   // Make sure profile is loaded before opening
   if (!currentProfile) {
-    const { data: profile } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
-    currentProfile = profile;
+    const { data: profile, error } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
+    if (error) { toast('Could not load your profile', 'error'); return; }
+    currentProfile = profile || null;
+    if (!currentProfile) { toast('Profile not found', 'error'); return; }
   }
   openProfile(currentUser.id);
 }
@@ -5209,6 +5252,26 @@ function prettyGenre(slug) {
   return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
+// Cache for user's book reading taste (reads + likes) — used by both
+// renderBookChips() and loadBookRecommendations() in the same page load.
+// 60-second TTL so stale-but-fresh-enough data doesn't trigger 2 round-trips.
+let _userBookTasteCache = null;
+let _userBookTasteAt = 0;
+async function getUserBookTaste() {
+  if (!currentUser) return { reads: [], likes: [] };
+  const now = Date.now();
+  if (_userBookTasteCache && (now - _userBookTasteAt) < 60_000) {
+    return _userBookTasteCache;
+  }
+  const [{ data: reads }, { data: likes }] = await Promise.all([
+    supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(50),
+    supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
+  ]);
+  _userBookTasteCache = { reads: reads || [], likes: likes || [] };
+  _userBookTasteAt = now;
+  return _userBookTasteCache;
+}
+
 async function renderBookChips() {
   const wrap = document.getElementById('bookGenreChips');
   if (!wrap) return;
@@ -5232,12 +5295,8 @@ async function renderBookChips() {
   // User reading taste (only for signed-in users)
   if (currentUser) {
     try {
-      const [{ data: reads }, { data: likes }] = await Promise.all([
-        // book_reads has `last_read_at`, not `created_at`
-        supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(30),
-        supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30),
-      ]);
-      const seedIds = [...new Set([...(reads || []), ...(likes || [])].map(r => r.book_id))].slice(0, 30);
+      const { reads, likes } = await getUserBookTaste();
+      const seedIds = [...new Set([...reads, ...likes].map(r => r.book_id))].slice(0, 30);
       if (seedIds.length) {
         const { data: seedBooks } = await supabase
           .from('books').select('id, genre, tags').in('id', seedIds);
@@ -5307,14 +5366,11 @@ async function loadBookRecommendations() {
   }
 
   try {
-    // Pull user's recent reads + likes for the interest signal
-    const [{ data: reads }, { data: likes }] = await Promise.all([
-      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(50),
-      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
-    ]);
-
-    const readIds  = new Set((reads || []).map(r => r.book_id));
-    const likedIds = new Set((likes || []).map(l => l.book_id));
+    // Pull user's reading taste from shared cache (avoids duplicate fetch
+    // since renderBookChips() already pulled this seconds ago)
+    const { reads, likes } = await getUserBookTaste();
+    const readIds  = new Set(reads.map(r => r.book_id));
+    const likedIds = new Set(likes.map(l => l.book_id));
     const seedIds  = [...new Set([...readIds, ...likedIds])].slice(0, 30);
 
     // Fetch a candidate pool (most recent public books)
@@ -8147,9 +8203,8 @@ function maybeFlushDueScheduledChapters() {
   const now = Date.now();
   if (now - _lastChapterPublishCheck < 5 * 60 * 1000) return; // 5 min throttle
   _lastChapterPublishCheck = now;
-  supabase.rpc('publish_due_scheduled_chapters').then(({ data, error }) => {
-    if (error) { console.warn('publish_due_scheduled_chapters:', error.message); return; }
-    if (data && data > 0) console.log(`[schedule] ${data} chapter(s) flipped public in the last 24h`);
+  supabase.rpc('publish_due_scheduled_chapters').then(({ error }) => {
+    if (error) console.warn('publish_due_scheduled_chapters:', error.message);
   }).catch(() => {});
 }
 
@@ -8559,9 +8614,8 @@ function maybeFlushDueScheduledVideos() {
   if (now - _lastSchedulePublishCheck < 5 * 60 * 1000) return; // 5 min throttle
   _lastSchedulePublishCheck = now;
   // Fire-and-forget — never block UI on this.
-  supabase.rpc('publish_due_scheduled_videos').then(({ data, error }) => {
-    if (error) { console.warn('publish_due_scheduled_videos:', error.message); return; }
-    if (data && data > 0) console.log(`[schedule] flipped ${data} scheduled video post(s) to public`);
+  supabase.rpc('publish_due_scheduled_videos').then(({ error }) => {
+    if (error) console.warn('publish_due_scheduled_videos:', error.message);
   }).catch(() => {});
 }
 
