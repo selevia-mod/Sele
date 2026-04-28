@@ -21,6 +21,21 @@ let currentUser = null;
 let currentProfile = null;
 let posts = [];
 
+// ── Wallet state (coins + stars + unlocks) ──────────────────────────────────
+// Maintained by loadWalletState() on signin and refreshed via Realtime
+// subscription on the wallets row. Other modules (chapter reader, video
+// player, lock modals) read from these and call refreshWalletAfterUnlock()
+// after a successful unlock_content RPC.
+let _wallet = { coin_balance: 0, star_balance: 0 };
+const _userUnlocks = new Set();   // keys like "video:UUID" or "chapter:aw_xyz"
+let _walletConfigDefaults = {     // mirrors app_config; loaded once on signin
+  default_chapter_unlock_coins: 3,
+  default_chapter_unlock_stars: 3,
+  default_video_unlock_coins:   1,
+  default_video_unlock_stars:   1,
+};
+let _walletChannel = null;
+
 function toast(msg, type = '') {
   const el = document.getElementById('toast');
   el.textContent = msg;
@@ -99,6 +114,10 @@ async function onSignedIn(user) {
   // — fire-and-forget; loadFeed will refresh them anyway
   loadUserContentFilters();
 
+  // Wallet (coins + stars + unlock map) — fire-and-forget; topbar pill renders
+  // when ready.
+  loadWalletState();
+
   // Notifications — fetch initial batch + start realtime subscription
   initNotifications();
 
@@ -139,6 +158,8 @@ async function onSignedIn(user) {
   } else if (hash === '#bookmarks') {
     setSidebarActive('btnBookmarks');
     showBookmarks();
+  } else if (hash === '#store') {
+    showStore();
   } else {
     loadStories();
     loadFeed();
@@ -179,7 +200,369 @@ document.getElementById('btnGuest').addEventListener('click', async () => {
 async function signOut() {
   await supabase.auth.signOut();
   currentUser = null; currentProfile = null; posts = [];
+  // Tear down wallet realtime
+  if (_walletChannel) { supabase.removeChannel(_walletChannel); _walletChannel = null; }
+  _wallet = { coin_balance: 0, star_balance: 0 };
+  _userUnlocks.clear();
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// WALLET — coins + stars + unlocks (Phase 5 — user-facing)
+// ════════════════════════════════════════════════════════════════════════════
+
+async function loadWalletState() {
+  if (!currentUser) return;
+
+  // Wallet row + unlocks + app_config defaults — three queries in parallel.
+  const [walletRes, unlocksRes, configRes] = await Promise.all([
+    supabase.from('wallets').select('coin_balance, star_balance').eq('user_id', currentUser.id).maybeSingle(),
+    supabase.from('unlocks').select('target_type, target_id').eq('user_id', currentUser.id),
+    supabase.from('app_config').select('key, value_int'),
+  ]);
+
+  if (walletRes.data) _wallet = walletRes.data;
+  // No row yet (e.g. brand new account before trigger fires) → start at zero.
+  else _wallet = { coin_balance: 0, star_balance: 0 };
+
+  _userUnlocks.clear();
+  for (const u of (unlocksRes.data || [])) {
+    _userUnlocks.add(`${u.target_type}:${u.target_id}`);
+  }
+
+  for (const c of (configRes.data || [])) {
+    if (c.key in _walletConfigDefaults) _walletConfigDefaults[c.key] = c.value_int;
+  }
+
+  renderTopbarCoinPill();
+
+  // Live updates: re-render on any change to my wallet row
+  if (_walletChannel) supabase.removeChannel(_walletChannel);
+  _walletChannel = supabase
+    .channel(`wallet-${currentUser.id}`)
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'wallets', filter: `user_id=eq.${currentUser.id}` },
+      (payload) => {
+        _wallet = { coin_balance: payload.new.coin_balance, star_balance: payload.new.star_balance };
+        renderTopbarCoinPill();
+      })
+    .subscribe();
+}
+
+function renderTopbarCoinPill() {
+  const coinEl = document.getElementById('topbarCoinBalance');
+  const starEl = document.getElementById('topbarStarBalance');
+  if (coinEl) coinEl.textContent = formatBalance(_wallet.coin_balance);
+  if (starEl) starEl.textContent = formatBalance(_wallet.star_balance);
+}
+
+function formatBalance(n) {
+  // 1234 → "1,234"; 12345678 → "12.3M"; keeps the pill compact.
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 10_000)    return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+  return n.toLocaleString();
+}
+
+// Has the current user unlocked this content?
+function isUnlocked(targetType, targetId) {
+  return _userUnlocks.has(`${targetType}:${targetId}`);
+}
+
+// Resolve cost: per-row override → app_config default
+function resolveUnlockCost(targetType, currency, row) {
+  const colCoins = row?.unlock_cost_coins;
+  const colStars = row?.unlock_cost_stars;
+  if (currency === 'coin') {
+    if (Number.isFinite(colCoins) && colCoins > 0) return colCoins;
+    return _walletConfigDefaults[targetType === 'video' ? 'default_video_unlock_coins' : 'default_chapter_unlock_coins'];
+  } else {
+    if (Number.isFinite(colStars) && colStars > 0) return colStars;
+    return _walletConfigDefaults[targetType === 'video' ? 'default_video_unlock_stars' : 'default_chapter_unlock_stars'];
+  }
+}
+
+// Premium unlock modal — two big buttons (coins or stars), insufficient
+// balance disables the button with a hint. On success, updates _wallet,
+// adds to _userUnlocks, fires onUnlocked() so the caller can re-render.
+function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
+  const costCoins = resolveUnlockCost(targetType, 'coin', row);
+  const costStars = resolveUnlockCost(targetType, 'star', row);
+  const canCoin = _wallet.coin_balance >= costCoins;
+  const canStar = _wallet.star_balance >= costStars;
+
+  // Remove any prior modal (defensive)
+  document.querySelector('.unlock-modal-backdrop')?.remove();
+
+  const modal = document.createElement('div');
+  modal.className = 'unlock-modal-backdrop';
+  modal.innerHTML = `
+    <div class="unlock-modal" role="dialog" aria-modal="true">
+      <button class="unlock-modal-close" aria-label="Close">×</button>
+      <div class="unlock-modal-icon">🔒</div>
+      <h2>Unlock this ${targetType}</h2>
+      ${title ? `<p class="unlock-modal-title">${escHTML(title)}</p>` : ''}
+      <p class="unlock-modal-sub">Pay once and read/watch as many times as you like.</p>
+      <div class="unlock-options">
+        <button class="unlock-option unlock-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
+          <span class="unlock-option-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+          </span>
+          <span class="unlock-option-cost">${costCoins}</span>
+          <span class="unlock-option-label">Coin${costCoins === 1 ? '' : 's'}</span>
+          <span class="unlock-option-hint">${canCoin ? 'Tap to unlock' : `You have ${_wallet.coin_balance}`}</span>
+        </button>
+        <div class="unlock-or">or</div>
+        <button class="unlock-option unlock-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
+          <span class="unlock-option-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
+          </span>
+          <span class="unlock-option-cost">${costStars}</span>
+          <span class="unlock-option-label">Star${costStars === 1 ? '' : 's'}</span>
+          <span class="unlock-option-hint">${canStar ? 'Tap to unlock' : `You have ${_wallet.star_balance}`}</span>
+        </button>
+      </div>
+      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Not enough coins or stars yet. Open the Store to top up, or watch ads to earn stars.</p>' : ''}
+    </div>
+  `;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 180); };
+  modal.querySelector('.unlock-modal-close').onclick = close;
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+  modal.querySelectorAll('.unlock-option').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      const currency = btn.dataset.cur;
+      btn.classList.add('is-loading');
+      const { data, error } = await supabase.rpc('unlock_content', {
+        p_target_type: targetType,
+        p_target_id:   targetId,
+        p_currency:    currency,
+      });
+      btn.classList.remove('is-loading');
+      if (error) { toast(error.message, 'error'); return; }
+      if (!data?.ok) {
+        toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
+        return;
+      }
+      // Local state update (Realtime will also push, but this avoids the flicker)
+      if (currency === 'coin') _wallet.coin_balance = data.balance_after;
+      else                     _wallet.star_balance = data.balance_after;
+      _userUnlocks.add(`${targetType}:${targetId}`);
+      renderTopbarCoinPill();
+      close();
+      toast(data.already_unlocked ? 'Already unlocked' : `Unlocked! −${data.cost} ${currency}${data.cost === 1 ? '' : 's'}`, 'success');
+      if (typeof onUnlocked === 'function') onUnlocked();
+    });
+  });
+}
+
+// Topbar pill click → open Store
+document.getElementById('topbarCoinPill')?.addEventListener('click', () => showStore());
+
+// ── Store page ──────────────────────────────────────────────────────────────
+async function showStore() {
+  hideAllMainPages();
+  if (!storePage) return;
+  storePage.style.display = 'block';
+  history.pushState(null, '', '#store');
+  setSidebarActive(null);
+  renderStoreBalances();
+  loadStorePacks();
+  renderStoreAdProgress(); // Phase 3 will populate; placeholder for now
+  refreshMigrateBanner();
+}
+
+// ── "Bring my balance over" banner (Phase 4) ───────────────────────────────
+//
+// Visibility rules:
+//   • Hidden if the user has already migrated (coin_transactions row of type
+//     'migration_grant' exists).
+//   • Hidden if the user explicitly dismissed it (localStorage flag).
+//   • Otherwise shown — we let the user decide whether they have a mobile
+//     balance to bring over. We don't pre-check Appwrite to avoid an extra
+//     server round-trip on every Store open.
+async function refreshMigrateBanner() {
+  const banner = document.getElementById('storeMigrateBanner');
+  if (!banner || !currentUser) return;
+
+  // Local dismissal — survives across sessions
+  const dismissKey = `selebox_migrate_dismiss_${currentUser.id}`;
+  if (localStorage.getItem(dismissKey)) { banner.style.display = 'none'; return; }
+
+  // Server check: did we already grant?
+  const { count, error } = await supabase
+    .from('coin_transactions')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', currentUser.id)
+    .eq('type', 'migration_grant');
+  if (error) { /* on error, just show — better safe than miss */ banner.style.display = 'flex'; return; }
+  banner.style.display = (count && count > 0) ? 'none' : 'flex';
+}
+
+document.getElementById('btnMigrateDismiss')?.addEventListener('click', () => {
+  if (!currentUser) return;
+  localStorage.setItem(`selebox_migrate_dismiss_${currentUser.id}`, '1');
+  document.getElementById('storeMigrateBanner').style.display = 'none';
+});
+
+document.getElementById('btnMigrateFromAppwrite')?.addEventListener('click', async () => {
+  if (!currentUser) { toast('Sign in first', 'error'); return; }
+  const btn = document.getElementById('btnMigrateFromAppwrite');
+  const originalLabel = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Checking your mobile account…';
+  try {
+    const data = await callEdgeFunction('migrate-from-appwrite', {});
+    if (data?.nothing_to_import) {
+      toast('Checked your mobile account — nothing to import.', '');
+      // Hide the banner permanently for this user
+      localStorage.setItem(`selebox_migrate_dismiss_${currentUser.id}`, '1');
+      document.getElementById('storeMigrateBanner').style.display = 'none';
+      return;
+    }
+    if (data?.ok === false) {
+      // Most common: already_migrated — be friendly about it
+      if (data.error === 'already_migrated') {
+        toast('Looks like you already brought your balance over.', '');
+        document.getElementById('storeMigrateBanner').style.display = 'none';
+        return;
+      }
+      toast(data.error || 'Migration failed', 'error');
+      return;
+    }
+    // Success — Realtime on wallet will auto-update the pill, but force a
+    // refresh here so the Store balance shows immediately.
+    await loadWalletState();
+    document.getElementById('storeMigrateBanner').style.display = 'none';
+    const parts = [];
+    if (data?.coins_credited)  parts.push(`${data.coins_credited.toLocaleString()} coins`);
+    if (data?.stars_credited)  parts.push(`${data.stars_credited.toLocaleString()} stars`);
+    if (data?.unlocks_imported) parts.push(`${data.unlocks_imported} unlocked`);
+    toast(parts.length ? `Imported: ${parts.join(' · ')}` : 'Migration complete.', 'success');
+  } catch (err) {
+    toast(err.message || 'Migration failed', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = originalLabel;
+  }
+});
+
+function renderStoreBalances() {
+  const c = document.getElementById('storeCoinBalance');
+  const s = document.getElementById('storeStarBalance');
+  if (c) c.textContent = `${_wallet.coin_balance.toLocaleString()} Coin${_wallet.coin_balance === 1 ? '' : 's'}`;
+  if (s) s.textContent = `${_wallet.star_balance.toLocaleString()} Star${_wallet.star_balance === 1 ? '' : 's'}`;
+}
+
+// Re-render store balances on Realtime wallet change too.
+// (renderTopbarCoinPill is called by the wallet realtime; we hook the store
+//  card render off the same callback path by patching it.)
+const _origRenderTopbarCoinPill = renderTopbarCoinPill;
+renderTopbarCoinPill = function () {
+  _origRenderTopbarCoinPill();
+  if (storePage && storePage.style.display === 'block') renderStoreBalances();
+};
+
+async function loadStorePacks() {
+  const grid = document.getElementById('storePacks');
+  if (!grid) return;
+  grid.innerHTML = '<div class="loading">Loading packs…</div>';
+  const { data: packs, error } = await supabase
+    .from('coin_packages')
+    .select('id, name, base_coins, bonus_coins, price_minor, currency, is_best_value, sort_order')
+    .eq('is_active', true)
+    .order('sort_order', { ascending: true });
+  if (error) {
+    grid.innerHTML = `<div class="loading">Couldn't load packs: ${escHTML(error.message)}</div>`;
+    return;
+  }
+  if (!packs?.length) {
+    grid.innerHTML = '<div class="loading">No packs available right now.</div>';
+    return;
+  }
+  grid.innerHTML = packs.map(p => {
+    const total    = p.base_coins + p.bonus_coins;
+    const bonusPct = p.base_coins > 0 ? Math.round((p.bonus_coins / p.base_coins) * 100) : 0;
+    const priceMaj = (p.price_minor / 100).toLocaleString('en-PH', { minimumFractionDigits: 2 });
+    const symbol   = p.currency === 'PHP' ? '₱' : (p.currency + ' ');
+    return `
+      <button class="store-pack ${p.is_best_value ? 'is-best-value' : ''}" data-pack-id="${escHTML(p.id)}" type="button">
+        <div class="store-pack-icon">
+          <svg viewBox="0 0 24 24" width="36" height="36">
+            <ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
+            <path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/>
+            <path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
+          </svg>
+        </div>
+        <div class="store-pack-meta">
+          <div class="store-pack-name">${p.base_coins} Coins</div>
+          <div class="store-pack-bonus">+${p.bonus_coins} free coins</div>
+          <div class="store-pack-tags">
+            ${bonusPct > 0 ? `<span class="store-pack-bonus-pill">BONUS ${bonusPct}%</span>` : ''}
+            ${p.is_best_value ? '<span class="store-pack-best-pill">BEST VALUE</span>' : ''}
+          </div>
+          <div class="store-pack-total">Total ${total.toLocaleString()} coins delivered instantly</div>
+        </div>
+        <div class="store-pack-cta">
+          <div class="store-pack-price">${symbol}${priceMaj}</div>
+          <div class="store-pack-buy">TAP TO BUY</div>
+        </div>
+      </button>
+    `;
+  }).join('');
+
+  // Wire click handlers
+  grid.querySelectorAll('.store-pack').forEach(btn => {
+    btn.addEventListener('click', () => purchasePack(btn.dataset.packId, btn));
+  });
+}
+
+async function purchasePack(packId, btnEl) {
+  if (!currentUser) { toast('Sign in to buy coins', 'error'); return; }
+  if (btnEl) { btnEl.classList.add('is-loading'); btnEl.disabled = true; }
+  try {
+    const data = await callEdgeFunction('hitpay-create-payment', { package_id: packId });
+    if (!data?.url) { toast('Could not start checkout', 'error'); return; }
+    // Redirect the whole page to HitPay checkout
+    window.location.href = data.url;
+  } catch (err) {
+    toast(err.message || 'Checkout failed', 'error');
+  } finally {
+    if (btnEl) { btnEl.classList.remove('is-loading'); btnEl.disabled = false; }
+  }
+}
+
+function renderStoreAdProgress() {
+  // Phase 3 will count today's ad_watches and update the bar.
+  // For now: leave the disabled "Watch ad" button as a coming-soon hint.
+  const sub = document.getElementById('storeAdSub');
+  const btn = document.getElementById('btnWatchAd');
+  if (sub) sub.textContent = 'Rewarded ads are coming soon. Ask an admin to grant test stars in the Wallet panel meanwhile.';
+  if (btn) { btn.disabled = true; btn.textContent = 'Coming soon'; }
+}
+
+// ── Return-from-HitPay handler ──
+// HitPay redirects users back to /?store=success&ref=<purchase_id> after
+// payment. We detect that on load, show a friendly toast, and clean the URL.
+function handleStoreReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get('store');
+  if (!status) return;
+  if (status === 'success') {
+    toast('Payment received! Your coins will land any moment.', 'success');
+    // Realtime on wallets will auto-update the pill once the webhook lands.
+    // Open the Store page so the user sees the balance update.
+    setTimeout(() => showStore(), 50);
+  } else if (status === 'cancelled' || status === 'cancel') {
+    toast('Payment cancelled.', 'error');
+  }
+  // Strip the param so a refresh doesn't re-trigger the toast
+  params.delete('store');
+  params.delete('ref');
+  const newQuery = params.toString();
+  history.replaceState(null, '', window.location.pathname + (newQuery ? '?' + newQuery : '') + window.location.hash);
+}
+// Run on initial load (after auth has had a chance to mount).
+setTimeout(handleStoreReturn, 800);
 document.getElementById('btnSignOut').addEventListener('click', signOut);
 
 // ── Compose ──
@@ -3562,6 +3945,7 @@ const bookDetailPage = document.getElementById('bookDetailPage');
 const chapterReaderPage = document.getElementById('chapterReaderPage');
 const bookmarksPage = document.getElementById('bookmarksPage');  // Hoisted here (used by hideAllMainPages)
 const messagesPage = document.getElementById('messagesPage');
+const storePage = document.getElementById('storePage');
 
 // Hide every main content page; show functions call this first then set their own page to block.
 function hideAllMainPages() {
@@ -3578,6 +3962,7 @@ function hideAllMainPages() {
   if (chapterReaderPage) chapterReaderPage.style.display = 'none';
   if (bookmarksPage) bookmarksPage.style.display = 'none';
   if (messagesPage) messagesPage.style.display = 'none';
+  if (storePage) storePage.style.display = 'none';
   // Sibling sentinels (live outside the page divs) — also hide
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel) feedSentinel.style.display = 'none';
@@ -4272,7 +4657,7 @@ async function openBookDetail(bookId) {
         .eq('id', realId)
         .single(),
       supabase.from('chapters')
-        .select('id, chapter_number, title, word_count, views_count, is_published, created_at')
+        .select('id, chapter_number, title, word_count, views_count, is_published, is_locked, unlock_cost_coins, unlock_cost_stars, created_at')
         .eq('book_id', realId)
         .eq('is_published', true)
         .order('chapter_number', { ascending: true })
@@ -4308,13 +4693,24 @@ function renderBookDetail() {
   ).join('');
 
   const chaptersHtml = chapters.length
-    ? chapters.map(c => `
-        <div class="chapter-row" data-chapter-id="${c.id}">
-          <span class="chapter-row-num">Ch ${c.chapter_number}</span>
-          <span class="chapter-row-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
-          <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
-        </div>
-      `).join('')
+    ? chapters.map(c => {
+        const realId = c.id.startsWith('sb_') ? c.id.slice(3) : c.id;
+        const locked = c.is_locked && !isUnlocked('chapter', realId);
+        const lockBadge = locked
+          ? `<span class="chapter-row-lock" title="Locked — tap to unlock">
+               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+               ${resolveUnlockCost('chapter', 'coin', c)}🪙 / ${resolveUnlockCost('chapter', 'star', c)}⭐
+             </span>`
+          : '';
+        return `
+          <div class="chapter-row${locked ? ' is-locked' : ''}" data-chapter-id="${c.id}">
+            <span class="chapter-row-num">Ch ${c.chapter_number}</span>
+            <span class="chapter-row-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
+            ${lockBadge}
+            <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
+          </div>
+        `;
+      }).join('')
     : '<div style="color:var(--text2);padding:1rem 0">No chapters published yet.</div>';
 
   content.innerHTML = `
@@ -4494,21 +4890,53 @@ async function openChapterReader(chapterIndex) {
   const content = document.getElementById('readerContent');
   content.innerHTML = '<div class="loading">Loading chapter...</div>';
 
-  // Fetch full chapter content from the right source
+  // Fetch full chapter content + lock fields from the right source
   let chapterContent = '';
   let resolvedChapterId = chapter.id;
+  let chapterRow = null;
   try {
     const realChapterId = chapter.id.startsWith('sb_') ? chapter.id.slice(3) : chapter.id;
     const { data, error } = await supabase
       .from('chapters')
-      .select('id, chapter_number, title, content')
+      .select('id, chapter_number, title, content, is_locked, unlock_cost_coins, unlock_cost_stars')
       .eq('id', realChapterId)
       .single();
     if (error || !data) throw new Error(error?.message || 'Chapter not found');
     chapterContent = data.content || '';
     resolvedChapterId = data.id;
+    chapterRow = data;
   } catch (err) {
     content.innerHTML = `<div class="loading">Couldn't load chapter: ${escHTML(err.message)}</div>`;
+    return;
+  }
+
+  // PAYWALL: locked + not unlocked → render the lock CTA instead of content.
+  if (chapterRow.is_locked && !isUnlocked('chapter', resolvedChapterId)) {
+    const coinCost = resolveUnlockCost('chapter', 'coin', chapterRow);
+    const starCost = resolveUnlockCost('chapter', 'star', chapterRow);
+    content.style.fontSize = '';
+    content.innerHTML = `
+      <div class="reader-paywall">
+        <div class="reader-paywall-icon">🔒</div>
+        <h2>This chapter is locked</h2>
+        <p>Unlock once to read as many times as you like.</p>
+        <div class="reader-paywall-pricing">
+          <span><b>${coinCost}</b> coin${coinCost === 1 ? '' : 's'}</span>
+          <span class="reader-paywall-or">or</span>
+          <span><b>${starCost}</b> star${starCost === 1 ? '' : 's'}</span>
+        </div>
+        <button class="btn btn-purple" id="btnReaderUnlock">Unlock chapter</button>
+      </div>
+    `;
+    document.getElementById('btnReaderUnlock')?.addEventListener('click', () => {
+      openUnlockDialog({
+        targetType: 'chapter',
+        targetId:   resolvedChapterId,
+        row:        chapterRow,
+        title:      chapterRow.title || `Chapter ${chapterRow.chapter_number}`,
+        onUnlocked: () => openChapterReader(chapterIndex),  // re-open after unlock
+      });
+    });
     return;
   }
 
@@ -5539,6 +5967,7 @@ async function openAuthorChapterEditor(bookId, chapterId) {
   chapterQuill.setText('');
   document.getElementById('chapterEditorTitle').value = '';
   _chapterPublishState = { is_published: false, scheduled_publish_at: null };
+  setChapterLockControls(false, null, null);
   setChapterStatePill();
   setChapterCoverPreview(null);
   setChapterSaveStatus('idle');
@@ -5547,7 +5976,7 @@ async function openAuthorChapterEditor(bookId, chapterId) {
   if (chapterId) {
     const { data, error } = await supabase
       .from('chapters')
-      .select('id, chapter_number, title, content, is_published, scheduled_publish_at, cover_url')
+      .select('id, chapter_number, title, content, is_published, scheduled_publish_at, cover_url, is_locked, unlock_cost_coins, unlock_cost_stars')
       .eq('id', chapterId)
       .single();
     if (error || !data) { toast('Chapter not found', 'error'); openAuthorBookEditor(bookId); return; }
@@ -5558,6 +5987,7 @@ async function openAuthorChapterEditor(bookId, chapterId) {
     };
     setChapterStatePill();
     setChapterCoverPreview(data.cover_url || null);
+    setChapterLockControls(data.is_locked, data.unlock_cost_coins, data.unlock_cost_stars);
     if (data.content) chapterQuill.clipboard.dangerouslyPasteHTML(data.content);
     chapterDirty = false;
   }
@@ -5572,6 +6002,33 @@ function updateChapterWordCount() {
   const words = text.length ? text.split(/\s+/).length : 0;
   document.getElementById('chapterWordCount').textContent = words.toLocaleString();
 }
+
+// Sync the lock UI with a chapter row's lock fields.
+function setChapterLockControls(locked, coins, stars) {
+  const cb        = document.getElementById('chapterLockEnabled');
+  const costRow   = document.getElementById('chapterLockCostRow');
+  const coinsInp  = document.getElementById('chapterLockCoins');
+  const starsInp  = document.getElementById('chapterLockStars');
+  if (!cb) return;
+  cb.checked = !!locked;
+  if (costRow) costRow.style.display = locked ? '' : 'none';
+  if (coinsInp) coinsInp.value = (coins ?? '') === null ? '' : (coins || '');
+  if (starsInp) starsInp.value = (stars ?? '') === null ? '' : (stars || '');
+}
+
+// Show/hide cost row when toggle flips, mark dirty so autosave fires.
+document.getElementById('chapterLockEnabled')?.addEventListener('change', (e) => {
+  const costRow = document.getElementById('chapterLockCostRow');
+  if (costRow) costRow.style.display = e.target.checked ? '' : 'none';
+  chapterDirty = true;
+  scheduleChapterAutosave();
+});
+['chapterLockCoins', 'chapterLockStars'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', () => {
+    chapterDirty = true;
+    scheduleChapterAutosave();
+  });
+});
 
 function setChapterSaveStatus(state) {
   const el = document.getElementById('chapterSaveStatus');
@@ -5598,6 +6055,13 @@ async function saveChapter() {
   // Cover URL — null if no cover, otherwise the public URL of uploaded image
   const coverUrl = document.getElementById('chapterCoverImg')?.dataset?.url || null;
 
+  // Lock fields
+  const isLocked = document.getElementById('chapterLockEnabled')?.checked || false;
+  const lockCoinsRaw = document.getElementById('chapterLockCoins')?.value;
+  const lockStarsRaw = document.getElementById('chapterLockStars')?.value;
+  const unlockCostCoins = isLocked && lockCoinsRaw ? parseInt(lockCoinsRaw, 10) || null : null;
+  const unlockCostStars = isLocked && lockStarsRaw ? parseInt(lockStarsRaw, 10) || null : null;
+
   let result;
   if (editingChapterId) {
     // Save = autosave the draft body. Don't touch is_published or scheduled_publish_at —
@@ -5605,6 +6069,9 @@ async function saveChapter() {
     result = await supabase.from('chapters').update({
       title, content, word_count: wordCount,
       cover_url: coverUrl,
+      is_locked: isLocked,
+      unlock_cost_coins: unlockCostCoins,
+      unlock_cost_stars: unlockCostStars,
       updated_at: new Date().toISOString(),
     }).eq('id', editingChapterId).select().single();
   } else {
@@ -5617,6 +6084,9 @@ async function saveChapter() {
       title, content, word_count: wordCount,
       is_published: false, // brand-new chapter is always a draft until Publish
       cover_url: coverUrl,
+      is_locked: isLocked,
+      unlock_cost_coins: unlockCostCoins,
+      unlock_cost_stars: unlockCostStars,
     }).select().single();
     if (result.data) {
       editingChapterId = result.data.id;
@@ -6062,7 +6532,7 @@ async function loadStudio() {
 
   const { data: videos, error } = await supabase
     .from('videos')
-    .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id')
+    .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id, is_locked, unlock_cost_coins, unlock_cost_stars')
     .eq('uploader_id', currentUser.id)
     .order('created_at', { ascending: false });
   
@@ -6270,7 +6740,7 @@ function openStudioEditModal(videoId) {
   document.getElementById('studioEditDescription').value = v.description || '';
   document.getElementById('studioEditTags').value = (v.tags || []).join(', ');
   document.getElementById('studioEditCategory').value = v.category || 'general';
-  
+
   const preview = document.getElementById('studioEditPreview');
   const thumb = document.getElementById('studioEditThumb');
   if (v.thumbnail_url) {
@@ -6279,12 +6749,30 @@ function openStudioEditModal(videoId) {
   } else {
     preview.style.display = 'none';
   }
-  
+
   document.getElementById('studioEditTitleCount').textContent = `${(v.title || '').length} / 100`;
   document.getElementById('studioEditDescCount').textContent = `${(v.description || '').length} / 2000`;
-  
+
+  // Lock controls
+  const lockCb        = document.getElementById('studioEditLockEnabled');
+  const lockCostRow   = document.getElementById('studioEditLockCostRow');
+  const lockCoinsInp  = document.getElementById('studioEditLockCoins');
+  const lockStarsInp  = document.getElementById('studioEditLockStars');
+  if (lockCb) {
+    lockCb.checked = !!v.is_locked;
+    if (lockCostRow)  lockCostRow.style.display = v.is_locked ? '' : 'none';
+    if (lockCoinsInp) lockCoinsInp.value = v.unlock_cost_coins || '';
+    if (lockStarsInp) lockStarsInp.value = v.unlock_cost_stars || '';
+  }
+
   document.getElementById('studioEditModal').style.display = 'flex';
 }
+
+// Toggle cost row when the lock checkbox flips
+document.getElementById('studioEditLockEnabled')?.addEventListener('change', (e) => {
+  const costRow = document.getElementById('studioEditLockCostRow');
+  if (costRow) costRow.style.display = e.target.checked ? '' : 'none';
+});
 
 function closeStudioEditModal() {
   document.getElementById('studioEditModal').style.display = 'none';
@@ -6323,9 +6811,22 @@ async function saveStudioEdit() {
 
   const tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t);
 
+  // Lock fields
+  const isLocked = document.getElementById('studioEditLockEnabled')?.checked || false;
+  const lockCoinsRaw = document.getElementById('studioEditLockCoins')?.value;
+  const lockStarsRaw = document.getElementById('studioEditLockStars')?.value;
+  const unlockCostCoins = isLocked && lockCoinsRaw ? parseInt(lockCoinsRaw, 10) || null : null;
+  const unlockCostStars = isLocked && lockStarsRaw ? parseInt(lockStarsRaw, 10) || null : null;
+
   const { error } = await supabase
     .from('videos')
-    .update({ title, description, tags, category, updated_at: new Date().toISOString() })
+    .update({
+      title, description, tags, category,
+      is_locked: isLocked,
+      unlock_cost_coins: unlockCostCoins,
+      unlock_cost_stars: unlockCostStars,
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', studioEditingVideoId);
 
   setSaving(false);
@@ -6985,7 +7486,7 @@ async function playVideo(videoId) {
       const rawId = videoId.startsWith('sb_') ? videoId.slice(3) : videoId;
       const { data, error } = await supabase
         .from('videos')
-        .select(`id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, status, is_hidden, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`)
+        .select(`id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, status, is_hidden, is_locked, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`)
         .eq('id', rawId)
         .maybeSingle();
       if (error || !data) {
@@ -7013,6 +7514,9 @@ async function playVideo(videoId) {
         videoStats: { views: data.views || 0, duration: data.duration || 0 },
         status: data.status || 'ready',
         $createdAt: data.created_at,
+        is_locked:         data.is_locked,
+        unlock_cost_coins: data.unlock_cost_coins,
+        unlock_cost_stars: data.unlock_cost_stars,
         _uploaderInfo: data.profiles ? { $id: data.profiles.id, username: data.profiles.username, avatar: data.profiles.avatar_url } : null,
       };
       // Cache it so revisits are instant + Prev/Next nav has it.
@@ -7026,6 +7530,36 @@ async function playVideo(videoId) {
 
     const player = document.getElementById('videoPlayer');
     if (currentHls) { currentHls.destroy(); currentHls = null; }
+
+    // PAYWALL: locked videos that the viewer hasn't unlocked AND don't own.
+    // Owner (the uploader) can always preview their own video.
+    const sbId = video._supabaseId || (videoId.startsWith('sb_') ? videoId.slice(3) : videoId);
+    const isOwner = currentUser && currentUser.id === video.uploader;
+    const paywallEl = document.getElementById('videoPaywall');
+    if (video.is_locked && !isOwner && !isUnlocked('video', sbId)) {
+      const coinCost = resolveUnlockCost('video', 'coin', { unlock_cost_coins: video.unlock_cost_coins, unlock_cost_stars: video.unlock_cost_stars });
+      const starCost = resolveUnlockCost('video', 'star', { unlock_cost_coins: video.unlock_cost_coins, unlock_cost_stars: video.unlock_cost_stars });
+      // Stop playback + hide controls until unlock.
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+      document.getElementById('videoPaywallTitle').textContent = video.title || 'This video is locked';
+      document.getElementById('videoPaywallCoins').textContent = coinCost;
+      document.getElementById('videoPaywallStars').textContent = starCost;
+      paywallEl.style.display = '';
+      const unlockBtn = document.getElementById('btnVideoUnlock');
+      unlockBtn.onclick = () => {
+        openUnlockDialog({
+          targetType: 'video',
+          targetId:   sbId,
+          row:        { unlock_cost_coins: video.unlock_cost_coins, unlock_cost_stars: video.unlock_cost_stars },
+          title:      video.title,
+          onUnlocked: () => { paywallEl.style.display = 'none'; playVideo(videoId); },
+        });
+      };
+      return;
+    }
+    if (paywallEl) paywallEl.style.display = 'none';
 
     const resumeFrom = getResumeTime(videoId);
 
@@ -7421,6 +7955,8 @@ window.addEventListener('popstate', () => {
   } else if (hash.startsWith('#video/')) {
     setSidebarActive('btnVideos');
     playVideo(hash.replace('#video/', ''));
+  } else if (hash === '#store') {
+    showStore();
   } else {
     setSidebarActive('btnHome');
     showFeed();
