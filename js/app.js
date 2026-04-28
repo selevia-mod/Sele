@@ -2,7 +2,7 @@ import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supa
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
-const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at';
+const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at, display_name_changed_at';
 
 // Reset window scroll across all common scroll containers (covers Safari edge
 // cases where `body` vs `documentElement` is the scrolling element).
@@ -3434,34 +3434,259 @@ document.querySelectorAll('.profile-tab').forEach(tab => {
   });
 });
 
-// Edit profile modal
-function openEditProfile(profile) {
-  document.getElementById('editUsername').value = profile.username || '';
-  document.getElementById('editBio').value = profile.bio || '';
-  document.getElementById('editLocation').value = profile.location || '';
-  document.getElementById('editWebsite').value = profile.website || '';
+// ═══════════════════════════════════════════════════════════════════════════
+// Edit profile modal — display-name cooldown, emoji-free, bio char/line limits
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Tunables loaded from app_config — falls back to sensible defaults so the
+// modal works even if the migration hasn't been applied yet.
+const _profileEditDefaults = {
+  max_bio_characters: 200,
+  max_bio_lines: 5,
+  display_name_change_cooldown_days: 60,
+};
+async function loadProfileEditDefaults() {
+  try {
+    const { data } = await supabase.from('app_config')
+      .select('key, value_int')
+      .in('key', Object.keys(_profileEditDefaults));
+    for (const r of (data || [])) {
+      if (r.value_int != null) _profileEditDefaults[r.key] = Number(r.value_int);
+    }
+  } catch {}
+  return _profileEditDefaults;
+}
+
+// Reject anything in pictographic/emoji Unicode blocks. Allows accented letters,
+// digits, and common punctuation — international names work fine.
+function stripEmoji(s) {
+  return (s || '').replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}]/gu, '');
+}
+function hasEmoji(s) {
+  return /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}]/u.test(s || '');
+}
+
+// ── Country / City lists ─────────────────────────────────────────────
+// Philippines is the primary market — its cities are pre-listed for a clean
+// dropdown UX. Other countries fall back to a free-text city input.
+const COUNTRY_LIST = [
+  'Philippines','United States','Canada','United Kingdom','Australia','Singapore','Malaysia','Indonesia','Thailand','Vietnam','Japan','South Korea','China','Hong Kong','Taiwan','India','Pakistan','Bangladesh','United Arab Emirates','Saudi Arabia','Qatar','Kuwait','Bahrain','Oman','Israel','Turkey','Germany','France','Spain','Italy','Portugal','Netherlands','Belgium','Switzerland','Sweden','Norway','Denmark','Finland','Ireland','Poland','Russia','Ukraine','Greece','Czechia','Austria','Hungary','Romania','New Zealand','Mexico','Brazil','Argentina','Chile','Colombia','Peru','South Africa','Egypt','Nigeria','Kenya','Morocco','Other'
+];
+const PH_CITIES = [
+  'Manila','Quezon City','Caloocan','Pasig','Taguig','Makati','Parañaque','Las Piñas','Muntinlupa','Mandaluyong','San Juan','Marikina','Pasay','Valenzuela','Malabon','Navotas','Pateros',
+  'Cebu City','Mandaue','Lapu-Lapu','Davao City','Iloilo City','Bacolod','Cagayan de Oro','Zamboanga City','General Santos','Baguio','Antipolo','Dasmariñas','Bacoor','Imus','Calamba','Santa Rosa','Lipa','Batangas City','Tarlac City','Angeles','San Fernando (Pampanga)','Olongapo','Naga','Legazpi','Tacloban','Butuan','Cotabato City','Iligan','Tagum','Puerto Princesa','Malolos','Meycauayan','San Jose del Monte','Other'
+];
+
+function populateCountryDropdown() {
+  const sel = document.getElementById('editCountry');
+  if (!sel || sel.dataset.populated === '1') return;
+  for (const c of COUNTRY_LIST) {
+    const opt = document.createElement('option');
+    opt.value = c; opt.textContent = c;
+    sel.appendChild(opt);
+  }
+  sel.dataset.populated = '1';
+}
+function populatePhCityDropdown() {
+  const sel = document.getElementById('editCity');
+  if (!sel || sel.dataset.populated === '1') return;
+  for (const c of PH_CITIES) {
+    const opt = document.createElement('option');
+    opt.value = c; opt.textContent = c;
+    sel.appendChild(opt);
+  }
+  sel.dataset.populated = '1';
+}
+
+function applyCountryUI(country) {
+  // Country = Philippines → show city dropdown. Anything else → show city text input.
+  const citySel  = document.getElementById('editCity');
+  const cityInp  = document.getElementById('editCityInput');
+  if (!citySel || !cityInp) return;
+  if (country === 'Philippines') {
+    citySel.style.display = '';
+    cityInp.style.display = 'none';
+  } else {
+    citySel.style.display = 'none';
+    cityInp.style.display = '';
+  }
+}
+
+function getCurrentCity() {
+  const country = document.getElementById('editCountry').value || '';
+  if (country === 'Philippines') {
+    const v = document.getElementById('editCity').value || '';
+    return v === 'Other' ? '' : v;
+  }
+  return (document.getElementById('editCityInput').value || '').trim();
+}
+
+// Parse a stored location string ("City, Country") into {country, city}.
+// Tolerates older free-form values — falls back to dumping the whole string
+// into city if we can't match the country.
+function parseLocation(loc) {
+  if (!loc) return { country: '', city: '' };
+  const parts = loc.split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const tail = parts[parts.length - 1];
+    const matchedCountry = COUNTRY_LIST.find(c => c.toLowerCase() === tail.toLowerCase());
+    if (matchedCountry) {
+      const city = parts.slice(0, -1).join(', ');
+      return { country: matchedCountry, city };
+    }
+  }
+  // Fallback — country unknown
+  return { country: '', city: loc };
+}
+
+async function openEditProfile(profile) {
+  const cfg = await loadProfileEditDefaults();
+  const usernameEl = document.getElementById('editUsername');
+  const bioEl      = document.getElementById('editBio');
+  const hintEl     = document.getElementById('editUsernameHint');
+
+  usernameEl.value = profile.username || '';
+  bioEl.value      = profile.bio || '';
+  document.getElementById('editWebsite').value  = profile.website  || '';
+
+  // ── Country + City ──
+  populateCountryDropdown();
+  populatePhCityDropdown();
+  const { country, city } = parseLocation(profile.location);
+  document.getElementById('editCountry').value = country;
+  applyCountryUI(country);
+  if (country === 'Philippines') {
+    const phMatch = PH_CITIES.find(c => c.toLowerCase() === (city || '').toLowerCase());
+    document.getElementById('editCity').value = phMatch || '';
+    document.getElementById('editCityInput').value = '';
+  } else {
+    document.getElementById('editCityInput').value = city || '';
+    document.getElementById('editCity').value = '';
+  }
+
+  // ── Display-name cooldown UI ──
+  const lastChange = profile.display_name_changed_at ? new Date(profile.display_name_changed_at) : null;
+  const cooldownMs = (cfg.display_name_change_cooldown_days || 60) * 86400 * 1000;
+  const nextAllowed = lastChange ? new Date(lastChange.getTime() + cooldownMs) : null;
+  const onCooldown = nextAllowed && nextAllowed > new Date();
+
+  if (onCooldown) {
+    usernameEl.disabled = true;
+    hintEl.classList.add('is-locked');
+    const dateStr = nextAllowed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    const days = Math.ceil((nextAllowed - new Date()) / 86400000);
+    hintEl.textContent = `Display name is locked. You can change it again on ${dateStr} (${days} day${days===1?'':'s'} from now).`;
+  } else {
+    usernameEl.disabled = false;
+    hintEl.classList.remove('is-locked');
+    hintEl.textContent = `Letters, numbers and basic punctuation only — no emoji. You can change this once every ${cfg.display_name_change_cooldown_days || 60} days.`;
+  }
+
+  // ── Bio counters ──
+  updateBioCounter();
+
   document.getElementById('editProfileModal').classList.add('open');
   document.body.style.overflow = 'hidden';
 }
+
 function closeEditProfile() {
   document.getElementById('editProfileModal').classList.remove('open');
   document.body.style.overflow = '';
 }
+
+function updateBioCounter() {
+  const el = document.getElementById('editBio');
+  const countEl = document.getElementById('editBioCount');
+  const linesEl = document.getElementById('editBioLines');
+  if (!el || !countEl || !linesEl) return;
+  const v = el.value || '';
+  const maxC = _profileEditDefaults.max_bio_characters || 200;
+  const maxL = _profileEditDefaults.max_bio_lines || 5;
+  const lines = v ? (v.split('\n').length) : 1;
+  countEl.textContent = `${v.length} / ${maxC}`;
+  linesEl.textContent = `${lines} / ${maxL} lines`;
+  countEl.classList.remove('is-warn','is-bad');
+  linesEl.classList.remove('is-warn','is-bad');
+  if (v.length > maxC) countEl.classList.add('is-bad');
+  else if (v.length > maxC * 0.9) countEl.classList.add('is-warn');
+  if (lines > maxL) linesEl.classList.add('is-bad');
+  else if (lines === maxL) linesEl.classList.add('is-warn');
+}
+
 document.getElementById('editProfileClose').addEventListener('click', closeEditProfile);
 document.getElementById('editProfileCancel').addEventListener('click', closeEditProfile);
 document.getElementById('editProfileModal').addEventListener('click', (e) => { if (e.target.id === 'editProfileModal') closeEditProfile(); });
 
+// Live: strip emoji as user types into display name
+document.getElementById('editUsername').addEventListener('input', (e) => {
+  const cleaned = stripEmoji(e.target.value);
+  if (cleaned !== e.target.value) e.target.value = cleaned;
+});
+
+// Live: bio counter updates
+document.getElementById('editBio').addEventListener('input', updateBioCounter);
+
+// Country change: swap city UI between dropdown (PH) and free-text input
+document.getElementById('editCountry').addEventListener('change', (e) => {
+  applyCountryUI(e.target.value);
+  // Clear stale city value on country swap
+  document.getElementById('editCity').value = '';
+  document.getElementById('editCityInput').value = '';
+});
+
 document.getElementById('editProfileSave').addEventListener('click', async () => {
   const btn = document.getElementById('editProfileSave');
+  const usernameEl = document.getElementById('editUsername');
+
+  // Client-side guards — server still re-validates as source of truth
+  let username = stripEmoji(usernameEl.value).trim();
+  const bio    = (document.getElementById('editBio').value || '').trim();
+  const country = (document.getElementById('editCountry').value || '').trim();
+  const city   = getCurrentCity();
+  // Compose location: "City, Country" if both present, just country if no city,
+  // empty string to clear.
+  const loc = (city && country) ? `${city}, ${country}` : (country || '');
+  const web    = (document.getElementById('editWebsite').value || '').trim();
+
+  if (!username) { toast('Display name is required', 'error'); return; }
+  if (hasEmoji(username)) { toast('Display name cannot contain emoji', 'error'); return; }
+
+  const maxC = _profileEditDefaults.max_bio_characters || 200;
+  const maxL = _profileEditDefaults.max_bio_lines || 5;
+  if (bio.length > maxC) { toast(`Bio is too long (max ${maxC} characters)`, 'error'); return; }
+  if (bio && bio.split('\n').length > maxL) { toast(`Bio has too many lines (max ${maxL})`, 'error'); return; }
+
   btn.disabled = true; btn.textContent = 'Saving...';
-  const { error } = await supabase.from('profiles').update({
-    username: document.getElementById('editUsername').value.trim() || 'User',
-    bio: document.getElementById('editBio').value.trim(),
-    location: document.getElementById('editLocation').value.trim(),
-    website: document.getElementById('editWebsite').value.trim()
-  }).eq('id', currentUser.id);
+
+  // If display name field is disabled (cooldown), don't try to send it
+  const sendUsername = usernameEl.disabled ? null : username;
+
+  const { data, error } = await supabase.rpc('update_profile', {
+    p_username: sendUsername,
+    p_bio: bio,
+    p_location: loc,
+    p_website: web,
+  });
+
   btn.disabled = false; btn.textContent = 'Save';
+
   if (error) { toast(error.message, 'error'); return; }
+  if (!data || data.ok === false) {
+    const code = data?.error;
+    const msg = {
+      not_authenticated:    'Please sign in again',
+      username_required:    'Display name is required',
+      emoji_not_allowed:    'Display name cannot contain emoji',
+      name_change_cooldown: data?.next_allowed_at
+        ? `You can change your name again on ${new Date(data.next_allowed_at).toLocaleDateString()}`
+        : `Display name is locked for ${data?.cooldown_days || 60} days between changes`,
+      bio_too_long:         `Bio is too long (max ${data?.max_chars || maxC} characters)`,
+      bio_too_many_lines:   `Bio has too many lines (max ${data?.max_lines || maxL})`,
+    }[code] || (code || 'Could not save profile');
+    toast(msg, 'error');
+    return;
+  }
+
   toast('Profile updated!', 'success');
   closeEditProfile();
   const { data: updated } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
