@@ -9758,6 +9758,93 @@ body:not(.light) .feed-tab.active { background: linear-gradient(135deg, #a78bfa,
   .feed-tab { padding: 0.3rem 0.7rem; font-size: 0.76rem; }
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   Withdrawal modal — read-only saved-account card + min-payout popup
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.payout-account-card {
+  margin: 0.85rem 0 1rem;
+  padding: 0.95rem 1.1rem;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.05), rgba(167, 139, 250, 0.07));
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  border-radius: 12px;
+}
+.payout-account-head {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text2);
+  margin-bottom: 0.25rem;
+}
+.payout-account-method {
+  font-size: 1rem;
+  font-weight: 800;
+  color: #6b21a8;
+  margin-bottom: 0.1rem;
+}
+.payout-account-name {
+  font-size: 0.9rem;
+  color: var(--text);
+  font-weight: 600;
+}
+.payout-account-foot {
+  font-size: 0.74rem;
+  color: var(--text2);
+  margin-top: 0.5rem;
+  line-height: 1.4;
+}
+body:not(.light) .payout-account-card {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.10), rgba(124, 58, 237, 0.08));
+  border-color: rgba(167, 139, 250, 0.26);
+}
+body:not(.light) .payout-account-method { color: #c4b5fd; }
+
+/* Min-payout popup */
+.min-payout-body {
+  text-align: center;
+  padding: 0.5rem 0 1rem;
+}
+.min-payout-icon {
+  font-size: 2.6rem;
+  margin-bottom: 0.5rem;
+}
+.min-payout-msg {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--text);
+  margin-bottom: 1.1rem;
+}
+.min-payout-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0 auto;
+  max-width: 280px;
+  padding: 0.85rem 1rem;
+  background: rgba(0, 0, 0, 0.025);
+  border-radius: 10px;
+}
+.min-payout-progress-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.88rem;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.min-payout-progress-row strong { color: var(--text); }
+.min-payout-progress-row-need {
+  border-top: 1px dashed rgba(124, 58, 237, 0.25);
+  padding-top: 0.4rem;
+  margin-top: 0.2rem;
+}
+.min-payout-progress-row-need strong { color: #7c3aed; }
+
+body:not(.light) .min-payout-progress {
+  background: rgba(255, 255, 255, 0.04);
+}
+body:not(.light) .min-payout-progress-row-need strong { color: #c4b5fd; }
+
 body:not(.light) .earnings-row { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
 body:not(.light) .author-earnings-card { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
 body:not(.light) .author-earnings-available { background: linear-gradient(135deg, rgba(167,139,250,0.10) 0%, rgba(124,58,237,0.04) 100%); border-color: rgba(167,139,250,0.24); }
