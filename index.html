@@ -66,6 +66,20 @@
       <button class="topbar-icon-btn" title="Toggle theme" id="btnTheme">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
       </button>
+      <button class="topbar-coin-pill" id="topbarCoinPill" title="Your wallet — click to open Store">
+        <span class="topbar-coin-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
+            <path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/>
+            <path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
+          </svg>
+        </span>
+        <span class="topbar-coin-balance" id="topbarCoinBalance">0</span>
+        <span class="topbar-star-tip" id="topbarStarTip" title="Stars">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="#a855f7"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg>
+          <span id="topbarStarBalance">0</span>
+        </span>
+      </button>
       <div class="topbar-avatar" id="topbarAvatar" title="Your profile">?</div>
     </div>
   </header>
@@ -509,6 +523,29 @@
           <span class="chapter-word-count"><span id="chapterWordCount">0</span> words</span>
         </div>
 
+        <!-- Lock controls: paywall this chapter behind coins/stars -->
+        <div class="lock-controls" id="chapterLockControls">
+          <label class="lock-toggle">
+            <input type="checkbox" id="chapterLockEnabled"/>
+            <span class="lock-toggle-track"><span class="lock-toggle-knob"></span></span>
+            <span class="lock-toggle-label">
+              <span class="lock-toggle-title">🔒 Premium chapter</span>
+              <span class="lock-toggle-sub">Readers pay coins or stars to unlock. You set the price below.</span>
+            </span>
+          </label>
+          <div class="lock-cost-row" id="chapterLockCostRow" style="display:none">
+            <label>
+              <span>Coins</span>
+              <input type="number" id="chapterLockCoins" min="1" max="999" placeholder="3"/>
+            </label>
+            <label>
+              <span>Stars</span>
+              <input type="number" id="chapterLockStars" min="1" max="999" placeholder="3"/>
+            </label>
+            <span class="lock-cost-hint">Leave blank to use the platform default.</span>
+          </div>
+        </div>
+
         <!-- Hidden file input for inline content image upload (used by Quill image handler) -->
         <input type="file" id="chapterContentImageFile" accept="image/*" style="display:none"/>
 
@@ -562,6 +599,17 @@
         <div class="video-player-main">
           <div class="video-player-wrap">
             <video id="videoPlayer" controls></video>
+            <div class="video-paywall" id="videoPaywall" style="display:none">
+              <div class="video-paywall-icon">🔒</div>
+              <h3 id="videoPaywallTitle">This video is locked</h3>
+              <p>Unlock once to watch as many times as you like.</p>
+              <div class="video-paywall-pricing">
+                <span><b id="videoPaywallCoins">1</b> coin</span>
+                <span class="video-paywall-or">or</span>
+                <span><b id="videoPaywallStars">1</b> star</span>
+              </div>
+              <button class="btn btn-purple" id="btnVideoUnlock">Unlock video</button>
+            </div>
           </div>
 
           <!-- Premium nav controls — Prev / Rewind 10s / Fast-forward 10s / Next / Auto-play -->
@@ -685,6 +733,74 @@
       <div class="bookmarks-content" id="bookmarksContent">
         <div class="loading">Loading bookmarks…</div>
       </div>
+    </div>
+
+    <!-- ── STORE (coin packs + earn stars) ── -->
+    <div id="storePage" style="display:none">
+      <div class="store-header">
+        <h1 class="store-title">Store</h1>
+        <span class="store-subtitle">Buy coins to unlock chapters & videos. Watch ads to earn free stars.</span>
+      </div>
+
+      <!-- Migration banner — shown until user clicks or we confirm nothing to import -->
+      <div class="store-migrate-banner" id="storeMigrateBanner" style="display:none">
+        <div class="store-migrate-icon">📲</div>
+        <div class="store-migrate-text">
+          <h3>Bring your mobile balance over</h3>
+          <p>If you've bought coins or unlocked chapters/videos on the Selebox mobile app, transfer them here in one tap. One-time only.</p>
+        </div>
+        <button class="btn btn-purple" id="btnMigrateFromAppwrite">Bring it over</button>
+        <button class="store-migrate-dismiss" id="btnMigrateDismiss" aria-label="Dismiss">×</button>
+      </div>
+
+      <div class="store-balance-cards">
+        <div class="store-balance-card store-balance-coin">
+          <div class="store-balance-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32">
+              <ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
+              <path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/>
+              <path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
+            </svg>
+          </div>
+          <div class="store-balance-meta">
+            <div class="store-balance-label">Coins balance</div>
+            <div class="store-balance-value" id="storeCoinBalance">0 Coins</div>
+          </div>
+        </div>
+        <div class="store-balance-card store-balance-star">
+          <div class="store-balance-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="#a855f7"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg>
+          </div>
+          <div class="store-balance-meta">
+            <div class="store-balance-label">Stars balance</div>
+            <div class="store-balance-value" id="storeStarBalance">0 Stars</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Earn-a-star ad block — wired in Phase 3 (rewarded ads) -->
+      <div class="store-ad-block" id="storeAdBlock">
+        <div class="store-ad-text">
+          <h3>Earn a free star</h3>
+          <p id="storeAdSub">Watch a short ad to earn 1 Star. Ads coming soon — for now, ask an admin to grant you stars for testing.</p>
+          <div class="store-ad-progress">
+            <div class="store-ad-progress-fill" id="storeAdProgressFill" style="width:0%"></div>
+          </div>
+          <span class="store-ad-progress-text" id="storeAdProgressText">0 / 20 watched today</span>
+        </div>
+        <button class="btn btn-amber" id="btnWatchAd" disabled>Watch ad</button>
+      </div>
+
+      <h2 class="store-section-title">Coin Packs</h2>
+      <p class="store-section-sub">Choose the pack that fits you best</p>
+      <div id="storePacks" class="store-packs">
+        <div class="loading">Loading packs…</div>
+      </div>
+
+      <p class="store-disclaimer">
+        We don't collect, store, or process any credit card or billing information.
+        All transactions are handled securely through HitPay.
+      </p>
     </div>
 
     <!-- ── MESSAGES (Direct Messages, FB-style with purple) ── -->
@@ -1180,6 +1296,29 @@
           <option value="shorts">Shorts</option>
           <option value="reels">Reels</option>
         </select>
+
+        <!-- Lock controls -->
+        <div class="lock-controls" style="margin-top:1rem">
+          <label class="lock-toggle">
+            <input type="checkbox" id="studioEditLockEnabled"/>
+            <span class="lock-toggle-track"><span class="lock-toggle-knob"></span></span>
+            <span class="lock-toggle-label">
+              <span class="lock-toggle-title">🔒 Premium video</span>
+              <span class="lock-toggle-sub">Viewers pay coins or stars to watch.</span>
+            </span>
+          </label>
+          <div class="lock-cost-row" id="studioEditLockCostRow" style="display:none">
+            <label>
+              <span>Coins</span>
+              <input type="number" id="studioEditLockCoins" min="1" max="999" placeholder="1"/>
+            </label>
+            <label>
+              <span>Stars</span>
+              <input type="number" id="studioEditLockStars" min="1" max="999" placeholder="1"/>
+            </label>
+            <span class="lock-cost-hint">Leave blank to use the platform default.</span>
+          </div>
+        </div>
       </div>
     </div>
     <div class="vu-footer">
