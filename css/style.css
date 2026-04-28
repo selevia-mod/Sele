@@ -4431,6 +4431,30 @@ body.light .vu-btn-secondary {
   color: #dc2626;
 }
 
+/* Monetize toggle — gold-tinted when active, neutral grey when off */
+.studio-btn-monetize:hover {
+  background: rgba(217, 119, 6, 0.12);
+  color: #d97706;
+}
+.studio-btn-monetize.is-on {
+  background: linear-gradient(135deg, #fbbf24, #f59e0b);
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(217, 119, 6, 0.30);
+}
+.studio-btn-monetize.is-on:hover {
+  filter: brightness(1.05);
+  transform: scale(1.05);
+  color: #fff;
+}
+body:not(.light) .studio-btn-monetize:hover {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fcd34d;
+}
+body:not(.light) .studio-btn-monetize.is-on {
+  background: linear-gradient(135deg, #fcd34d, #fbbf24);
+  color: #1a1428;
+}
+
 /* ─── Empty state ─── */
 .studio-empty {
   text-align: center;
@@ -8381,9 +8405,9 @@ body:not(.light) .lock-cost-row input { background: rgba(255,255,255,0.06); bord
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
-  margin-left: 0.5rem;
+  width: 28px;
+  height: 28px;
+  margin: 0 0.7rem;            /* breathing room on both sides so word count doesn't overlap */
   background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
   border-radius: 999px;
   color: #fff;
@@ -8399,7 +8423,7 @@ body:not(.light) .lock-cost-row input { background: rgba(255,255,255,0.06); bord
     0 6px 16px rgba(124, 58, 237, 0.42),
     inset 0 1px 0 rgba(255, 255, 255, 0.24);
 }
-.chapter-row-lock svg { width: 14px; height: 14px; }
+.chapter-row-lock svg { width: 13px; height: 13px; }
 body:not(.light) .chapter-row-lock {
   background: linear-gradient(135deg, #a78bfa 0%, #c4b5fd 100%);
   box-shadow:
@@ -9844,6 +9868,99 @@ body:not(.light) .min-payout-progress {
   background: rgba(255, 255, 255, 0.04);
 }
 body:not(.light) .min-payout-progress-row-need strong { color: #c4b5fd; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Collapsible post bodies — Facebook-style "See more / less" with tap-to-toggle
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.collapsible-body {
+  position: relative;
+  cursor: pointer;
+  /* Reserve a tiny right-padding so the toggle text doesn't crowd the edge */
+  padding-bottom: 0;
+  transition: max-height 0.18s ease;
+}
+.collapsible-body.is-collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Soft gradient fade at the bottom of the truncated text — signals "more below" */
+.collapsible-body.is-collapsed::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2.4em;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.85) 60%,
+    rgba(255, 255, 255, 1) 100%
+  );
+}
+
+/* Tap-anywhere hint: subtle hover dims the body slightly so users sense it's clickable */
+.collapsible-body:hover { filter: brightness(0.985); }
+
+/* The "See more" / "See less" inline label — premium purple, never blue */
+.collapsible-toggle {
+  display: inline-block;
+  margin-top: 0.45rem;
+  color: #7c3aed;
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  user-select: none;
+}
+.collapsible-toggle:hover {
+  color: #6b21a8;
+  text-decoration: underline;
+}
+/* When inside the collapsed body, the toggle floats inline above the gradient */
+.collapsible-body.is-collapsed .collapsible-toggle {
+  position: absolute;
+  bottom: 0.2rem;
+  right: 0;
+  background: #fff;
+  padding: 0 0.3rem 0 0.6rem;
+  z-index: 1;
+}
+
+/* Dark mode — match the post card bg so the gradient doesn't clash */
+body:not(.light) .collapsible-body.is-collapsed::after {
+  background: linear-gradient(
+    to bottom,
+    rgba(15, 10, 28, 0) 0%,
+    rgba(15, 10, 28, 0.85) 60%,
+    rgba(15, 10, 28, 1) 100%
+  );
+}
+body:not(.light) .collapsible-toggle { color: #c4b5fd; }
+body:not(.light) .collapsible-toggle:hover { color: #ddd6fe; }
+body:not(.light) .collapsible-body.is-collapsed .collapsible-toggle {
+  background: var(--bg2, #1a1428);
+}
+
+/* Sign-out confirmation popup */
+.signout-body {
+  text-align: center;
+  padding: 0.5rem 0 1rem;
+}
+.signout-icon {
+  font-size: 2.6rem;
+  margin-bottom: 0.4rem;
+}
+.signout-msg {
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--text2);
+  margin: 0;
+}
 
 body:not(.light) .earnings-row { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
 body:not(.light) .author-earnings-card { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
