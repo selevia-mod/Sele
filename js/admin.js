@@ -1293,6 +1293,7 @@ function initPayoutsTab() {
   });
   document.getElementById('payoutsFilter')?.addEventListener('change', loadPayouts);
   document.getElementById('kycFilter')?.addEventListener('change', loadKycList);
+  document.getElementById('changeRequestsFilter')?.addEventListener('change', loadChangeRequests);
 }
 
 function switchPayoutsSubtab(name) {
@@ -1300,8 +1301,88 @@ function switchPayoutsSubtab(name) {
   document.querySelectorAll('[data-tab-content="payouts"] .admin-subtab-content').forEach(s => {
     s.style.display = s.dataset.subtabContent === name ? 'block' : 'none';
   });
-  if (name === 'withdrawals') loadPayouts();
-  if (name === 'kyc')         loadKycList();
+  if (name === 'withdrawals')    loadPayouts();
+  if (name === 'kyc')            loadKycList();
+  if (name === 'changerequests') loadChangeRequests();
+}
+
+// ─── Payment info change requests ──────────────────────────────────────
+async function loadChangeRequests() {
+  const listEl = document.getElementById('changeRequestsList');
+  const filter = document.getElementById('changeRequestsFilter')?.value || 'pending';
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  let q = supabase
+    .from('payment_info_change_requests')
+    .select('id, user_id, current_data, requested_data, reason, status, rejection_reason, requested_at, reviewed_at')
+    .order('requested_at', { ascending: false })
+    .limit(100);
+  if (filter !== 'all') q = q.eq('status', filter);
+
+  const { data: rows, error } = await q;
+  if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
+  if (!rows?.length) {
+    listEl.innerHTML = `<div class="admin-empty">No ${filter === 'all' ? '' : filter + ' '}change requests.</div>`;
+    return;
+  }
+
+  // Hydrate user info
+  const userIds = [...new Set(rows.map(r => r.user_id))];
+  const { data: users } = await supabase.from('profiles').select('id, username, avatar_url, email').in('id', userIds);
+  const userMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+
+  listEl.innerHTML = '';
+  for (const r of rows) {
+    const user = userMap[r.user_id];
+    const card = document.createElement('div');
+    card.className = 'kyc-card';
+
+    const diffRows = [];
+    const requested = r.requested_data || {};
+    const current   = r.current_data || {};
+    for (const [key, newVal] of Object.entries(requested)) {
+      const oldVal = current[key] || '—';
+      diffRows.push(`<div class="cr-diff"><span class="cr-diff-key">${esc(key)}</span><span class="cr-diff-old">${esc(oldVal)}</span><span class="cr-diff-arrow">→</span><span class="cr-diff-new">${esc(newVal)}</span></div>`);
+    }
+
+    card.innerHTML = `
+      <div class="payout-card-head">
+        <div class="payout-author">
+          <div class="payout-author-name">${esc(user?.username || 'Unknown')}</div>
+          <div class="payout-author-email">${esc(user?.email || '')}</div>
+        </div>
+        <span class="payout-status-badge payout-status-badge-${r.status}">${r.status}</span>
+      </div>
+      <div class="cr-reason"><strong>Reason:</strong> ${esc(r.reason || '—')}</div>
+      <div class="cr-diff-list">${diffRows.join('') || '<em>No changes captured</em>'}</div>
+      ${r.rejection_reason ? `<div class="cr-rejection"><strong>Rejection:</strong> ${esc(r.rejection_reason)}</div>` : ''}
+      ${r.status === 'pending' ? `
+        <div class="payout-actions">
+          <button class="admin-btn admin-btn-primary" data-act="approve">Approve</button>
+          <button class="admin-btn admin-btn-danger" data-act="reject">Reject</button>
+        </div>
+      ` : ''}
+    `;
+
+    card.querySelector('[data-act="approve"]')?.addEventListener('click', async () => {
+      if (!confirm('Approve this change request? It will be applied to the author\'s Payments Info immediately.')) return;
+      const { data, error } = await supabase.rpc('review_payment_info_change', { p_request_id: r.id, p_approve: true });
+      if (error || !data?.ok) { toast(error?.message || data?.error || 'Approve failed'); return; }
+      toast('Approved');
+      loadChangeRequests();
+    });
+    card.querySelector('[data-act="reject"]')?.addEventListener('click', async () => {
+      const reason = prompt('Reason for rejection (will be shown to the author):');
+      if (!reason) return;
+      const { data, error } = await supabase.rpc('review_payment_info_change', { p_request_id: r.id, p_approve: false, p_rejection_reason: reason });
+      if (error || !data?.ok) { toast(error?.message || data?.error || 'Reject failed'); return; }
+      toast('Rejected');
+      loadChangeRequests();
+    });
+
+    listEl.appendChild(card);
+  }
 }
 
 // ─── Withdrawals ───────────────────────────────────────────────────────
