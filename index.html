@@ -210,6 +210,13 @@
         </div>
       </div>
 
+    <!-- Feed mode tabs (For You / Following / Discover) -->
+    <nav class="feed-tabs" id="feedTabs">
+      <button class="feed-tab active" data-feed="foryou">For You</button>
+      <button class="feed-tab" data-feed="following">Following</button>
+      <button class="feed-tab" data-feed="discover">Discover</button>
+    </nav>
+
     <!-- Feed -->
     <div id="feed"><div class="loading">Loading feed...</div></div>
     <div id="feedSentinel" class="book-grid-sentinel" style="display:none">
@@ -908,64 +915,60 @@
 
       <!-- Earnings tab -->
       <div class="earnings-tab-content" data-etab-content="earnings">
-        <!-- Balance cards -->
+        <!-- Balance cards — minimalist purple, peso-primary -->
         <div class="author-earnings-cards">
           <div class="author-earnings-card author-earnings-available">
-            <div class="author-earnings-icon">
-              <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+            <div class="author-earnings-card-head">
+              <span class="author-earnings-label">Available to withdraw</span>
             </div>
-            <div class="author-earnings-meta">
-              <div class="author-earnings-label">Available to withdraw</div>
-              <div class="author-earnings-value">
-                <span id="earningsAvailableCoins">0</span> coins
-                <span class="author-earnings-php" id="earningsAvailablePhp">≈ ₱0.00</span>
-              </div>
+            <div class="author-earnings-amount-php" id="earningsAvailablePhp">₱0.00</div>
+            <div class="author-earnings-amount-sub">
+              <span id="earningsAvailableCoins">0</span> coins · <span id="earningsAvailableStars">0</span> stars
             </div>
-            <button class="btn btn-purple" id="btnRequestPayout" disabled>Request payout</button>
+            <button class="btn btn-purple author-earnings-payout-btn" id="btnRequestPayout" disabled>Request payout</button>
           </div>
           <div class="author-earnings-card author-earnings-pending">
-            <div class="author-earnings-icon">⏳</div>
-            <div class="author-earnings-meta">
-              <div class="author-earnings-label">Pending (in hold period)</div>
-              <div class="author-earnings-value">
-                <span id="earningsPendingCoins">0</span> coins
-                <span class="author-earnings-php" id="earningsPendingPhp">≈ ₱0.00</span>
-              </div>
-              <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 7 days after they're earned.</div>
+            <div class="author-earnings-card-head">
+              <span class="author-earnings-label">Pending (hold period)</span>
             </div>
+            <div class="author-earnings-amount-php" id="earningsPendingPhp">₱0.00</div>
+            <div class="author-earnings-amount-sub">
+              <span id="earningsPendingCoins">0</span> coins · <span id="earningsPendingStars">0</span> stars
+            </div>
+            <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 1–3 days after they're earned.</div>
           </div>
         </div>
 
-        <!-- Earnings breakdown by source -->
+        <!-- Earnings breakdown by source — peso primary -->
         <div class="earnings-breakdown">
           <div class="earnings-breakdown-card">
-            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <div class="earnings-breakdown-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </div>
             <div class="earnings-breakdown-meta">
               <div class="earnings-breakdown-label">From Posts</div>
-              <div class="earnings-breakdown-value"><span id="breakdownPostsCoins">0</span> coins</div>
               <div class="earnings-breakdown-php" id="breakdownPostsPhp">₱0.00</div>
+              <div class="earnings-breakdown-sub"><span id="breakdownPostsCoins">0</span> coins</div>
             </div>
           </div>
           <div class="earnings-breakdown-card">
-            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+            <div class="earnings-breakdown-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
             </div>
             <div class="earnings-breakdown-meta">
               <div class="earnings-breakdown-label">From Videos</div>
-              <div class="earnings-breakdown-value"><span id="breakdownVideosCoins">0</span> coins</div>
               <div class="earnings-breakdown-php" id="breakdownVideosPhp">₱0.00</div>
+              <div class="earnings-breakdown-sub"><span id="breakdownVideosCoins">0</span> coins</div>
             </div>
           </div>
           <div class="earnings-breakdown-card">
-            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+            <div class="earnings-breakdown-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
             </div>
             <div class="earnings-breakdown-meta">
               <div class="earnings-breakdown-label">From Books</div>
-              <div class="earnings-breakdown-value"><span id="breakdownBooksCoins">0</span> coins</div>
               <div class="earnings-breakdown-php" id="breakdownBooksPhp">₱0.00</div>
+              <div class="earnings-breakdown-sub"><span id="breakdownBooksCoins">0</span> coins</div>
             </div>
           </div>
         </div>
