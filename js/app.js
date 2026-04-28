@@ -5976,6 +5976,9 @@ async function loadAuthorDashboard() {
     return;
   }
 
+  // Phase 7: load earnings in parallel (it's a separate panel below)
+  loadAuthorEarnings();
+
   const { data, error } = await supabase
     .from('books')
     .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, created_at, updated_at, published_at')
@@ -6071,6 +6074,284 @@ async function deleteAuthorBook(bookId) {
   toast('Book deleted', 'success');
   loadAuthorDashboard();
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// PHASE 7 — Author Earnings, KYC, Withdrawals
+// ════════════════════════════════════════════════════════════════════════════
+
+let _authorBalance = null;
+let _authorKyc     = null;
+
+async function loadAuthorEarnings() {
+  if (!currentUser) return;
+  const section = document.getElementById('authorEarningsSection');
+  if (!section) return;
+  section.style.display = '';
+
+  // Fire all three reads in parallel
+  const [balanceRes, earningsRes, withdrawalsRes, kycRes] = await Promise.all([
+    supabase.rpc('author_balance_for', { p_author_id: currentUser.id }),
+    supabase.from('author_earnings')
+      .select('id, source_type, source_id, gross_coins, share_pct, net_coins, net_php_minor, status, available_at, created_at')
+      .eq('author_id', currentUser.id)
+      .order('created_at', { ascending: false })
+      .limit(50),
+    supabase.from('author_withdrawals')
+      .select('id, amount_coins, amount_php_minor, status, payout_method, requested_at, approved_at, paid_at, rejection_reason')
+      .eq('author_id', currentUser.id)
+      .order('requested_at', { ascending: false })
+      .limit(20),
+    supabase.from('author_kyc')
+      .select('status, rejection_reason, submitted_at, reviewed_at')
+      .eq('user_id', currentUser.id)
+      .maybeSingle(),
+  ]);
+
+  _authorBalance = balanceRes.data || { available_coins: 0, pending_coins: 0, available_php_minor: 0, pending_php_minor: 0 };
+  _authorKyc     = kycRes.data || null;
+
+  renderAuthorEarningsBalance();
+  renderAuthorEarningsList(earningsRes.data || []);
+  renderAuthorWithdrawalsList(withdrawalsRes.data || []);
+  renderAuthorKycBanner();
+  syncAuthorPayoutButton();
+}
+
+function renderAuthorEarningsBalance() {
+  const b = _authorBalance || {};
+  document.getElementById('earningsAvailableCoins').textContent = (b.available_coins || 0).toLocaleString();
+  document.getElementById('earningsPendingCoins').textContent   = (b.pending_coins   || 0).toLocaleString();
+  document.getElementById('earningsAvailablePhp').textContent = '≈ ' + formatPhpFromMinor(b.available_php_minor || 0);
+  document.getElementById('earningsPendingPhp').textContent   = '≈ ' + formatPhpFromMinor(b.pending_php_minor   || 0);
+  const holdDays = _walletConfigDefaults.author_earnings_hold_days || 7;
+  const foot = document.getElementById('earningsHoldFootnote');
+  if (foot) foot.textContent = `Earnings become available ${holdDays} day${holdDays === 1 ? '' : 's'} after they're earned.`;
+}
+
+function formatPhpFromMinor(m) {
+  return '₱' + (m / 100).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function renderAuthorEarningsList(rows) {
+  const el = document.getElementById('authorEarningsList');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="page-empty-soft">No earnings yet. Once readers unlock your work with coins, you\'ll see entries here.</div>';
+    return;
+  }
+  el.innerHTML = rows.map(r => `
+    <div class="earnings-row">
+      <div class="earnings-row-meta">
+        <div class="earnings-row-type">${escHTML(r.source_type.replace('_', ' '))}</div>
+        <div class="earnings-row-sub">${timeAgo(r.created_at)} · ${r.share_pct}% share of ${r.gross_coins} coin${r.gross_coins === 1 ? '' : 's'}</div>
+      </div>
+      <div class="earnings-row-amount">+${r.net_coins} <small>coin${r.net_coins === 1 ? '' : 's'}</small></div>
+      <div class="earnings-row-php">${formatPhpFromMinor(r.net_php_minor)}</div>
+      <div class="earnings-row-status earnings-row-status-${r.status}">${earningsStatusLabel(r)}</div>
+    </div>
+  `).join('');
+}
+
+function earningsStatusLabel(r) {
+  if (r.status === 'pending') {
+    const ms = new Date(r.available_at) - Date.now();
+    if (ms <= 0) return 'Available';
+    const days = Math.ceil(ms / 86400000);
+    return `Pending · ${days}d`;
+  }
+  if (r.status === 'available') return 'Available';
+  if (r.status === 'withdrawn') return 'Withdrawn';
+  if (r.status === 'reversed')  return 'Reversed';
+  return r.status;
+}
+
+function renderAuthorWithdrawalsList(rows) {
+  const el = document.getElementById('authorWithdrawalsList');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="page-empty-soft">No withdrawals yet.</div>';
+    return;
+  }
+  el.innerHTML = rows.map(r => `
+    <div class="earnings-row earnings-row-withdrawal">
+      <div class="earnings-row-meta">
+        <div class="earnings-row-type">Payout · ${escHTML(r.payout_method)}</div>
+        <div class="earnings-row-sub">Requested ${timeAgo(r.requested_at)}${r.paid_at ? ' · Paid ' + timeAgo(r.paid_at) : ''}${r.rejection_reason ? ' · Reason: ' + escHTML(r.rejection_reason) : ''}</div>
+      </div>
+      <div class="earnings-row-amount">${r.amount_coins.toLocaleString()} <small>coins</small></div>
+      <div class="earnings-row-php">${formatPhpFromMinor(r.amount_php_minor)}</div>
+      <div class="earnings-row-status earnings-row-status-w-${r.status}">${escHTML(r.status)}</div>
+    </div>
+  `).join('');
+}
+
+function renderAuthorKycBanner() {
+  const banner  = document.getElementById('authorKycBanner');
+  const titleEl = document.getElementById('authorKycTitle');
+  const subEl   = document.getElementById('authorKycSub');
+  const btn     = document.getElementById('btnSubmitKyc');
+  if (!banner) return;
+
+  const k = _authorKyc;
+  if (!k) {
+    titleEl.textContent = 'Complete KYC to enable payouts';
+    subEl.textContent   = 'We need to verify your identity before sending you money. One-time step required by Philippine law.';
+    btn.textContent     = 'Submit KYC';
+    btn.style.display   = '';
+    banner.style.display = '';
+    banner.className = 'author-kyc-banner is-required';
+    return;
+  }
+  if (k.status === 'pending') {
+    titleEl.textContent = 'KYC under review';
+    subEl.textContent   = 'Submitted ' + timeAgo(k.submitted_at) + '. Usually approved within 1-2 business days.';
+    btn.style.display   = 'none';
+    banner.className = 'author-kyc-banner is-pending';
+    banner.style.display = '';
+    return;
+  }
+  if (k.status === 'approved') {
+    titleEl.textContent = 'KYC approved ✓';
+    subEl.textContent   = 'You\'re cleared for payouts. You can request a withdrawal whenever your available balance hits the minimum.';
+    btn.style.display   = 'none';
+    banner.className = 'author-kyc-banner is-approved';
+    banner.style.display = '';
+    return;
+  }
+  if (k.status === 'rejected') {
+    titleEl.textContent = 'KYC rejected';
+    subEl.textContent   = 'Reason: ' + (k.rejection_reason || 'unspecified') + '. Click Resubmit to update your details.';
+    btn.textContent     = 'Resubmit KYC';
+    btn.style.display   = '';
+    banner.className = 'author-kyc-banner is-rejected';
+    banner.style.display = '';
+    return;
+  }
+}
+
+function syncAuthorPayoutButton() {
+  const btn = document.getElementById('btnRequestPayout');
+  if (!btn) return;
+  const min  = _walletConfigDefaults.author_payout_min_coins || 500;
+  const avail = _authorBalance?.available_coins || 0;
+  const kycOk = !_walletConfigDefaults.author_payout_kyc_required ||
+                _authorKyc?.status === 'approved';
+  btn.disabled = avail < min || !kycOk;
+  if (avail < min)        btn.title = `Need at least ${min} coins available`;
+  else if (!kycOk)        btn.title = 'KYC must be approved first';
+  else                    btn.title = '';
+}
+
+// ── KYC modal wiring ────────────────────────────────────────────────────
+document.getElementById('btnSubmitKyc')?.addEventListener('click', () => {
+  const m = document.getElementById('kycModal');
+  if (!m) return;
+  // Pre-fill from existing KYC (lets users refine after rejection)
+  if (_authorKyc) {
+    document.getElementById('kycFullName').value  = _authorKyc.full_name || '';
+    document.getElementById('kycDob').value       = _authorKyc.date_of_birth ? _authorKyc.date_of_birth.slice(0, 10) : '';
+    document.getElementById('kycIdType').value    = _authorKyc.id_type || 'philsys';
+    document.getElementById('kycIdNumber').value  = _authorKyc.id_number || '';
+  } else {
+    document.getElementById('kycFullName').value  = '';
+    document.getElementById('kycDob').value       = '';
+    document.getElementById('kycIdType').value    = 'philsys';
+    document.getElementById('kycIdNumber').value  = '';
+  }
+  m.style.display = 'flex';
+});
+document.getElementById('kycClose')?.addEventListener('click', () => { document.getElementById('kycModal').style.display = 'none'; });
+document.getElementById('kycCancel')?.addEventListener('click', () => { document.getElementById('kycModal').style.display = 'none'; });
+document.getElementById('kycSubmit')?.addEventListener('click', async () => {
+  const fullName = document.getElementById('kycFullName').value.trim();
+  const dob      = document.getElementById('kycDob').value;
+  const idType   = document.getElementById('kycIdType').value;
+  const idNumber = document.getElementById('kycIdNumber').value.trim();
+  if (!fullName) { toast('Full name is required', 'error'); return; }
+  if (!idNumber) { toast('ID number is required', 'error'); return; }
+  const btn = document.getElementById('kycSubmit');
+  btn.disabled = true; btn.textContent = 'Submitting…';
+  const { data, error } = await supabase.rpc('submit_author_kyc', {
+    p_full_name:       fullName,
+    p_date_of_birth:   dob || null,
+    p_id_type:         idType,
+    p_id_number:       idNumber,
+    p_id_document_url: null,
+    p_selfie_url:      null,
+  });
+  btn.disabled = false; btn.textContent = 'Submit for review';
+  if (error)        { toast(error.message, 'error'); return; }
+  if (data?.ok === false) { toast(data.error || 'Failed', 'error'); return; }
+  document.getElementById('kycModal').style.display = 'none';
+  toast('KYC submitted — we\'ll review within 1-2 business days.', 'success');
+  await loadAuthorEarnings();
+});
+
+// ── Withdrawal modal wiring ─────────────────────────────────────────────
+document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
+  const m = document.getElementById('withdrawalModal');
+  if (!m) return;
+  const avail = _authorBalance?.available_coins || 0;
+  const min   = _walletConfigDefaults.author_payout_min_coins || 500;
+  document.getElementById('withdrawalAmount').value = avail;
+  document.getElementById('withdrawalAmount').min   = min;
+  document.getElementById('withdrawalAmount').max   = avail;
+  const rate = _walletConfigDefaults.coin_to_php_minor || 100;
+  document.getElementById('withdrawalAmountHint').textContent =
+    `Minimum ${min} coins. ₱${(rate / 100).toFixed(2)} per coin. Max available: ${avail.toLocaleString()}.`;
+  document.getElementById('withdrawalAccountName').value   = '';
+  document.getElementById('withdrawalAccountNumber').value = '';
+  document.getElementById('withdrawalBankName').value      = '';
+  syncWithdrawalBankField();
+  m.style.display = 'flex';
+});
+function syncWithdrawalBankField() {
+  const method = document.getElementById('withdrawalMethod')?.value;
+  const isBank = method === 'bank';
+  const lbl = document.getElementById('withdrawalBankNameLabel');
+  const inp = document.getElementById('withdrawalBankName');
+  if (lbl) lbl.style.display = isBank ? '' : 'none';
+  if (inp) inp.style.display = isBank ? '' : 'none';
+}
+document.getElementById('withdrawalMethod')?.addEventListener('change', syncWithdrawalBankField);
+document.getElementById('withdrawalClose')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
+document.getElementById('withdrawalCancel')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
+document.getElementById('withdrawalSubmit')?.addEventListener('click', async () => {
+  const amount       = parseInt(document.getElementById('withdrawalAmount').value, 10);
+  const method       = document.getElementById('withdrawalMethod').value;
+  const accountName  = document.getElementById('withdrawalAccountName').value.trim();
+  const accountNum   = document.getElementById('withdrawalAccountNumber').value.trim();
+  const bankName     = document.getElementById('withdrawalBankName').value.trim();
+  const min          = _walletConfigDefaults.author_payout_min_coins || 500;
+  if (!Number.isFinite(amount) || amount < min) { toast(`Enter at least ${min} coins`, 'error'); return; }
+  if (!accountName || !accountNum) { toast('Account name and number are required', 'error'); return; }
+  if (method === 'bank' && !bankName) { toast('Bank name is required', 'error'); return; }
+  const details = { account_name: accountName, account_number: accountNum };
+  if (method === 'bank') details.bank_name = bankName;
+
+  const btn = document.getElementById('withdrawalSubmit');
+  btn.disabled = true; btn.textContent = 'Submitting…';
+  const { data, error } = await supabase.rpc('request_author_withdrawal', {
+    p_amount_coins:   amount,
+    p_payout_method:  method,
+    p_payout_details: details,
+  });
+  btn.disabled = false; btn.textContent = 'Submit request';
+  if (error) { toast(error.message, 'error'); return; }
+  if (data?.ok === false) {
+    const msg = data.error === 'kyc_not_approved' ? 'KYC must be approved first.' :
+                data.error === 'kyc_not_submitted' ? 'Submit KYC first.' :
+                data.error === 'below_minimum'     ? `Need at least ${data.minimum_coins} coins.` :
+                data.error === 'insufficient_available' ? `Only ${data.available_coins} coins available.` :
+                data.error === 'withdrawal_in_progress' ? 'You already have a pending or approved request.' :
+                data.error || 'Failed';
+    toast(msg, 'error');
+    return;
+  }
+  document.getElementById('withdrawalModal').style.display = 'none';
+  toast('Withdrawal request submitted. Admin review usually within 1-3 business days.', 'success');
+  await loadAuthorEarnings();
+});
 
 // ── New book modal ──
 const newBookModal = document.getElementById('newBookModal');
