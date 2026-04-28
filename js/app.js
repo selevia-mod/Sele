@@ -3474,8 +3474,26 @@ document.getElementById('editProfileSave').addEventListener('click', async () =>
 let cropperInstance = null;
 let cropField = null; // 'avatar_url' or 'banner_url'
 
-function openCropModal(file, aspectRatio, field, title) {
-  cropField = field;
+// onSave receives a File of the cropped JPEG. Caller decides storage + DB update.
+let _cropOnSave = null;
+
+function openCropModal(file, optsOrAspect, fieldLegacy, titleLegacy) {
+  let aspectRatio, title, onSave;
+  if (typeof optsOrAspect === 'object' && optsOrAspect !== null) {
+    // New-style: openCropModal(file, { aspectRatio, title, onSave })
+    aspectRatio = optsOrAspect.aspectRatio;
+    title       = optsOrAspect.title || 'Crop image';
+    onSave      = optsOrAspect.onSave || null;
+    cropField   = null;
+  } else {
+    // Legacy: openCropModal(file, aspectRatio, fieldName, title) — used by
+    // avatar / banner. Falls through to the profiles.{field} update path.
+    aspectRatio = optsOrAspect;
+    title       = titleLegacy || 'Crop image';
+    cropField   = fieldLegacy;
+    onSave      = null;
+  }
+  _cropOnSave = onSave;
   document.getElementById('cropTitle').textContent = title;
 
   const reader = new FileReader();
@@ -3523,9 +3541,22 @@ document.getElementById('cropSave').addEventListener('click', async () => {
 
   canvas.toBlob(async (blob) => {
     const file = new File([blob], `crop-${Date.now()}.jpg`, { type: 'image/jpeg' });
+
+    // New callback path — used by book covers, video thumbs, etc.
+    if (typeof _cropOnSave === 'function') {
+      try {
+        await _cropOnSave(file);
+      } catch (err) {
+        toast('Crop save failed: ' + (err?.message || err), 'error');
+      }
+      btn.disabled = false; btn.textContent = 'Save';
+      closeCropModal();
+      return;
+    }
+
+    // Legacy path: profiles.{cropField}
     const url = await uploadImage(file);
     if (!url) { btn.disabled = false; btn.textContent = 'Save'; return; }
-
     await supabase.from('profiles').update({ [cropField]: url }).eq('id', currentUser.id);
     if (cropField === 'avatar_url') {
       currentProfile.avatar_url = url;
@@ -6948,21 +6979,27 @@ document.getElementById('bookCoverFile')?.addEventListener('change', async (e) =
   if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
   if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
 
-  toast('Uploading cover…', '');
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) { toast('Sign in first', 'error'); return; }
+  // Open the crop modal at 2:3 (book cover standard). The save callback
+  // uploads the cropped JPEG to book-covers and updates books.cover_url.
+  openCropModal(file, {
+    aspectRatio: 2 / 3,
+    title: 'Crop book cover',
+    onSave: async (croppedFile) => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { toast('Sign in first', 'error'); return; }
 
-  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
-  const path = `${user.id}/${editingBookId}-${Date.now()}.${ext}`;
-  const { error: upErr } = await supabase.storage.from('book-covers').upload(path, file, { upsert: true, contentType: file.type });
-  if (upErr) { toast('Upload failed: ' + upErr.message, 'error'); return; }
+      const path = `${user.id}/${editingBookId}-${Date.now()}.jpg`;
+      const { error: upErr } = await supabase.storage.from('book-covers').upload(path, croppedFile, { upsert: true, contentType: 'image/jpeg' });
+      if (upErr) { toast('Upload failed: ' + upErr.message, 'error'); return; }
 
-  const { data: { publicUrl } } = supabase.storage.from('book-covers').getPublicUrl(path);
-  const { error: updErr } = await supabase.from('books').update({ cover_url: publicUrl, updated_at: new Date().toISOString() }).eq('id', editingBookId);
-  if (updErr) { toast('Saved file but DB update failed: ' + updErr.message, 'error'); return; }
+      const { data: { publicUrl } } = supabase.storage.from('book-covers').getPublicUrl(path);
+      const { error: updErr } = await supabase.from('books').update({ cover_url: publicUrl, updated_at: new Date().toISOString() }).eq('id', editingBookId);
+      if (updErr) { toast('Saved file but DB update failed: ' + updErr.message, 'error'); return; }
 
-  document.getElementById('bookEditorCover').innerHTML = `<img src="${escHTML(publicUrl)}" alt=""/>`;
-  toast('Cover updated', 'success');
+      document.getElementById('bookEditorCover').innerHTML = `<img src="${escHTML(publicUrl)}" alt=""/>`;
+      toast('Cover updated', 'success');
+    },
+  });
 });
 
 // New chapter
@@ -7104,7 +7141,40 @@ function updateChapterWordCount() {
   if (!chapterQuill) return;
   const text = chapterQuill.getText().trim();
   const words = text.length ? text.split(/\s+/).length : 0;
-  document.getElementById('chapterWordCount').textContent = words.toLocaleString();
+  const min   = _walletConfigDefaults.min_chapter_words || 100;
+  const max   = _walletConfigDefaults.max_chapter_words || 10000;
+
+  const wcEl = document.getElementById('chapterWordCount');
+  if (wcEl) wcEl.textContent = words.toLocaleString();
+
+  // Color-code the word count container based on whether the chapter is
+  // publishable. The container is the .chapter-meta-strip element.
+  const strip = wcEl?.closest('.chapter-meta-strip');
+  if (!strip) return;
+
+  strip.classList.remove('wc-under', 'wc-ok', 'wc-over');
+  let label = '';
+  if (words === 0) {
+    label = `Aim for ${min.toLocaleString()}–${max.toLocaleString()} words`;
+  } else if (words < min) {
+    strip.classList.add('wc-under');
+    label = `${(min - words).toLocaleString()} more to reach minimum (${min.toLocaleString()})`;
+  } else if (words > max) {
+    strip.classList.add('wc-over');
+    label = `${(words - max).toLocaleString()} over the maximum (${max.toLocaleString()})`;
+  } else {
+    strip.classList.add('wc-ok');
+    label = `Within range · max ${max.toLocaleString()}`;
+  }
+
+  // Inject (or update) a small hint span next to the count
+  let hint = strip.querySelector('.chapter-wc-hint');
+  if (!hint) {
+    hint = document.createElement('span');
+    hint.className = 'chapter-wc-hint';
+    strip.appendChild(hint);
+  }
+  hint.textContent = label;
 }
 
 // Sync the lock UI with a chapter row's lock fields. Also gates the toggle
