@@ -9660,3 +9660,211 @@ body:not(.light) .author-earnings-available { background: linear-gradient(135deg
 
 body:not(.light) .earnings-breakdown-card { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
 body:not(.light) .payments-info-help { background: rgba(255,255,255,0.04); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PAYMENTS INFO — inline form (Phase 7b)
+   Premium feel: white cards, subtle purple accents, large touch targets.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.pi-card {
+  background: var(--card, #fff);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 14px;
+  margin-bottom: 0.95rem;
+  overflow: hidden;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.pi-card:hover { box-shadow: 0 4px 18px rgba(15, 10, 28, 0.05); border-color: rgba(124, 58, 237, 0.18); }
+
+.pi-card-head {
+  display: flex; align-items: center; gap: 0.7rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.06);
+}
+.pi-card-head-active {
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.04), transparent);
+}
+.pi-card-pill {
+  width: 18px; height: 4px; border-radius: 999px;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  flex-shrink: 0;
+}
+.pi-card-pill-active { background: linear-gradient(135deg, #22c55e, #10b981); }
+.pi-card-icon-box {
+  width: 32px; height: 32px;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.12), rgba(167, 139, 250, 0.10));
+  color: #7c3aed;
+  border-radius: 9px;
+  flex-shrink: 0;
+}
+.pi-card-title {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.pi-req { color: #dc2626; font-weight: 700; }
+
+.pi-card-body { padding: 1.1rem 1.25rem 1.25rem; }
+
+/* Field rows */
+.pi-field { display: block; margin-bottom: 0.95rem; }
+.pi-field:last-child { margin-bottom: 0; }
+.pi-label {
+  display: block;
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.005em;
+}
+
+.pi-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.75rem 0.95rem;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text);
+  background: rgba(248, 250, 252, 0.7);
+  border: 1px solid rgba(17, 24, 39, 0.10);
+  border-radius: 10px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.pi-input::placeholder { color: rgba(107, 114, 128, 0.7); }
+.pi-input:hover { border-color: rgba(124, 58, 237, 0.22); }
+.pi-input:focus {
+  outline: none;
+  background: #fff;
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.14);
+}
+
+/* Method-of-payment pill grid */
+.pi-method-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem;
+}
+.pi-method-pill {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0.95rem 1rem;
+  background: rgba(238, 242, 255, 0.6);
+  border: 1.5px solid rgba(17, 24, 39, 0.06);
+  border-radius: 12px;
+  font-weight: 700; font-size: 0.95rem;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.08s ease;
+}
+.pi-method-pill input { position: absolute; opacity: 0; pointer-events: none; }
+.pi-method-pill:hover { border-color: rgba(124, 58, 237, 0.35); background: rgba(238, 242, 255, 0.9); }
+.pi-method-pill:active { transform: translateY(1px); }
+.pi-method-pill.is-checked {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.10), rgba(167, 139, 250, 0.10));
+  border-color: #7c3aed;
+  color: #6b21a8;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.16);
+}
+
+/* Upload boxes — large dashed drop targets */
+.pi-upload {
+  position: relative;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 0.6rem;
+  min-height: 160px;
+  padding: 1.5rem;
+  background: rgba(248, 250, 252, 0.6);
+  border: 2px dashed rgba(124, 58, 237, 0.22);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  overflow: hidden;
+}
+.pi-upload:hover { background: rgba(238, 242, 255, 0.7); border-color: rgba(124, 58, 237, 0.45); }
+.pi-upload.is-uploading { opacity: 0.6; cursor: wait; }
+.pi-upload-icon {
+  display: grid; place-items: center;
+  width: 56px; height: 56px;
+  background: rgba(75, 85, 99, 0.78);
+  color: #fff;
+  border-radius: 50%;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+.pi-upload:hover .pi-upload-icon {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  transform: translateY(-2px);
+}
+.pi-upload-text {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text2);
+}
+.pi-upload-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+}
+.pi-upload-preview ~ .pi-upload-icon,
+.pi-upload-preview ~ .pi-upload-text { position: relative; z-index: 2; }
+.pi-upload:has(.pi-upload-preview[style*="display: none"]) .pi-upload-preview { display: none; }
+.pi-upload:has(.pi-upload-preview:not([style*="display: none"])) .pi-upload-icon,
+.pi-upload:has(.pi-upload-preview:not([style*="display: none"])) .pi-upload-text {
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  padding: 0.3rem 0.85rem;
+  border-radius: 999px;
+}
+
+/* Save button — premium gradient */
+.pi-save-btn {
+  display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+  width: 100%;
+  margin: 1.5rem 0 0.75rem;
+  padding: 1rem 1.5rem;
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  color: #fff;
+  border: 0;
+  border-radius: 14px;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(37, 99, 235, 0.30);
+  transition: transform 0.08s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+.pi-save-btn:hover { transform: translateY(-1px); filter: brightness(1.05); box-shadow: 0 10px 26px rgba(37, 99, 235, 0.36); }
+.pi-save-btn:active { transform: translateY(0); }
+.pi-save-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+.pi-disclaimer {
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--text2);
+  margin: 0.8rem 0 0;
+  font-style: italic;
+}
+
+/* Dark mode */
+body:not(.light) .pi-card { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.08); }
+body:not(.light) .pi-input { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.08); color: #f3f4f6; }
+body:not(.light) .pi-input:focus { background: rgba(255, 255, 255, 0.07); }
+body:not(.light) .pi-method-pill { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.08); color: #f3f4f6; }
+body:not(.light) .pi-method-pill:hover { background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.40); }
+body:not(.light) .pi-method-pill.is-checked { background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(124, 58, 237, 0.16)); border-color: #a78bfa; color: #ddd6fe; }
+body:not(.light) .pi-upload { background: rgba(255, 255, 255, 0.03); }
+body:not(.light) .pi-upload:hover { background: rgba(167, 139, 250, 0.06); }
+
+/* Mobile */
+@media (max-width: 600px) {
+  .pi-method-grid { grid-template-columns: 1fr; }
+  .pi-card-body { padding: 1rem; }
+}
