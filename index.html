@@ -586,20 +586,20 @@
             <input type="checkbox" id="chapterLockEnabled"/>
             <span class="lock-toggle-track"><span class="lock-toggle-knob"></span></span>
             <span class="lock-toggle-label">
-              <span class="lock-toggle-title">🔒 Premium chapter</span>
-              <span class="lock-toggle-sub">Readers pay coins or stars to unlock. You set the price below.</span>
+              <span class="lock-toggle-title">Premium chapter</span>
+              <span class="lock-toggle-sub" id="chapterLockSub">Readers pay coins or stars to unlock. You set the price below.</span>
             </span>
           </label>
           <div class="lock-cost-row" id="chapterLockCostRow" style="display:none">
             <label>
               <span>Coins</span>
-              <input type="number" id="chapterLockCoins" min="1" max="999" placeholder="3"/>
+              <input type="number" id="chapterLockCoins" min="1" max="10" placeholder="3"/>
             </label>
             <label>
               <span>Stars</span>
-              <input type="number" id="chapterLockStars" min="1" max="999" placeholder="3"/>
+              <input type="number" id="chapterLockStars" min="1" max="10" placeholder="3"/>
             </label>
-            <span class="lock-cost-hint">Leave blank to use the platform default.</span>
+            <span class="lock-cost-hint">Leave blank to use the platform default. Range 1–10.</span>
           </div>
         </div>
 
@@ -858,6 +858,119 @@
         We don't collect, store, or process any credit card or billing information.
         All transactions are handled securely through HitPay.
       </p>
+    </div>
+
+    <!-- ── EARNINGS (Phase 7 — own sidebar entry) ── -->
+    <div id="earningsPage" style="display:none">
+      <div class="page-hero page-hero-earnings">
+        <div class="page-hero-content">
+          <h1 class="page-hero-title">Earnings</h1>
+          <p class="page-hero-subtitle">Coins from readers who unlock your work. Stars don't count.</p>
+        </div>
+        <div class="page-hero-decoration" aria-hidden="true">
+          <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M40 14v52"/>
+            <path d="M52 22H30a8 8 0 0 0 0 16h16a8 8 0 0 1 0 16H22"/>
+          </svg>
+        </div>
+      </div>
+
+      <nav class="earnings-tabs">
+        <button class="earnings-tab active" data-etab="earnings">Earnings</button>
+        <button class="earnings-tab" data-etab="payments">Payments Info</button>
+      </nav>
+
+      <!-- Earnings tab -->
+      <div class="earnings-tab-content" data-etab-content="earnings">
+        <!-- Balance cards -->
+        <div class="author-earnings-cards">
+          <div class="author-earnings-card author-earnings-available">
+            <div class="author-earnings-icon">
+              <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+            </div>
+            <div class="author-earnings-meta">
+              <div class="author-earnings-label">Available to withdraw</div>
+              <div class="author-earnings-value">
+                <span id="earningsAvailableCoins">0</span> coins
+                <span class="author-earnings-php" id="earningsAvailablePhp">≈ ₱0.00</span>
+              </div>
+            </div>
+            <button class="btn btn-purple" id="btnRequestPayout" disabled>Request payout</button>
+          </div>
+          <div class="author-earnings-card author-earnings-pending">
+            <div class="author-earnings-icon">⏳</div>
+            <div class="author-earnings-meta">
+              <div class="author-earnings-label">Pending (in hold period)</div>
+              <div class="author-earnings-value">
+                <span id="earningsPendingCoins">0</span> coins
+                <span class="author-earnings-php" id="earningsPendingPhp">≈ ₱0.00</span>
+              </div>
+              <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 7 days after they're earned.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Earnings breakdown by source -->
+        <div class="earnings-breakdown">
+          <div class="earnings-breakdown-card">
+            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <div class="earnings-breakdown-meta">
+              <div class="earnings-breakdown-label">From Posts</div>
+              <div class="earnings-breakdown-value"><span id="breakdownPostsCoins">0</span> coins</div>
+              <div class="earnings-breakdown-php" id="breakdownPostsPhp">₱0.00</div>
+            </div>
+          </div>
+          <div class="earnings-breakdown-card">
+            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+            </div>
+            <div class="earnings-breakdown-meta">
+              <div class="earnings-breakdown-label">From Videos</div>
+              <div class="earnings-breakdown-value"><span id="breakdownVideosCoins">0</span> coins</div>
+              <div class="earnings-breakdown-php" id="breakdownVideosPhp">₱0.00</div>
+            </div>
+          </div>
+          <div class="earnings-breakdown-card">
+            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+            </div>
+            <div class="earnings-breakdown-meta">
+              <div class="earnings-breakdown-label">From Books</div>
+              <div class="earnings-breakdown-value"><span id="breakdownBooksCoins">0</span> coins</div>
+              <div class="earnings-breakdown-php" id="breakdownBooksPhp">₱0.00</div>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="author-section-subtitle">Recent earnings</h3>
+        <div id="authorEarningsList" class="author-earnings-list">
+          <div class="loading">Loading earnings…</div>
+        </div>
+
+        <h3 class="author-section-subtitle">Withdrawal history</h3>
+        <div id="authorWithdrawalsList" class="author-earnings-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+
+      <!-- Payments Info tab -->
+      <div class="earnings-tab-content" data-etab-content="payments" style="display:none">
+        <div class="author-kyc-banner" id="authorKycBanner">
+          <div class="author-kyc-icon">🪪</div>
+          <div class="author-kyc-text">
+            <div class="author-kyc-title" id="authorKycTitle">Complete your payments info to enable payouts</div>
+            <div class="author-kyc-sub" id="authorKycSub">We need to verify your identity before sending you money. One-time step required by Philippine law.</div>
+          </div>
+          <button class="btn btn-purple btn-sm" id="btnSubmitKyc">Submit info</button>
+        </div>
+
+        <div class="payments-info-help">
+          <p><strong>Why we ask for this:</strong> Philippine law (Data Privacy Act + AMLA) requires us to verify identity before sending real money. Approval typically takes 1–2 business days after submission.</p>
+          <p><strong>What happens after approval:</strong> Once you reach the minimum balance, you can request a payout from the Earnings tab. Funds go to your GCash, Maya, or bank account, usually within 1–3 business days of admin approval.</p>
+        </div>
+      </div>
     </div>
 
     <!-- ── MESSAGES (Direct Messages, FB-style with purple) ── -->
