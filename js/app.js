@@ -185,7 +185,29 @@ function updateTopbarUser() {
   composeAvatarEl.innerHTML = avatarHTML;
 }
 
+// ── Auth-screen consent gate ─────────────────────────────────────────────
+// Both sign-in buttons stay disabled until the user checks the "I agree to
+// Terms / Privacy / Refund + I'm 16 or older" checkbox. We don't persist the
+// state across sessions on purpose — every fresh sign-in re-acknowledges,
+// which is the most defensible posture under PH DPA + Terms case-law.
+function syncAuthConsentGate() {
+  const cb        = document.getElementById('authConsentCheck');
+  const googleBtn = document.getElementById('btnGoogle');
+  const guestBtn  = document.getElementById('btnGuest');
+  const label     = document.getElementById('authConsentLabel');
+  const checked   = !!cb?.checked;
+  if (googleBtn) googleBtn.disabled = !checked;
+  if (guestBtn)  guestBtn.disabled  = !checked;
+  if (label)     label.classList.toggle('is-checked', checked);
+}
+document.getElementById('authConsentCheck')?.addEventListener('change', syncAuthConsentGate);
+syncAuthConsentGate();
+
 document.getElementById('btnGoogle').addEventListener('click', async () => {
+  if (!document.getElementById('authConsentCheck')?.checked) {
+    toast('Please agree to the Terms and Privacy Policy first.', 'error');
+    return;
+  }
   const { error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: { redirectTo: window.location.origin }
@@ -193,6 +215,10 @@ document.getElementById('btnGoogle').addEventListener('click', async () => {
   if (error) toast(error.message, 'error');
 });
 document.getElementById('btnGuest').addEventListener('click', async () => {
+  if (!document.getElementById('authConsentCheck')?.checked) {
+    toast('Please agree to the Terms and Privacy Policy first.', 'error');
+    return;
+  }
   const { error } = await supabase.auth.signInAnonymously();
   if (error) toast(error.message, 'error');
 });
@@ -10963,3 +10989,4 @@ function insertEmojiIntoComposer(emoji) {
   resizeDmInput();
   updateSendButton();
 }
+
