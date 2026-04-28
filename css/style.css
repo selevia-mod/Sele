@@ -9731,19 +9731,15 @@ body:not(.light) .site-footer {
 }
 
 .author-book-pro-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.22rem 0.55rem;
-  margin-right: 0.4rem;
-  background: linear-gradient(135deg, #fbbf24 0%, #a78bfa 60%, #7c3aed 100%);
-  color: #fff;
-  font-size: 0.66rem;
+  display: inline-block;
+  font-size: 0.62rem;
   font-weight: 800;
-  letter-spacing: 0.06em;
-  border-radius: 999px;
-  box-shadow:
-    0 3px 10px rgba(124, 58, 237, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  letter-spacing: 0.08em;
+  padding: 0.18rem 0.45rem;
+  margin-right: 0.4rem;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: #fff;
   user-select: none;
   cursor: default;
 }
