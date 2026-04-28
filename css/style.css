@@ -9082,47 +9082,109 @@ body:not(.light) .auth-consent-box {
    PHASE 6 — Book lock + bulk unlock + time-based video monetization
    ════════════════════════════════════════════════════════════════════════════ */
 
-/* ─── Book lock card (author book editor) ─── */
+/* ─── Book lock card (author book editor) — premium look ─── */
 .book-lock-card {
-  margin-top: 1.2rem;
-  padding: 1rem 1.2rem;
-  background: linear-gradient(135deg, rgba(124, 58, 237, 0.04), rgba(251, 191, 36, 0.04));
-  border: 1px solid rgba(124, 58, 237, 0.14);
-  border-radius: 12px;
+  margin-top: 1.4rem;
+  padding: 1.25rem 1.4rem 1.1rem;
+  background: linear-gradient(150deg, rgba(124, 58, 237, 0.045), rgba(251, 191, 36, 0.035));
+  border: 1px solid rgba(124, 58, 237, 0.18);
+  border-radius: 14px;
+  position: relative;
+  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.05);
+}
+/* subtle gradient accent line on top — feels premium */
+.book-lock-card::before {
+  content: '';
+  position: absolute;
+  top: -1px; left: 18px; right: 18px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #7c3aed 30%, #fbbf24 70%, transparent);
+  border-radius: 2px;
 }
 .book-lock-head {
-  display: flex; align-items: flex-start; gap: 0.75rem;
-  margin-bottom: 0.85rem;
+  margin-bottom: 1rem;
 }
-.book-lock-icon { font-size: 1.4rem; line-height: 1; flex-shrink: 0; }
-.book-lock-title { font-weight: 700; font-size: 0.96rem; }
-.book-lock-sub   { font-size: 0.82rem; color: var(--text2); margin-top: 0.18rem; }
+.book-lock-title {
+  font-weight: 800;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+  display: flex; align-items: center; gap: 0.55rem;
+}
+.book-lock-tag {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0.18rem 0.45rem;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: #fff;
+}
+.book-lock-sub { font-size: 0.83rem; color: var(--text2); margin-top: 0.25rem; line-height: 1.5; }
 .book-lock-row {
   display: flex; flex-wrap: wrap; align-items: center;
-  gap: 1rem 1.5rem;
-  margin-bottom: 0.7rem;
+  gap: 1rem 1.8rem;
+  margin-bottom: 0.85rem;
 }
 .book-lock-toggle {
-  display: flex; align-items: center; gap: 0.55rem;
+  display: flex; align-items: center; gap: 0.6rem;
   cursor: pointer; user-select: none;
   font-weight: 600; font-size: 0.9rem;
+  position: relative;
 }
 .book-lock-toggle input[type="checkbox"] {
   position: absolute; opacity: 0; pointer-events: none;
 }
+/* Track + knob: visual update when checkbox toggles. The selectors target
+   the .lock-toggle-track sibling next to the (hidden) checkbox inside
+   .book-lock-toggle — fixes the "click does nothing" bug. */
+.book-lock-toggle .lock-toggle-track {
+  flex-shrink: 0;
+  width: 38px; height: 22px;
+  background: rgba(17, 24, 39, 0.18);
+  border-radius: 999px;
+  position: relative;
+  transition: background 0.18s ease;
+}
+.book-lock-toggle .lock-toggle-knob {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 18px; height: 18px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.18s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.book-lock-toggle input:checked + .lock-toggle-track {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+}
+.book-lock-toggle input:checked + .lock-toggle-track .lock-toggle-knob {
+  transform: translateX(16px);
+}
+.book-lock-toggle-text { font-size: 0.92rem; }
+
 .book-lock-from {
-  display: flex; align-items: center; gap: 0.55rem;
+  display: flex; align-items: center; gap: 0.7rem;
   font-size: 0.85rem; color: var(--text2); font-weight: 600;
 }
+.book-lock-from-select,
 .book-lock-from input {
-  width: 76px; padding: 0.4rem 0.55rem;
-  border: 1px solid rgba(17,24,39,0.12);
+  width: 72px; padding: 0.45rem 0.7rem;
+  border: 1px solid rgba(124, 58, 237, 0.20);
   border-radius: 8px; font: inherit; font-weight: 700;
   text-align: center; font-variant-numeric: tabular-nums;
   background: #fff; color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
 }
-.book-lock-from input:disabled { opacity: 0.5; cursor: not-allowed; }
-.book-lock-from input:focus { outline: 2px solid rgba(124,58,237,0.3); border-color: #7c3aed; }
+.book-lock-from-select:disabled,
+.book-lock-from input:disabled { opacity: 0.45; cursor: not-allowed; background: rgba(0,0,0,0.02); }
+.book-lock-from-select:focus,
+.book-lock-from input:focus {
+  outline: none;
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.18);
+}
 
 .book-lock-warning {
   font-size: 0.78rem; color: #92400e;
@@ -9469,3 +9531,20 @@ body:not(.light) .author-earnings-available { background: linear-gradient(135deg
   display: flex; gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+/* Clickable author chip on book detail page */
+.book-detail-author-link {
+  background: transparent;
+  border: 0;
+  padding: 0.4rem 0.6rem;
+  margin-left: -0.6rem;
+  border-radius: 999px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.book-detail-author-link:hover { background: rgba(124, 58, 237, 0.08); }
+.book-detail-author-link:hover strong { color: #7c3aed; }
+.book-detail-author-link strong { transition: color 0.15s ease; }
