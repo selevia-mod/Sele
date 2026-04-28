@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>System Status — Selebox</title>
+  <meta name="description" content="Live status of selebox.com — database, sync jobs, and edge functions."/>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Poppins', system-ui, sans-serif;
+      background: linear-gradient(180deg, #f8f9fc 0%, #ffffff 100%);
+      color: #111827;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+    .wrap { max-width: 720px; margin: 0 auto; }
+    .header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .logo {
+      display: inline-block;
+      padding: 0.55rem 1rem;
+      background: linear-gradient(135deg, #7c3aed, #a78bfa);
+      color: #fff;
+      font-weight: 800;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+      border-radius: 12px;
+      box-shadow: 0 6px 18px rgba(124, 58, 237, 0.30);
+      margin-bottom: 1rem;
+    }
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      margin-bottom: 0.4rem;
+    }
+    .sub {
+      color: #6b7280;
+      font-size: 0.95rem;
+    }
+    .overall {
+      padding: 1.4rem 1.6rem;
+      border-radius: 16px;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      transition: background 0.3s ease;
+    }
+    .overall.is-ok       { background: linear-gradient(135deg, #dcfce7, #bbf7d0); border: 1px solid #86efac; }
+    .overall.is-degraded { background: linear-gradient(135deg, #fef3c7, #fde68a); border: 1px solid #fcd34d; }
+    .overall.is-down     { background: linear-gradient(135deg, #fee2e2, #fecaca); border: 1px solid #fca5a5; }
+    .overall.is-loading  { background: #f3f4f6; border: 1px solid #e5e7eb; }
+    .overall-dot {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .overall.is-ok       .overall-dot { background: #16a34a; box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.20); }
+    .overall.is-degraded .overall-dot { background: #d97706; box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.20); }
+    .overall.is-down     .overall-dot { background: #dc2626; box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.20); }
+    .overall.is-loading  .overall-dot { background: #9ca3af; }
+    .overall-text {
+      font-weight: 700;
+      font-size: 1.1rem;
+    }
+    .overall.is-ok       .overall-text { color: #166534; }
+    .overall.is-degraded .overall-text { color: #92400e; }
+    .overall.is-down     .overall-text { color: #991b1b; }
+    .checks {
+      display: flex;
+      flex-direction: column;
+      gap: 0.7rem;
+      margin-bottom: 2rem;
+    }
+    .check {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem 1.2rem;
+      background: #fff;
+      border: 1px solid rgba(17, 24, 39, 0.08);
+      border-radius: 12px;
+      transition: border-color 0.18s ease;
+    }
+    .check:hover { border-color: rgba(124, 58, 237, 0.20); }
+    .check-name {
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+    .check-name small {
+      display: block;
+      font-weight: 400;
+      font-size: 0.78rem;
+      color: #6b7280;
+      margin-top: 0.15rem;
+    }
+    .check-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.84rem;
+      font-weight: 700;
+      padding: 0.3rem 0.7rem;
+      border-radius: 999px;
+    }
+    .check-status.is-ok       { background: #dcfce7; color: #166534; }
+    .check-status.is-degraded { background: #fef3c7; color: #92400e; }
+    .check-status.is-down     { background: #fee2e2; color: #991b1b; }
+    .check-status.is-loading  { background: #f3f4f6; color: #6b7280; }
+    .check-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .footer {
+      text-align: center;
+      color: #9ca3af;
+      font-size: 0.84rem;
+      padding-top: 1rem;
+      border-top: 1px solid #e5e7eb;
+      margin-top: 1rem;
+    }
+    .footer a { color: #7c3aed; text-decoration: none; font-weight: 600; }
+    .footer a:hover { text-decoration: underline; }
+    .updated {
+      text-align: center;
+      color: #9ca3af;
+      font-size: 0.78rem;
+      margin: -1rem 0 1.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div class="logo">SELEBOX</div>
+      <h1>System Status</h1>
+      <p class="sub">Live status of selebox.com infrastructure</p>
+    </div>
+
+    <div class="overall is-loading" id="overall">
+      <span class="overall-dot"></span>
+      <div>
+        <div class="overall-text" id="overallText">Checking systems…</div>
+        <div class="sub" id="overallSub" style="margin-top:0.15rem">Hang tight.</div>
+      </div>
+    </div>
+
+    <div class="updated" id="updatedAt">&nbsp;</div>
+
+    <div class="checks">
+      <div class="check">
+        <div class="check-name">
+          Website
+          <small>The page you're reading right now</small>
+        </div>
+        <span class="check-status is-ok"><span class="check-dot"></span> Operational</span>
+      </div>
+      <div class="check">
+        <div class="check-name">
+          Database
+          <small>User accounts, posts, books, videos, payments</small>
+        </div>
+        <span class="check-status is-loading" id="dbStatus"><span class="check-dot"></span> Checking…</span>
+      </div>
+      <div class="check">
+        <div class="check-name">
+          Mobile-to-web sync
+          <small>Lock states from the mobile app, every 15 minutes</small>
+        </div>
+        <span class="check-status is-loading" id="syncStatus"><span class="check-dot"></span> Checking…</span>
+      </div>
+    </div>
+
+    <div class="footer">
+      Need help? Email <a href="mailto:support@selebox.com">support@selebox.com</a>
+      &nbsp;·&nbsp; <a href="index.html">Back to Selebox</a>
+    </div>
+  </div>
+
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+    // ── Wire up your Supabase project below ─────────────────────────────
+    // These are public anon keys — safe to expose in client-side code.
+    // Replace YOUR_SUPABASE_URL and YOUR_ANON_KEY with the same values
+    // your main app.js uses.
+    const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+    const SUPABASE_ANON_KEY = 'YOUR_ANON_KEY';
+
+    const set = (id, cls, html) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.className = `check-status ${cls}`;
+      el.innerHTML = `<span class="check-dot"></span> ${html}`;
+    };
+    const setOverall = (cls, text, sub) => {
+      document.getElementById('overall').className = `overall ${cls}`;
+      document.getElementById('overallText').textContent = text;
+      document.getElementById('overallSub').textContent = sub;
+    };
+
+    function timeAgo(iso) {
+      if (!iso) return 'never';
+      const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+      if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+      return `${Math.floor(s / 86400)}d ago`;
+    }
+
+    async function check() {
+      const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+
+      let dbOk = false;
+      let syncOk = false;
+      let lastSyncAt = null;
+
+      try {
+        const { data, error } = await supabase.rpc('public_health_check');
+        if (error) throw error;
+        dbOk = !!data?.db_ok;
+        syncOk = !!data?.sync_ok;
+        lastSyncAt = data?.last_sync_at;
+      } catch (err) {
+        console.warn('Health check RPC failed:', err);
+      }
+
+      // Database
+      if (dbOk) set('dbStatus', 'is-ok',   'Operational');
+      else      set('dbStatus', 'is-down', 'Unavailable');
+
+      // Sync
+      if (syncOk)            set('syncStatus', 'is-ok',       `Operational · last run ${timeAgo(lastSyncAt)}`);
+      else if (lastSyncAt)   set('syncStatus', 'is-degraded', `Delayed · last run ${timeAgo(lastSyncAt)}`);
+      else                   set('syncStatus', 'is-down',     'Not running');
+
+      // Overall
+      if (dbOk && syncOk) {
+        setOverall('is-ok', 'All systems operational', 'Everything is running smoothly.');
+      } else if (dbOk) {
+        setOverall('is-degraded', 'Partial outage', 'Database is up, but mobile-to-web sync is delayed. Recent mobile changes may take longer to appear on the web.');
+      } else {
+        setOverall('is-down', 'Major outage', "We're working on it. Please try again in a few minutes.");
+      }
+
+      document.getElementById('updatedAt').textContent = `Last checked ${new Date().toLocaleTimeString()}`;
+    }
+
+    // Update the year in the footer copyright
+    const y = document.getElementById('footerYear');
+    if (y) y.textContent = new Date().getFullYear();
+
+    check();
+    // Re-check every 30 seconds
+    setInterval(check, 30_000);
+  </script>
+</body>
+</html>
