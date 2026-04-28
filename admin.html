@@ -208,6 +208,7 @@
         <nav class="admin-subtabs">
           <button class="admin-subtab active" data-subtab="withdrawals">Withdrawals</button>
           <button class="admin-subtab" data-subtab="kyc">KYC review</button>
+          <button class="admin-subtab" data-subtab="changerequests">Info change requests</button>
         </nav>
 
         <div class="admin-subtab-content" data-subtab-content="withdrawals">
@@ -248,6 +249,26 @@
             </div>
           </div>
           <div id="kycList" class="admin-list">
+            <div class="admin-empty">Loading…</div>
+          </div>
+        </div>
+
+        <div class="admin-subtab-content" data-subtab-content="changerequests" style="display:none">
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>Payment info change requests</h2>
+              <span class="admin-toolbar-sub">Authors requesting edits to their saved Payments Info</span>
+            </div>
+            <div class="admin-toolbar-right">
+              <select id="changeRequestsFilter" class="admin-select">
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="all">All</option>
+              </select>
+            </div>
+          </div>
+          <div id="changeRequestsList" class="admin-list">
             <div class="admin-empty">Loading…</div>
           </div>
         </div>
