@@ -531,13 +531,160 @@ async function purchasePack(packId, btnEl) {
   }
 }
 
-function renderStoreAdProgress() {
-  // Phase 3 will count today's ad_watches and update the bar.
-  // For now: leave the disabled "Watch ad" button as a coming-soon hint.
-  const sub = document.getElementById('storeAdSub');
-  const btn = document.getElementById('btnWatchAd');
-  if (sub) sub.textContent = 'Rewarded ads are coming soon. Ask an admin to grant test stars in the Wallet panel meanwhile.';
-  if (btn) { btn.disabled = true; btn.textContent = 'Coming soon'; }
+// ── Phase 3: rewarded ads for stars ────────────────────────────────────────
+
+let _adDailyCap = 20;            // synced from app_config.star_daily_cap
+let _adsWatchedToday = 0;        // count for the current PH-day
+
+async function renderStoreAdProgress() {
+  if (!currentUser) return;
+  _adDailyCap = _walletConfigDefaults.star_daily_cap || 20;
+
+  // Count today's completed ad watches (PH time anchor — matches server RPC)
+  // Server-side day-rollover is "Asia/Manila" via the credit_star_for_ad RPC.
+  // Client-side we anchor to the same TZ so the displayed count matches what
+  // the server would credit if the user watches now.
+  const todayPh = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+  todayPh.setHours(0, 0, 0, 0);
+
+  const { count, error } = await supabase
+    .from('ad_watches')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', currentUser.id)
+    .eq('status', 'completed')
+    .gte('watched_at', todayPh.toISOString());
+
+  _adsWatchedToday = error ? 0 : (count || 0);
+  paintAdProgress();
+}
+
+function paintAdProgress() {
+  const sub  = document.getElementById('storeAdSub');
+  const fill = document.getElementById('storeAdProgressFill');
+  const text = document.getElementById('storeAdProgressText');
+  const btn  = document.getElementById('btnWatchAd');
+  const remaining = Math.max(0, _adDailyCap - _adsWatchedToday);
+  const pct = Math.min(100, (_adsWatchedToday / _adDailyCap) * 100);
+
+  if (sub)  sub.textContent  = remaining > 0
+    ? `Watch a short ad to earn 1 Star. ${remaining} left today.`
+    : 'You\'ve hit today\'s ad limit. Come back tomorrow for more stars.';
+  if (fill) fill.style.width = `${pct}%`;
+  if (text) text.textContent = `${_adsWatchedToday} / ${_adDailyCap} watched today`;
+  if (btn)  {
+    btn.disabled    = remaining <= 0;
+    btn.textContent = remaining > 0 ? 'Watch ad' : 'Limit reached';
+  }
+}
+
+document.getElementById('btnWatchAd')?.addEventListener('click', async () => {
+  if (!currentUser) { toast('Sign in to earn stars', 'error'); return; }
+  if (_adsWatchedToday >= _adDailyCap) { toast('Daily ad limit reached', ''); return; }
+  try {
+    const ad = await playRewardedAd();
+    if (!ad?.completed) { return; /* user closed early — no credit */ }
+
+    const { data, error } = await supabase.rpc('credit_star_for_ad', {
+      p_ad_provider: ad.provider,
+      p_ad_id:       ad.adId,
+    });
+    if (error) { toast(error.message, 'error'); return; }
+    if (!data?.ok) {
+      if (data?.error === 'daily_cap_reached') {
+        _adsWatchedToday = _adDailyCap;
+        paintAdProgress();
+        toast('Daily limit reached.', '');
+      } else {
+        toast(data?.error || 'Could not credit star', 'error');
+      }
+      return;
+    }
+    _wallet.star_balance = data.balance_after;
+    _adsWatchedToday    += 1;
+    renderTopbarCoinPill();
+    renderStoreBalances();
+    paintAdProgress();
+    toast('+1 ⭐ Star earned!', 'success');
+  } catch (err) {
+    console.warn('[ad] error', err);
+    toast(err.message || 'Ad failed to play', 'error');
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Rewarded-ad player — STUB FOR NOW.
+//
+// This function is the integration point. Today it shows a 5-second
+// countdown placeholder so the rest of the flow (RPC, balance update, daily
+// cap enforcement) can be tested end-to-end. When the real ad SDK lands
+// (AdMob H5, AdSense rewarded video, or Google Ad Manager), replace the
+// body of this function with the real SDK call. It must:
+//   • Resolve with { completed: true, provider, adId } only after the user
+//     watched the ad to completion.
+//   • Resolve with { completed: false } if the user skipped/closed early.
+// The provider and adId fields land in ad_watches.ad_provider / ad_id, used
+// for fraud auditing in the admin Wallet panel.
+//
+// HEADS-UP: today the only abuse-prevention is the 20/day server cap. When
+// you wire AdMob, also enable Server-Side Verification (SSV) so the ad
+// network calls a Supabase Edge Function on completion — that gives you a
+// signed reward-token instead of the client self-reporting completion.
+// ─────────────────────────────────────────────────────────────────────────
+function playRewardedAd() {
+  return new Promise((resolve) => {
+    const adId    = 'stub_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    const seconds = 5;
+
+    // Modal with a countdown bar — no skip allowed during playback.
+    const modal = document.createElement('div');
+    modal.className = 'ad-modal-backdrop';
+    modal.innerHTML = `
+      <div class="ad-modal" role="dialog" aria-modal="true">
+        <div class="ad-modal-tag">Test ad</div>
+        <div class="ad-modal-icon">
+          <svg viewBox="0 0 24 24" width="64" height="64" fill="#a855f7"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg>
+        </div>
+        <h2>Watch to earn 1 Star</h2>
+        <p class="ad-modal-sub">Real ads via AdMob / AdSense will replace this stub when integrated. For now, it's a 5-second placeholder.</p>
+        <div class="ad-modal-progress">
+          <div class="ad-modal-progress-fill" id="adProgressFill"></div>
+        </div>
+        <div class="ad-modal-countdown" id="adCountdown">${seconds}s remaining</div>
+        <button class="ad-modal-cancel" id="adCancelBtn">Cancel — no reward</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    requestAnimationFrame(() => modal.classList.add('open'));
+
+    const fill      = modal.querySelector('#adProgressFill');
+    const countdown = modal.querySelector('#adCountdown');
+    const cancelBtn = modal.querySelector('#adCancelBtn');
+    let remaining   = seconds;
+    let timer       = null;
+
+    const cleanup = (result) => {
+      if (timer) clearInterval(timer);
+      modal.classList.remove('open');
+      setTimeout(() => modal.remove(), 180);
+      resolve(result);
+    };
+
+    cancelBtn.onclick = () => cleanup({ completed: false });
+
+    // Tick every 100ms for smooth progress bar
+    let elapsedMs = 0;
+    const totalMs = seconds * 1000;
+    timer = setInterval(() => {
+      elapsedMs += 100;
+      const pct = Math.min(100, (elapsedMs / totalMs) * 100);
+      fill.style.width = pct + '%';
+      remaining = Math.max(0, Math.ceil((totalMs - elapsedMs) / 1000));
+      countdown.textContent = remaining > 0 ? `${remaining}s remaining` : 'Almost there…';
+      if (elapsedMs >= totalMs) {
+        cleanup({ completed: true, provider: 'stub', adId });
+      }
+    }, 100);
+  });
 }
 
 // ── Return-from-HitPay handler ──
