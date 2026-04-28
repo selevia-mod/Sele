@@ -2847,6 +2847,9 @@ function showFeed() {
   // storiesEl intentionally untouched — inline display:none in HTML keeps it hidden.
   // To bring stories back, remove `style="display:none"` from #storiesRow in index.html.
   composeEl.style.display = '';
+  // Restore feed mode tabs (For You / Following / Discover) — Home only
+  const feedTabs = document.getElementById('feedTabs');
+  if (feedTabs) feedTabs.style.display = '';
   // Restore the feed sentinel only when there's actually more to load and posts already rendered
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel && _hasMoreFeedPosts && feedEl.querySelector('.post-card')) {
@@ -3656,8 +3659,12 @@ async function openEditProfile(profile) {
   const bioEl      = document.getElementById('editBio');
   const hintEl     = document.getElementById('editUsernameHint');
 
-  usernameEl.value = profile.username || '';
-  bioEl.value      = profile.bio || '';
+  // Strip emoji on initial load too — old saved values (from before the emoji
+  // rule shipped) would otherwise re-display in the input.
+  usernameEl.value = stripEmoji(profile.username || '');
+  // Clamp bio on initial load to the line limit (in case it was saved before
+  // the limit existed)
+  bioEl.value      = clampBioLines(profile.bio || '');
   document.getElementById('editWebsite').value  = profile.website  || '';
 
   // ── Country + City ──
@@ -3747,8 +3754,33 @@ document.getElementById('editUsername').addEventListener('input', (e) => {
   if (cleaned !== e.target.value) e.target.value = cleaned;
 });
 
+// Hard-cap bio at the configured line count. Blocks Enter past the limit and
+// trims pasted multi-line text down to N lines.
+function clampBioLines(text) {
+  const max = _profileEditDefaults.max_bio_lines || 5;
+  const lines = (text || '').split('\n');
+  if (lines.length <= max) return text || '';
+  return lines.slice(0, max).join('\n');
+}
+
+const _bioEl = document.getElementById('editBio');
+_bioEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const max = _profileEditDefaults.max_bio_lines || 5;
+  const lines = (e.target.value || '').split('\n').length;
+  if (lines >= max) e.preventDefault();   // refuse new line at the cap
+});
+_bioEl.addEventListener('paste', (e) => {
+  // Re-clamp after paste so pasting a 12-line block gets trimmed to 5
+  setTimeout(() => {
+    const clamped = clampBioLines(e.target.value);
+    if (clamped !== e.target.value) e.target.value = clamped;
+    updateBioCounter();
+  }, 0);
+});
+
 // Live: bio counter updates
-document.getElementById('editBio').addEventListener('input', updateBioCounter);
+_bioEl.addEventListener('input', updateBioCounter);
 
 // Country change: swap city UI between dropdown (PH) and free-text input
 document.getElementById('editCountry').addEventListener('change', (e) => {
@@ -3770,7 +3802,9 @@ document.getElementById('editProfileSave').addEventListener('click', async () =>
   // Compose location: "City, Country" if both present, just country if no city,
   // empty string to clear.
   const loc = (city && country) ? `${city}, ${country}` : (country || '');
-  const web    = (document.getElementById('editWebsite').value || '').trim();
+  // Website field removed from the form — pass null to preserve any existing
+  // value in the DB (the RPC's coalesce-style update won't overwrite when null).
+  const web    = null;
 
   if (!username) { toast('Display name is required', 'error'); return; }
   if (hasEmoji(username)) { toast('Display name cannot contain emoji', 'error'); return; }
@@ -4774,6 +4808,9 @@ function hideAllMainPages() {
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
+  // Feed mode tabs (For You / Following / Discover) — only on Home
+  const feedTabs = document.getElementById('feedTabs');
+  if (feedTabs) feedTabs.style.display = 'none';
   if (profilePage) profilePage.style.display = 'none';
   if (videosPage) videosPage.style.display = 'none';
   if (videoPlayerPage) videoPlayerPage.style.display = 'none';
@@ -6811,19 +6848,29 @@ function renderEarningsBreakdown(rows) {
 
 function renderAuthorEarningsBalance() {
   const b = _authorBalance || {};
-  // Peso primary, coins/stars secondary (admin-tunable rates handle conversion)
-  document.getElementById('earningsAvailablePhp').textContent = formatPhpFromMinor(b.available_php_minor || 0);
-  document.getElementById('earningsPendingPhp').textContent   = formatPhpFromMinor(b.pending_php_minor   || 0);
-  document.getElementById('earningsAvailableCoins').textContent = (b.available_coins || 0).toLocaleString();
-  document.getElementById('earningsPendingCoins').textContent   = (b.pending_coins   || 0).toLocaleString();
-  // Stars surfaces (RPC may not return them yet — fall back gracefully)
-  const availStars = document.getElementById('earningsAvailableStars');
-  const pendStars  = document.getElementById('earningsPendingStars');
-  if (availStars) availStars.textContent = (b.available_stars || 0).toLocaleString();
-  if (pendStars)  pendStars.textContent  = (b.pending_stars   || 0).toLocaleString();
+  // ── Rate-locked at earning time ─────────────────────────────────────
+  // available_php_minor and pending_php_minor are summed from author_earnings
+  // rows, each of which snapshotted its coin_to_php_minor at the moment the
+  // reader paid. So when admin changes the rate from ₱0.20 → ₱0.25, only
+  // FUTURE earnings use the new rate. Existing balances are immune.
+  const availMinor = b.available_php_minor || 0;
+  const pendMinor  = b.pending_php_minor   || 0;
+
+  document.getElementById('earningsAvailablePhp').textContent = formatPhpFromMinor(availMinor);
+  document.getElementById('earningsPendingPhp').textContent   = formatPhpFromMinor(pendMinor);
+
   // Hold copy — kept as "1–3 days" range regardless of underlying config
   const foot = document.getElementById('earningsHoldFootnote');
   if (foot) foot.textContent = "Earnings become available 1–3 days after they're earned.";
+
+  // Minimum payout hint — show admin-configured floor, or ₱100 by default
+  const minPayoutMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
+  const minHint = document.getElementById('earningsMinPayoutHint');
+  if (minHint) minHint.textContent = `Minimum payout: ${formatPhpFromMinor(minPayoutMinor)}`;
+
+  // Cache for the payout-button gate
+  _authorBalance._computed_available_minor = availMinor;
+  _authorBalance._computed_pending_minor   = pendMinor;
 }
 
 function formatPhpFromMinor(m) {
@@ -6930,14 +6977,16 @@ function renderAuthorKycBanner() {
 function syncAuthorPayoutButton() {
   const btn = document.getElementById('btnRequestPayout');
   if (!btn) return;
-  const min  = _walletConfigDefaults.author_payout_min_coins || 500;
-  const avail = _authorBalance?.available_coins || 0;
+  // Gate on PHP minimum (₱100 default) instead of coin count — simpler for
+  // authors to understand and matches what they see in the dashboard.
+  const minPhpMinor  = _walletConfigDefaults.min_payout_php_minor || 10000;
+  const availPhpMinor = _authorBalance?._computed_available_minor ?? (_authorBalance?.available_php_minor || 0);
   const kycOk = !_walletConfigDefaults.author_payout_kyc_required ||
                 _authorKyc?.status === 'approved';
-  btn.disabled = avail < min || !kycOk;
-  if (avail < min)        btn.title = `Need at least ${min} coins available`;
-  else if (!kycOk)        btn.title = 'KYC must be approved first';
-  else                    btn.title = '';
+  btn.disabled = availPhpMinor < minPhpMinor || !kycOk;
+  if (availPhpMinor < minPhpMinor) btn.title = `Need at least ${formatPhpFromMinor(minPhpMinor)} available`;
+  else if (!kycOk)                 btn.title = 'KYC must be approved first';
+  else                             btn.title = '';
 }
 
 // ── Payments Info form (inline, replaces the old modal) ─────────────────
