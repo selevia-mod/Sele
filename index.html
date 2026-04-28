@@ -3,222 +3,1322 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Selebox · Moderation</title>
+  <title>Selebox All-In-One</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css"/>
   <link rel="stylesheet" href="css/style.css"/>
-  <link rel="stylesheet" href="css/admin.css"/>
 </head>
-<body class="light">
-  <!-- Loading state shown until role check completes -->
-  <div id="adminLoading" class="admin-loading">
-    <div class="admin-loading-pulse"></div>
-    <p>Verifying access…</p>
-  </div>
+<body>
 
-  <!-- Access denied state -->
-  <div id="adminDenied" class="admin-denied" style="display:none">
-    <div class="admin-denied-icon">⊘</div>
-    <h1>Access denied</h1>
-    <p>Moderator privileges required.</p>
-    <a href="/" class="admin-denied-link">Return home</a>
+<!-- AUTH SCREEN -->
+<div id="authScreen" class="auth-screen" style="display:none">
+  <div class="auth-card">
+    <div class="auth-logo">SELEBOX</div>
+    <p class="auth-tagline">All-in-one social experience.<br>Connect, share, and react with your world.</p>
+    <button class="btn btn-google" id="btnGoogle" style="width:100%">
+      <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+      Continue with Google
+    </button>
+    <div class="auth-divider">or</div>
+    <button class="btn btn-ghost" id="btnGuest" style="width:100%">Continue as Guest</button>
+    <p style="font-size:0.72rem;color:var(--text3);margin-top:1.5rem;line-height:1.6">
+      Guest accounts are anonymous. Sign in with Google anytime to keep your data permanently.
+    </p>
   </div>
+</div>
 
-  <!-- Main admin shell -->
-  <div id="adminShell" class="admin-shell" style="display:none">
+<!-- MAIN APP -->
+<div id="appScreen" style="display:none">
+
+  <!-- TOP HEADER -->
+  <header class="topbar">
+    <button class="topbar-logo" id="topbarLogoBtn" aria-label="Selebox — go to home" title="Home">
+      <img src="img/logo.png" alt="Selebox" draggable="false"/>
+    </button>
+
+    <div class="topbar-search" id="topbarSearch">
+  <svg class="topbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+  <input type="text" id="searchInput" placeholder="Search posts and people..."/>
+  <button class="topbar-search-clear" id="topbarSearchClear" style="display:none">×</button>
+</div>
+<div id="searchResults" class="search-results"></div>
+    <div class="topbar-actions">
+      <div class="topbar-bell-wrap">
+        <button class="topbar-icon-btn topbar-bell" id="btnNotifications" title="Notifications" aria-label="Notifications">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span class="topbar-bell-badge" id="notifBadge" style="display:none">0</span>
+        </button>
+        <div class="notifications-panel" id="notificationsPanel" style="display:none">
+          <div class="notifications-header">
+            <h3>Notifications</h3>
+            <button class="notifications-mark-all" id="notifMarkAll">Mark all read</button>
+          </div>
+          <div class="notif-filter-tabs" role="tablist">
+            <button class="notif-filter-tab active" data-filter="all" role="tab">All</button>
+            <button class="notif-filter-tab" data-filter="you" role="tab">You</button>
+            <button class="notif-filter-tab" data-filter="following" role="tab">Following</button>
+          </div>
+          <div class="notifications-list" id="notificationsList">
+            <div class="notifications-empty">Loading…</div>
+          </div>
+        </div>
+      </div>
+      <button class="topbar-icon-btn" title="Toggle theme" id="btnTheme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+      <div class="topbar-avatar" id="topbarAvatar" title="Your profile">?</div>
+    </div>
+  </header>
+
+  <!-- LEFT SIDEBAR -->
+  <aside class="sidebar">
+    <button class="sidebar-item active" title="Home" id="btnHome">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V20a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2V9.5z"/></svg>
+      </span>
+      <span class="sidebar-label">Home</span>
+    </button>
+    <button class="sidebar-item" title="Videos" id="btnVideos">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="13.5" height="12" rx="2.5"/><path d="M16 10.5l5-2.5v8l-5-2.5z" fill="currentColor" stroke="none"/></svg>
+      </span>
+      <span class="sidebar-label">Videos</span>
+    </button>
+    <button class="sidebar-item" title="Books" id="btnBook">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/><line x1="12" y1="2" x2="12" y2="20"/></svg>
+      </span>
+      <span class="sidebar-label">Book</span>
+    </button>
+    <button class="sidebar-item" title="Creator Studio" id="btnStudio">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.09 5.26L19.5 9l-4.5 3.27L16.18 18 12 14.77 7.82 18 9 12.27 4.5 9l5.41-.74L12 3z"/></svg>
+      </span>
+      <span class="sidebar-label">Studio</span>
+    </button>
+    <button class="sidebar-item" title="Author" id="btnAuthor">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+      </span>
+      <span class="sidebar-label">Author</span>
+    </button>
+    <button class="sidebar-item" title="Bookmarks" id="btnBookmarks">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+      </span>
+      <span class="sidebar-label">Bookmarks</span>
+    </button>
+    <button class="sidebar-item" title="Messages" id="btnMessages">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+      </span>
+      <span class="sidebar-label">Messages</span>
+      <span class="sidebar-badge" id="messagesUnreadBadge" style="display:none">0</span>
+    </button>
+    <button class="sidebar-item" title="Profile" id="btnProfile">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/></svg>
+      </span>
+      <span class="sidebar-label">Profile</span>
+    </button>
+    <div class="sidebar-divider"></div>
+    <button class="sidebar-item sidebar-item-logout" title="Log out" id="btnSignOut">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </span>
+      <span class="sidebar-label">Log out</span>
+    </button>
+  </aside>
+
+  <!-- MAIN CONTENT -->
+  <main class="main-wrap">
+
+    <!-- Stories / People row — hidden for now (minimalist feed) -->
+    <div class="stories-row" id="storiesRow" style="display:none"></div>
+
+    <!-- Compose -->
+    <div class="compose">
+        <div class="compose-top">
+          <div class="avatar" id="composeAvatar">?</div>
+          <div class="compose-text-wrap">
+            <textarea id="composeText" placeholder="What's on your mind?" maxlength="5000"></textarea>
+            <span class="char-count" id="charCount">0 / 5000</span>
+          </div>
+        </div>
+        <div id="composeImagePreview"></div>
+      <div id="composeVideoPreview"></div>
+        <div class="upload-progress" id="uploadProgress">
+          <div class="upload-progress-label">
+            <span id="uploadStatus">Uploading video...</span>
+            <span id="uploadPercent">0%</span>
+          </div>
+          <div class="upload-progress-bar">
+            <div class="upload-progress-fill" id="uploadFill"></div>
+          </div>
+        </div>
+        <div class="compose-footer">
+          <label class="image-upload-btn" title="Add photo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Photo
+            <input type="file" accept="image/*" id="composeImageInput"/>
+          </label>
+          <button class="image-upload-btn" title="Add video" id="btnOpenVideoUpload" type="button">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+  Video
+</button>
+          <button class="image-upload-btn" title="Add book" id="btnOpenBookUpload" type="button">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+  Book
+</button>
+          <div class="spacer"></div>
+          <button class="btn btn-purple btn-sm" id="btnPost">Post</button>
+        </div>
+      </div>
+
+    <!-- Feed -->
+    <div id="feed"><div class="loading">Loading feed...</div></div>
+    <div id="feedSentinel" class="book-grid-sentinel" style="display:none">
+      <div class="book-grid-loadmore">Loading more posts…</div>
+    </div>
+
+    <!-- Videos Page -->
+    <div id="videosPage" style="display:none">
+      <div class="videos-header videos-header-row">
+        <h1 class="videos-title">Videos</h1>
+        <button class="btn-upload-video" id="btnUploadVideo">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="17 8 12 3 7 8"/>
+    <line x1="12" y1="3" x2="12" y2="15"/>
+  </svg>
+  Upload
+</button>
+      </div>
+      <div id="videoSearchTags" class="video-search-tags"></div>
+      <div class="video-grid" id="videoGrid">
+        <div class="loading">Loading videos...</div>
+      </div>
+    </div>
+
+    <!-- Book (Reader) Page -->
+    <div id="bookPage" style="display:none">
+      <!-- Minimalist header — just the title, premium gradient -->
+      <div class="books-header-min">
+        <h1 class="books-title-min">Books</h1>
+      </div>
+
+      <!-- Recommended for you carousel (logged-in only, populated by JS) -->
+      <div class="book-recommend-rail" id="bookRecommendRail" style="display:none">
+        <div class="book-recommend-head">
+          <h3 class="book-recommend-title">Recommended for you</h3>
+          <span class="book-recommend-sub" id="bookRecommendSub">Based on your reading taste</span>
+        </div>
+        <div class="book-recommend-track" id="bookRecommendTrack"></div>
+      </div>
+
+      <!-- Genre / sort bar — single-line horizontal scroll, adaptive -->
+      <div class="book-toolbar">
+        <div class="book-genre-chips" id="bookGenreChips">
+          <!-- Populated by renderBookChips() based on user's reading history + platform popularity -->
+        </div>
+        <div class="book-sort">
+          <select id="bookSortSelect" class="book-sort-select" title="Sort books">
+            <option value="trending">🔥 Trending</option>
+            <option value="recent">✨ Newest</option>
+            <option value="most-liked">❤️ Most loved</option>
+            <option value="most-read">👁 Most read</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Books grid + empty state -->
+      <div id="bookGrid" class="book-grid">
+        <div class="loading">Loading books...</div>
+      </div>
+      <div id="bookGridSentinel" class="book-grid-sentinel" style="display:none">
+        <div class="book-grid-loadmore">Loading more books…</div>
+      </div>
+      <div id="bookEmpty" class="page-empty" style="display:none">
+        <div class="page-empty-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+        </div>
+        <h2 class="page-empty-title">No books to show</h2>
+        <p class="page-empty-body">Try a different genre or be the first to publish — head to <strong>Author</strong> and start writing.</p>
+        <button class="btn btn-purple btn-sm" id="btnGoToAuthor">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
+          Become an author
+        </button>
+      </div>
+    </div>
+
+    <!-- Book Detail Page -->
+    <div id="bookDetailPage" style="display:none">
+      <button class="btn btn-ghost btn-sm" id="btnBackBooks" style="margin-bottom:0.75rem">← Back to books</button>
+      <div id="bookDetailContent">
+        <div class="loading">Loading book...</div>
+      </div>
+    </div>
+
+    <!-- Chapter Reader Page -->
+    <div id="chapterReaderPage" style="display:none">
+      <div class="reader-bar">
+        <button class="reader-back" id="btnBackBookDetail" title="Back to book">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="reader-bar-info">
+          <div class="reader-bar-title" id="readerBookTitle">—</div>
+          <div class="reader-bar-chapter" id="readerChapterTitle">—</div>
+        </div>
+        <div class="reader-bar-actions">
+          <button class="reader-tool" id="btnReaderFontSmaller" title="Smaller text">A−</button>
+          <button class="reader-tool" id="btnReaderFontLarger" title="Larger text">A+</button>
+        </div>
+      </div>
+      <div class="reader-content" id="readerContent">
+        <div class="loading">Loading chapter...</div>
+      </div>
+      <div class="reader-nav">
+        <button class="reader-nav-btn" id="btnReaderPrev" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="15 18 9 12 15 6"/></svg>
+          Previous
+        </button>
+        <span class="reader-progress" id="readerProgress">Chapter 1 of 1</span>
+        <button class="reader-nav-btn" id="btnReaderNext" disabled>
+          Next
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Creator Studio Page -->
+    <div id="studioPage" style="display:none">
+      <div class="studio-header">
+        <div>
+          <h1 class="studio-title">Creator Studio</h1>
+          <p class="studio-subtitle">Manage your videos, track performance, and engage your audience</p>
+        </div>
+        <button class="btn-upload-video" id="btnStudioUpload">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          Upload
+        </button>
+      </div>
+      <div id="studioContent">
+        <div class="empty"><h3>Loading...</h3></div>
+      </div>
+    </div>
+    
+    <!-- Author (Manuscript Studio) Page -->
+    <div id="authorPage" style="display:none">
+
+      <!-- ─── View A: Dashboard (My Books) ─── -->
+      <div id="authorDashboard">
+        <div class="page-hero page-hero-author">
+          <div class="page-hero-content">
+            <h1 class="page-hero-title">Author</h1>
+            <p class="page-hero-subtitle">Write, edit, publish. Your manuscripts in one place.</p>
+          </div>
+          <div class="page-hero-decoration" aria-hidden="true">
+            <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M68 40a20 20 0 0 0-28-28L18 34v28h28z"/>
+              <line x1="54" y1="26" x2="6" y2="74"/>
+              <line x1="58" y1="50" x2="30" y2="50"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Stats row -->
+        <div class="author-stats" id="authorStats">
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyBooks">0</div>
+              <div class="author-stat-label">Books</div>
+            </div>
+          </div>
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyChapters">0</div>
+              <div class="author-stat-label">Chapters</div>
+            </div>
+          </div>
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyReads">0</div>
+              <div class="author-stat-label">Total reads</div>
+            </div>
+          </div>
+          <div class="author-stat">
+            <div class="author-stat-icon" style="background:linear-gradient(135deg,#ec4899,#f43f5e)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+            </div>
+            <div class="author-stat-text">
+              <div class="author-stat-value" id="statMyLikes">0</div>
+              <div class="author-stat-label">Likes</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="author-toolbar">
+          <h2 class="author-section-title">My books</h2>
+          <button class="btn btn-purple btn-sm" id="btnNewBook">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New book
+          </button>
+        </div>
+
+        <!-- Books table -->
+        <div id="authorBooksContent">
+          <div class="loading">Loading your books...</div>
+        </div>
+      </div>
+
+      <!-- ─── View B: Book editor (metadata + chapter list) ─── -->
+      <div id="authorBookEditor" style="display:none">
+        <button class="btn btn-ghost btn-sm" id="btnBackToDashboard" style="margin-bottom:0.75rem">← Back to my books</button>
+
+        <div class="book-editor-grid">
+          <!-- Cover -->
+          <div class="book-editor-cover-wrap">
+            <div class="book-editor-cover" id="bookEditorCover">
+              <div class="book-cover-placeholder">?</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="btnUploadCover" style="margin-top:0.6rem;width:100%">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Upload cover
+            </button>
+            <input type="file" accept="image/*" id="bookCoverFile" style="display:none">
+            <div class="book-editor-status" id="bookEditorStatusBadge">Draft</div>
+          </div>
+
+          <!-- Form -->
+          <div class="book-editor-form">
+            <label class="vu-label">Title <span class="vu-required">*</span></label>
+            <input type="text" id="bookEditorTitle" class="vu-input" maxlength="120" placeholder="The book of...">
+
+            <label class="vu-label">Description</label>
+            <textarea id="bookEditorDescription" class="vu-textarea" rows="4" placeholder="What's it about?"></textarea>
+
+            <label class="vu-label">
+              Genres
+              <small style="color:#888">pick up to 5 — readers find your book by these</small>
+            </label>
+            <div id="bookEditorGenrePicker" class="genre-picker">
+              <div class="genre-picker-counter"><span class="genre-picker-count">0</span> / 5 selected</div>
+              <div class="genre-picker-chips"></div>
+            </div>
+            <!-- Hidden legacy input — kept for back-compat; the picker writes here invisibly -->
+            <input type="hidden" id="bookEditorGenre"/>
+
+            <label class="vu-label">Custom tags <small style="color:#888">comma-separated, in addition to genres above</small></label>
+            <input type="text" id="bookEditorTags" class="vu-input" placeholder="slowburn, enemies-to-lovers, my-original-tag">
+
+            <label class="vu-label">Status</label>
+            <select id="bookEditorBookStatus" class="vu-input">
+              <option value="draft">Draft (not visible to readers)</option>
+              <option value="ongoing">Ongoing</option>
+              <option value="completed">Completed</option>
+              <option value="paused">Paused</option>
+            </select>
+
+            <div class="book-editor-actions">
+              <label class="book-editor-publish-toggle">
+                <input type="checkbox" id="bookEditorPublic">
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Visible to readers</span>
+              </label>
+              <button class="btn btn-purple btn-sm" id="btnSaveBook">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chapters list -->
+        <div class="book-editor-chapters">
+          <div class="book-editor-chapters-head">
+            <h3 class="author-section-title">Chapters</h3>
+            <button class="btn btn-purple btn-sm" id="btnNewChapter">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add chapter
+            </button>
+          </div>
+          <div id="bookEditorChapters">
+            <div class="loading">Loading chapters...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── View C: Chapter editor (Quill) ─── -->
+      <div id="authorChapterEditor" style="display:none">
+        <!-- Top bar: back   |   spacer   |   Published · Save -->
+        <div class="chapter-editor-bar">
+          <button class="reader-back" id="btnBackToBookEditor" title="Back to book">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <div class="chapter-editor-bar-spacer"></div>
+          <div class="chapter-editor-actions">
+            <span class="chapter-state-pill" id="chapterStatePill" data-state="draft">
+              <span class="chapter-state-dot"></span>
+              <span class="chapter-state-text">Draft</span>
+            </span>
+            <button class="btn btn-ghost btn-sm" id="btnSaveChapter" title="Save draft">Save</button>
+            <button class="btn btn-purple btn-sm" id="btnPublishChapter">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.3rem;vertical-align:-2px"><path d="M5 12l5 5L20 7"/></svg>
+              <span id="btnPublishChapterLabel">Publish</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Chapter cover (Wattpad-style hero) — single clean dashed dropzone -->
+        <div class="chapter-cover" id="chapterCover">
+          <button type="button" class="chapter-cover-empty" id="btnUploadChapterCover">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+            <span>Add chapter cover</span>
+            <small>Wide image works best — readers see this above the chapter title</small>
+          </button>
+          <img class="chapter-cover-img" id="chapterCoverImg" alt="" style="display:none"/>
+          <div class="chapter-cover-actions" id="chapterCoverActions" style="display:none">
+            <button type="button" id="btnReplaceChapterCover" title="Replace cover">Replace</button>
+            <button type="button" id="btnRemoveChapterCover"  title="Remove cover">Remove</button>
+          </div>
+          <input type="file" id="chapterCoverFile" accept="image/*" style="display:none"/>
+        </div>
+
+        <!-- Title in a premium-styled box -->
+        <div class="chapter-title-box">
+          <input type="text" id="chapterEditorTitle" class="chapter-title-input-boxed" placeholder="Chapter title…" maxlength="160" autocomplete="off">
+        </div>
+
+        <!-- Meta strip: Saved badge + word count -->
+        <div class="chapter-meta-strip">
+          <span class="chapter-save-status" id="chapterSaveStatus">Idle</span>
+          <span class="chapter-word-count"><span id="chapterWordCount">0</span> words</span>
+        </div>
+
+        <!-- Hidden file input for inline content image upload (used by Quill image handler) -->
+        <input type="file" id="chapterContentImageFile" accept="image/*" style="display:none"/>
+
+        <div id="chapterEditorQuill"></div>
+      </div>
+
+    </div>
+
+    <!-- New Book Modal -->
+    <div class="modal-overlay video-upload-overlay" id="newBookModal" style="display:none">
+      <div class="vu-modal" style="max-width:540px">
+        <div class="vu-header">
+          <div class="vu-header-text">
+            <h2 class="vu-title">Create a new book</h2>
+            <p class="vu-subtitle">You can fill in the rest later.</p>
+          </div>
+          <button class="vu-close" id="newBookClose" aria-label="Close">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="vu-body">
+          <div class="vu-form">
+            <label class="vu-label">Title <span class="vu-required">*</span></label>
+            <input type="text" id="newBookTitle" class="vu-input" maxlength="120" placeholder="Untitled novel">
+
+            <label class="vu-label">
+              Genres
+              <small style="color:#888">pick up to 5</small>
+            </label>
+            <div id="newBookGenrePicker" class="genre-picker">
+              <div class="genre-picker-counter"><span class="genre-picker-count">0</span> / 5 selected</div>
+              <div class="genre-picker-chips"></div>
+            </div>
+            <input type="hidden" id="newBookGenre"/>
+
+            <label class="vu-label">Short description</label>
+            <textarea id="newBookDescription" class="vu-textarea" rows="3" placeholder="What's it about?"></textarea>
+          </div>
+        </div>
+        <div class="vu-footer">
+          <button class="vu-btn vu-btn-secondary" id="newBookCancel">Cancel</button>
+          <button class="vu-btn vu-btn-primary" id="newBookCreate">Create book</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Video Player Page -->
+    <div id="videoPlayerPage" style="display:none">
+      <button class="btn btn-ghost btn-sm" id="btnBackVideos" style="margin-bottom:0.75rem">← Back</button>
+      <div class="video-player-layout">
+        <div class="video-player-main">
+          <div class="video-player-wrap">
+            <video id="videoPlayer" controls></video>
+          </div>
+
+          <!-- Premium nav controls — Prev / Rewind 10s / Fast-forward 10s / Next / Auto-play -->
+          <div class="video-nav-controls">
+            <button class="vc-btn" id="vcPrev" title="Previous video (P)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+              <span>Previous</span>
+            </button>
+            <button class="vc-btn vc-btn-skip" id="vcRewind" title="Rewind 10 seconds (←)">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 17l-5-5 5-5"/><path d="M18 17l-5-5 5-5"/></svg>
+              <span class="vc-skip-num">10</span>
+            </button>
+            <button class="vc-btn vc-btn-skip" id="vcFastForward" title="Fast forward 10 seconds (→)">
+              <span class="vc-skip-num">10</span>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 17l5-5-5-5"/><path d="M6 17l5-5-5-5"/></svg>
+            </button>
+            <button class="vc-btn" id="vcNext" title="Next video (N)">
+              <span>Next</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z"/></svg>
+            </button>
+            <div class="vc-spacer"></div>
+            <label class="vc-autonext" title="Automatically play the next video when this one ends">
+              <input type="checkbox" id="vcAutoNext" checked/>
+              <span class="vc-autonext-track"><span class="vc-autonext-thumb"></span></span>
+              <span class="vc-autonext-label">Autoplay</span>
+            </label>
+          </div>
+
+          <!-- Title + meta -->
+          <div class="video-info">
+            <h1 class="video-title-big" id="videoTitle">—</h1>
+            <div class="video-meta">
+              <span id="videoViews"></span>
+              <span id="videoDate">—</span>
+            </div>
+          </div>
+
+          <!-- Action bar: like / repost / share -->
+          <div class="video-actions" id="videoActions">
+            <div class="reaction-wrap" data-target="" data-type="video">
+              <button class="action-btn reaction-trigger" data-target="" data-type="video">
+                <span class="r-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                </span>
+                <span class="r-label-text">Like</span>
+              </button>
+              <div class="reaction-picker"></div>
+            </div>
+            <button class="action-btn" id="videoRepostBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+              <span>Repost</span>
+            </button>
+            <div class="reaction-wrap" style="position:relative">
+              <button class="action-btn" id="videoShareBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+                <span>Share</span>
+              </button>
+              <div class="share-menu" id="videoShareMenu">
+                <button class="share-option" data-platform="facebook">📘 Facebook</button>
+                <button class="share-option" data-platform="twitter">🐦 Twitter / X</button>
+                <button class="share-option" data-platform="whatsapp">💬 WhatsApp</button>
+                <button class="share-option" data-platform="copy">🔗 Copy link</button>
+              </div>
+            </div>
+            <button class="action-btn" id="videoBookmarkBtn" data-active="0">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+              <span>Bookmark</span>
+            </button>
+          </div>
+
+          <!-- Uploader (with Follow) + description -->
+          <div class="video-info-secondary">
+            <div class="video-uploader-row">
+              <div class="video-uploader">
+                <div class="avatar" id="videoUploaderAvatar">?</div>
+                <div>
+                  <div class="video-uploader-name" id="videoUploaderName">—</div>
+                  <div class="video-uploader-badge" id="videoUploaderBadge"></div>
+                </div>
+              </div>
+              <button class="btn-follow-creator" id="btnFollowCreator" style="display:none">+ Follow</button>
+            </div>
+            <div class="video-description-wrap">
+              <div class="video-description" id="videoDescription"></div>
+              <button class="video-description-toggle" id="videoDescriptionToggle" style="display:none">Show more</button>
+            </div>
+          </div>
+
+          <!-- Comments on this video -->
+          <div class="video-comments-wrap" id="videoCommentsWrap" style="display:none">
+            <div class="video-comments-header">
+              <h3 class="video-comments-title">Comments <span class="video-comments-count" id="videoCommentsCount"></span></h3>
+            </div>
+            <div id="videoComments" class="comments-section" style="display:block"></div>
+          </div>
+        </div>
+        <aside class="video-upnext">
+          <h3 class="upnext-title">Up next</h3>
+          <div id="upNextList" class="upnext-list"></div>
+        </aside>
+      </div>
+    </div>
+    
+    <!-- Profile Page -->
+    <!-- Bookmarks Page -->
+    <div id="bookmarksPage" style="display:none">
+      <div class="bookmarks-header">
+        <h1 class="bookmarks-title">Bookmarks</h1>
+        <span class="bookmarks-subtitle">Your saved videos and books</span>
+      </div>
+      <div class="bookmarks-tabs">
+        <button class="bookmarks-tab active" data-tab="videos">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          Videos <span class="bookmarks-tab-count" id="bookmarkVideoCount"></span>
+        </button>
+        <button class="bookmarks-tab" data-tab="books">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          Books <span class="bookmarks-tab-count" id="bookmarkBookCount"></span>
+        </button>
+      </div>
+      <div class="bookmarks-content" id="bookmarksContent">
+        <div class="loading">Loading bookmarks…</div>
+      </div>
+    </div>
+
+    <!-- ── MESSAGES (Direct Messages, FB-style with purple) ── -->
+    <div id="messagesPage" style="display:none">
+      <div class="dm-shell">
+        <!-- Left pane: conversation list -->
+        <aside class="dm-sidebar">
+          <div class="dm-sidebar-header">
+            <h2>Chats</h2>
+            <button class="dm-new-btn" id="dmNewBtn" title="New message" aria-label="New message">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="11.01"/><line x1="8" y1="11" x2="8" y2="11.01"/><line x1="16" y1="11" x2="16" y2="11.01"/></svg>
+            </button>
+          </div>
+          <div class="dm-search-wrap">
+            <svg class="dm-search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="text" id="dmSearchInput" placeholder="Search conversations…" />
+          </div>
+          <div class="dm-conv-list" id="dmConvList"></div>
+        </aside>
+
+        <!-- Right pane: active thread -->
+        <section class="dm-thread" id="dmThread">
+          <!-- Empty placeholder shown when no thread is open -->
+          <div class="dm-thread-empty" id="dmThreadEmpty">
+            <div class="dm-thread-empty-icon">
+              <svg viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+            </div>
+            <h2>Your messages</h2>
+            <p>Pick a chat from the left, or start a new one from someone's profile.</p>
+          </div>
+
+          <!-- Active thread (hidden until a conversation is selected) -->
+          <div class="dm-thread-active" id="dmThreadActive" style="display:none">
+            <header class="dm-thread-header">
+              <button class="dm-back-btn" id="dmBackBtn" aria-label="Back to chats" title="Back">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              <button class="dm-thread-avatar" id="dmThreadAvatar" aria-label="View profile">
+                <span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>
+              </button>
+              <div class="dm-thread-info">
+                <button class="dm-thread-name" id="dmThreadName">Loading…</button>
+                <span class="dm-thread-status" id="dmThreadStatus"></span>
+              </div>
+              <button class="dm-thread-menu" id="dmThreadMenu" title="Options" aria-label="Options">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+              </button>
+            </header>
+
+            <div class="dm-messages" id="dmMessages">
+              <!-- Messages render here as bubbles -->
+            </div>
+
+            <!-- Reply preview slot (above composer; populated when replying) -->
+            <div class="dm-reply-preview" id="dmReplyPreview" style="display:none">
+              <div class="dm-reply-bar"></div>
+              <div class="dm-reply-meta">
+                <span class="dm-reply-label">Replying to <strong id="dmReplyName"></strong></span>
+                <span class="dm-reply-text" id="dmReplyText"></span>
+              </div>
+              <button type="button" class="dm-reply-cancel" id="dmReplyCancel" aria-label="Cancel reply" title="Cancel reply">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+
+            <!-- Image attachment preview (shown after selecting a file, before send) -->
+            <div class="dm-attach-preview" id="dmAttachPreview" style="display:none">
+              <div class="dm-attach-preview-img"><img id="dmAttachPreviewImg" alt="Selected attachment"/></div>
+              <div class="dm-attach-preview-info">
+                <span class="dm-attach-preview-name" id="dmAttachPreviewName"></span>
+                <span class="dm-attach-preview-size" id="dmAttachPreviewSize"></span>
+              </div>
+              <button type="button" class="dm-attach-preview-cancel" id="dmAttachCancel" aria-label="Remove attachment" title="Remove">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+
+            <input type="file" id="dmFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none"/>
+
+            <form class="dm-composer" id="dmComposer" onsubmit="return false">
+              <button type="button" class="dm-composer-btn" id="dmAttachBtn" title="Attach photo or GIF" aria-label="Attach">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <div class="dm-composer-input-wrap">
+                <textarea id="dmInput" placeholder="Aa" rows="1" maxlength="4000"></textarea>
+                <button type="button" class="dm-composer-emoji" id="dmEmojiBtn" title="Emoji" aria-label="Emoji">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                </button>
+              </div>
+              <button type="submit" class="dm-send-btn" id="dmSendBtn" aria-label="Send">
+                <!-- Paper plane when has text, thumbs-up when empty (FB classic) -->
+                <svg class="dm-send-icon-plane" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                <svg class="dm-send-icon-thumb" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M2 10h4v12H2zm20 2c0-1.1-.9-2-2-2h-6.31l.95-4.57c.02-.1.03-.2.03-.31 0-.41-.17-.79-.44-1.06L13.17 3 6.59 9.59C6.22 9.95 6 10.45 6 11v9c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-1z"/></svg>
+              </button>
+            </form>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="profilePage" style="display:none">
+      <div class="profile-banner" id="profileBanner">
+        <button class="profile-banner-edit" id="editBannerBtn" style="display:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17v4a1 1 0 0 0 1 1h4l11-11-5-5L3 17z"/></svg>
+          Edit cover
+          <input type="file" accept="image/*" id="bannerInput" style="display:none"/>
+        </button>
+      </div>
+      <div class="profile-head">
+        <div class="profile-avatar-wrap">
+          <div class="profile-avatar" id="profileAvatarBig">?</div>
+          <button class="profile-avatar-edit" id="editAvatarBtn" style="display:none" title="Change photo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <input type="file" accept="image/*" id="avatarInput" style="display:none"/>
+          </button>
+        </div>
+        <div class="profile-info">
+          <div class="profile-name-row">
+            <h1 class="profile-name" id="profileName">Loading...</h1>
+            <span class="profile-badge" id="profileBadge">Member</span>
+            <button class="profile-menu-btn" id="profileMenuBtn" title="Profile options" aria-label="Profile options">
+              <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+            </button>
+          </div>
+          <div class="profile-stats">
+            <button class="profile-stat" id="statFollowing"><strong>0</strong> following</button>
+            <button class="profile-stat" id="statFollowers"><strong>0</strong> followers</button>
+            <button class="profile-stat" id="statPosts"><strong>0</strong> posts</button>
+            <span class="profile-joined">📅 Joined <span id="profileJoined">recently</span></span>
+          </div>
+          <div class="profile-bio" id="profileBio"></div>
+          <div class="profile-mutuals" id="profileMutuals" style="display:none"></div>
+          <div class="profile-actions">
+            <button class="btn btn-purple btn-sm" id="profileActionBtn">Settings</button>
+            <button class="btn btn-ghost btn-sm" id="profileMessageBtn" style="display:none">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.4rem"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+              Message
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Premium tabs -->
+      <div class="profile-tabs" role="tablist">
+        <button class="profile-tab active" data-tab="posts" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <span>Posts</span>
+        </button>
+        <button class="profile-tab" data-tab="videos" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="13.5" height="12" rx="2.5"/><path d="M16 10.5l5-2.5v8l-5-2.5z" fill="currentColor" stroke="none"/></svg>
+          <span>Videos</span>
+        </button>
+        <button class="profile-tab" data-tab="books" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/><line x1="12" y1="2" x2="12" y2="20"/></svg>
+          <span>Books</span>
+        </button>
+        <button class="profile-tab" data-tab="about" role="tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          <span>About</span>
+        </button>
+      </div>
+
+      <!-- Tab content -->
+      <div id="profilePosts" class="profile-tab-content"></div>
+      <div id="profileVideos" class="profile-tab-content" style="display:none"></div>
+      <div id="profileBooks" class="profile-tab-content" style="display:none"></div>
+      <div id="profileAbout" class="profile-tab-content" style="display:none">
+        <div class="about-grid">
+          <div class="about-card">
+            <h3 class="about-card-title">📇 Personal Information</h3>
+            <div class="about-row"><span class="about-label">Username</span><span class="about-value" id="aboutUsername">—</span></div>
+            <div class="about-row"><span class="about-label">Bio</span><span class="about-value" id="aboutBio">—</span></div>
+            <div class="about-row"><span class="about-label">Location</span><span class="about-value" id="aboutLocation">—</span></div>
+            <div class="about-row"><span class="about-label">Website</span><span class="about-value" id="aboutWebsite">—</span></div>
+            <div class="about-row"><span class="about-label">Joined</span><span class="about-value" id="aboutJoined">—</span></div>
+          </div>
+          <div class="about-card">
+            <h3 class="about-card-title">🛡️ Account Status</h3>
+            <div class="about-row"><span class="about-label">Status</span><span class="about-pill success">Active</span></div>
+            <div class="about-row"><span class="about-label">Type</span><span class="about-value" id="aboutType">Member</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+  <!-- Edit Profile Modal -->
+<div class="modal-overlay" id="editProfileModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">Edit profile</div>
+      <button class="modal-close-btn" id="editProfileClose">×</button>
+    </div>
+    <label class="form-label">Display name</label>
+    <input class="form-input" id="editUsername" placeholder="Your name"/>
+    <label class="form-label">Bio</label>
+    <textarea class="form-input" id="editBio" rows="3" placeholder="Tell us about yourself..."></textarea>
+    <label class="form-label">Location</label>
+    <input class="form-input" id="editLocation" placeholder="City, Country"/>
+    <label class="form-label">Website</label>
+    <input class="form-input" id="editWebsite" placeholder="https://..."/>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="editProfileCancel">Cancel</button>
+      <button class="btn btn-purple btn-sm" id="editProfileSave">Save</button>
+    </div>
+  </div>
+</div>
+  
+<!-- Repost Modal -->
+<div class="modal-overlay" id="repostModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">Repost</div>
+      <button class="modal-close-btn" id="repostClose">×</button>
+    </div>
+    <textarea class="repost-caption" id="repostCaption" placeholder="Add a caption (optional)…" maxlength="2000"></textarea>
+    <div id="repostPreview" class="repost-preview"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="repostCancel">Cancel</button>
+      <button class="btn btn-purple btn-sm" id="repostSubmit">Repost</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cropper Modal -->
+<div class="modal-overlay" id="cropModal">
+  <div class="modal-box" style="max-width:700px">
+    <div class="modal-header">
+      <div class="modal-title" id="cropTitle">Crop image</div>
+      <button class="modal-close-btn" id="cropClose">×</button>
+    </div>
+    <div class="crop-container">
+      <img id="cropImage" src="" alt=""/>
+    </div>
+    <div class="modal-footer" style="margin-top:1rem">
+      <button class="btn btn-ghost btn-sm" id="cropCancel">Cancel</button>
+      <button class="btn btn-purple btn-sm" id="cropSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Video Upload Modal (Premium 4-phase wizard) -->
+<div class="modal-overlay video-upload-overlay" id="videoUploadModal" style="display:none">
+  <div class="video-upload-modal-premium vu-wizard">
 
     <!-- Header -->
-    <header class="admin-header">
-      <div class="admin-header-left">
-        <a href="/" class="admin-back" title="Back to Selebox">←</a>
-        <div class="admin-title">
-          <h1>Moderation</h1>
-          <span class="admin-role-badge" id="adminRoleBadge">Moderator</span>
-        </div>
+    <div class="vu-header">
+      <div class="vu-header-text">
+        <h2 id="vuTitle">Upload video</h2>
+        <p class="vu-subtitle" id="vuSubtitle">Share your story with the world</p>
       </div>
-      <div class="admin-header-right">
-        <span class="admin-user-name" id="adminUserName"></span>
-      </div>
-    </header>
-
-    <!-- Tab nav -->
-    <nav class="admin-tabs">
-      <button class="admin-tab active" data-tab="inbox">
-        Inbox <span class="admin-tab-count" id="inboxCount">0</span>
+      <button class="vu-close" id="closeVideoUploadModal" aria-label="Close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
       </button>
-      <button class="admin-tab" data-tab="users">Users</button>
-      <button class="admin-tab" data-tab="content">Content</button>
-      <button class="admin-tab" data-tab="bans">Bans</button>
-      <button class="admin-tab" data-tab="wallet">Wallet</button>
-      <button class="admin-tab" data-tab="activity">Activity</button>
-    </nav>
+    </div>
 
-    <!-- Tab content -->
-    <main class="admin-main">
+    <!-- Stepper -->
+    <div class="vu-stepper" id="vuStepper">
+      <div class="vu-step-pill active" data-step="1"><span class="vu-step-num">1</span><span class="vu-step-label">File</span></div>
+      <div class="vu-step-line"></div>
+      <div class="vu-step-pill"        data-step="2"><span class="vu-step-num">2</span><span class="vu-step-label">Details</span></div>
+      <div class="vu-step-line"></div>
+      <div class="vu-step-pill"        data-step="3"><span class="vu-step-num">3</span><span class="vu-step-label">Visibility</span></div>
+      <div class="vu-step-line"></div>
+      <div class="vu-step-pill"        data-step="4"><span class="vu-step-num">4</span><span class="vu-step-label">Upload</span></div>
+    </div>
 
-      <!-- INBOX -->
-      <section class="admin-tab-content" data-tab-content="inbox">
-        <div class="admin-toolbar">
-          <div class="admin-toolbar-left">
-            <h2>Pending reports</h2>
-            <span class="admin-toolbar-sub" id="inboxSubtitle">Loading…</span>
+    <!-- Body -->
+    <div class="vu-body">
+
+      <!-- Phase 1: File picker -->
+      <div class="vu-panel" data-panel="1">
+        <label class="vu-dropzone" id="videoFilePicker">
+          <div class="vu-dropzone-icon">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
           </div>
-          <div class="admin-toolbar-right">
-            <select id="inboxFilter" class="admin-select">
-              <option value="pending">Pending</option>
-              <option value="reviewing">Reviewing</option>
-              <option value="resolved">Resolved</option>
-              <option value="dismissed">Dismissed</option>
-              <option value="all">All</option>
+          <h3>Drag a video here, or click to browse</h3>
+          <p>MP4, MOV, AVI · Up to 2 GB</p>
+          <span class="vu-cta-pill">Select file</span>
+          <input type="file" accept="video/*" id="videoUploadFile" style="display:none">
+        </label>
+        <!-- Selected-file summary, shown after a file is picked -->
+        <div class="vu-file-summary" id="vuFileSummary" style="display:none">
+          <div class="vu-preview-box compact">
+            <video id="videoUploadPreview" muted playsinline></video>
+          </div>
+          <div class="vu-file-meta">
+            <div class="vu-file-name" id="vuFileName">video.mp4</div>
+            <div class="vu-file-size" id="vuFileSize">0 MB</div>
+            <button type="button" class="vu-replace-btn" id="vuReplaceFile">Replace file</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Phase 2: Details -->
+      <div class="vu-panel" data-panel="2" style="display:none">
+        <div class="vu-form">
+          <div class="vu-field">
+            <div class="vu-field-header">
+              <label>Title <span class="vu-required">*</span></label>
+              <span class="vu-counter"><span id="titleCharCount">0</span>/100</span>
+            </div>
+            <input type="text" id="videoUploadTitle" maxlength="100" placeholder="Add a catchy title">
+          </div>
+
+          <div class="vu-field">
+            <div class="vu-field-header">
+              <label>Description</label>
+              <span class="vu-counter"><span id="descCharCount">0</span>/2000</span>
+            </div>
+            <textarea id="videoUploadDescription" maxlength="2000" rows="4" placeholder="Tell viewers about your video..."></textarea>
+          </div>
+
+          <div class="vu-field">
+            <div class="vu-field-header">
+              <label>Tags</label>
+              <span class="vu-hint">Separate with commas</span>
+            </div>
+            <input type="text" id="videoUploadTags" placeholder="romance, drama, story">
+          </div>
+
+          <div class="vu-field">
+            <div class="vu-field-header"><label>Category</label></div>
+            <select id="videoUploadCategory">
+              <option value="general">General</option>
+              <option value="romance">Romance</option>
+              <option value="hot-romance">Hot Romance</option>
+              <option value="thriller">Thriller</option>
+              <option value="horror">Horror</option>
+              <option value="comedy">Comedy</option>
+              <option value="anime">Anime</option>
+              <option value="music">Music</option>
+              <option value="audiobook">Audiobook</option>
+              <option value="books">Books</option>
+              <option value="relaxing">Relaxing</option>
+              <option value="shorts">Shorts</option>
+              <option value="reels">Reels</option>
             </select>
           </div>
         </div>
-        <div id="inboxList" class="admin-list">
-          <div class="admin-empty">Loading reports…</div>
-        </div>
-      </section>
+      </div>
 
-      <!-- USERS -->
-      <section class="admin-tab-content" data-tab-content="users" style="display:none">
-        <div class="admin-toolbar">
-          <div class="admin-toolbar-left">
-            <h2>Users</h2>
-            <span class="admin-toolbar-sub" id="usersSubtitle">Search by username or email</span>
-          </div>
-          <div class="admin-toolbar-right admin-user-filters">
-            <input type="search" id="usersSearch" class="admin-input" placeholder="Search…" autocomplete="off"/>
-            <select id="usersStatusFilter" class="admin-select">
-              <option value="all">All status</option>
-              <option value="active">Active</option>
-              <option value="suspended">Suspended</option>
-              <option value="banned">Banned</option>
-            </select>
-            <select id="usersRoleFilter" class="admin-select">
-              <option value="all">All roles</option>
-              <option value="user">User</option>
-              <option value="moderator">Moderator</option>
-              <option value="admin">Admin</option>
-            </select>
-          </div>
-        </div>
-        <div id="usersList" class="admin-list">
-          <div class="admin-empty">Loading users…</div>
-        </div>
-      </section>
-
-      <!-- CONTENT -->
-      <section class="admin-tab-content" data-tab-content="content" style="display:none">
-        <div class="admin-toolbar">
-          <div class="admin-toolbar-left">
-            <h2>Hidden content</h2>
-            <span class="admin-toolbar-sub" id="contentSubtitle">Loading…</span>
-          </div>
-          <div class="admin-toolbar-right">
-            <select id="contentFilter" class="admin-select">
-              <option value="all">All reasons</option>
-              <option value="spam">Spam</option>
-              <option value="harassment">Harassment</option>
-              <option value="hate">Hate speech</option>
-              <option value="nsfw">NSFW</option>
-              <option value="self_harm">Self-harm</option>
-              <option value="other">Other</option>
-            </select>
-          </div>
-        </div>
-        <div id="contentList" class="admin-list">
-          <div class="admin-empty">Loading…</div>
-        </div>
-      </section>
-
-      <!-- BANS -->
-      <section class="admin-tab-content" data-tab-content="bans" style="display:none">
-        <div class="admin-toolbar">
-          <div class="admin-toolbar-left">
-            <h2>Banned &amp; suspended</h2>
-            <span class="admin-toolbar-sub" id="bansSubtitle">Loading…</span>
-          </div>
-          <div class="admin-toolbar-right">
-            <select id="bansFilter" class="admin-select">
-              <option value="all">All enforcement</option>
-              <option value="banned">Banned only</option>
-              <option value="suspended">Suspended only</option>
-            </select>
-          </div>
-        </div>
-        <div id="bansList" class="admin-list">
-          <div class="admin-empty">Loading…</div>
-        </div>
-      </section>
-
-      <!-- WALLET -->
-      <section class="admin-tab-content" data-tab-content="wallet" style="display:none">
-        <nav class="admin-subtabs">
-          <button class="admin-subtab active" data-subtab="packs">Coin packs</button>
-          <button class="admin-subtab" data-subtab="userwallets">User wallets</button>
-          <button class="admin-subtab" data-subtab="walletconfig">Defaults</button>
-        </nav>
-
-        <!-- Packs sub-tab -->
-        <div class="admin-subtab-content" data-subtab-content="packs">
-          <div class="admin-toolbar">
-            <div class="admin-toolbar-left">
-              <h2>Coin packs</h2>
-              <span class="admin-toolbar-sub" id="packsSubtitle">The catalog users see in the Store</span>
+      <!-- Phase 3: Monetization + Schedule -->
+      <div class="vu-panel" data-panel="3" style="display:none">
+        <!-- Monetization (disabled — coming soon) -->
+        <div class="vu-card">
+          <div class="vu-card-header">
+            <div>
+              <div class="vu-card-title">
+                Monetization
+                <span class="vu-badge-soon">Coming soon</span>
+              </div>
+              <div class="vu-card-sub">Earn from ads, tips, and subscriptions on this video.</div>
             </div>
-            <div class="admin-toolbar-right">
-              <button class="admin-btn admin-btn-primary" id="btnAddPack">+ Add pack</button>
+            <label class="vu-toggle disabled" title="Monetization is not available yet">
+              <input type="checkbox" disabled>
+              <span class="vu-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="vu-card-body muted">
+            We're rolling this out gradually. You'll get an email when it's available for your account.
+          </div>
+        </div>
+
+        <!-- Schedule -->
+        <div class="vu-card">
+          <div class="vu-card-header">
+            <div>
+              <div class="vu-card-title">Visibility</div>
+              <div class="vu-card-sub">Choose when this video goes public.</div>
             </div>
           </div>
-          <div id="packsList" class="admin-list">
-            <div class="admin-empty">Loading packs…</div>
-          </div>
-        </div>
-
-        <!-- User wallets sub-tab -->
-        <div class="admin-subtab-content" data-subtab-content="userwallets" style="display:none">
-          <div class="admin-toolbar">
-            <div class="admin-toolbar-left">
-              <h2>User wallets</h2>
-              <span class="admin-toolbar-sub">Search a user to see live balance + recent transactions</span>
+          <div class="vu-card-body">
+            <div class="vu-radio-row">
+              <label class="vu-radio active" data-vis="now">
+                <input type="radio" name="vuVisibility" value="now" checked>
+                <div class="vu-radio-content">
+                  <div class="vu-radio-title">Publish when ready</div>
+                  <div class="vu-radio-sub">Goes live as soon as Selebox finishes processing.</div>
+                </div>
+              </label>
+              <label class="vu-radio" data-vis="schedule">
+                <input type="radio" name="vuVisibility" value="schedule">
+                <div class="vu-radio-content">
+                  <div class="vu-radio-title">Schedule for later</div>
+                  <div class="vu-radio-sub">Pick a date and time. Stays hidden until then.</div>
+                </div>
+              </label>
             </div>
-            <div class="admin-toolbar-right">
-              <input type="search" id="walletSearch" class="admin-input" placeholder="Username or email…" autocomplete="off"/>
-            </div>
-          </div>
-          <div id="walletSearchResults" class="admin-list" style="display:none"></div>
-          <div id="walletDetail" class="admin-wallet-detail" style="display:none"></div>
-          <div id="walletEmpty" class="admin-empty">Search for a user to view their wallet.</div>
-        </div>
-
-        <!-- Defaults sub-tab -->
-        <div class="admin-subtab-content" data-subtab-content="walletconfig" style="display:none">
-          <div class="admin-toolbar">
-            <div class="admin-toolbar-left">
-              <h2>Defaults</h2>
-              <span class="admin-toolbar-sub">Platform-wide unlock prices and limits. Per-content overrides win.</span>
+            <div class="vu-schedule-input" id="vuScheduleInput" style="display:none">
+              <input type="datetime-local" id="vuScheduleDatetime"/>
             </div>
           </div>
-          <div id="walletConfigList" class="admin-list">
-            <div class="admin-empty">Loading defaults…</div>
+        </div>
+
+        <p class="vu-fb-note">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          Your video stays hidden until Selebox finishes processing — exactly like Facebook. You'll see it in Studio while it processes.
+        </p>
+      </div>
+
+      <!-- Phase 4: Upload progress -->
+      <div class="vu-panel" data-panel="4" style="display:none">
+        <div class="vu-upload-hero" id="vuUploadHero">
+          <div class="vu-upload-icon-wrap">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" id="vuUploadIcon">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <h3 class="vu-upload-title" id="vuUploadHeroTitle">Uploading your video</h3>
+          <p class="vu-upload-sub" id="vuUploadHeroSub">Hang tight — we're sending it to our servers.</p>
+        </div>
+        <div class="vu-progress active" id="videoUploadProgress">
+          <div class="vu-progress-row">
+            <span class="vu-progress-status" id="videoUploadStatus">Preparing…</span>
+            <span class="vu-progress-percent" id="videoUploadPercent">0%</span>
+          </div>
+          <div class="vu-progress-bar">
+            <div class="vu-progress-fill" id="videoUploadFill"></div>
           </div>
         </div>
-      </section>
-
-      <!-- ACTIVITY -->
-      <section class="admin-tab-content" data-tab-content="activity" style="display:none">
-        <div class="admin-toolbar">
-          <h2>Activity log</h2>
-          <span class="admin-toolbar-sub">Every moderation action, append-only</span>
+        <div class="vu-upload-bytes" id="vuUploadBytes" style="display:none">
+          <span id="vuBytesSent">0 MB</span> / <span id="vuBytesTotal">0 MB</span>
+          <span class="vu-upload-speed" id="vuUploadSpeed"></span>
         </div>
-        <div id="activityList" class="admin-list">
-          <div class="admin-empty">Loading activity…</div>
-        </div>
-      </section>
+      </div>
 
-    </main>
+    </div>
+
+    <!-- Footer -->
+    <div class="vu-footer">
+      <button class="vu-btn vu-btn-ghost" id="vuFooterBack">Back</button>
+      <div class="vu-footer-right">
+        <button class="vu-btn vu-btn-ghost" id="cancelVideoUpload">Cancel</button>
+        <button class="vu-btn vu-btn-primary" id="vuFooterNext" disabled>Continue</button>
+      </div>
+    </div>
+
   </div>
+</div>
 
-  <!-- Report detail modal (lazy injected) -->
-  <div id="adminModalRoot"></div>
+<!-- Studio Edit Modal -->
+<div class="modal-overlay video-upload-overlay" id="studioEditModal" style="display:none">
+  <div class="vu-modal">
+    <div class="vu-header">
+      <div class="vu-header-text">
+        <h2 class="vu-title">Edit video</h2>
+        <p class="vu-subtitle">Update your video's details</p>
+      </div>
+      <button class="vu-close" id="studioEditClose" aria-label="Close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="vu-body">
+      <div class="vu-preview-box" id="studioEditPreview" style="display:none">
+        <img id="studioEditThumb" alt=""/>
+      </div>
+      <div class="vu-form">
+        <label class="vu-label">Title <span class="vu-required">*</span></label>
+        <input type="text" id="studioEditTitle" class="vu-input" maxlength="100" placeholder="Add a catchy title">
+        <div class="vu-hint" id="studioEditTitleCount">0 / 100</div>
 
-  <script type="module" src="js/admin.js"></script>
+        <label class="vu-label">Description</label>
+        <textarea id="studioEditDescription" class="vu-textarea" maxlength="2000" rows="4" placeholder="Tell viewers about your video..."></textarea>
+        <div class="vu-hint" id="studioEditDescCount">0 / 2000</div>
+
+        <label class="vu-label">Tags <small style="color:#888">comma-separated</small></label>
+        <input type="text" id="studioEditTags" class="vu-input" placeholder="romance, drama, story">
+
+        <label class="vu-label">Category</label>
+        <select id="studioEditCategory" class="vu-input">
+          <option value="general">General</option>
+          <option value="romance">Romance</option>
+          <option value="hot-romance">Hot Romance</option>
+          <option value="thriller">Thriller</option>
+          <option value="horror">Horror</option>
+          <option value="comedy">Comedy</option>
+          <option value="anime">Anime</option>
+          <option value="music">Music</option>
+          <option value="audiobook">Audiobook</option>
+          <option value="books">Books</option>
+          <option value="relaxing">Relaxing</option>
+          <option value="shorts">Shorts</option>
+          <option value="reels">Reels</option>
+        </select>
+      </div>
+    </div>
+    <div class="vu-footer">
+      <button class="vu-btn vu-btn-secondary" id="studioEditCancel">Cancel</button>
+      <button class="vu-btn vu-btn-primary" id="studioEditSave">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Premium Confirm Modal (reusable for destructive actions) -->
+<div class="modal-overlay confirm-modal-overlay" id="confirmModal" style="display:none">
+  <div class="confirm-modal">
+    <div class="confirm-icon-wrap" id="confirmIconWrap">
+      <svg id="confirmIcon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        <line x1="10" y1="11" x2="10" y2="17"/>
+        <line x1="14" y1="11" x2="14" y2="17"/>
+      </svg>
+    </div>
+    <h2 class="confirm-title" id="confirmTitle">Delete this video?</h2>
+    <p class="confirm-body" id="confirmBody">This permanently removes the video from your feed and Bunny storage. This can't be undone.</p>
+    <div class="confirm-actions">
+      <button class="confirm-btn confirm-btn-cancel" id="confirmCancel" type="button">Cancel</button>
+      <button class="confirm-btn confirm-btn-danger" id="confirmOk" type="button">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+        </svg>
+        <span id="confirmOkLabel">Delete forever</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Chapter Publish dialog (Now / Schedule) ─── -->
+<div class="modal-overlay video-upload-overlay" id="chapterPublishModal" style="display:none">
+  <div class="vu-modal cp-modal">
+    <div class="vu-header">
+      <div class="vu-header-text">
+        <h2 class="vu-title">Publish chapter</h2>
+        <p class="vu-subtitle" id="cpSubtitle">Choose when this chapter goes live</p>
+      </div>
+      <button class="vu-close" id="cpClose" aria-label="Close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="vu-body">
+      <div class="vu-radio-row">
+        <label class="vu-radio active" data-cp-when="now">
+          <input type="radio" name="cpWhen" value="now" checked>
+          <div class="vu-radio-content">
+            <div class="vu-radio-title">Publish now</div>
+            <div class="vu-radio-sub">Readers can open this chapter the moment you click Publish.</div>
+          </div>
+        </label>
+        <label class="vu-radio" data-cp-when="schedule">
+          <input type="radio" name="cpWhen" value="schedule">
+          <div class="vu-radio-content">
+            <div class="vu-radio-title">Schedule for later</div>
+            <div class="vu-radio-sub">Goes live automatically at the time you pick.</div>
+            <div class="vu-schedule-input" id="cpScheduleWrap" style="display:none">
+              <input type="datetime-local" id="cpScheduleDatetime">
+            </div>
+          </div>
+        </label>
+      </div>
+      <div class="vu-fb-note">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        <span>Scheduled chapters stay private until their time arrives — even with the link.</span>
+      </div>
+    </div>
+    <div class="vu-footer">
+      <button class="vu-btn vu-btn-ghost" id="cpUnpublish" style="display:none">Unpublish</button>
+      <div class="vu-footer-right">
+        <button class="vu-btn vu-btn-ghost" id="cpCancel">Cancel</button>
+        <button class="vu-btn vu-btn-primary" id="cpCommit">Publish now</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Chapter Publish SUCCESS modal (Wattpad-style) ─── -->
+<div class="modal-overlay video-upload-overlay" id="chapterPublishSuccessModal" style="display:none">
+  <div class="vu-modal cp-success-modal">
+    <button class="vu-close cp-success-close" id="cpSuccessClose" aria-label="Close">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+
+    <!-- Burst hero -->
+    <div class="cp-success-hero">
+      <div class="cp-success-burst">
+        <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </div>
+      <h2 class="cp-success-title" id="cpSuccessTitle">Chapter published!</h2>
+      <p class="cp-success-sub"  id="cpSuccessSub">Your readers can dive in right now.</p>
+    </div>
+
+    <!-- Book card -->
+    <div class="cp-card">
+      <img class="cp-cover" id="cpSuccessCover" src="" alt="">
+      <div class="cp-card-meta">
+        <div class="cp-book-title" id="cpSuccessBookTitle">—</div>
+        <div class="cp-chapter-line">
+          <span class="cp-chapter-num"  id="cpSuccessChapterNum">Ch 1</span>
+          <span class="cp-chapter-title" id="cpSuccessChapterTitle">—</span>
+        </div>
+        <div class="cp-found-under">
+          <span class="cp-found-label">Found under</span>
+          <div class="cp-chips" id="cpSuccessChips"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="cp-success-actions">
+      <button class="cp-action-btn" id="cpSuccessShare">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+        <span>Share link</span>
+      </button>
+      <button class="cp-action-btn cp-action-btn-primary" id="cpSuccessPreview">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span>Preview</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox">
+  <button class="lightbox-close" id="lightboxClose">×</button>
+  <img id="lightboxImg" src="" alt=""/>
+</div>
+
+<div id="toast" style="display:none"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>
