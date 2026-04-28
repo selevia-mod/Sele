@@ -2631,13 +2631,63 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
 
 async function handleReaction(targetId, targetType, emojiKey) {
   if (!currentUser) return toast('Sign in to react', 'error');
-  const { data: existing } = await supabase.from('reactions').select('id, emoji').eq('user_id', currentUser.id).eq('target_id', targetId).eq('target_type', targetType).maybeSingle();
-  if (existing) {
-    if (existing.emoji === emojiKey) await supabase.from('reactions').delete().eq('id', existing.id);
-    else await supabase.from('reactions').update({ emoji: emojiKey }).eq('id', existing.id);
-  } else {
-    await supabase.from('reactions').insert({ user_id: currentUser.id, target_id: targetId, target_type: targetType, emoji: emojiKey });
+
+  // Optimistic UI update: flip the trigger label/icon immediately so the
+  // user sees their reaction land instantly. loadReactions() reconciles
+  // with the server result a moment later.
+  try {
+    const wraps = document.querySelectorAll(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
+    const r = REACTIONS.find(x => x.key === emojiKey);
+    wraps.forEach(wrap => {
+      const trigger = wrap.querySelector('.reaction-trigger');
+      if (!trigger || !r) return;
+      const icon = trigger.querySelector('.r-icon');
+      const label = trigger.querySelector('.r-label-text');
+      if (icon)  icon.innerHTML = `<span>${r.emoji}</span>`;
+      if (label) label.textContent = r.label;
+      trigger.classList.add('reacted');
+    });
+  } catch {}
+
+  const { data: existing, error: lookupErr } = await supabase
+    .from('reactions')
+    .select('id, emoji')
+    .eq('user_id', currentUser.id)
+    .eq('target_id', targetId)
+    .eq('target_type', targetType)
+    .maybeSingle();
+
+  if (lookupErr) {
+    toast('Reaction failed: ' + lookupErr.message, 'error');
+    loadReactions(targetId, targetType);   // resync UI to server truth
+    return;
   }
+
+  let mutErr = null;
+  if (existing) {
+    if (existing.emoji === emojiKey) {
+      const { error } = await supabase.from('reactions').delete().eq('id', existing.id);
+      mutErr = error;
+    } else {
+      const { error } = await supabase.from('reactions').update({ emoji: emojiKey }).eq('id', existing.id);
+      mutErr = error;
+    }
+  } else {
+    const { error } = await supabase.from('reactions').insert({
+      user_id: currentUser.id,
+      target_id: targetId,
+      target_type: targetType,
+      emoji: emojiKey,
+    });
+    mutErr = error;
+  }
+
+  if (mutErr) {
+    // Surface the real reason so we can debug RLS / schema / FK issues.
+    // Without this, reactions just silently fail and look broken.
+    toast('Reaction failed: ' + mutErr.message, 'error');
+  }
+  // Always resync — pulls server truth + updates counts everywhere
   loadReactions(targetId, targetType);
 }
 
@@ -6950,7 +7000,7 @@ async function loadAuthorDashboard() {
 
   const { data, error } = await supabase
     .from('books')
-    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, created_at, updated_at, published_at')
+    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, lock_from_chapter, locked_at, created_at, updated_at, published_at')
     .eq('author_id', user.id)
     .order('updated_at', { ascending: false });
 
@@ -7018,6 +7068,7 @@ function renderAuthorBookRow(b) {
       <div class="author-book-row-stat">${(b.chapters_count || 0)} ch</div>
       <div class="author-book-row-stat">${(b.views_count || 0).toLocaleString()} 👁</div>
       <div class="author-book-row-actions">
+        ${b.lock_from_chapter ? `<span class="author-book-pro-tag" title="Premium book — locked from chapter ${b.lock_from_chapter}">PRO</span>` : ''}
         <button class="author-book-action-btn" data-author-action="edit" data-id="${b.id}" title="Edit">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
         </button>
