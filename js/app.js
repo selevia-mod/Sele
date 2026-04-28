@@ -205,10 +205,12 @@ async function onSignedIn(user) {
 function showAuth() {
   document.getElementById('authScreen').style.display = 'flex';
   document.getElementById('appScreen').style.display = 'none';
+  document.body.classList.add('is-auth');
 }
 function showApp() {
   document.getElementById('authScreen').style.display = 'none';
   document.getElementById('appScreen').style.display = 'block';
+  document.body.classList.remove('is-auth');
 }
 
 function updateTopbarUser() {
