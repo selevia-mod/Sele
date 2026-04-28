@@ -479,7 +479,9 @@ async function setupVideoMonetGate(player, sbId, video) {
     if (player.currentTime < nextThreshold) return;
 
     modalOpen = true;
-    player.pause();
+    // Note: video keeps playing during the prompt. The 5s auto-coin fallback
+    // means most users won't even notice an interruption — they get a brief
+    // glance at the choice, then it auto-deducts and dismisses.
     openVideoMonetThresholdDialog({
       videoTitle: video.title,
       videoId:    sbId,
@@ -496,12 +498,13 @@ async function setupVideoMonetGate(player, sbId, video) {
           nextThreshold = computeNext(paidThrough);
         }
         renderTopbarCoinPill();
-        player.play().catch(() => {});
+        // No need to call play — we never paused
       },
       onCancel: () => {
-        // Modal closed without payment — leave video paused. User can hit
-        // play again, which will re-fire timeupdate and re-prompt.
+        // Modal closed without payment. Pause now so the user has to
+        // re-engage; on next play, listener re-fires and re-prompts.
         modalOpen = false;
+        try { player.pause(); } catch {}
       },
     });
   };
@@ -529,39 +532,56 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
 
   document.querySelector('.unlock-modal-backdrop')?.remove();
   const modal = document.createElement('div');
-  modal.className = 'unlock-modal-backdrop';
+  modal.className = 'unlock-modal-backdrop video-monet-backdrop';
   modal.innerHTML = `
     <div class="unlock-modal video-monet-modal" role="dialog" aria-modal="true">
       <button class="unlock-modal-close" aria-label="Close">×</button>
-      <div class="unlock-modal-icon">▶️</div>
+      <div class="video-monet-icon-wrap">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      </div>
       <h2>Keep watching</h2>
       ${videoTitle ? `<p class="unlock-modal-title">${escHTML(videoTitle)}</p>` : ''}
-      <p class="unlock-modal-sub">You've enjoyed the first ${Math.floor(threshold / 60)} minutes. Pick how to continue:</p>
+      <p class="unlock-modal-sub">First ${Math.floor(threshold / 60)} minutes done — pick how to continue:</p>
       <div class="video-monet-options">
         <button class="video-monet-option video-monet-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
           <div class="video-monet-option-icon">
-            <svg viewBox="0 0 24 24" width="36" height="36"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+            <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
           </div>
           <div class="video-monet-option-cost">${coinCost} <small>coin${coinCost === 1 ? '' : 's'}</small></div>
-          <div class="video-monet-option-mode">One-time forever</div>
-          <div class="video-monet-option-hint">${canCoin ? 'No more deductions ever' : `You have ${_wallet.coin_balance}`}</div>
+          <div class="video-monet-option-mode">Forever</div>
         </button>
         <button class="video-monet-option video-monet-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
           <div class="video-monet-option-icon">
-            <svg viewBox="0 0 24 24" width="36" height="36"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
+            <svg viewBox="0 0 24 24" width="28" height="28"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
           </div>
           <div class="video-monet-option-cost">${starCost} <small>star${starCost === 1 ? '' : 's'}</small></div>
           <div class="video-monet-option-mode">${recurringMin}-min window</div>
-          <div class="video-monet-option-hint">${canStar ? `Charged again every ${recurringMin} min` : `You have ${_wallet.star_balance}`}</div>
         </button>
       </div>
-      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Out of coins and stars. Top up in the Store, or watch ads in the mobile app to earn stars.</p>' : ''}
+      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Out of coins and stars. Top up in the Store.</p>' : `
+        <div class="video-monet-countdown" id="vmCountdown">
+          <span class="video-monet-countdown-bar"><span class="video-monet-countdown-fill" id="vmCountdownFill"></span></span>
+          <span class="video-monet-countdown-text">Auto-paying with <strong>${coinCost} coin</strong> in <span id="vmCountdownNum">5</span>s · tap to choose differently</span>
+        </div>`}
     </div>
   `;
   document.body.appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('open'));
 
+  // ── 5-second auto-coin countdown ──────────────────────────────────
+  // If user does nothing, we silently deduct a coin and dismiss the dialog
+  // so the video keeps playing without interruption. Any click cancels.
+  let countdownTimer = null;
+  let countdownInterval = null;
+  let cancelCountdown = () => {
+    if (countdownTimer)    { clearTimeout(countdownTimer);    countdownTimer = null; }
+    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+    const cd = modal.querySelector('#vmCountdown');
+    if (cd) cd.classList.add('is-cancelled');
+  };
+
   const close = (cancelled) => {
+    cancelCountdown();
     modal.classList.remove('open');
     setTimeout(() => modal.remove(), 180);
     if (cancelled && typeof onCancel === 'function') onCancel();
@@ -569,31 +589,52 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
   modal.querySelector('.unlock-modal-close').onclick = () => close(true);
   modal.addEventListener('click', (e) => { if (e.target === modal) close(true); });
 
-  modal.querySelectorAll('.video-monet-option').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (btn.disabled) return;
-      const currency = btn.dataset.cur;
-      btn.classList.add('is-loading');
-      const { data, error } = await supabase.rpc('unlock_video_threshold', {
-        p_video_id:          videoId,
-        p_currency:          currency,
-        p_threshold_seconds: threshold,
-      });
-      btn.classList.remove('is-loading');
-      if (error) { toast(error.message, 'error'); return; }
-      if (!data?.ok) {
-        toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
-        return;
-      }
-      // Update local balance optimistically (Realtime will sync too)
-      if (currency === 'coin') _wallet.coin_balance = data.balance_after;
-      else                     _wallet.star_balance = data.balance_after;
-      renderTopbarCoinPill();
-      close(false);
-      toast(data.mode === 'permanent' ? `Unlocked forever! −${data.cost} coin` : `Continuing for ${recurringMin} more min · −${data.cost} star`, 'success');
-      onSuccess({ mode: data.mode || (currency === 'coin' ? 'permanent' : 'window') });
+  const tryUnlock = async (currency, btn) => {
+    if (btn?.disabled) return;
+    cancelCountdown();
+    if (btn) btn.classList.add('is-loading');
+    const { data, error } = await supabase.rpc('unlock_video_threshold', {
+      p_video_id:          videoId,
+      p_currency:          currency,
+      p_threshold_seconds: threshold,
     });
+    if (btn) btn.classList.remove('is-loading');
+    if (error) { toast(error.message, 'error'); return false; }
+    if (!data?.ok) {
+      toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
+      return false;
+    }
+    if (currency === 'coin') _wallet.coin_balance = data.balance_after;
+    else                     _wallet.star_balance = data.balance_after;
+    renderTopbarCoinPill();
+    close(false);
+    toast(data.mode === 'permanent' ? `Unlocked forever! −${data.cost} coin` : `Continuing ${recurringMin} more min · −${data.cost} star`, 'success');
+    onSuccess({ mode: data.mode || (currency === 'coin' ? 'permanent' : 'window') });
+    return true;
+  };
+
+  modal.querySelectorAll('.video-monet-option').forEach(btn => {
+    btn.addEventListener('click', () => tryUnlock(btn.dataset.cur, btn));
   });
+
+  // Start countdown only if the user can actually afford coin auto-pay.
+  // If they're out of coins but have stars, they need to choose manually.
+  if (canCoin) {
+    let secsLeft = 5;
+    const fill = modal.querySelector('#vmCountdownFill');
+    const num  = modal.querySelector('#vmCountdownNum');
+    if (fill) fill.style.width = '0%';
+    requestAnimationFrame(() => { if (fill) fill.style.width = '100%'; });
+    countdownInterval = setInterval(() => {
+      secsLeft--;
+      if (num) num.textContent = secsLeft;
+      if (secsLeft <= 0) clearInterval(countdownInterval);
+    }, 1000);
+    countdownTimer = setTimeout(() => {
+      // Auto-deduct silently. tryUnlock handles success + cleanup.
+      tryUnlock('coin', modal.querySelector('.video-monet-option-coin'));
+    }, 5000);
+  }
 }
 
 // ── Bulk book unlock dialog (Phase 6) ─────────────────────────────────────
@@ -4273,9 +4314,21 @@ async function runFeedSearch(query) {
   searchResultsEl.classList.add('open');
   searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
 
+  // Fetch more people so substring matches like "Ligaya" pull users like
+  // "LIGAYA_ba1f" too (they alphabetically rank below other "Ligaya*" hits).
+  // Bumped from 5 → 20 with explicit username ordering for predictability.
   const [{ data: profiles }, { data: posts }] = await Promise.all([
-    supabase.from('profiles').select('id, username, avatar_url, bio, is_guest').ilike('username', `%${query}%`).limit(5),
-    supabase.from('posts').select('*, profiles!user_id(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
+    supabase.from('profiles')
+      .select('id, username, avatar_url, bio, is_guest, is_banned')
+      .ilike('username', `%${query}%`)
+      .eq('is_banned', false)
+      .order('username', { ascending: true })
+      .limit(20),
+    supabase.from('posts')
+      .select('*, profiles!user_id(username, avatar_url, is_guest)')
+      .ilike('body', `%${query}%`)
+      .order('created_at', { ascending: false })
+      .limit(8)
   ]);
 
   let html = '';
@@ -4321,10 +4374,43 @@ async function runFeedSearch(query) {
       const id = item.dataset.id;
       searchResultsEl.classList.remove('open');
       searchInput.value = '';
-      
+
       if (type === 'profile') openProfile(id);
+      else if (type === 'post') openPostFromSearch(id);
     };
   });
+}
+
+// Navigate the feed to a specific post — scrolls + highlights it briefly so
+// the user knows which one matched. If the post isn't in the visible feed,
+// jumps to the author's profile instead so the user can find it there.
+async function openPostFromSearch(postId) {
+  // Already in the loaded feed? Scroll + highlight.
+  const inFeed = document.querySelector(`.post-card[data-postid="${postId}"]`);
+  if (inFeed && feedEl.style.display !== 'none') {
+    inFeed.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    inFeed.classList.add('post-flash');
+    setTimeout(() => inFeed.classList.remove('post-flash'), 1500);
+    return;
+  }
+  // Otherwise show the feed first, wait for it to render, then try again.
+  // If still not found, jump to the author's profile (where the post lives in
+  // their timeline).
+  if (typeof showFeed === 'function') showFeed();
+  setTimeout(async () => {
+    const card = document.querySelector(`.post-card[data-postid="${postId}"]`);
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.add('post-flash');
+      setTimeout(() => card.classList.remove('post-flash'), 1500);
+      return;
+    }
+    // Fallback — fetch the post's author and open their profile
+    try {
+      const { data } = await supabase.from('posts').select('user_id').eq('id', postId).maybeSingle();
+      if (data?.user_id) openProfile(data.user_id);
+    } catch {}
+  }, 600);
 }
 
 window.addEventListener('hashchange', updateSearchPlaceholder);
@@ -10407,8 +10493,9 @@ async function initNotifications() {
         _notifUnreadCount += 1;
         updateNotifBadge();
         renderNotifications();
-        // Subtle toast so the user knows something happened
-        toast(notificationLabel(n), 'success');
+        // No toast on incoming notifications — the bell badge + dropdown
+        // already surfaces them. Toast was too intrusive (especially for DMs
+        // where the unread badge on the Messages sidebar entry is enough).
       })
       .on('postgres_changes', {
         event: 'UPDATE',
@@ -11410,14 +11497,21 @@ async function openConversation(convId) {
   // Load messages
   await loadMessages(convId);
 
-  // Mark as read (server-side) — fire-and-forget
-  supabase.rpc('mark_conversation_read', { p_conversation_id: convId }).then(() => {
+  // ── Optimistically clear unread BEFORE the RPC call ──
+  // Even if mark_conversation_read fails (RPC missing, network error, etc.),
+  // the user sees the badge clear immediately. Real-time correction happens
+  // on next loadConversationList if the server disagrees.
+  const _zeroUnread = () => {
     const c = dmState.conversations.find(x => x.id === convId);
     if (c) c.unread = 0;
     renderConversationList();
     const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
     updateUnreadBadge(total);
-  });
+  };
+  _zeroUnread();
+  supabase.rpc('mark_conversation_read', { p_conversation_id: convId })
+    .then(_zeroUnread)
+    .catch(() => {});  // Already cleared optimistically; ignore RPC errors
 
   // Subscribe to realtime updates for this conversation
   subscribeToThread(convId);
@@ -11885,7 +11979,37 @@ function subscribeToThread(convId) {
       filter: `conversation_id=eq.${convId}`,
     }, (payload) => {
       const newMsg = payload.new;
+      // Already in the array by real id? skip (covers the case where the
+      // HTTP insert response landed first and we already swapped tempId → real).
       if (dmState.messages.some(m => m.id === newMsg.id)) return;
+
+      // Race fix: if MY own message echoes back from realtime BEFORE the HTTP
+      // insert response returns, the temp-XXX placeholder is still in the
+      // array. Without this match, we'd push a second copy and the user
+      // would see the message twice. Find the matching temp and swap in
+      // place rather than push.
+      if (newMsg.sender_id === currentUser.id) {
+        const tempIdx = dmState.messages.findIndex(m =>
+          String(m.id).startsWith('temp-') &&
+          m.sender_id === currentUser.id &&
+          (m.body || '') === (newMsg.body || '')
+        );
+        if (tempIdx >= 0) {
+          const oldId = dmState.messages[tempIdx].id;
+          dmState.messages[tempIdx] = newMsg;
+          // Migrate the rendered-id tracker so the bubble doesn't re-animate
+          if (_renderedMessageIds.has(oldId)) {
+            _renderedMessageIds.delete(oldId);
+            _renderedMessageIds.add(newMsg.id);
+          }
+          // Update the DOM in-place — same as the HTTP-response path does
+          document.querySelectorAll(`[data-msg-id="${oldId}"]`).forEach(el => {
+            el.dataset.msgId = newMsg.id;
+          });
+          return;
+        }
+      }
+
       dmState.messages.push(newMsg);
       renderMessages();
       scrollMessagesToBottom();
@@ -11893,6 +12017,15 @@ function subscribeToThread(convId) {
         // The other side just sent — clear typing indicator
         dmState.otherIsTyping = false;
         supabase.rpc('mark_conversation_read', { p_conversation_id: convId });
+        // Also reset local unread immediately so the sidebar badge doesn't
+        // tick up while the user is actively reading the thread. The inbox
+        // channel's guard already skips totalUnread bump, but the per-conv
+        // count needs explicit clearing here in case it drifted.
+        const c = dmState.conversations.find(x => x.id === convId);
+        if (c) c.unread = 0;
+        const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
+        updateUnreadBadge(total);
+        renderConversationList();
       }
     })
     .on('postgres_changes', {
