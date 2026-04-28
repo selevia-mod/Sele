@@ -5509,8 +5509,8 @@ function renderBookDetail() {
           : '';
         return `
           <div class="chapter-row${locked ? ' is-locked' : ''}" data-chapter-id="${c.id}">
-            <span class="chapter-row-num">Ch ${c.chapter_number}</span>
-            <span class="chapter-row-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
+            <span class="chapter-row-num">#${c.chapter_number}</span>
+            <span class="chapter-row-title">${escHTML(c.title || `#${c.chapter_number}`)}</span>
             ${lockBadge}
             <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
           </div>
