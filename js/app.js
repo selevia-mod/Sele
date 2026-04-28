@@ -1087,6 +1087,37 @@ let _feedPostObserver = null;
 
 const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration))`;
 
+// Feed mode — 'foryou' (default), 'following', or 'discover'
+let _feedMode = 'foryou';
+
+// Velocity score for ranking — recent engagement per hour, weighted.
+// likes×1, comments×2, reposts×3 (stronger signals weighted heavier).
+function _feedVelocity(p) {
+  const created = new Date(p.created_at || Date.now()).getTime();
+  const hours   = Math.max(1, (Date.now() - created) / 3600_000);
+  const eng     = (p.likes_count || 0)
+                + (p.comments_count || 0) * 2
+                + (p.reposts_count  || 0) * 3;
+  return eng / hours;
+}
+
+// Apply diversity penalty: skip showing the same author twice in a row.
+// Pushes those posts down rather than removing them.
+function _feedDiversify(arr) {
+  const out = [];
+  const queue = [...arr];
+  let lastAuthor = null;
+  while (queue.length) {
+    // Find next post whose author differs from lastAuthor; if none, take the head.
+    let i = queue.findIndex(p => p.user_id !== lastAuthor);
+    if (i === -1) i = 0;
+    const p = queue.splice(i, 1)[0];
+    out.push(p);
+    lastAuthor = p.user_id;
+  }
+  return out;
+}
+
 window.loadFeed = async function() {
   const feed = document.getElementById('feed');
   const sentinel = document.getElementById('feedSentinel');
@@ -1101,23 +1132,84 @@ window.loadFeed = async function() {
   if (_feedVideoObserver)  { _feedVideoObserver.disconnect();  _feedVideoObserver = null; }
   if (_feedPostObserver)   { _feedPostObserver.disconnect();   _feedPostObserver = null; }
 
-  const { data, error } = await supabase
-    .from('posts')
-    .select(FEED_SELECT)
-    .eq('is_hidden', false)
-    .order('created_at', { ascending: false })
-    .range(0, FEED_PAGE_SIZE - 1);
+  // Resolve which posts to fetch based on the active mode
+  let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
+  let scoreClientSide = false;
+  let followIds = null;
+
+  if (_feedMode === 'following' || _feedMode === 'discover') {
+    // Need follow set for both
+    const { data: f } = await supabase.from('follows')
+      .select('following_id')
+      .eq('follower_id', currentUser.id);
+    followIds = (f || []).map(r => r.following_id);
+  }
+
+  if (_feedMode === 'following') {
+    if (!followIds.length) {
+      feed.innerHTML = `
+        <div class="empty">
+          <h3>You're not following anyone yet</h3>
+          <p>Switch to <strong>Discover</strong> or <strong>For You</strong> to find creators worth following.</p>
+        </div>`;
+      return;
+    }
+    q = q.in('user_id', followIds).order('created_at', { ascending: false });
+  } else if (_feedMode === 'discover') {
+    // Exclude follows and self. Pull a wider pool, score client-side.
+    const exclude = [...followIds, currentUser.id];
+    if (exclude.length) {
+      q = q.not('user_id', 'in', `(${exclude.map(id => `"${id}"`).join(',')})`);
+    }
+    // Last 14 days only — keeps the section feeling fresh
+    q = q.gt('created_at', new Date(Date.now() - 14*86400_000).toISOString())
+         .order('created_at', { ascending: false });
+    scoreClientSide = true;
+  } else {
+    // For You — wider pool, then client-side velocity scoring + follow boost
+    q = q.gt('created_at', new Date(Date.now() - 14*86400_000).toISOString())
+         .order('created_at', { ascending: false });
+    scoreClientSide = true;
+  }
+
+  // Pull a wider page so client-side scoring has material to work with
+  const fetchLimit = scoreClientSide ? FEED_PAGE_SIZE * 3 : FEED_PAGE_SIZE;
+  const { data, error } = await q.range(0, fetchLimit - 1);
 
   if (error) { feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`; return; }
 
   // Filter happens client-side using the cached filter set (loaded once on sign-in).
-  // No re-fetch here — keeps feed load fast.
-  posts = (data || []).filter(p => !shouldHidePost(p));
-  if ((data || []).length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
+  let result = (data || []).filter(p => !shouldHidePost(p));
+
+  if (scoreClientSide) {
+    // For You: boost posts from people you follow by 1.5×
+    if (_feedMode === 'foryou' && !followIds) {
+      const { data: f } = await supabase.from('follows')
+        .select('following_id')
+        .eq('follower_id', currentUser.id);
+      followIds = (f || []).map(r => r.following_id);
+    }
+    const followSet = new Set(followIds || []);
+    result.forEach(p => {
+      p._score = _feedVelocity(p) * (followSet.has(p.user_id) ? 1.5 : 1.0);
+    });
+    result.sort((a, b) => (b._score || 0) - (a._score || 0));
+    // Diversity: don't show the same author twice in a row
+    result = _feedDiversify(result);
+    // Trim back to the page size
+    result = result.slice(0, FEED_PAGE_SIZE);
+  }
+
+  posts = result;
+
+  if ((data || []).length < fetchLimit) _hasMoreFeedPosts = false;
   _feedOffset = (data || []).length;
 
   if (!posts.length) {
-    feed.innerHTML = '<div class="empty"><h3>No posts yet</h3><p>Be the first to share something!</p></div>';
+    const emptyMsg = _feedMode === 'discover'
+      ? '<h3>No fresh posts to discover</h3><p>Check back soon — new content drops daily.</p>'
+      : '<h3>No posts yet</h3><p>Be the first to share something!</p>';
+    feed.innerHTML = `<div class="empty">${emptyMsg}</div>`;
     return;
   }
 
@@ -1131,6 +1223,17 @@ window.loadFeed = async function() {
   setupFeedLazyLoaders(feed);
   if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
 };
+
+// Wire feed mode tabs (For You / Following / Discover)
+document.querySelectorAll('#feedTabs .feed-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const mode = tab.dataset.feed;
+    if (mode === _feedMode) return;
+    document.querySelectorAll('#feedTabs .feed-tab').forEach(t => t.classList.toggle('active', t === tab));
+    _feedMode = mode;
+    loadFeed();
+  });
+});
 
 async function loadMoreFeed() {
   if (_isLoadingMoreFeed || !_hasMoreFeedPosts) return;
@@ -6708,13 +6811,19 @@ function renderEarningsBreakdown(rows) {
 
 function renderAuthorEarningsBalance() {
   const b = _authorBalance || {};
+  // Peso primary, coins/stars secondary (admin-tunable rates handle conversion)
+  document.getElementById('earningsAvailablePhp').textContent = formatPhpFromMinor(b.available_php_minor || 0);
+  document.getElementById('earningsPendingPhp').textContent   = formatPhpFromMinor(b.pending_php_minor   || 0);
   document.getElementById('earningsAvailableCoins').textContent = (b.available_coins || 0).toLocaleString();
   document.getElementById('earningsPendingCoins').textContent   = (b.pending_coins   || 0).toLocaleString();
-  document.getElementById('earningsAvailablePhp').textContent = '≈ ' + formatPhpFromMinor(b.available_php_minor || 0);
-  document.getElementById('earningsPendingPhp').textContent   = '≈ ' + formatPhpFromMinor(b.pending_php_minor   || 0);
-  const holdDays = _walletConfigDefaults.author_earnings_hold_days || 7;
+  // Stars surfaces (RPC may not return them yet — fall back gracefully)
+  const availStars = document.getElementById('earningsAvailableStars');
+  const pendStars  = document.getElementById('earningsPendingStars');
+  if (availStars) availStars.textContent = (b.available_stars || 0).toLocaleString();
+  if (pendStars)  pendStars.textContent  = (b.pending_stars   || 0).toLocaleString();
+  // Hold copy — kept as "1–3 days" range regardless of underlying config
   const foot = document.getElementById('earningsHoldFootnote');
-  if (foot) foot.textContent = `Earnings become available ${holdDays} day${holdDays === 1 ? '' : 's'} after they're earned.`;
+  if (foot) foot.textContent = "Earnings become available 1–3 days after they're earned.";
 }
 
 function formatPhpFromMinor(m) {
@@ -6886,7 +6995,7 @@ const _piUploads = { qr: null, id: null, sig: null };
 
 // Pre-fill the form when the Payments Info tab loads (idempotent — safe to
 // call any time _authorKyc is fresh).
-function fillPaymentsInfoForm() {
+async function fillPaymentsInfoForm() {
   const k = _authorKyc;
   document.getElementById('piFullName').value = k?.full_name || '';
   document.getElementById('piPhone').value    = k?.phone || '';
@@ -6909,6 +7018,204 @@ function fillPaymentsInfoForm() {
   _piUploads.qr  = null;
   _piUploads.id  = null;
   _piUploads.sig = null;
+
+  // ── Lock-after-first-save logic ──
+  // If the user has already saved their info (record exists), the form goes
+  // read-only and they have to use the "Request changes" flow which routes
+  // through admin review. Prevents impulse edits / fraud.
+  const hasRecord = !!(k && k.full_name);
+
+  // Check for any pending change request to surface the "awaiting review" banner
+  let pendingRequest = null;
+  if (hasRecord) {
+    try {
+      const { data } = await supabase
+        .from('payment_info_change_requests')
+        .select('id, requested_at, status')
+        .eq('user_id', currentUser.id)
+        .eq('status', 'pending')
+        .order('requested_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (data) pendingRequest = data;
+    } catch {}
+  }
+
+  applyPaymentsInfoLockState(hasRecord, pendingRequest);
+}
+
+// Toggle the form between editable (first-time) and read-only (post-save).
+// In read-only mode, all inputs/uploads are disabled and the save button is
+// replaced with "Request changes" — which opens a modal that submits a request
+// for admin approval (see payment_info_change_requests table).
+function applyPaymentsInfoLockState(hasRecord, pendingRequest) {
+  const inputs = [
+    document.getElementById('piFullName'),
+    document.getElementById('piPhone'),
+    document.getElementById('piEmail'),
+    document.getElementById('piDob'),
+    document.getElementById('piAddress'),
+  ];
+  const radios = document.querySelectorAll('input[name="piMethod"]');
+  const uploadBoxes = document.querySelectorAll('.pi-upload, #piQrUploadBox, #piIdUploadBox, #piSigUploadBox');
+
+  inputs.forEach(el => { if (el) el.readOnly = hasRecord; });
+  radios.forEach(r => { r.disabled = hasRecord; });
+  uploadBoxes.forEach(box => {
+    if (hasRecord) box.classList.add('pi-locked');
+    else           box.classList.remove('pi-locked');
+  });
+
+  // Swap action buttons
+  const saveBtn      = document.getElementById('piSaveBtn');
+  const requestBtn   = document.getElementById('piRequestChangeBtn');
+  const pendingBanner = document.getElementById('piPendingBanner');
+
+  if (saveBtn) saveBtn.style.display = hasRecord ? 'none' : '';
+
+  // Lazily inject the "Request changes" button + pending banner if missing
+  if (hasRecord && !requestBtn) {
+    const saveContainer = saveBtn?.parentElement;
+    if (saveContainer) {
+      const btn = document.createElement('button');
+      btn.id = 'piRequestChangeBtn';
+      btn.className = 'pi-save-btn';
+      btn.style.background = 'linear-gradient(135deg, #7c3aed, #a78bfa)';
+      btn.innerHTML = '<span>Request changes</span>';
+      btn.onclick = openPaymentInfoChangeModal;
+      saveContainer.appendChild(btn);
+    }
+  } else if (!hasRecord && requestBtn) {
+    requestBtn.remove();
+  }
+
+  // Pending banner
+  let banner = document.getElementById('piPendingBanner');
+  if (pendingRequest) {
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'piPendingBanner';
+      banner.className = 'pi-pending-banner';
+      const formContainer = document.querySelector('.pi-card')?.parentElement;
+      if (formContainer) formContainer.insertBefore(banner, formContainer.firstChild);
+    }
+    const requestedAt = new Date(pendingRequest.requested_at).toLocaleDateString();
+    banner.innerHTML = `<span>⏳</span><span>Change request pending admin review (submitted ${requestedAt}). You'll be notified when it's reviewed.</span>`;
+  } else if (banner) {
+    banner.remove();
+  }
+}
+
+async function openPaymentInfoChangeModal() {
+  const k = _authorKyc || {};
+  const modal = document.getElementById('piChangeModal') || createPaymentInfoChangeModal();
+  // Pre-fill with current values so the user only edits what's changing
+  modal.querySelector('#piChangeFullName').value = k.full_name || '';
+  modal.querySelector('#piChangePhone').value    = k.phone || '';
+  modal.querySelector('#piChangeEmail').value    = k.email || '';
+  modal.querySelector('#piChangeAddress').value  = k.address || '';
+  modal.querySelector('#piChangeMethod').value   = k.payment_method || '';
+  modal.querySelector('#piChangeReason').value   = '';
+  modal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closePaymentInfoChangeModal() {
+  document.getElementById('piChangeModal')?.classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+function createPaymentInfoChangeModal() {
+  const m = document.createElement('div');
+  m.id = 'piChangeModal';
+  m.className = 'modal-overlay';
+  m.innerHTML = `
+    <div class="modal-box" style="max-width:520px">
+      <div class="modal-header">
+        <div class="modal-title">Request changes to Payments Info</div>
+        <button class="modal-close-btn" id="piChangeClose">×</button>
+      </div>
+      <p style="font-size:0.86rem; color:var(--text2); margin-bottom:1rem; line-height:1.5">
+        Edit only the fields you want to change. An admin will review your request — you'll get a notification when approved or rejected.
+      </p>
+      <label class="form-label">Full name</label>
+      <input class="form-input" id="piChangeFullName" maxlength="100"/>
+      <label class="form-label">Phone</label>
+      <input class="form-input" id="piChangePhone" maxlength="30"/>
+      <label class="form-label">Email</label>
+      <input class="form-input" id="piChangeEmail" maxlength="120"/>
+      <label class="form-label">Address</label>
+      <input class="form-input" id="piChangeAddress" maxlength="200"/>
+      <label class="form-label">Payment method</label>
+      <select class="form-input" id="piChangeMethod">
+        <option value="">— Select —</option>
+        <option value="gcash">GCash</option>
+        <option value="maya">Maya</option>
+        <option value="bank">Bank transfer</option>
+        <option value="gotyme">GoTyme</option>
+      </select>
+      <label class="form-label">Why are you making this change? (required)</label>
+      <textarea class="form-input" id="piChangeReason" rows="3" maxlength="500" placeholder="e.g. I switched to a new bank, my address changed…"></textarea>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" id="piChangeCancel">Cancel</button>
+        <button class="btn btn-purple btn-sm" id="piChangeSubmit">Submit request</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(m);
+  m.querySelector('#piChangeClose').onclick = closePaymentInfoChangeModal;
+  m.querySelector('#piChangeCancel').onclick = closePaymentInfoChangeModal;
+  m.addEventListener('click', (e) => { if (e.target === m) closePaymentInfoChangeModal(); });
+  m.querySelector('#piChangeSubmit').onclick = submitPaymentInfoChange;
+  return m;
+}
+
+async function submitPaymentInfoChange() {
+  const reason = document.getElementById('piChangeReason').value.trim();
+  if (!reason) { toast('Please explain why you need this change', 'error'); return; }
+
+  const k = _authorKyc || {};
+  // Only include fields that actually changed — keeps the diff focused
+  const changed = {};
+  const fields = [
+    ['piChangeFullName', 'full_name',      k.full_name],
+    ['piChangePhone',    'phone',          k.phone],
+    ['piChangeEmail',    'email',          k.email],
+    ['piChangeAddress',  'address',        k.address],
+    ['piChangeMethod',   'payment_method', k.payment_method],
+  ];
+  for (const [id, key, current] of fields) {
+    const v = document.getElementById(id).value.trim();
+    if (v && v !== (current || '')) changed[key] = v;
+  }
+  if (Object.keys(changed).length === 0) {
+    toast('No fields changed — edit at least one before submitting', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('piChangeSubmit');
+  btn.disabled = true; btn.textContent = 'Submitting…';
+
+  const { data, error } = await supabase.rpc('request_payment_info_change', {
+    p_requested_data: changed,
+    p_reason: reason,
+  });
+
+  btn.disabled = false; btn.textContent = 'Submit request';
+
+  if (error) { toast(error.message, 'error'); return; }
+  if (!data?.ok) {
+    const msg = data?.error === 'pending_request_exists'
+      ? 'You already have a pending change request — wait for admin review first.'
+      : (data?.error || 'Failed to submit request');
+    toast(msg, 'error');
+    return;
+  }
+
+  toast('Change request submitted — admin will review it shortly', 'success');
+  closePaymentInfoChangeModal();
+  // Re-render the locked form so the pending banner appears
+  fillPaymentsInfoForm();
 }
 
 // Wire each upload control once at module load
