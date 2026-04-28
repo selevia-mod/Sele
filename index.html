@@ -150,6 +150,12 @@
       </span>
       <span class="sidebar-label">Profile</span>
     </button>
+    <button class="sidebar-item" title="Earnings" id="btnEarnings">
+      <span class="sidebar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+      </span>
+      <span class="sidebar-label">Earnings</span>
+    </button>
     <div class="sidebar-divider"></div>
     <button class="sidebar-item sidebar-item-logout" title="Log out" id="btnSignOut">
       <span class="sidebar-icon">
@@ -413,67 +419,6 @@
           <div class="loading">Loading your books...</div>
         </div>
 
-        <!-- ─── Earnings section (Phase 7) ─── -->
-        <div class="author-earnings-section" id="authorEarningsSection" style="display:none">
-          <div class="author-earnings-header">
-            <h2 class="author-section-title">Earnings</h2>
-            <span class="author-section-sub" id="authorEarningsSub">Coins from readers who unlock your work. Stars don't count.</span>
-          </div>
-
-          <div class="author-earnings-cards">
-            <div class="author-earnings-card author-earnings-available">
-              <div class="author-earnings-icon">
-                <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
-              </div>
-              <div class="author-earnings-meta">
-                <div class="author-earnings-label">Available to withdraw</div>
-                <div class="author-earnings-value">
-                  <span id="earningsAvailableCoins">0</span> coins
-                  <span class="author-earnings-php" id="earningsAvailablePhp">≈ ₱0.00</span>
-                </div>
-              </div>
-              <button class="btn btn-purple" id="btnRequestPayout" disabled>Request payout</button>
-            </div>
-
-            <div class="author-earnings-card author-earnings-pending">
-              <div class="author-earnings-icon">⏳</div>
-              <div class="author-earnings-meta">
-                <div class="author-earnings-label">Pending (in hold period)</div>
-                <div class="author-earnings-value">
-                  <span id="earningsPendingCoins">0</span> coins
-                  <span class="author-earnings-php" id="earningsPendingPhp">≈ ₱0.00</span>
-                </div>
-                <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 7 days after they're earned.</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- KYC banner (changes copy by status) -->
-          <div class="author-kyc-banner" id="authorKycBanner" style="display:none">
-            <div class="author-kyc-icon">🪪</div>
-            <div class="author-kyc-text">
-              <div class="author-kyc-title" id="authorKycTitle">Complete KYC to enable payouts</div>
-              <div class="author-kyc-sub" id="authorKycSub">We need to verify your identity before sending you money. This is a one-time step required by Philippine law.</div>
-            </div>
-            <button class="btn btn-purple btn-sm" id="btnSubmitKyc">Submit KYC</button>
-          </div>
-
-          <!-- Recent earnings list -->
-          <div class="author-earnings-list-wrap">
-            <h3 class="author-section-subtitle">Recent earnings</h3>
-            <div id="authorEarningsList" class="author-earnings-list">
-              <div class="loading">Loading earnings…</div>
-            </div>
-          </div>
-
-          <!-- Withdrawal history -->
-          <div class="author-earnings-list-wrap">
-            <h3 class="author-section-subtitle">Withdrawal history</h3>
-            <div id="authorWithdrawalsList" class="author-earnings-list">
-              <div class="loading">Loading…</div>
-            </div>
-          </div>
-        </div>
       </div>
 
       <!-- ─── View B: Book editor (metadata + chapter list) ─── -->
@@ -524,12 +469,14 @@
               <option value="paused">Paused</option>
             </select>
 
-            <!-- Book-level monetization lock -->
+            <!-- Book-level monetization lock — premium card, no decorative icon -->
             <div class="book-lock-card" id="bookLockCard">
               <div class="book-lock-head">
-                <span class="book-lock-icon" aria-hidden="true">🔒</span>
                 <div class="book-lock-titles">
-                  <div class="book-lock-title">Premium chapters</div>
+                  <div class="book-lock-title">
+                    Premium chapters
+                    <span class="book-lock-tag">PRO</span>
+                  </div>
                   <div class="book-lock-sub">Lock chapters from a chosen number onwards. Chapters 1–4 are always free.</div>
                 </div>
               </div>
@@ -537,11 +484,18 @@
                 <label class="book-lock-toggle">
                   <input type="checkbox" id="bookLockEnabled"/>
                   <span class="lock-toggle-track"><span class="lock-toggle-knob"></span></span>
-                  <span>Enable lock</span>
+                  <span class="book-lock-toggle-text">Enable lock</span>
                 </label>
                 <label class="book-lock-from">
                   <span>Lock from chapter</span>
-                  <input type="number" id="bookLockFromChapter" min="5" max="9999" placeholder="5"/>
+                  <select id="bookLockFromChapter" class="book-lock-from-select">
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                    <option value="7">7</option>
+                    <option value="8">8</option>
+                    <option value="9">9</option>
+                    <option value="10">10</option>
+                  </select>
                 </label>
               </div>
               <div class="book-lock-warning" id="bookLockWarning">
@@ -1256,23 +1210,17 @@
 
       <!-- Phase 3: Monetization + Schedule -->
       <div class="vu-panel" data-panel="3" style="display:none">
-        <!-- Monetization (disabled — coming soon) -->
+        <!-- Monetization (Phase 6: time-based, not gated-from-start) -->
         <div class="vu-card">
           <div class="vu-card-header">
             <div>
-              <div class="vu-card-title">
-                Monetization
-                <span class="vu-badge-soon">Coming soon</span>
-              </div>
-              <div class="vu-card-sub">Earn from ads, tips, and subscriptions on this video.</div>
+              <div class="vu-card-title">Monetize this video</div>
+              <div class="vu-card-sub">Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.</div>
             </div>
-            <label class="vu-toggle disabled" title="Monetization is not available yet">
-              <input type="checkbox" disabled>
+            <label class="vu-toggle" title="Toggle monetization">
+              <input type="checkbox" id="vuMonetized">
               <span class="vu-toggle-slider"></span>
             </label>
-          </div>
-          <div class="vu-card-body muted">
-            We're rolling this out gradually. You'll get an email when it's available for your account.
           </div>
         </div>
 
