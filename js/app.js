@@ -4828,15 +4828,30 @@ function applyBookFilterAndSort(list) {
 
   const dateOf = b => new Date(b.published_at || b.created_at || 0);
   if (bookSortBy === 'recent') {
+    // Newest = most recently published
     merged.sort((a, b) => dateOf(b) - dateOf(a));
   } else if (bookSortBy === 'most-liked') {
+    // All-time most liked
     merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
   } else if (bookSortBy === 'most-read') {
+    // All-time most viewed
     merged.sort((a, b) => (b.views_count || 0) - (a.views_count || 0));
-  } else { // trending
+  } else if (bookSortBy === 'completed') {
+    // Filter to completed-status only, sort by likes (binge-readable)
+    merged = merged.filter(b => (b.status || '').toLowerCase() === 'completed');
+    merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
+  } else if (bookSortBy === 'editors-pick') {
+    // Admin-curated; sort by editors_pick_at desc (newest pick first)
+    merged = merged.filter(b => b.is_editors_pick === true);
+    merged.sort((a, b) => new Date(b.editors_pick_at || 0) - new Date(a.editors_pick_at || 0));
+  } else { // trending — last-7-days hotness, weighted by likes
     merged.sort((a, b) => {
-      const diff = (b.likes_count || 0) - (a.likes_count || 0);
-      if (diff !== 0) return diff;
+      const sa = (a.trending_score != null) ? Number(a.trending_score) : ((a.views_last_7d || 0) + (a.likes_last_7d || 0) * 5);
+      const sb = (b.trending_score != null) ? Number(b.trending_score) : ((b.views_last_7d || 0) + (b.likes_last_7d || 0) * 5);
+      if (sb !== sa) return sb - sa;
+      // Tie-break: all-time likes, then newest
+      const lDiff = (b.likes_count || 0) - (a.likes_count || 0);
+      if (lDiff !== 0) return lDiff;
       return dateOf(b) - dateOf(a);
     });
   }
@@ -5242,8 +5257,10 @@ async function fetchSupabaseBooks(offset = 0, limit = 80) {
     const { data, error } = await supabase
       .from('books')
       .select(`
-        id, title, description, cover_url, genre, tags,
+        id, title, description, cover_url, genre, tags, status,
         views_count, likes_count, chapters_count, word_count,
+        views_last_7d, likes_last_7d, trending_score,
+        is_editors_pick, editors_pick_at, editors_pick_note,
         published_at, created_at,
         author_id,
         profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
@@ -5375,9 +5392,17 @@ function renderBookCard(b) {
     : `<div class="book-cover-placeholder">${initialLetter}</div>`;
   const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
 
+  const editorsPickBadge = b.is_editors_pick
+    ? `<div class="book-editors-pick-badge" title="${escHTML(b.editors_pick_note || 'Editor\'s Pick')}">
+         <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+         Editor's Pick
+       </div>`
+    : '';
+
   card.innerHTML = `
     <div class="book-cover">
       ${cover}
+      ${editorsPickBadge}
       <div class="book-stats">
         <span title="Views" data-stat="views">👁 ${formatCompact(b.views_count || 0)}</span>
         <span title="Likes" data-stat="likes">❤ ${formatCompact(b.likes_count || 0)}</span>
@@ -5572,6 +5597,12 @@ function renderBookDetail() {
             <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
             <span class="book-action-label">Bookmark</span>
           </button>
+          ${(currentProfile?.role === 'admin' || currentProfile?.role === 'moderator') ? `
+            <button class="btn btn-sm book-action-btn book-editors-pick-btn ${book.is_editors_pick ? 'is-picked' : ''}" id="btnEditorsPick" data-picked="${book.is_editors_pick ? '1' : '0'}" title="${book.is_editors_pick ? 'Remove Editor\\'s Pick' : 'Mark as Editor\\'s Pick'}">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="${book.is_editors_pick ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+              <span class="book-action-label">${book.is_editors_pick ? "Editor's Pick" : 'Pick'}</span>
+            </button>
+          ` : ''}
         </div>
         <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
         ${bulkUnlockCard}
@@ -5614,6 +5645,46 @@ function renderBookDetail() {
   const bookmarkBtn = document.getElementById('btnBookmarkBook');
   likeBtn?.addEventListener('click', () => toggleBookLike(book.id));
   bookmarkBtn?.addEventListener('click', () => toggleBookBookmark(book.id));
+
+  // Editor's Pick toggle (mods/admins only — button is gated server-side too)
+  document.getElementById('btnEditorsPick')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const currentlyPicked = btn.dataset.picked === '1';
+    const willPick = !currentlyPicked;
+    btn.disabled = true;
+    let note = null;
+    if (willPick) {
+      // Optional editorial note — short blurb that shows up in tooltips/lists
+      note = prompt('Optional — short editorial note (why is this an Editor\'s Pick?):', '') || null;
+    }
+    try {
+      const { data, error } = await supabase.rpc('set_editors_pick', {
+        p_book_id: book.id,
+        p_pick: willPick,
+        p_note: note,
+      });
+      if (error) throw error;
+      if (!data?.ok) throw new Error(data?.error || 'Failed to update Editor\'s Pick');
+      // Update UI inline
+      btn.dataset.picked = willPick ? '1' : '0';
+      btn.classList.toggle('is-picked', willPick);
+      btn.querySelector('.book-action-label').textContent = willPick ? "Editor's Pick" : 'Pick';
+      btn.querySelector('svg').setAttribute('fill', willPick ? 'currentColor' : 'none');
+      btn.title = willPick ? "Remove Editor's Pick" : "Mark as Editor's Pick";
+      // Mutate cached book so re-renders stay in sync
+      if (currentBookDetail?.book) {
+        currentBookDetail.book.is_editors_pick = willPick;
+        currentBookDetail.book.editors_pick_at = willPick ? new Date().toISOString() : null;
+        currentBookDetail.book.editors_pick_note = willPick ? note : null;
+      }
+      toast(willPick ? 'Marked as Editor\'s Pick ⭐' : 'Removed from Editor\'s Pick', 'success');
+    } catch (err) {
+      toast(err.message || String(err), 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // Load initial state (whether the user has already liked/bookmarked)
   loadBookActionState(book.id);
 }
@@ -8727,6 +8798,8 @@ async function runSearch() {
 
   try {
     // Two parallel queries: title/description match, and creator-name match.
+    // Also collect matching CREATOR profiles to surface them as channel cards.
+    let matchingCreators = [];
     const [byText, byUploader] = await Promise.all([
       supabase.from('videos').select(baseSelect)
         .eq('status', 'ready').eq('is_hidden', false)
@@ -8735,8 +8808,12 @@ async function runSearch() {
         .limit(60),
       (async () => {
         const { data: profs } = await supabase.from('profiles')
-          .select('id').ilike('username', term).limit(25);
+          .select('id, username, avatar_url, bio, is_banned')
+          .ilike('username', term)
+          .eq('is_banned', false)
+          .limit(8);
         if (!profs?.length) return { data: [] };
+        matchingCreators = profs;
         const ids = profs.map(p => p.id);
         return await supabase.from('videos').select(baseSelect)
           .eq('status', 'ready').eq('is_hidden', false)
@@ -8787,7 +8864,25 @@ async function runSearch() {
       out = formatted.filter(v => (v.tags || []).some(t => t.toLowerCase() === activeTagFilter.toLowerCase()));
     }
 
-    renderVideoResults(out);
+    // Decorate matching creators with video count + total views drawn from
+    // the search results we already have in hand. Cheap, no extra round-trip.
+    const creatorStats = new Map();
+    for (const v of formatted) {
+      const s = creatorStats.get(v.uploader) || { videos: 0, views: 0 };
+      s.videos += 1;
+      s.views  += (v.videoStats?.views || 0);
+      creatorStats.set(v.uploader, s);
+    }
+    const creators = (matchingCreators || []).map(p => ({
+      id: p.id,
+      username: p.username,
+      avatar_url: p.avatar_url,
+      bio: p.bio || '',
+      videos_count: creatorStats.get(p.id)?.videos || 0,
+      views_count:  creatorStats.get(p.id)?.views  || 0,
+    }));
+
+    renderVideoResults(out, creators);
   } catch (err) {
     console.error('Search failed:', err);
     // Fallback: cache filter (covers offline / RPC issues)
@@ -8795,9 +8890,10 @@ async function runSearch() {
   }
 }
 
-function renderVideoResults(videos) {
+function renderVideoResults(videos, creators = []) {
   const grid = document.getElementById('videoGrid');
-  if (!videos.length) {
+  // No videos AND no matching creators → empty state
+  if (!videos.length && !creators.length) {
     grid.innerHTML = `
       <div class="video-search-empty">
         <h3>No videos found</h3>
@@ -8808,11 +8904,59 @@ function renderVideoResults(videos) {
   }
 
   grid.innerHTML = '';
+
+  // ── Creator channel cards (YouTube-style, top of search results) ──
+  if (creators?.length) {
+    const header = document.createElement('div');
+    header.className = 'video-creators-header';
+    header.textContent = creators.length === 1 ? 'Creator' : 'Creators';
+    grid.appendChild(header);
+
+    const channelRow = document.createElement('div');
+    channelRow.className = 'video-creators-row';
+    creators.forEach(c => channelRow.appendChild(renderCreatorChannelCard(c)));
+    grid.appendChild(channelRow);
+
+    if (videos.length) {
+      const videosHeader = document.createElement('div');
+      videosHeader.className = 'video-creators-header';
+      videosHeader.textContent = 'Videos';
+      grid.appendChild(videosHeader);
+    }
+  }
+
   videos.slice(0, 100).forEach((v, i) => {
     const card = renderVideoCard(v, allUploadersCache[v.uploader]);
     card.style.animationDelay = `${i * 0.03}s`;
     grid.appendChild(card);
   });
+}
+
+// Creator channel card (search result top row, YouTube-style)
+function renderCreatorChannelCard(creator) {
+  const card = document.createElement('button');
+  card.className = 'creator-channel-card';
+  card.type = 'button';
+  card.onclick = () => openProfile(creator.id);
+
+  const initial = (creator.username || '?').trim().charAt(0).toUpperCase();
+  const avatar = creator.avatar_url
+    ? `<img src="${escHTML(creator.avatar_url)}" alt=""/>`
+    : `<div class="creator-channel-avatar-placeholder">${initial}</div>`;
+
+  const videosLabel = creator.videos_count === 1 ? '1 video' : `${formatCompact(creator.videos_count)} videos`;
+  const viewsLabel  = creator.views_count > 0 ? ` · ${formatCompact(creator.views_count)} views` : '';
+
+  card.innerHTML = `
+    <div class="creator-channel-avatar">${avatar}</div>
+    <div class="creator-channel-info">
+      <div class="creator-channel-name">${escHTML(creator.username || 'Unknown')}</div>
+      <div class="creator-channel-meta">${videosLabel}${viewsLabel}</div>
+      ${creator.bio ? `<div class="creator-channel-bio">${escHTML(creator.bio.slice(0, 90))}${creator.bio.length > 90 ? '…' : ''}</div>` : ''}
+    </div>
+    <div class="creator-channel-cta">View channel →</div>
+  `;
+  return card;
 }
 
 function renderVideoCard(video, uploader) {
