@@ -3530,7 +3530,7 @@ async function loadProfileVideos(userId) {
   // Supabase videos uploaded by this user
   let q = supabase
     .from('videos')
-    .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
+    .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
     .eq('uploader_id', userId)
     .order('created_at', { ascending: false });
   // Non-owners only see ready videos
@@ -3573,6 +3573,13 @@ async function loadProfileVideos(userId) {
       videoUrl: v.video_url,
       uri: v.video_url,
       videoStats: { views: v.views || 0, duration: v.duration || 0 },
+      // Monetization fields — without these, clicking a video from a user's
+      // wall doesn't trigger setupVideoMonetGate (auto-deduct at 3:00 fails).
+      is_locked:          !!v.is_locked,
+      is_monetized:       !!v.is_monetized,
+      duration:           v.duration || 0,
+      unlock_cost_coins:  v.unlock_cost_coins ?? null,
+      unlock_cost_stars:  v.unlock_cost_stars ?? null,
       status: v.status || 'ready',
       $createdAt: v.created_at,
       _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
@@ -9232,6 +9239,10 @@ async function fetchSupabaseVideos() {
         duration,
         created_at,
         uploader_id,
+        is_locked,
+        is_monetized,
+        unlock_cost_coins,
+        unlock_cost_stars,
         profiles!videos_uploader_id_fkey (
           id,
           username,
@@ -9265,6 +9276,14 @@ async function fetchSupabaseVideos() {
         videoUrl: v.video_url,
         uri: v.video_url,
         videoStats: { views: v.views || 0, duration: v.duration || 0 },
+        // Monetization fields (Phase 6) — needed by setupVideoMonetGate to
+        // decide whether to set up the time-based unlock listener.
+        // Without these the gate silently no-ops, breaking auto-deduct.
+        is_locked:          !!v.is_locked,
+        is_monetized:       !!v.is_monetized,
+        duration:           v.duration || 0,
+        unlock_cost_coins:  v.unlock_cost_coins ?? null,
+        unlock_cost_stars:  v.unlock_cost_stars ?? null,
         status: 'ready',
         $createdAt: v.created_at,
         // Pre-populated uploader info (saves an extra fetch)
@@ -9527,7 +9546,7 @@ async function runSearch() {
   grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Searching…</div>';
 
   const term = `%${q.replace(/[%_]/g, m => '\\' + m)}%`;
-  const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
+  const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
 
   try {
     // Two parallel queries: title/description match, and creator-name match.
@@ -9578,6 +9597,12 @@ async function runSearch() {
       videoUrl: v.video_url,
       uri: v.video_url,
       videoStats: { views: v.views || 0, duration: v.duration || 0 },
+      // Monetization fields needed by setupVideoMonetGate (auto-deduct at 3:00)
+      is_locked:          !!v.is_locked,
+      is_monetized:       !!v.is_monetized,
+      duration:           v.duration || 0,
+      unlock_cost_coins:  v.unlock_cost_coins ?? null,
+      unlock_cost_stars:  v.unlock_cost_stars ?? null,
       status: 'ready',
       $createdAt: v.created_at,
       _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
