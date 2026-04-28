@@ -8870,3 +8870,117 @@ body:not(.light) .store-migrate-text h3 { color: #c4b5fd; }
   .store-migrate-banner { flex-direction: column; align-items: flex-start; gap: 0.7rem; padding-right: 2.2rem; }
   .store-migrate-banner .btn-purple { width: 100%; }
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   REWARDED AD MODAL (Phase 3 — stub for now, AdMob slot later)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.ad-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 10, 28, 0.85);
+  backdrop-filter: blur(6px);
+  display: grid;
+  place-items: center;
+  z-index: 10001;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  padding: 1rem;
+}
+.ad-modal-backdrop.open { opacity: 1; }
+
+.ad-modal {
+  background: linear-gradient(160deg, #1a1726, #2a1f3a);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: 18px;
+  padding: 2rem 1.8rem;
+  width: 100%;
+  max-width: 440px;
+  text-align: center;
+  color: #fff;
+  position: relative;
+  transform: translateY(8px) scale(0.98);
+  transition: transform 0.18s ease;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+}
+.ad-modal-backdrop.open .ad-modal { transform: translateY(0) scale(1); }
+
+.ad-modal-tag {
+  display: inline-block;
+  padding: 0.22rem 0.7rem;
+  background: rgba(168, 85, 247, 0.20);
+  color: #d8b4fe;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  margin-bottom: 1rem;
+}
+
+.ad-modal-icon {
+  display: grid;
+  place-items: center;
+  margin-bottom: 0.85rem;
+  filter: drop-shadow(0 6px 18px rgba(168, 85, 247, 0.45));
+  animation: adIconBob 2.4s ease-in-out infinite;
+}
+@keyframes adIconBob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+
+.ad-modal h2 {
+  margin: 0 0 0.3rem;
+  font-size: 1.4rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #c4b5fd, #fff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.ad-modal-sub {
+  margin: 0 0 1.4rem;
+  font-size: 0.84rem;
+  color: rgba(255,255,255,0.65);
+  line-height: 1.5;
+}
+
+.ad-modal-progress {
+  height: 6px;
+  background: rgba(255,255,255,0.10);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 0.55rem;
+}
+.ad-modal-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(135deg, #a855f7, #c084fc);
+  border-radius: 999px;
+  transition: width 0.1s linear;
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.6);
+}
+.ad-modal-countdown {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.7);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 1.2rem;
+}
+
+.ad-modal-cancel {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.16);
+  color: rgba(255,255,255,0.7);
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.5rem 1rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.ad-modal-cancel:hover {
+  background: rgba(220, 38, 38, 0.15);
+  color: #fca5a5;
+  border-color: rgba(220, 38, 38, 0.35);
+}
