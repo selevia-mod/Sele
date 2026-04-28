@@ -37,6 +37,8 @@ let _walletConfigDefaults = {     // mirrors app_config; loaded once on signin
   book_bulk_unlock_discount_pct:   15,   // Phase 6
   video_initial_unlock_seconds:    180,  // Phase 6 — 3 min before first video unlock
   video_recurring_unlock_seconds:  600,  // Phase 6 — 10 min star window
+  min_chapter_words:               100,  // chapter publish floor
+  max_chapter_words:               10000, // chapter publish ceiling
 };
 let _walletChannel = null;
 
@@ -164,6 +166,8 @@ async function onSignedIn(user) {
     showBookmarks();
   } else if (hash === '#store') {
     showStore();
+  } else if (hash === '#earnings') {
+    showEarnings();
   } else {
     loadStories();
     loadFeed();
@@ -629,6 +633,32 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
 
 // Topbar pill click → open Store
 document.getElementById('topbarCoinPill')?.addEventListener('click', () => showStore());
+
+// ── Earnings page (Phase 7 — own sidebar entry, tabs) ────────────────────
+function showEarnings() {
+  hideAllMainPages();
+  if (!earningsPage) return;
+  earningsPage.style.display = 'block';
+  history.pushState(null, '', '#earnings');
+  setSidebarActive('btnEarnings');
+  // Default to the Earnings tab on every open
+  switchEarningsTab('earnings');
+  loadAuthorEarnings();
+}
+
+function switchEarningsTab(name) {
+  document.querySelectorAll('.earnings-tab').forEach(t => t.classList.toggle('active', t.dataset.etab === name));
+  document.querySelectorAll('.earnings-tab-content').forEach(s => {
+    s.style.display = s.dataset.etabContent === name ? 'block' : 'none';
+  });
+}
+
+document.querySelectorAll('.earnings-tab').forEach(t => {
+  t.addEventListener('click', () => switchEarningsTab(t.dataset.etab));
+});
+
+// Sidebar entry point
+document.getElementById('btnEarnings')?.addEventListener('click', () => showEarnings());
 
 // ── Store page ──────────────────────────────────────────────────────────────
 async function showStore() {
@@ -3925,6 +3955,37 @@ function vuHandleFile(file) {
   titleInput.value = file.name.replace(/\.[^.]+$/, '').slice(0, 100);
   document.getElementById('titleCharCount').textContent = titleInput.value.length;
   vuRefreshFooter();
+
+  // Read the video's duration via the preview element so we can gate the
+  // monetize toggle on step 3. <video> fires 'loadedmetadata' once .duration
+  // is available. We snapshot the value into pendingVideoDurationSec.
+  preview.addEventListener('loadedmetadata', () => {
+    pendingVideoDurationSec = Number.isFinite(preview.duration) ? preview.duration : 0;
+    syncVuMonetizeGate();
+  }, { once: true });
+}
+
+// Pending file's duration (filled in by vuHandleFile via loadedmetadata)
+let pendingVideoDurationSec = 0;
+
+// Disable monetize toggle for videos shorter than the first unlock threshold.
+function syncVuMonetizeGate() {
+  const cb     = document.getElementById('vuMonetized');
+  const card   = cb?.closest('.vu-card');
+  if (!cb) return;
+  const minSec = _walletConfigDefaults.video_initial_unlock_seconds || 180;
+  const eligible = pendingVideoDurationSec >= minSec;
+  cb.disabled = !eligible;
+  if (!eligible) cb.checked = false;
+  if (card) {
+    card.classList.toggle('is-ineligible', !eligible);
+    const sub = card.querySelector('.vu-card-sub');
+    if (sub) {
+      sub.innerHTML = eligible
+        ? 'Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.'
+        : `Video must be at least ${Math.floor(minSec/60)} minute${minSec/60 === 1 ? '' : 's'} long to monetize. This one is ${Math.floor(pendingVideoDurationSec/60)}m ${Math.floor(pendingVideoDurationSec%60)}s.`;
+    }
+  }
 }
 document.getElementById('videoUploadFile')?.addEventListener('change', (e) => {
   vuHandleFile(e.target.files[0]);
@@ -4324,6 +4385,7 @@ const chapterReaderPage = document.getElementById('chapterReaderPage');
 const bookmarksPage = document.getElementById('bookmarksPage');  // Hoisted here (used by hideAllMainPages)
 const messagesPage = document.getElementById('messagesPage');
 const storePage = document.getElementById('storePage');
+const earningsPage = document.getElementById('earningsPage');
 
 // Hide every main content page; show functions call this first then set their own page to block.
 function hideAllMainPages() {
@@ -4341,6 +4403,7 @@ function hideAllMainPages() {
   if (bookmarksPage) bookmarksPage.style.display = 'none';
   if (messagesPage) messagesPage.style.display = 'none';
   if (storePage) storePage.style.display = 'none';
+  if (earningsPage) earningsPage.style.display = 'none';
   // Sibling sentinels (live outside the page divs) — also hide
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel) feedSentinel.style.display = 'none';
@@ -6064,8 +6127,7 @@ async function loadAuthorDashboard() {
     return;
   }
 
-  // Phase 7: load earnings in parallel (it's a separate panel below)
-  loadAuthorEarnings();
+  // (Phase 7 earnings now lives in its own #earnings page — sidebar entry.)
 
   const { data, error } = await supabase
     .from('books')
@@ -6172,18 +6234,18 @@ let _authorKyc     = null;
 
 async function loadAuthorEarnings() {
   if (!currentUser) return;
-  const section = document.getElementById('authorEarningsSection');
-  if (!section) return;
-  section.style.display = '';
+  // Note: the legacy #authorEarningsSection lives in the Author dashboard
+  // and was removed. Earnings now lives in the dedicated #earningsPage.
 
-  // Fire all three reads in parallel
+  // Fire all four reads in parallel — pulls all earnings rows for the
+  // breakdown calculation (small per-author dataset, fine to fetch in full).
   const [balanceRes, earningsRes, withdrawalsRes, kycRes] = await Promise.all([
     supabase.rpc('author_balance_for', { p_author_id: currentUser.id }),
     supabase.from('author_earnings')
       .select('id, source_type, source_id, gross_coins, share_pct, net_coins, net_php_minor, status, available_at, created_at')
       .eq('author_id', currentUser.id)
       .order('created_at', { ascending: false })
-      .limit(50),
+      .limit(500),
     supabase.from('author_withdrawals')
       .select('id, amount_coins, amount_php_minor, status, payout_method, requested_at, approved_at, paid_at, rejection_reason')
       .eq('author_id', currentUser.id)
@@ -6198,11 +6260,31 @@ async function loadAuthorEarnings() {
   _authorBalance = balanceRes.data || { available_coins: 0, pending_coins: 0, available_php_minor: 0, pending_php_minor: 0 };
   _authorKyc     = kycRes.data || null;
 
+  const earnings = earningsRes.data || [];
   renderAuthorEarningsBalance();
-  renderAuthorEarningsList(earningsRes.data || []);
+  renderEarningsBreakdown(earnings);
+  renderAuthorEarningsList(earnings.slice(0, 50));
   renderAuthorWithdrawalsList(withdrawalsRes.data || []);
   renderAuthorKycBanner();
   syncAuthorPayoutButton();
+}
+
+// Breakdown by source_type — Posts / Videos / Books (Books = chapter + book_bulk)
+function renderEarningsBreakdown(rows) {
+  const totals = { posts: 0, videos: 0, books: 0 };
+  const phpTotals = { posts: 0, videos: 0, books: 0 };
+  for (const r of rows) {
+    if (r.source_type === 'video')                                        { totals.videos += r.net_coins; phpTotals.videos += r.net_php_minor; }
+    else if (r.source_type === 'chapter' || r.source_type === 'book_bulk'){ totals.books  += r.net_coins; phpTotals.books  += r.net_php_minor; }
+    else if (r.source_type === 'post')                                    { totals.posts  += r.net_coins; phpTotals.posts  += r.net_php_minor; }
+  }
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('breakdownPostsCoins',  totals.posts.toLocaleString());
+  set('breakdownVideosCoins', totals.videos.toLocaleString());
+  set('breakdownBooksCoins',  totals.books.toLocaleString());
+  set('breakdownPostsPhp',    formatPhpFromMinor(phpTotals.posts));
+  set('breakdownVideosPhp',   formatPhpFromMinor(phpTotals.videos));
+  set('breakdownBooksPhp',    formatPhpFromMinor(phpTotals.books));
 }
 
 function renderAuthorEarningsBalance() {
@@ -6678,12 +6760,17 @@ function setBookLockUI(lockFromChapter, lockedAt) {
   const inp      = document.getElementById('bookLockFromChapter');
   const status   = document.getElementById('bookLockStatus');
   const warning  = document.getElementById('bookLockWarning');
+  const toggle   = cb?.closest('.book-lock-toggle');
   if (!cb || !inp) return;
 
   const isLocked = lockFromChapter != null;
   cb.checked = isLocked;
   inp.value  = isLocked ? lockFromChapter : '';
   inp.disabled = !isLocked;
+
+  // Default: toggle clickable.
+  cb.disabled = false;
+  toggle?.classList.remove('is-locked-grace');
 
   if (isLocked && lockedAt) {
     const lockedDate    = new Date(lockedAt);
@@ -6692,10 +6779,16 @@ function setBookLockUI(lockFromChapter, lockedAt) {
     const fmt = (d) => d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
     if (now < eligibleDate) {
       const days = Math.ceil((eligibleDate - now) / (24 * 60 * 60 * 1000));
+      // Within 90-day window: disable the toggle so the author can't try
+      // to flip it off (server would reject anyway). Cost dropdown stays
+      // editable (changing the lock point is allowed).
+      cb.disabled = true;
+      toggle?.classList.add('is-locked-grace');
       status.style.display = '';
       status.innerHTML = `<strong>Locked since ${fmt(lockedDate)}.</strong> You can disable this lock starting <strong>${fmt(eligibleDate)}</strong> (${days} day${days === 1 ? '' : 's'} from now).`;
       if (warning) warning.style.display = 'none';
     } else {
+      // 90 days passed — toggle becomes clickable for unlock.
       status.style.display = '';
       status.innerHTML = `<strong>Locked since ${fmt(lockedDate)}.</strong> The 90-day window has passed — you can disable the lock anytime.`;
       if (warning) warning.style.display = 'none';
@@ -6840,6 +6933,18 @@ async function openAuthorChapterEditor(bookId, chapterId) {
   setChapterSaveStatus('idle');
   chapterDirty = false;
 
+  // Fetch the book's lock_from_chapter so we can gate the per-chapter
+  // Premium toggle: chapters BELOW the lock-from point can't be marked
+  // premium individually (they're always free).
+  let bookLockFrom = null;
+  try {
+    const { data: b } = await supabase.from('books')
+      .select('lock_from_chapter')
+      .eq('id', bookId)
+      .maybeSingle();
+    bookLockFrom = b?.lock_from_chapter ?? null;
+  } catch {}
+
   if (chapterId) {
     const { data, error } = await supabase
       .from('chapters')
@@ -6854,9 +6959,13 @@ async function openAuthorChapterEditor(bookId, chapterId) {
     };
     setChapterStatePill();
     setChapterCoverPreview(data.cover_url || null);
-    setChapterLockControls(data.is_locked, data.unlock_cost_coins, data.unlock_cost_stars);
+    setChapterLockControls(data.is_locked, data.unlock_cost_coins, data.unlock_cost_stars, data.chapter_number, bookLockFrom);
     if (data.content) chapterQuill.clipboard.dangerouslyPasteHTML(data.content);
     chapterDirty = false;
+  } else {
+    // New chapter — chapter_number is computed at save time. For UI, treat
+    // as eligible if book lock is set (we don't know N yet, optimistic).
+    setChapterLockControls(false, null, null, null, bookLockFrom);
   }
 
   updateChapterWordCount();
@@ -6870,17 +6979,49 @@ function updateChapterWordCount() {
   document.getElementById('chapterWordCount').textContent = words.toLocaleString();
 }
 
-// Sync the lock UI with a chapter row's lock fields.
-function setChapterLockControls(locked, coins, stars) {
+// Sync the lock UI with a chapter row's lock fields. Also gates the toggle
+// based on book.lock_from_chapter — chapters below that point can never be
+// marked premium individually (1-4 are always free).
+function setChapterLockControls(locked, coins, stars, chapterNumber, bookLockFrom) {
   const cb        = document.getElementById('chapterLockEnabled');
   const costRow   = document.getElementById('chapterLockCostRow');
   const coinsInp  = document.getElementById('chapterLockCoins');
   const starsInp  = document.getElementById('chapterLockStars');
+  const sub       = document.getElementById('chapterLockSub');
+  const toggle    = cb?.closest('.lock-toggle');
   if (!cb) return;
   cb.checked = !!locked;
   if (costRow) costRow.style.display = locked ? '' : 'none';
   if (coinsInp) coinsInp.value = (coins ?? '') === null ? '' : (coins || '');
   if (starsInp) starsInp.value = (stars ?? '') === null ? '' : (stars || '');
+
+  // Eligibility check
+  // - If the book has NO book-level lock → no per-chapter premium possible
+  //   (the new model is book-level-only; per-chapter is an override only)
+  // - If chapterNumber is below book.lock_from_chapter → can't lock
+  // - Otherwise → eligible
+  let eligible = true;
+  let reason = '';
+  if (bookLockFrom == null) {
+    eligible = false;
+    reason = 'Set book-level lock first (in book editor) before marking individual chapters premium.';
+  } else if (chapterNumber != null && chapterNumber < bookLockFrom) {
+    eligible = false;
+    reason = `Chapters before #${bookLockFrom} are always free for readers.`;
+  }
+
+  cb.disabled = !eligible;
+  if (toggle) toggle.classList.toggle('is-disabled', !eligible);
+  if (sub) {
+    sub.textContent = eligible
+      ? 'Readers pay coins or stars to unlock. You set the price below.'
+      : reason;
+  }
+  // If not eligible, force unchecked (defensive)
+  if (!eligible && cb.checked) {
+    cb.checked = false;
+    if (costRow) costRow.style.display = 'none';
+  }
 }
 
 // Show/hide cost row when toggle flips, mark dirty so autosave fires.
@@ -6926,8 +7067,15 @@ async function saveChapter() {
   const isLocked = document.getElementById('chapterLockEnabled')?.checked || false;
   const lockCoinsRaw = document.getElementById('chapterLockCoins')?.value;
   const lockStarsRaw = document.getElementById('chapterLockStars')?.value;
-  const unlockCostCoins = isLocked && lockCoinsRaw ? parseInt(lockCoinsRaw, 10) || null : null;
-  const unlockCostStars = isLocked && lockStarsRaw ? parseInt(lockStarsRaw, 10) || null : null;
+  // Clamp to 1..10 — defensive in case someone bypasses the input min/max
+  const clampCost = (v) => {
+    if (v == null || v === '') return null;
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || n < 1) return null;
+    return Math.min(10, n);
+  };
+  const unlockCostCoins = isLocked ? clampCost(lockCoinsRaw) : null;
+  const unlockCostStars = isLocked ? clampCost(lockStarsRaw) : null;
 
   let result;
   if (editingChapterId) {
@@ -7088,6 +7236,23 @@ async function commitChapterPublish() {
   }
 
   const commitBtn = document.getElementById('cpCommit');
+
+  // Word-count guardrail (admin-tunable in app_config: min/max_chapter_words).
+  // Pull live word count from the Quill editor so the check matches what the
+  // author currently sees in the meta strip.
+  const text = chapterQuill?.getText().trim() || '';
+  const words = text.length ? text.split(/\s+/).length : 0;
+  const minW = _walletConfigDefaults.min_chapter_words || 100;
+  const maxW = _walletConfigDefaults.max_chapter_words || 10000;
+  if (words < minW) {
+    toast(`Chapter must be at least ${minW.toLocaleString()} words. Current: ${words.toLocaleString()}.`, 'error');
+    return;
+  }
+  if (words > maxW) {
+    toast(`Chapter is too long — max ${maxW.toLocaleString()} words. Current: ${words.toLocaleString()}. Split it into multiple chapters.`, 'error');
+    return;
+  }
+
   commitBtn.disabled = true;
   commitBtn.textContent = scheduledAt ? 'Scheduling…' : 'Publishing…';
 
@@ -7620,9 +7785,25 @@ function openStudioEditModal(videoId) {
   document.getElementById('studioEditTitleCount').textContent = `${(v.title || '').length} / 100`;
   document.getElementById('studioEditDescCount').textContent = `${(v.description || '').length} / 2000`;
 
-  // Monetization toggle (Phase 6: time-based, not gated-from-start)
-  const monCb = document.getElementById('studioEditMonetized');
-  if (monCb) monCb.checked = !!v.is_monetized;
+  // Monetization toggle (Phase 6: time-based, not gated-from-start).
+  // Gate: monetize requires duration >= 3 min, since the first paid threshold
+  // is the 3:00 mark — a 2-min video could never trigger an unlock.
+  const monCb     = document.getElementById('studioEditMonetized');
+  const monLabel  = monCb?.closest('.lock-toggle');
+  const minSec    = _walletConfigDefaults.video_initial_unlock_seconds || 180;
+  const eligible  = (v.duration || 0) >= minSec;
+  if (monCb) {
+    monCb.checked  = !!v.is_monetized && eligible;
+    monCb.disabled = !eligible;
+    if (monLabel) monLabel.classList.toggle('is-disabled', !eligible);
+    // Update sub-text to explain the gate
+    const subEl = monLabel?.querySelector('.lock-toggle-sub');
+    if (subEl) {
+      subEl.innerHTML = eligible
+        ? 'Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.'
+        : `Video must be at least ${Math.floor(minSec/60)} minute${minSec/60 === 1 ? '' : 's'} long to monetize. This one is ${Math.floor((v.duration||0)/60)}m ${Math.floor((v.duration||0)%60)}s.`;
+    }
+  }
 
   document.getElementById('studioEditModal').style.display = 'flex';
 }
@@ -8818,6 +8999,8 @@ window.addEventListener('popstate', () => {
     playVideo(hash.replace('#video/', ''));
   } else if (hash === '#store') {
     showStore();
+  } else if (hash === '#earnings') {
+    showEarnings();
   } else {
     setSidebarActive('btnHome');
     showFeed();
