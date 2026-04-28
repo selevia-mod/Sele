@@ -4,6 +4,31 @@ import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supa
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
 const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at';
 
+// Set footer copyright year dynamically — never goes stale across new years
+{
+  const y = document.getElementById('footerYear');
+  if (y) y.textContent = new Date().getFullYear();
+}
+
+// ─── Sentry helper ────────────────────────────────────────────────────────
+// Wraps Sentry calls so the app keeps working if Sentry isn't loaded
+// (no DSN configured yet). Use everywhere we want to log a real error.
+function captureError(err, context = {}) {
+  if (typeof window.Sentry !== 'undefined' && Sentry.captureException) {
+    try {
+      Sentry.captureException(err, { extra: context });
+    } catch {}
+  }
+  // Always also log locally so DevTools shows it during dev
+  console.error(err, context);
+}
+
+// Catch unhandled errors that escape try/catch blocks. Sentry already does
+// this on its own, but having a fallback means logs reach the console even
+// when Sentry isn't initialized yet.
+window.addEventListener('error', (e) => captureError(e.error || new Error(e.message), { source: 'window.onerror', filename: e.filename, line: e.lineno }));
+window.addEventListener('unhandledrejection', (e) => captureError(e.reason || new Error('Unhandled promise rejection'), { source: 'unhandledrejection' }));
+
 // Reset window scroll across all common scroll containers (covers Safari edge
 // cases where `body` vs `documentElement` is the scrolling element).
 function scrollToTop() {
