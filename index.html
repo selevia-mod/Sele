@@ -1298,13 +1298,23 @@
       <button class="modal-close-btn" id="editProfileClose">×</button>
     </div>
     <label class="form-label">Display name</label>
-    <input class="form-input" id="editUsername" placeholder="Your name"/>
+    <input class="form-input" id="editUsername" placeholder="Your name" maxlength="40"/>
+    <div class="edit-profile-hint" id="editUsernameHint">Letters, numbers and basic punctuation only — no emoji. You can change this once every 60 days.</div>
     <label class="form-label">Bio</label>
-    <textarea class="form-input" id="editBio" rows="3" placeholder="Tell us about yourself..."></textarea>
+    <textarea class="form-input" id="editBio" rows="5" placeholder="Tell us about yourself..."></textarea>
+    <div class="edit-profile-counter"><span id="editBioCount">0 / 200</span><span id="editBioLines">1 / 5 lines</span></div>
     <label class="form-label">Location</label>
-    <input class="form-input" id="editLocation" placeholder="City, Country"/>
+    <div class="edit-location-row">
+      <select class="form-input" id="editCountry">
+        <option value="">Select country…</option>
+      </select>
+      <select class="form-input" id="editCity" style="display:none">
+        <option value="">Select city…</option>
+      </select>
+      <input class="form-input" id="editCityInput" placeholder="City" maxlength="60"/>
+    </div>
     <label class="form-label">Website</label>
-    <input class="form-input" id="editWebsite" placeholder="https://..."/>
+    <input class="form-input" id="editWebsite" placeholder="https://..." maxlength="200"/>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" id="editProfileCancel">Cancel</button>
       <button class="btn btn-purple btn-sm" id="editProfileSave">Save</button>
