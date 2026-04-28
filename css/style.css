@@ -9771,57 +9771,112 @@ body:not(.light) .payments-info-help { background: rgba(255,255,255,0.04); }
   box-shadow: 0 4px 14px rgba(124, 58, 237, 0.16);
 }
 
-/* Upload boxes — large dashed drop targets */
+/* Upload boxes — premium dashed-purple drop targets */
 .pi-upload {
   position: relative;
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
-  gap: 0.6rem;
-  min-height: 160px;
-  padding: 1.5rem;
-  background: rgba(248, 250, 252, 0.6);
-  border: 2px dashed rgba(124, 58, 237, 0.22);
-  border-radius: 12px;
+  gap: 1rem;
+  min-height: 200px;
+  padding: 2rem 1.5rem;
+  background:
+    radial-gradient(ellipse at top, rgba(167, 139, 250, 0.12) 0%, transparent 70%),
+    linear-gradient(135deg, rgba(124, 58, 237, 0.04) 0%, rgba(167, 139, 250, 0.06) 100%);
+  border: 2px dashed rgba(124, 58, 237, 0.32);
+  border-radius: 16px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease, background 0.2s ease;
   overflow: hidden;
 }
-.pi-upload:hover { background: rgba(238, 242, 255, 0.7); border-color: rgba(124, 58, 237, 0.45); }
+.pi-upload::before {
+  /* Subtle inner glow that intensifies on hover */
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(167, 139, 250, 0.10) 0%, transparent 60%);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+}
+.pi-upload:hover {
+  border-color: rgba(124, 58, 237, 0.62);
+  border-style: solid;
+  transform: translateY(-2px);
+  box-shadow: 0 14px 30px rgba(124, 58, 237, 0.12);
+}
+.pi-upload:hover::before { opacity: 1; }
 .pi-upload.is-uploading { opacity: 0.6; cursor: wait; }
+
 .pi-upload-icon {
+  position: relative;
+  z-index: 2;
   display: grid; place-items: center;
-  width: 56px; height: 56px;
-  background: rgba(75, 85, 99, 0.78);
+  width: 64px; height: 64px;
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
   color: #fff;
   border-radius: 50%;
-  transition: background 0.15s ease, transform 0.12s ease;
+  box-shadow:
+    0 10px 22px rgba(124, 58, 237, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transition: transform 0.2s cubic-bezier(.34, 1.56, .64, 1),
+              box-shadow 0.2s ease;
 }
 .pi-upload:hover .pi-upload-icon {
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  transform: translateY(-2px);
+  transform: translateY(-3px) scale(1.06);
+  box-shadow:
+    0 16px 30px rgba(124, 58, 237, 0.40),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
+
 .pi-upload-text {
-  font-size: 0.92rem;
+  position: relative;
+  z-index: 2;
+  font-size: 0.94rem;
   font-weight: 600;
-  color: var(--text2);
+  color: #6b21a8;
+  letter-spacing: -0.005em;
 }
+
 .pi-upload-preview {
   position: absolute;
   inset: 0;
   width: 100%; height: 100%;
   object-fit: cover;
-  border-radius: 10px;
+  border-radius: 14px;
+  z-index: 1;
 }
-.pi-upload-preview ~ .pi-upload-icon,
-.pi-upload-preview ~ .pi-upload-text { position: relative; z-index: 2; }
-.pi-upload:has(.pi-upload-preview[style*="display: none"]) .pi-upload-preview { display: none; }
-.pi-upload:has(.pi-upload-preview:not([style*="display: none"])) .pi-upload-icon,
+/* When a preview is shown, shrink the icon + text into a soft floating chip */
+.pi-upload:has(.pi-upload-preview:not([style*="display: none"])) {
+  background: #000;
+  border-style: solid;
+  border-color: rgba(124, 58, 237, 0.5);
+}
+.pi-upload:has(.pi-upload-preview:not([style*="display: none"])) .pi-upload-icon {
+  width: 40px; height: 40px;
+  box-shadow: 0 6px 14px rgba(0,0,0,0.35);
+}
+.pi-upload:has(.pi-upload-preview:not([style*="display: none"])) .pi-upload-icon svg {
+  width: 18px; height: 18px;
+}
 .pi-upload:has(.pi-upload-preview:not([style*="display: none"])) .pi-upload-text {
-  background: rgba(0, 0, 0, 0.65);
-  color: #fff;
-  padding: 0.3rem 0.85rem;
+  background: rgba(255, 255, 255, 0.95);
+  color: #6b21a8;
+  padding: 0.4rem 0.95rem;
   border-radius: 999px;
+  font-size: 0.84rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.20);
+  backdrop-filter: blur(8px);
 }
+
+/* Dark mode */
+body:not(.light) .pi-upload {
+  background:
+    radial-gradient(ellipse at top, rgba(167, 139, 250, 0.18) 0%, transparent 70%),
+    linear-gradient(135deg, rgba(124, 58, 237, 0.08) 0%, rgba(167, 139, 250, 0.06) 100%);
+  border-color: rgba(167, 139, 250, 0.40);
+}
+body:not(.light) .pi-upload:hover { border-color: rgba(167, 139, 250, 0.70); }
+body:not(.light) .pi-upload-text { color: #ddd6fe; }
 
 /* Save button — premium gradient */
 .pi-save-btn {
@@ -9868,3 +9923,62 @@ body:not(.light) .pi-upload:hover { background: rgba(167, 139, 250, 0.06); }
   .pi-method-grid { grid-template-columns: 1fr; }
   .pi-card-body { padding: 1rem; }
 }
+
+/* Per-chapter coin/star cost dropdowns */
+.lock-cost-select {
+  width: 90px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid rgba(124, 58, 237, 0.20);
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.lock-cost-select:focus {
+  outline: none;
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.16);
+}
+body:not(.light) .lock-cost-select { background: rgba(255,255,255,0.06); border-color: rgba(167, 139, 250, 0.30); color: #f3f4f6; }
+
+/* Chapter editor — word count indicator with min/max color coding */
+.chapter-meta-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.chapter-wc-hint {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  margin-left: 0.4rem;
+  background: rgba(107, 114, 128, 0.10);
+  color: var(--text2);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.chapter-meta-strip.wc-under .chapter-wc-hint {
+  background: rgba(217, 119, 6, 0.14);
+  color: #92400e;
+}
+.chapter-meta-strip.wc-ok .chapter-wc-hint {
+  background: rgba(34, 197, 94, 0.14);
+  color: #166534;
+}
+.chapter-meta-strip.wc-over .chapter-wc-hint {
+  background: rgba(220, 38, 38, 0.14);
+  color: #991b1b;
+}
+.chapter-meta-strip.wc-under .chapter-word-count { color: #92400e; }
+.chapter-meta-strip.wc-ok .chapter-word-count    { color: #166534; }
+.chapter-meta-strip.wc-over .chapter-word-count  { color: #991b1b; }
+
+body:not(.light) .chapter-meta-strip.wc-under .chapter-wc-hint { background: rgba(217, 119, 6, 0.20); color: #fcd34d; }
+body:not(.light) .chapter-meta-strip.wc-ok    .chapter-wc-hint { background: rgba(34, 197, 94, 0.20);  color: #6ee7b7; }
+body:not(.light) .chapter-meta-strip.wc-over  .chapter-wc-hint { background: rgba(220, 38, 38, 0.20);  color: #fca5a5; }
