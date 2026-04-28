@@ -68,9 +68,17 @@ async function initAuth() {
   // sign-in / sign-out — TOKEN_REFRESHED and USER_UPDATED fire periodically
   // and don't need full re-init (Supabase already swapped the token
   // internally; re-running onSignedIn would just re-fetch profile + reroute).
+  //
+  // Tab visibility note: when the user switches away and back, Supabase
+  // re-validates the session and may fire SIGNED_IN even though the user
+  // hasn't changed. We guard against that with the same-user check so we
+  // don't repaint the whole app's loading state on every tab focus.
   supabase.auth.onAuthStateChange((event, session) => {
     if (isFirstAuthEvent) { isFirstAuthEvent = false; return; }
     if (event === 'SIGNED_IN' && session) {
+      // Same user as before? This is a session re-validation (tab focus,
+      // cross-tab sync, etc.), not a fresh sign-in. Skip re-init.
+      if (currentUser && currentUser.id === session.user.id) return;
       setTimeout(() => { onSignedIn(session.user); }, 0);
     } else if (event === 'SIGNED_OUT') {
       // showAuth() touches DOM only — safe to call directly.
