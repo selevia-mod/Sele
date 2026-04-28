@@ -140,8 +140,8 @@
 
       <div class="row">
         <div>
-          <div class="row-name">Phase 10: Lock state (videos &amp; chapters → books)</div>
-          <div class="row-desc">One-time import of <code>isLocked</code> flags from Appwrite. Videos with <code>isLocked=true</code> get <code>is_monetized=true</code>. For chapters: if the smallest locked chapter_number is 5–10, sets <code>books.lock_from_chapter</code> + <code>locked_at</code>; otherwise sets per-chapter <code>is_locked=true</code> overrides. Idempotent — safe to re-run anytime.</div>
+          <div class="row-name">Phase 10: Lock state (books + videos)</div>
+          <div class="row-desc">One-time import of <code>isLocked</code> flags from Appwrite. Books with <code>isLocked=true</code> get <code>lock_from_chapter=5</code> + <code>locked_at=now()</code>. Videos with <code>isLocked=true</code> get <code>is_monetized=true</code>. Also future-proofed for chapter-level locks (smallest locked chapter 5–10 → book-level, else per-chapter overrides). Idempotent — safe to re-run anytime.</div>
         </div>
         <div class="row-actions"><button data-phase="locks">Run</button><span id="status-locks" class="status status-idle">Idle</span></div>
       </div>
@@ -1310,27 +1310,73 @@
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // PHASE 10: Lock state (videos + chapters → books.lock_from_chapter)
+    // PHASE 10: Lock state (books + videos + chapters → web schema)
     //
     // One-way import from Appwrite (mobile source-of-truth) → Supabase (web).
-    // Mobile uses a single `isLocked` boolean per video and per chapter.
-    // Web models monetization at the *book* level (lock_from_chapter 5–10) with
-    // optional per-chapter overrides, plus a per-video `is_monetized` boolean.
     //
-    // Strategy:
-    //   1. Videos: any video with isLocked=true  → set is_monetized=true
-    //   2. Chapters: group locked chapters by book, look at smallest locked
-    //      chapter_number:
-    //        - If 5–10  → set books.lock_from_chapter + locked_at (book-level lock)
-    //        - Anything else → per-chapter is_locked=true override
+    // Mobile data model (current — Phase 1 of locking):
+    //   • books.isLocked     boolean — locks the whole book (no chapter cutoff)
+    //   • videos.isLocked    boolean — locks the video
+    //   • chapters.isLocked  boolean — reserved for future per-chapter locks
     //
-    // Idempotent — joins via legacy_appwrite_id, only touches rows that already
-    // migrated. Safe to re-run anytime.
+    // Web data model:
+    //   • books.lock_from_chapter (5–10) + books.locked_at — book-level lock
+    //   • books.is_locked overrides at chapter level (future)
+    //   • videos.is_monetized boolean
+    //
+    // Translation rules (per Sele's confirmation):
+    //   1. books.isLocked=true → web books.lock_from_chapter = 5, locked_at=now()
+    //      (Mobile will adopt web's 5–10 model later; until then everything
+    //      defaults to 5 — gives readers chapters 1–4 free.)
+    //   2. videos.isLocked=true → web videos.is_monetized = true
+    //   3. chapters.isLocked=true (when mobile starts using it) → smallest
+    //      locked chapter wins; if 5–10 → books.lock_from_chapter, else
+    //      per-chapter is_locked overrides.
+    //
+    // Idempotent — joins via legacy_appwrite_id. Safe to re-run anytime.
     // ──────────────────────────────────────────────────────────────────────
     async function runLocks() {
       setStatus('locks','running','Running…');
       try {
         const sb = makeSupabase();
+
+        // ── Books ───────────────────────────────────────────────────────
+        log('— Books —');
+        log('Fetching all books from Appwrite…');
+        const books = await awListAll(COLL.books);
+        log(`Fetched ${books.length} books.`);
+
+        const lockedBooks = books.filter(b => b.isLocked === true || b.is_locked === true || b.locked === true);
+        log(`  ${lockedBooks.length} books flagged isLocked=true.`);
+
+        let bUpdated = 0, bMissing = 0, bFailed = 0;
+        const lockedAtIso = new Date().toISOString();
+        for (const b of lockedBooks) {
+          try {
+            // Default to lock_from_chapter=5 — confirmed by Sele.
+            // Re-running is safe: locked_at only matters if it was previously null;
+            // a coalesce-style update would need a SQL function, but for a one-time
+            // import this overwrite is fine (locks the 90-day grace clock to today).
+            const { data, error } = await sb.from('books')
+              .update({ lock_from_chapter: 5, locked_at: lockedAtIso })
+              .eq('legacy_appwrite_id', b.$id)
+              .select('id');
+            if (error) throw error;
+            if (!data || data.length === 0) {
+              bMissing++;
+              if (bMissing <= 10) log(`  no Supabase row for book ${b.$id}`, 'warn');
+            } else {
+              bUpdated++;
+            }
+          } catch (e) {
+            bFailed++;
+            if (bFailed <= 10) log(`  fail book ${b.$id}: ${e.message||e}`, 'err');
+          }
+          if ((bUpdated + bFailed + bMissing) % 50 === 0 && (bUpdated + bFailed + bMissing) > 0) {
+            log(`  books: ${bUpdated + bFailed + bMissing}/${lockedBooks.length}`);
+          }
+        }
+        log(`  ✓ books updated=${bUpdated}, missing=${bMissing}, failed=${bFailed}`);
 
         // ── Videos ──────────────────────────────────────────────────────
         log('— Videos —');
@@ -1338,7 +1384,6 @@
         const vids = await awListAll(COLL.videos);
         log(`Fetched ${vids.length} videos.`);
 
-        // Mobile field is `isLocked` (boolean). Be lenient in case of variants.
         const lockedVids = vids.filter(v => v.isLocked === true || v.is_locked === true || v.locked === true);
         log(`  ${lockedVids.length} videos flagged isLocked=true.`);
 
@@ -1366,7 +1411,7 @@
         }
         log(`  ✓ videos updated=${vUpdated}, missing=${vMissing}, failed=${vFailed}`);
 
-        // ── Chapters → book-level lock ──────────────────────────────────
+        // ── Chapters → book-level lock (future-proofing) ────────────────
         log('— Chapters —');
         log('Fetching all chapters from Appwrite…');
         const chs = await awListAll(COLL.chapters);
@@ -1375,74 +1420,62 @@
         const lockedChs = chs.filter(c => c.isLocked === true || c.is_locked === true || c.locked === true);
         log(`  ${lockedChs.length} chapters flagged isLocked=true.`);
 
-        if (lockedChs.length === 0) {
-          log('Phase 10 done — no locked chapters to import.', 'ok');
-          setStatus('locks','ok',`videos=${vUpdated}`);
-          return;
-        }
-
-        // For each locked Appwrite chapter we need its Supabase chapter row,
-        // which gives us book_id and chapter_number. Fetch in a single bulk
-        // query keyed on legacy_appwrite_id.
-        log('Resolving Supabase chapter rows…');
-        const lockedAwIds = lockedChs.map(c => c.$id);
-        const supChapters = [];
-        // chunk to avoid URL length limits on .in()
-        for (const batch of chunk(lockedAwIds, 200)) {
-          const { data, error } = await sb.from('chapters')
-            .select('id, book_id, chapter_number, legacy_appwrite_id')
-            .in('legacy_appwrite_id', batch);
-          if (error) throw error;
-          supChapters.push(...(data || []));
-        }
-        log(`  resolved ${supChapters.length}/${lockedChs.length} chapters in Supabase.`);
-
-        // Group by book → list of {chapterId, chapter_number}
-        const byBook = new Map();
-        for (const c of supChapters) {
-          if (!byBook.has(c.book_id)) byBook.set(c.book_id, []);
-          byBook.get(c.book_id).push(c);
-        }
-        log(`  ${byBook.size} books with locked chapters.`);
-
         let booksLocked = 0, perChapterLocks = 0, lockFailed = 0;
-        for (const [bookId, group] of byBook) {
-          // Smallest locked chapter_number wins as the lock cutoff
-          const minLocked = Math.min(...group.map(c => c.chapter_number));
+        if (lockedChs.length > 0) {
+          // Resolve each Appwrite chapter to its Supabase row (book_id + chapter_number)
+          log('Resolving Supabase chapter rows…');
+          const lockedAwIds = lockedChs.map(c => c.$id);
+          const supChapters = [];
+          for (const batch of chunk(lockedAwIds, 200)) {
+            const { data, error } = await sb.from('chapters')
+              .select('id, book_id, chapter_number, legacy_appwrite_id')
+              .in('legacy_appwrite_id', batch);
+            if (error) throw error;
+            supChapters.push(...(data || []));
+          }
+          log(`  resolved ${supChapters.length}/${lockedChs.length} chapters in Supabase.`);
 
-          if (minLocked >= 5 && minLocked <= 10) {
-            // Book-level lock — fits the web's 5–10 model
-            try {
-              const { error } = await sb.from('books')
-                .update({ lock_from_chapter: minLocked, locked_at: new Date().toISOString() })
-                .eq('id', bookId);
-              if (error) throw error;
-              booksLocked++;
-            } catch (e) {
-              lockFailed++;
-              if (lockFailed <= 10) log(`  fail book ${bookId} lock_from_chapter=${minLocked}: ${e.message||e}`, 'err');
-            }
-          } else {
-            // Out of band — fall back to per-chapter overrides
-            log(`  book ${bookId}: smallest locked chapter is ${minLocked} (outside 5–10) — using per-chapter overrides`, 'warn');
-            for (const c of group) {
+          const byBook = new Map();
+          for (const c of supChapters) {
+            if (!byBook.has(c.book_id)) byBook.set(c.book_id, []);
+            byBook.get(c.book_id).push(c);
+          }
+          log(`  ${byBook.size} books with locked chapters.`);
+
+          for (const [bookId, group] of byBook) {
+            const minLocked = Math.min(...group.map(c => c.chapter_number));
+            if (minLocked >= 5 && minLocked <= 10) {
               try {
-                const { error } = await sb.from('chapters')
-                  .update({ is_locked: true })
-                  .eq('id', c.id);
+                const { error } = await sb.from('books')
+                  .update({ lock_from_chapter: minLocked, locked_at: lockedAtIso })
+                  .eq('id', bookId);
                 if (error) throw error;
-                perChapterLocks++;
+                booksLocked++;
               } catch (e) {
                 lockFailed++;
-                if (lockFailed <= 10) log(`  fail chapter ${c.id} is_locked=true: ${e.message||e}`, 'err');
+                if (lockFailed <= 10) log(`  fail book ${bookId} lock_from_chapter=${minLocked}: ${e.message||e}`, 'err');
+              }
+            } else {
+              log(`  book ${bookId}: smallest locked chapter is ${minLocked} (outside 5–10) — using per-chapter overrides`, 'warn');
+              for (const c of group) {
+                try {
+                  const { error } = await sb.from('chapters')
+                    .update({ is_locked: true })
+                    .eq('id', c.id);
+                  if (error) throw error;
+                  perChapterLocks++;
+                } catch (e) {
+                  lockFailed++;
+                  if (lockFailed <= 10) log(`  fail chapter ${c.id} is_locked=true: ${e.message||e}`, 'err');
+                }
               }
             }
           }
+          log(`  ✓ chapter-derived: books=${booksLocked}, per-chapter overrides=${perChapterLocks}, failed=${lockFailed}`);
         }
-        log(`  ✓ books locked at chapter level=${booksLocked}, per-chapter overrides=${perChapterLocks}, failed=${lockFailed}`);
 
-        log(`Phase 10 done — videos=${vUpdated}, books=${booksLocked}, chapter-overrides=${perChapterLocks}`, 'ok');
-        setStatus('locks','ok',`v=${vUpdated} b=${booksLocked}`);
+        log(`Phase 10 done — books=${bUpdated}, videos=${vUpdated}, chapter-derived books=${booksLocked}, per-chapter=${perChapterLocks}`, 'ok');
+        setStatus('locks','ok',`b=${bUpdated} v=${vUpdated}`);
       } catch (err) {
         log(err.message,'err');
         setStatus('locks','fail','Failed');
