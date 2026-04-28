@@ -4381,37 +4381,65 @@ async function runFeedSearch(query) {
   });
 }
 
-// Navigate the feed to a specific post — scrolls + highlights it briefly so
-// the user knows which one matched. If the post isn't in the visible feed,
-// jumps to the author's profile instead so the user can find it there.
+// Open a focused post detail modal — works for ANY post, even old ones not
+// in the loaded feed. Reuses renderPost so the post stays visually identical
+// to the feed version (same actions, same comments, same look).
 async function openPostFromSearch(postId) {
-  // Already in the loaded feed? Scroll + highlight.
-  const inFeed = document.querySelector(`.post-card[data-postid="${postId}"]`);
-  if (inFeed && feedEl.style.display !== 'none') {
-    inFeed.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    inFeed.classList.add('post-flash');
-    setTimeout(() => inFeed.classList.remove('post-flash'), 1500);
-    return;
-  }
-  // Otherwise show the feed first, wait for it to render, then try again.
-  // If still not found, jump to the author's profile (where the post lives in
-  // their timeline).
-  if (typeof showFeed === 'function') showFeed();
-  setTimeout(async () => {
-    const card = document.querySelector(`.post-card[data-postid="${postId}"]`);
-    if (card) {
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.classList.add('post-flash');
-      setTimeout(() => card.classList.remove('post-flash'), 1500);
+  const modal = document.getElementById('postDetailModal');
+  const body  = document.getElementById('postDetailBody');
+  if (!modal || !body) return;
+  body.innerHTML = '<div class="loading">Loading post…</div>';
+  modal.classList.add('open');
+  modal.style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+
+  try {
+    const { data: post, error } = await supabase
+      .from('posts')
+      .select(FEED_SELECT)
+      .eq('id', postId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!post) {
+      body.innerHTML = '<div class="empty"><h3>Post not found</h3><p>It may have been deleted or hidden.</p></div>';
       return;
     }
-    // Fallback — fetch the post's author and open their profile
-    try {
-      const { data } = await supabase.from('posts').select('user_id').eq('id', postId).maybeSingle();
-      if (data?.user_id) openProfile(data.user_id);
-    } catch {}
-  }, 600);
+    if (shouldHidePost(post)) {
+      body.innerHTML = '<div class="empty"><h3>Post unavailable</h3><p>You\'ve hidden this post or its author.</p></div>';
+      return;
+    }
+
+    body.innerHTML = '';
+    const card = renderPost(post);
+    body.appendChild(card);
+    // Activate "See more" collapsing for long bodies (same as feed)
+    if (typeof setupCollapsibleBodies === 'function') setupCollapsibleBodies(body);
+    // Lazy-load reactions/comments (same observer pattern as feed)
+    if (typeof triggerPostLazyLoad === 'function') triggerPostLazyLoad(card);
+    // Hook up post-video lazy attachment
+    card.querySelectorAll('.post-video').forEach(v => {
+      if (typeof attachHlsToPostVideo === 'function') attachHlsToPostVideo(v);
+    });
+  } catch (err) {
+    body.innerHTML = `<div class="empty"><h3>Couldn't load post</h3><p>${escHTML(err.message || 'Network error')}</p></div>`;
+  }
 }
+
+// Wire close handlers for the post detail modal
+function _closePostDetailModal() {
+  const m = document.getElementById('postDetailModal');
+  if (!m) return;
+  m.classList.remove('open');
+  m.style.display = 'none';
+  document.body.style.overflow = '';
+  // Clear the body so the next open shows the loading state, not stale content
+  const body = document.getElementById('postDetailBody');
+  if (body) body.innerHTML = '<div class="loading">Loading post…</div>';
+}
+document.getElementById('postDetailClose')?.addEventListener('click', _closePostDetailModal);
+document.getElementById('postDetailModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'postDetailModal') _closePostDetailModal();
+});
 
 window.addEventListener('hashchange', updateSearchPlaceholder);
 updateSearchPlaceholder();
@@ -9613,11 +9641,65 @@ function renderTagPills() {
 async function runSearch() {
   const q = (activeSearchQuery || '').trim();
 
-  // Empty query — show personalized feed (or tag-filtered cache)
+  // Empty query — show personalized feed, or tag-filtered results.
+  // For tag filters we must hit the server (not the 100-video in-memory cache),
+  // otherwise older videos in that category never show. Without this fix,
+  // clicking "Comedy" only surfaced comedy videos that happened to be in the
+  // most recent 100 uploads.
   if (!q) {
     if (activeTagFilter) {
-      const filtered = searchVideos('', activeTagFilter);
-      renderVideoResults(filtered);
+      const grid = document.getElementById('videoGrid');
+      grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Loading…</div>';
+      const tagLower = activeTagFilter.toLowerCase();
+      try {
+        // Match category OR any tag that equals the filter — covers both
+        // schema patterns (category column + tags array).
+        const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
+        const [byCat, byTag] = await Promise.all([
+          supabase.from('videos').select(baseSelect)
+            .eq('status', 'ready').eq('is_hidden', false)
+            .ilike('category', tagLower)
+            .order('created_at', { ascending: false })
+            .limit(100),
+          supabase.from('videos').select(baseSelect)
+            .eq('status', 'ready').eq('is_hidden', false)
+            .contains('tags', [activeTagFilter])
+            .order('created_at', { ascending: false })
+            .limit(100),
+        ]);
+        // Merge + dedupe + drop banned uploaders
+        const seen = new Set();
+        const merged = [];
+        [...(byCat.data || []), ...(byTag.data || [])].forEach(v => {
+          if (seen.has(v.id) || v.profiles?.is_banned) return;
+          seen.add(v.id);
+          merged.push(v);
+        });
+        const formatted = merged.map(v => ({
+          $id: 'sb_' + v.id, _supabase: true, _supabaseId: v.id,
+          title: v.title, description: v.description || '',
+          tags: v.tags || [], uploader: v.uploader_id,
+          thumbnail: v.thumbnail_url, videoUrl: v.video_url, uri: v.video_url,
+          videoStats: { views: v.views || 0, duration: v.duration || 0 },
+          is_locked: !!v.is_locked, is_monetized: !!v.is_monetized,
+          duration: v.duration || 0,
+          unlock_cost_coins: v.unlock_cost_coins ?? null,
+          unlock_cost_stars: v.unlock_cost_stars ?? null,
+          status: 'ready', $createdAt: v.created_at,
+          _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
+        }));
+        // Hydrate cache so playVideo finds these
+        formatted.forEach(v => {
+          if (!allVideosCache.find(x => x.$id === v.$id)) allVideosCache.push(v);
+          if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
+            allUploadersCache[v.uploader] = v._uploaderInfo;
+          }
+        });
+        renderVideoResults(formatted);
+      } catch (err) {
+        console.warn('Tag filter server fetch failed, falling back to cache:', err);
+        renderVideoResults(searchVideos('', activeTagFilter));
+      }
     } else {
       renderVideoResults(getPersonalizedFeed?.() || allVideosCache);
     }
