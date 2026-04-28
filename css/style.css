@@ -9684,6 +9684,8 @@ body:not(.light) .video-monet-countdown-text strong { color: #c4b5fd; }
   /* Account for the left sidebar so the footer aligns with main content */
   padding-left: calc(var(--sidebar-w, 240px) + 1.5rem);
 }
+/* Hide footer on auth screen + during initial auth resolve on refresh */
+body.is-auth .site-footer { display: none; }
 .site-footer-inner {
   max-width: 1100px;
   margin: 0 auto;
