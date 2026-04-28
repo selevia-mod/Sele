@@ -2185,8 +2185,13 @@ body.light .reaction-picker {
 
 /* ── COMMENTS ── */
 .comments-section { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
-.comment-item { display: flex; gap: 0.6rem; margin-bottom: 0.85rem; }
+.comment-item { display: flex; gap: 0.6rem; margin-bottom: 0.85rem; position: relative; }
 .comment-body { flex: 1; min-width: 0; }
+/* Ensure the reaction picker isn't clipped by parent comment containers.
+   Without this, the picker can appear below the visible viewport when a
+   comment has many siblings. */
+.comment-item .reaction-picker { z-index: 100; }
+.comment-item .reaction-wrap { position: relative; z-index: 1; }
 .comment-bubble { background: var(--bg3); border-radius: 4px 16px 16px 16px; padding: 0.65rem 0.85rem; font-size: 0.87rem; line-height: 1.6; color: var(--text); word-break: break-word; }
 .comment-bubble a { color: var(--purple-lt); text-decoration: underline; }
 .comment-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 3px; }
@@ -9665,6 +9670,27 @@ body:not(.light) .video-monet-option-star .video-monet-option-cost { color: #c4b
 body:not(.light) .video-monet-countdown-text strong { color: #c4b5fd; }
 
 /* Briefly highlight a post that was navigated to from search results */
+/* PRO badge for monetized books in My Books list — gold→purple gradient
+   matching the studio video monetize button, but as a text pill to fit the
+   horizontal action row */
+.author-book-pro-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.22rem 0.55rem;
+  margin-right: 0.4rem;
+  background: linear-gradient(135deg, #fbbf24 0%, #a78bfa 60%, #7c3aed 100%);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  border-radius: 999px;
+  box-shadow:
+    0 3px 10px rgba(124, 58, 237, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  user-select: none;
+  cursor: default;
+}
+
 .post-card.post-flash {
   animation: postFlash 1.4s ease-out;
 }
