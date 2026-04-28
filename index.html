@@ -412,6 +412,68 @@
         <div id="authorBooksContent">
           <div class="loading">Loading your books...</div>
         </div>
+
+        <!-- ─── Earnings section (Phase 7) ─── -->
+        <div class="author-earnings-section" id="authorEarningsSection" style="display:none">
+          <div class="author-earnings-header">
+            <h2 class="author-section-title">Earnings</h2>
+            <span class="author-section-sub" id="authorEarningsSub">Coins from readers who unlock your work. Stars don't count.</span>
+          </div>
+
+          <div class="author-earnings-cards">
+            <div class="author-earnings-card author-earnings-available">
+              <div class="author-earnings-icon">
+                <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+              </div>
+              <div class="author-earnings-meta">
+                <div class="author-earnings-label">Available to withdraw</div>
+                <div class="author-earnings-value">
+                  <span id="earningsAvailableCoins">0</span> coins
+                  <span class="author-earnings-php" id="earningsAvailablePhp">≈ ₱0.00</span>
+                </div>
+              </div>
+              <button class="btn btn-purple" id="btnRequestPayout" disabled>Request payout</button>
+            </div>
+
+            <div class="author-earnings-card author-earnings-pending">
+              <div class="author-earnings-icon">⏳</div>
+              <div class="author-earnings-meta">
+                <div class="author-earnings-label">Pending (in hold period)</div>
+                <div class="author-earnings-value">
+                  <span id="earningsPendingCoins">0</span> coins
+                  <span class="author-earnings-php" id="earningsPendingPhp">≈ ₱0.00</span>
+                </div>
+                <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 7 days after they're earned.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- KYC banner (changes copy by status) -->
+          <div class="author-kyc-banner" id="authorKycBanner" style="display:none">
+            <div class="author-kyc-icon">🪪</div>
+            <div class="author-kyc-text">
+              <div class="author-kyc-title" id="authorKycTitle">Complete KYC to enable payouts</div>
+              <div class="author-kyc-sub" id="authorKycSub">We need to verify your identity before sending you money. This is a one-time step required by Philippine law.</div>
+            </div>
+            <button class="btn btn-purple btn-sm" id="btnSubmitKyc">Submit KYC</button>
+          </div>
+
+          <!-- Recent earnings list -->
+          <div class="author-earnings-list-wrap">
+            <h3 class="author-section-subtitle">Recent earnings</h3>
+            <div id="authorEarningsList" class="author-earnings-list">
+              <div class="loading">Loading earnings…</div>
+            </div>
+          </div>
+
+          <!-- Withdrawal history -->
+          <div class="author-earnings-list-wrap">
+            <h3 class="author-section-subtitle">Withdrawal history</h3>
+            <div id="authorWithdrawalsList" class="author-earnings-list">
+              <div class="loading">Loading…</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- ─── View B: Book editor (metadata + chapter list) ─── -->
@@ -1380,6 +1442,94 @@
         </svg>
         <span id="confirmOkLabel">Delete forever</span>
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── KYC submission modal (Phase 7) ─── -->
+<div class="modal-overlay video-upload-overlay" id="kycModal" style="display:none">
+  <div class="vu-modal" style="max-width:520px">
+    <div class="vu-header">
+      <div class="vu-header-text">
+        <h2 class="vu-title">Author KYC</h2>
+        <p class="vu-subtitle">Required by Philippine law before we can send money. We verify offline and approve usually within 1-2 business days.</p>
+      </div>
+      <button class="vu-close" id="kycClose" aria-label="Close">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="vu-body">
+      <label class="vu-label">Full legal name</label>
+      <input type="text" id="kycFullName" class="vu-input" placeholder="As shown on your ID" maxlength="120"/>
+
+      <label class="vu-label">Date of birth</label>
+      <input type="date" id="kycDob" class="vu-input"/>
+
+      <label class="vu-label">ID type</label>
+      <select id="kycIdType" class="vu-input">
+        <option value="philsys">PhilSys (National ID)</option>
+        <option value="driver_license">Driver's License</option>
+        <option value="passport">Passport</option>
+        <option value="umid">UMID</option>
+        <option value="sss">SSS ID</option>
+        <option value="gsis">GSIS ID</option>
+        <option value="voter">Voter's ID / COMELEC</option>
+        <option value="postal">Postal ID</option>
+        <option value="prc">PRC ID</option>
+        <option value="other">Other</option>
+      </select>
+
+      <label class="vu-label">ID number</label>
+      <input type="text" id="kycIdNumber" class="vu-input" placeholder="Number printed on your ID" maxlength="50"/>
+
+      <p class="vu-hint">For now we record only the basics. We may ask for an ID photo by email if review needs more info.</p>
+    </div>
+    <div class="vu-footer">
+      <button class="vu-btn vu-btn-secondary" id="kycCancel">Cancel</button>
+      <button class="vu-btn vu-btn-primary" id="kycSubmit">Submit for review</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Withdrawal request modal (Phase 7) ─── -->
+<div class="modal-overlay video-upload-overlay" id="withdrawalModal" style="display:none">
+  <div class="vu-modal" style="max-width:520px">
+    <div class="vu-header">
+      <div class="vu-header-text">
+        <h2 class="vu-title">Request payout</h2>
+        <p class="vu-subtitle" id="withdrawalSub">Convert your available coins to PHP and send to your account.</p>
+      </div>
+      <button class="vu-close" id="withdrawalClose" aria-label="Close">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="vu-body">
+      <label class="vu-label">Amount in coins</label>
+      <input type="number" id="withdrawalAmount" class="vu-input" min="500" step="1" placeholder="500"/>
+      <div class="vu-hint" id="withdrawalAmountHint">Minimum 500 coins. ₱1.00 per coin.</div>
+
+      <label class="vu-label">Payout method</label>
+      <select id="withdrawalMethod" class="vu-input">
+        <option value="gcash">GCash</option>
+        <option value="maya">Maya</option>
+        <option value="bank">Bank transfer</option>
+        <option value="other">Other (we'll contact you)</option>
+      </select>
+
+      <label class="vu-label">Account name</label>
+      <input type="text" id="withdrawalAccountName" class="vu-input" placeholder="Name registered on the account" maxlength="120"/>
+
+      <label class="vu-label">Account number / phone number</label>
+      <input type="text" id="withdrawalAccountNumber" class="vu-input" placeholder="11-digit GCash/Maya number, or bank account number" maxlength="64"/>
+
+      <label class="vu-label" id="withdrawalBankNameLabel" style="display:none">Bank name</label>
+      <input type="text" id="withdrawalBankName" class="vu-input" placeholder="e.g. BDO, BPI, UnionBank" maxlength="80" style="display:none"/>
+
+      <p class="vu-hint">Funds are sent within 1–3 business days after admin approval. We'll email you a confirmation when paid.</p>
+    </div>
+    <div class="vu-footer">
+      <button class="vu-btn vu-btn-secondary" id="withdrawalCancel">Cancel</button>
+      <button class="vu-btn vu-btn-primary" id="withdrawalSubmit">Submit request</button>
     </div>
   </div>
 </div>
