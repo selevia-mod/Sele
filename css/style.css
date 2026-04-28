@@ -9548,3 +9548,115 @@ body:not(.light) .author-earnings-available { background: linear-gradient(135deg
 .book-detail-author-link:hover { background: rgba(124, 58, 237, 0.08); }
 .book-detail-author-link:hover strong { color: #7c3aed; }
 .book-detail-author-link strong { transition: color 0.15s ease; }
+
+/* Book-lock toggle: disabled during 90-day grace */
+.book-lock-toggle.is-locked-grace { cursor: not-allowed; opacity: 0.85; }
+.book-lock-toggle.is-locked-grace .lock-toggle-track,
+.book-lock-toggle.is-locked-grace .lock-toggle-knob { cursor: not-allowed; }
+.book-lock-toggle.is-locked-grace .book-lock-toggle-text::after {
+  content: ' (locked)';
+  color: var(--text2);
+  font-weight: 500;
+  font-size: 0.78rem;
+}
+
+/* Per-chapter Premium toggle — disabled state */
+.lock-toggle.is-disabled { opacity: 0.55; cursor: not-allowed; }
+.lock-toggle.is-disabled .lock-toggle-track { background: rgba(17,24,39,0.10); cursor: not-allowed; }
+.lock-toggle.is-disabled .lock-toggle-knob { box-shadow: none; }
+
+/* Upload monetize card — ineligible state (video < 3 min) */
+.vu-card.is-ineligible { opacity: 0.6; }
+.vu-card.is-ineligible .vu-toggle { cursor: not-allowed; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   EARNINGS PAGE — own sidebar entry, two tabs (Earnings / Payments Info)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+#earningsPage { max-width: 920px; margin: 0 auto; padding: 1.4rem 1.5rem 4rem; }
+
+.page-hero-earnings {
+  background: linear-gradient(135deg, rgba(124,58,237,0.07), rgba(251,191,36,0.05));
+  border: 1px solid rgba(124,58,237,0.18);
+}
+
+.earnings-tabs {
+  display: flex;
+  gap: 0.4rem;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+  margin: 1.5rem 0 1.6rem;
+  padding-bottom: 0.25rem;
+}
+.earnings-tab {
+  background: transparent;
+  border: 0;
+  padding: 0.6rem 1.05rem;
+  font: inherit; font-weight: 700; font-size: 0.96rem;
+  color: var(--text2);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.earnings-tab:hover { background: rgba(17,24,39,0.04); color: var(--text); }
+.earnings-tab.active {
+  background: linear-gradient(135deg, rgba(124,58,237,0.12), rgba(167,139,250,0.12));
+  color: #7c3aed;
+}
+
+/* Breakdown cards (Posts / Videos / Books) */
+.earnings-breakdown {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.85rem;
+  margin: 1.4rem 0 1.5rem;
+}
+.earnings-breakdown-card {
+  display: flex; align-items: center; gap: 0.85rem;
+  padding: 1rem 1.1rem;
+  background: var(--card, #fff);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 12px;
+}
+.earnings-breakdown-icon {
+  width: 42px; height: 42px;
+  border-radius: 12px;
+  display: grid; place-items: center;
+  color: #fff;
+  flex-shrink: 0;
+}
+.earnings-breakdown-meta { min-width: 0; }
+.earnings-breakdown-label {
+  font-size: 0.72rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text2);
+  margin-bottom: 0.18rem;
+}
+.earnings-breakdown-value {
+  font-size: 1.05rem; font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.earnings-breakdown-php {
+  font-size: 0.78rem; color: var(--text2);
+  margin-top: 0.1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.payments-info-help {
+  padding: 1.2rem 1.4rem;
+  background: rgba(0,0,0,0.02);
+  border-radius: 12px;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--text2);
+}
+.payments-info-help p { margin: 0 0 0.6rem; }
+.payments-info-help p:last-child { margin: 0; }
+.payments-info-help strong { color: var(--text); font-weight: 700; }
+
+@media (max-width: 720px) {
+  .earnings-breakdown { grid-template-columns: 1fr; }
+}
+
+body:not(.light) .earnings-breakdown-card { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
+body:not(.light) .payments-info-help { background: rgba(255,255,255,0.04); }
