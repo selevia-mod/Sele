@@ -1265,8 +1265,8 @@ async function loadWalletConfig() {
         <div class="admin-config-key">${esc(c.key)}</div>
         <div class="admin-config-desc">${esc(c.description || '')}</div>
       </div>
-      <input class="admin-input admin-config-input" type="number" value="${c.value_int}" data-key="${esc(c.key)}"/>
-      <button class="admin-btn admin-btn-ghost" data-save="${esc(c.key)}">Save</button>
+      <input class="admin-config-input" type="number" value="${c.value_int}" data-key="${esc(c.key)}"/>
+      <button class="admin-btn admin-btn-primary admin-config-save" data-save="${esc(c.key)}">Save</button>
     `;
     row.querySelector(`[data-save="${c.key}"]`).onclick = async () => {
       const v = parseInt(row.querySelector('input').value, 10);
