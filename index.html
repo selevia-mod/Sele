@@ -1758,6 +1758,24 @@
   </div>
 </div>
 
+<!-- ─── Sign-out confirmation ─── -->
+<div class="modal-overlay" id="signOutModal" style="display:none">
+  <div class="modal-box" style="max-width:400px">
+    <div class="modal-header">
+      <div class="modal-title">Sign out?</div>
+      <button class="modal-close-btn" id="signOutClose">×</button>
+    </div>
+    <div class="signout-body">
+      <div class="signout-icon">👋</div>
+      <p class="signout-msg">You'll need to sign in again to access your account.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" id="signOutCancel">Cancel</button>
+      <button class="btn btn-purple btn-sm" id="signOutConfirm">Sign out</button>
+    </div>
+  </div>
+</div>
+
 <!-- ─── Chapter Publish dialog (Now / Schedule) ─── -->
 <div class="modal-overlay video-upload-overlay" id="chapterPublishModal" style="display:none">
   <div class="vu-modal cp-modal">
