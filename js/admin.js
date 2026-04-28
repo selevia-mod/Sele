@@ -64,8 +64,17 @@ function switchTab(name) {
   if (name === 'users')   lazyInit('usersSearch',   typeof initUsersTab   === 'function' ? initUsersTab   : null, typeof loadUsers          === 'function' ? loadUsers          : null);
   if (name === 'bans')    lazyInit('bansFilter',    typeof initBansTab    === 'function' ? initBansTab    : null, typeof loadBans           === 'function' ? loadBans           : null);
   if (name === 'content') lazyInit('contentFilter', typeof initContentTab === 'function' ? initContentTab : null, typeof loadHiddenContent  === 'function' ? loadHiddenContent  : null);
-  if (name === 'wallet')  lazyInit('btnAddPack',    typeof initWalletTab  === 'function' ? initWalletTab  : null, typeof loadWalletPacks    === 'function' ? loadWalletPacks    : null);
-  if (name === 'payouts') lazyInit('payoutsFilter', typeof initPayoutsTab === 'function' ? initPayoutsTab : null, typeof loadPayouts        === 'function' ? loadPayouts        : null);
+  // Wallet + Payouts both have sub-tabs — re-enter the tab → reset to the
+  // default sub-tab and re-render so the user always sees populated content,
+  // never a blank panel.
+  if (name === 'wallet') {
+    lazyInit('btnAddPack', typeof initWalletTab === 'function' ? initWalletTab : null, null);
+    if (typeof switchWalletSubtab === 'function') switchWalletSubtab('packs');
+  }
+  if (name === 'payouts') {
+    lazyInit('payoutsFilter', typeof initPayoutsTab === 'function' ? initPayoutsTab : null, null);
+    if (typeof switchPayoutsSubtab === 'function') switchPayoutsSubtab('withdrawals');
+  }
 }
 
 document.querySelectorAll('.admin-tab').forEach(t => {
@@ -891,10 +900,13 @@ function toast(msg) {
 // WALLET TAB — coin packs CRUD, user wallet lookup + adjust, default config
 // ════════════════════════════════════════════════════════════════════════════
 
-// Sub-tab switching inside the Wallet panel
+// Sub-tab switching inside the Wallet panel.
+// CRITICAL: scope all selectors to [data-tab-content="wallet"] — without it,
+// these queries also match the Payouts sub-tabs (same .admin-subtab class)
+// and toggling one tab strips .active from the other → empty content area.
 function switchWalletSubtab(name) {
-  document.querySelectorAll('.admin-subtab').forEach(t => t.classList.toggle('active', t.dataset.subtab === name));
-  document.querySelectorAll('.admin-subtab-content').forEach(s => {
+  document.querySelectorAll('[data-tab-content="wallet"] .admin-subtab').forEach(t => t.classList.toggle('active', t.dataset.subtab === name));
+  document.querySelectorAll('[data-tab-content="wallet"] .admin-subtab-content').forEach(s => {
     s.style.display = s.dataset.subtabContent === name ? 'block' : 'none';
   });
   if (name === 'packs')        loadWalletPacks();
@@ -903,7 +915,7 @@ function switchWalletSubtab(name) {
 }
 
 function initWalletTab() {
-  document.querySelectorAll('.admin-subtab').forEach(t => {
+  document.querySelectorAll('[data-tab-content="wallet"] .admin-subtab').forEach(t => {
     t.addEventListener('click', () => switchWalletSubtab(t.dataset.subtab));
   });
   document.getElementById('btnAddPack')?.addEventListener('click', () => openPackEditor(null));
