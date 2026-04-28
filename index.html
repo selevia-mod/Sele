@@ -955,21 +955,129 @@
         </div>
       </div>
 
-      <!-- Payments Info tab -->
+      <!-- Payments Info tab — inline form (KYC + payout method, single submit) -->
       <div class="earnings-tab-content" data-etab-content="payments" style="display:none">
-        <div class="author-kyc-banner" id="authorKycBanner">
+
+        <div class="author-kyc-banner" id="authorKycBanner" style="display:none">
           <div class="author-kyc-icon">🪪</div>
           <div class="author-kyc-text">
             <div class="author-kyc-title" id="authorKycTitle">Complete your payments info to enable payouts</div>
             <div class="author-kyc-sub" id="authorKycSub">We need to verify your identity before sending you money. One-time step required by Philippine law.</div>
           </div>
-          <button class="btn btn-purple btn-sm" id="btnSubmitKyc">Submit info</button>
         </div>
 
-        <div class="payments-info-help">
-          <p><strong>Why we ask for this:</strong> Philippine law (Data Privacy Act + AMLA) requires us to verify identity before sending real money. Approval typically takes 1–2 business days after submission.</p>
-          <p><strong>What happens after approval:</strong> Once you reach the minimum balance, you can request a payout from the Earnings tab. Funds go to your GCash, Maya, or bank account, usually within 1–3 business days of admin approval.</p>
+        <!-- Basic Information -->
+        <div class="pi-card">
+          <div class="pi-card-head">
+            <span class="pi-card-pill"></span>
+            <span class="pi-card-title">Basic Information</span>
+          </div>
+          <div class="pi-card-body">
+            <label class="pi-field">
+              <span class="pi-label">Full Name <span class="pi-req">*</span></span>
+              <input type="text" id="piFullName" class="pi-input" placeholder="Enter Full Name" maxlength="120" autocomplete="name"/>
+            </label>
+            <label class="pi-field">
+              <span class="pi-label">Phone Number <span class="pi-req">*</span></span>
+              <input type="tel" id="piPhone" class="pi-input" placeholder="Enter Phone Number" maxlength="20" autocomplete="tel"/>
+            </label>
+            <label class="pi-field">
+              <span class="pi-label">Email Address <span class="pi-req">*</span></span>
+              <input type="email" id="piEmail" class="pi-input" placeholder="Enter Email Address" maxlength="160" autocomplete="email"/>
+            </label>
+            <label class="pi-field">
+              <span class="pi-label">Date of Birth <span class="pi-req">*</span></span>
+              <input type="date" id="piDob" class="pi-input"/>
+            </label>
+            <label class="pi-field">
+              <span class="pi-label">Address <span class="pi-req">*</span></span>
+              <input type="text" id="piAddress" class="pi-input" placeholder="Enter full address" maxlength="240" autocomplete="street-address"/>
+            </label>
+          </div>
         </div>
+
+        <!-- Method of Payment -->
+        <div class="pi-card">
+          <div class="pi-card-head pi-card-head-active">
+            <span class="pi-card-pill pi-card-pill-active"></span>
+            <span class="pi-card-title">Method of Payment <span class="pi-req">*</span></span>
+          </div>
+          <div class="pi-card-body">
+            <div class="pi-method-grid">
+              <label class="pi-method-pill"><input type="radio" name="piMethod" value="gcash"/><span>Gcash</span></label>
+              <label class="pi-method-pill"><input type="radio" name="piMethod" value="maya"/><span>Maya</span></label>
+              <label class="pi-method-pill"><input type="radio" name="piMethod" value="bank"/><span>Bank</span></label>
+              <label class="pi-method-pill"><input type="radio" name="piMethod" value="gotyme"/><span>Gotyme</span></label>
+            </div>
+          </div>
+        </div>
+
+        <!-- QR Code upload -->
+        <div class="pi-card">
+          <div class="pi-card-head">
+            <span class="pi-card-icon-box">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 18h3v3h-3z"/></svg>
+            </span>
+            <span class="pi-card-title">QR CODE FOR METHOD OF PAYMENT <span class="pi-req">*</span></span>
+          </div>
+          <div class="pi-card-body">
+            <label class="pi-upload" id="piQrUploadBox">
+              <input type="file" id="piQrFile" accept="image/*,application/pdf" hidden/>
+              <span class="pi-upload-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><path d="M19 12v7H5v-7H3v9h18v-9zM12 16l5-6h-3V3h-4v7H7l5 6z"/></svg>
+              </span>
+              <span class="pi-upload-text" id="piQrText">Tap to upload qr code</span>
+              <img class="pi-upload-preview" id="piQrPreview" alt="" style="display:none"/>
+            </label>
+          </div>
+        </div>
+
+        <!-- Valid ID upload -->
+        <div class="pi-card">
+          <div class="pi-card-head">
+            <span class="pi-card-icon-box">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="9" cy="12" r="2.5"/><line x1="14" y1="10" x2="19" y2="10"/><line x1="14" y1="14" x2="19" y2="14"/></svg>
+            </span>
+            <span class="pi-card-title">VALID ID (GOVERNMENT ID) <span class="pi-req">*</span></span>
+          </div>
+          <div class="pi-card-body">
+            <label class="pi-upload" id="piIdUploadBox">
+              <input type="file" id="piIdFile" accept="image/*,application/pdf" hidden/>
+              <span class="pi-upload-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><path d="M19 12v7H5v-7H3v9h18v-9zM12 16l5-6h-3V3h-4v7H7l5 6z"/></svg>
+              </span>
+              <span class="pi-upload-text" id="piIdText">Tap to upload valid id</span>
+              <img class="pi-upload-preview" id="piIdPreview" alt="" style="display:none"/>
+            </label>
+          </div>
+        </div>
+
+        <!-- Signature upload -->
+        <div class="pi-card">
+          <div class="pi-card-head">
+            <span class="pi-card-icon-box">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l4-1 12-12 4 4-12 12-1 4z"/><path d="M14 6l4 4"/></svg>
+            </span>
+            <span class="pi-card-title">SIGNATURE <span class="pi-req">*</span></span>
+          </div>
+          <div class="pi-card-body">
+            <label class="pi-upload" id="piSigUploadBox">
+              <input type="file" id="piSigFile" accept="image/*" hidden/>
+              <span class="pi-upload-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><path d="M19 12v7H5v-7H3v9h18v-9zM12 16l5-6h-3V3h-4v7H7l5 6z"/></svg>
+              </span>
+              <span class="pi-upload-text" id="piSigText">Tap to upload signature</span>
+              <img class="pi-upload-preview" id="piSigPreview" alt="" style="display:none"/>
+            </label>
+          </div>
+        </div>
+
+        <button class="btn pi-save-btn" id="piSaveBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="9 12 11 14 15 10"/></svg>
+          <span>Save Information</span>
+        </button>
+
+        <p class="pi-disclaimer">Approval typically takes 1–2 business days after submission. We'll email you when reviewed.</p>
       </div>
     </div>
 
