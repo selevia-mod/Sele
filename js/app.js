@@ -136,11 +136,10 @@ async function initAuth() {
 
 async function onSignedIn(user) {
   currentUser = user;
-  // Books page: invalidate the user-scoped tab caches (Library / Reading List)
-  // so a fresh sign-in re-fetches them instead of reusing the previous user's
+  // Books page: invalidate the user-scoped tab cache (Reading List) so a
+  // fresh sign-in re-fetches it instead of reusing the previous user's
   // (or the signed-out) state.
   if (typeof _bookTabLoaded !== 'undefined') {
-    _bookTabLoaded.library = false;
     _bookTabLoaded.readinglist = false;
   }
   // Defensive: if the profile row doesn't exist yet (rare race on first sign-in),
@@ -299,14 +298,13 @@ async function signOut() {
   if (typeof allBooksRaw   !== 'undefined') allBooksRaw   = [];
   if (typeof _booksLoadedSort  !== 'undefined') _booksLoadedSort  = null;
   if (typeof _booksLoadedGenre !== 'undefined') _booksLoadedGenre = null;
-  // Reset the v2 tabbed-books "first-visit" flags so personal tabs (Library /
-  // Reading List) re-fetch when the user signs back in. Otherwise they'd stay
-  // stuck showing "Sign in to see your library" until a hard reload.
+  // Reset the v2 tabbed-books "first-visit" flags so the personal tab
+  // (Reading List) re-fetches when the user signs back in. Otherwise it'd
+  // stay stuck showing "Sign in to see your reading list" until a hard reload.
   if (typeof _bookTabLoaded !== 'undefined') {
     _bookTabLoaded.foryou      = false;
     _bookTabLoaded.discover    = false;
     _bookTabLoaded.ranking     = false;
-    _bookTabLoaded.library     = false;
     _bookTabLoaded.readinglist = false;
   }
   // Reset user-taste cache (book reads + likes) — would otherwise show
@@ -5397,6 +5395,9 @@ const earningsPage = document.getElementById('earningsPage');
 
 // Hide every main content page; show functions call this first then set their own page to block.
 function hideAllMainPages() {
+  // Drop layout-mode body classes — each show* opts back in if it needs a
+  // wider canvas. (Currently used by the videos and books pages.)
+  document.body.classList.remove('on-videos', 'on-books');
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
@@ -5506,19 +5507,23 @@ let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '
 //   foryou      → Weekly Featured (editor's picks) / Fresh Reads / Completed & Excellent
 //   discover    → Genre-grouped rows of top books
 //   ranking     → Most Loved / Most Read / Trending This Week
-//   library     → User's reads
 //   readinglist → User's bookmarks
+//
+// (Library was dropped from web — the sidebar's existing Bookmarks page
+// already plays that role; mobile app's "Library" maps to web's Bookmarks.)
 //
 // Each section has a See All link that opens an in-page list view with
 // infinite scroll, sorted/filtered the same way that section was populated.
 // ────────────────────────────────────────────────────────────────────────────
 let _activeBookTab = 'foryou';
-const _bookTabLoaded = { foryou: false, discover: false, ranking: false, library: false, readinglist: false };
+const _bookTabLoaded = { foryou: false, discover: false, ranking: false, readinglist: false };
 
 function showBook(force = false) {
   hideAllMainPages();
   bookPage.style.display = 'block';
-  document.body.classList.remove('on-videos');
+  // Wider canvas: 7 covers per row needs the full viewport, not the 900px
+  // home-feed column. The body class is removed by hideAllMainPages on nav.
+  document.body.classList.add('on-books');
   stopVideoPlayer();
   history.pushState(null, '', '#book');
   // Hide See-All sub-view if it was open from a previous visit.
@@ -5540,45 +5545,343 @@ function loadBooksTab(tab, force = false) {
   if (tab === 'foryou')      return _loadForYouTab();
   if (tab === 'discover')    return _loadDiscoverTab();
   if (tab === 'ranking')     return _loadRankingTab();
-  if (tab === 'library')     return _loadLibraryTab();
   if (tab === 'readinglist') return _loadReadingListTab();
 }
 
-// Generic section loader: populate a horizontal-scroll track with v2 cards.
-async function _loadBookSection(sectionKey, fetcher, emptyMsg) {
-  const track = document.querySelector(`.book-section-track[data-track="${sectionKey}"]`);
-  if (!track) return;
-  track.innerHTML = '<div class="loading">Loading…</div>';
-  try {
-    const books = await fetcher();
-    if (!books?.length) {
-      track.innerHTML = `<div class="book-section-empty">${escHTML(emptyMsg)}</div>`;
-      return;
+// (The old fire-and-render `_loadBookSection` was removed when For You and
+// Ranking moved to the parallel-fetch + claim-by-priority pattern below.
+// `_renderBookSection` is the new render-only helper.)
+
+// ── For You tab — 10 Wattpad-inspired rails ────────────────────────────────
+//
+// Strategy: fetch all rails in parallel (each overfetches 2× for dedup
+// headroom), then walk them in priority order and CLAIM books — once a
+// book lands in an earlier rail, later rails skip it. This guarantees
+// every book appears at most once across the whole For You tab, while
+// keeping the parallel speed (no sequential wait between waves).
+//
+// Order is the priority order: curated → personal → fresh activity →
+// discovery → format → all-time → completed. Edit this array to reorder.
+const _SECTION_ROW_SIZE = 7;
+const _FORYOU_SECTIONS = [
+  { key: 'weeklyFeatured',     fetch: (n) => _fetchWeeklyFeaturedWithFallback(n),                       empty: 'No featured books yet' },
+  { key: 'recommended',        fetch: (n) => _fetchRecommendedForUser(n),                               empty: 'Read a few books to get personalised picks' },
+  { key: 'trending',           fetch: (n) => fetchSupabaseBooks(0, n, 'trending'),                      empty: 'Nothing trending yet' },
+  { key: 'freshReads',         fetch: (n) => fetchSupabaseBooks(0, n, 'recent'),                        empty: 'No fresh reads' },
+  { key: 'justUpdated',        fetch: (n) => fetchSupabaseBooks(0, n, 'just-updated'),                  empty: 'No recent updates' },
+  { key: 'hiddenGems',         fetch: (n) => _fetchHiddenGems(n),                                       empty: 'No hidden gems found' },
+  { key: 'quickReads',         fetch: (n) => _fetchQuickReads(n),                                       empty: 'No quick reads yet' },
+  { key: 'mostLoved',          fetch: (n) => fetchSupabaseBooks(0, n, 'most-liked'),                    empty: 'Nothing here yet' },
+  { key: 'mostRead',           fetch: (n) => fetchSupabaseBooks(0, n, 'most-read'),                     empty: 'Nothing here yet' },
+  { key: 'completedExcellent', fetch: (n) => fetchSupabaseBooks(0, n, 'completed'),                     empty: 'No completed books yet' },
+];
+
+async function _loadForYouTab() {
+  // Scope all DOM queries to this panel. Several keys (mostLoved / mostRead /
+  // trending) are reused by the Ranking tab — without this scope, querySelector
+  // would write to whichever copy comes first in the DOM.
+  const panel = document.getElementById('bookTabForYou');
+  if (!panel) return;
+  // Show a loading state on every track immediately so the page never looks empty.
+  for (const s of _FORYOU_SECTIONS) {
+    const track = panel.querySelector(`.book-section-track[data-track="${s.key}"]`);
+    if (track) track.innerHTML = '<div class="loading">Loading…</div>';
+  }
+
+  // Overfetch 3× — gives the dedup pass plenty of headroom even when later
+  // rails get most of their top picks claimed by earlier rails.
+  const FETCH = _SECTION_ROW_SIZE * 3;
+  const results = await Promise.all(
+    _FORYOU_SECTIONS.map(s =>
+      s.fetch(FETCH).catch(err => {
+        console.warn(`[For You] section "${s.key}" failed:`, err);
+        return [];
+      })
+    )
+  );
+
+  // Claim books in priority order with SOFT dedup:
+  //   1. First pass: take un-claimed books only (the strict dedup).
+  //   2. If a rail ends up too sparse to be useful (< MIN_PER_RAIL), top it
+  //      up with its own already-claimed books — better to repeat a great
+  //      book in a category showcase than to leave the rail empty.
+  // This is the right trade for "category" rails like Most Loved / Completed,
+  // where the rail's whole job is "show me the best of this slice", and dies
+  // visually if dedup steals all its top picks.
+  const seen = new Set();
+  const MIN_PER_RAIL = 4;
+  results.forEach((books, i) => {
+    const pool = books || [];
+    const claimed = [];
+    const claimedIds = new Set();
+    // Pass 1 — strict dedup
+    for (const b of pool) {
+      if (!b || seen.has(b.id) || claimedIds.has(b.id)) continue;
+      claimed.push(b);
+      claimedIds.add(b.id);
+      seen.add(b.id);
+      if (claimed.length >= _SECTION_ROW_SIZE) break;
     }
-    track.innerHTML = '';
-    books.forEach(b => track.appendChild(_renderBookCardV2(b)));
+    // Pass 2 — soft fill if the rail came up short
+    if (claimed.length < MIN_PER_RAIL) {
+      for (const b of pool) {
+        if (!b || claimedIds.has(b.id)) continue;
+        claimed.push(b);
+        claimedIds.add(b.id);
+        if (claimed.length >= _SECTION_ROW_SIZE) break;
+      }
+    }
+    _renderBookSection(_FORYOU_SECTIONS[i].key, claimed, _FORYOU_SECTIONS[i].empty, panel);
+  });
+}
+
+// Render-only helper — paints already-fetched books into a section track.
+// `scope` defaults to `document` but should be the parent tab panel when
+// the same section key exists in multiple tabs (For You and Ranking both
+// use mostLoved / mostRead / trending). Without scoping, the loaders write
+// to the first matching track in DOM order — usually the wrong tab.
+function _renderBookSection(sectionKey, books, emptyMsg, scope) {
+  const root = scope || document;
+  const track = root.querySelector(`.book-section-track[data-track="${sectionKey}"]`);
+  if (!track) return;
+  if (!books || !books.length) {
+    track.innerHTML = `<div class="book-section-empty">${escHTML(emptyMsg || 'Nothing here yet')}</div>`;
+    return;
+  }
+  track.innerHTML = '';
+  books.forEach(b => track.appendChild(_renderBookCardV2(b)));
+}
+
+// Hidden Gems: high engagement RATE, not absolute likes. A book with 8 likes
+// and 12 views is more of a "gem" than one with 50 likes and 600 views — the
+// first signals "almost everyone who reads it loves it". Server filter is
+// the same (low-views floor), but we re-rank client-side by likes/views ratio
+// to pick the *true* gems out of that pool.
+async function _fetchHiddenGems(limit = _SECTION_ROW_SIZE) {
+  // Overfetch — we need headroom because we re-rank below.
+  const raw = await fetchSupabaseBooks(0, Math.max(limit * 3, 24), 'most-liked', {
+    filter: q => q.gte('likes_count', 3).lt('views_count', 500),
+  });
+  return [...raw].sort((a, b) => {
+    // Smoothed ratio: floor views at 10 so a 5-view, 5-like fluke doesn't
+    // win over a 50-view, 40-like consistent favourite.
+    const rateA = (a.likes_count || 0) / Math.max(a.views_count || 0, 10);
+    const rateB = (b.likes_count || 0) / Math.max(b.views_count || 0, 10);
+    if (rateB !== rateA) return rateB - rateA;
+    return (b.likes_count || 0) - (a.likes_count || 0);
+  }).slice(0, limit);
+}
+
+// Quick Reads: short stories ranked by likes-PER-CHAPTER so a 1-chapter
+// masterpiece beats a 5-chapter draft. Density of love > sheer count.
+async function _fetchQuickReads(limit = _SECTION_ROW_SIZE) {
+  const raw = await fetchSupabaseBooks(0, Math.max(limit * 3, 24), 'most-liked', {
+    filter: q => q.gte('chapters_count', 1).lte('chapters_count', 5),
+  });
+  return [...raw].sort((a, b) => {
+    const densityA = (a.likes_count || 0) / Math.max(a.chapters_count || 0, 1);
+    const densityB = (b.likes_count || 0) / Math.max(b.chapters_count || 0, 1);
+    if (densityB !== densityA) return densityB - densityA;
+    return (b.likes_count || 0) - (a.likes_count || 0);
+  }).slice(0, limit);
+}
+
+// Weekly Featured = editor's picks first; if too few, top up with trending
+// (last-7-day hot) and finally with high-likes recent books, so the row
+// always feels alive even before a moderator curates anything.
+async function _fetchWeeklyFeaturedWithFallback(limit = _SECTION_ROW_SIZE) {
+  const target = limit;
+  const picks = await fetchSupabaseBooks(0, target, 'editors-pick');
+  if (picks.length >= target) return picks;
+
+  // Top up with trending (most likely to feel "weekly featured" without curation)
+  const fillers = await fetchSupabaseBooks(0, target, 'trending');
+  const seen = new Set(picks.map(b => b.id));
+  for (const b of fillers) {
+    if (picks.length >= target) break;
+    if (!seen.has(b.id)) { picks.push(b); seen.add(b.id); }
+  }
+  if (picks.length >= 3) return picks;
+
+  // Final fallback: most-loved books overall — guarantees a populated row.
+  const safetyNet = await fetchSupabaseBooks(0, target, 'most-liked');
+  for (const b of safetyNet) {
+    if (picks.length >= target) break;
+    if (!seen.has(b.id)) { picks.push(b); seen.add(b.id); }
+  }
+  return picks;
+}
+
+// "Recommended for You" — picks books matching the tags/genres the user has
+// previously read or liked. For brand-new users (no signal), gracefully
+// falls back to trending so the rail is always populated.
+async function _fetchRecommendedForUser(limit = _SECTION_ROW_SIZE) {
+  if (!currentUser?.id) {
+    return await fetchSupabaseBooks(0, limit, 'most-liked');
+  }
+  try {
+    // Pull a small sample of the user's recent reads + likes to derive their taste.
+    const [{ data: reads }, { data: likes }] = await Promise.all([
+      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(20),
+      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(20),
+    ]);
+    const seedIds = [...new Set([...(reads || []), ...(likes || [])].map(r => r.book_id))];
+    if (!seedIds.length) {
+      return await fetchSupabaseBooks(0, limit, 'trending');
+    }
+    // Build a tag-weight map from those books.
+    const { data: seedBooks } = await supabase.from('books')
+      .select('genre, tags').in('id', seedIds);
+    const tagWeights = {};
+    for (const b of (seedBooks || [])) {
+      if (b.genre) tagWeights[b.genre] = (tagWeights[b.genre] || 0) + 2;
+      for (const t of (b.tags || [])) {
+        if (t) tagWeights[t] = (tagWeights[t] || 0) + 1;
+      }
+    }
+    const topTag = Object.entries(tagWeights).sort((a,b) => b[1] - a[1])[0]?.[0];
+    if (!topTag) return await fetchSupabaseBooks(0, limit, 'trending');
+
+    // Fetch top books in that taste, excluding ones the user already read/liked.
+    // Overfetch so we have headroom after excluding their seedlist.
+    const exclude = new Set(seedIds);
+    const candidates = await fetchSupabaseBooks(0, Math.max(limit * 2, 14), 'most-liked', { genre: topTag });
+    const fresh = candidates.filter(b => !exclude.has(b.id)).slice(0, limit);
+    if (fresh.length >= 3) return fresh;
+    return await fetchSupabaseBooks(0, limit, 'trending');
   } catch (err) {
-    console.warn(`Section "${sectionKey}" failed:`, err);
-    track.innerHTML = '<div class="book-section-empty">Couldn\'t load this section.</div>';
+    console.warn('Recommended-for-you failed, falling back:', err);
+    return await fetchSupabaseBooks(0, _SECTION_ROW_SIZE, 'trending');
   }
 }
 
-// ── For You tab ────────────────────────────────────────────────────────────
-async function _loadForYouTab() {
-  await Promise.all([
-    _loadBookSection('weeklyFeatured', () => fetchSupabaseBooks(0, 12, 'editors-pick'), 'No editor picks yet'),
-    _loadBookSection('freshReads',     () => fetchSupabaseBooks(0, 12, 'recent'),       'No fresh reads'),
-    _loadBookSection('completedExcellent', () => fetchSupabaseBooks(0, 12, 'completed'), 'No completed books yet'),
-  ]);
+// ── Ranking tab — Top-100 leaderboard with genre filter (App-aligned) ──────
+// One ranked vertical list per genre, numbered ribbons on each row. The
+// chip rail at the top filters by genre; "All" shows the platform-wide Top 100.
+// Sort is by likes_count (the canonical "Most Loved" axis) — the same axis
+// the mobile app uses for its single ranking score.
+const _RANKING_GENRES = [
+  { slug: '',                  label: 'All' },
+  { slug: 'dark-romance',      label: 'Dark Romance' },
+  { slug: 'mafia-boss',        label: 'Mafia Boss' },
+  { slug: 'billionaire',       label: 'Billionaire' },
+  { slug: 'enemies-to-lovers', label: 'Enemies to Lovers' },
+  { slug: 'forbidden-love',    label: 'Forbidden Love' },
+  { slug: 'hot-romance',       label: 'Hot Romance' },
+  { slug: 'sci-fi',            label: 'Sci-fi' },
+  { slug: 'teen-fiction',      label: 'Teen Fiction' },
+  { slug: 'general-fiction',   label: 'General Fiction' },
+];
+let _rankingActiveGenre = '';
+let _rankingSeq = 0;
+
+async function _loadRankingTab() {
+  const panel = document.getElementById('bookTabRanking');
+  if (!panel) return;
+  _renderRankGenreChips();
+  await _loadRankingForGenre(_rankingActiveGenre);
 }
 
-// ── Ranking tab ────────────────────────────────────────────────────────────
-async function _loadRankingTab() {
-  await Promise.all([
-    _loadBookSection('mostLoved', () => fetchSupabaseBooks(0, 12, 'most-liked'), 'Nothing here yet'),
-    _loadBookSection('mostRead',  () => fetchSupabaseBooks(0, 12, 'most-read'),  'Nothing here yet'),
-    _loadBookSection('trending',  () => fetchSupabaseBooks(0, 12, 'trending'),   'Nothing trending yet'),
-  ]);
+function _renderRankGenreChips() {
+  const wrap = document.getElementById('rankGenreChips');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  for (const g of _RANKING_GENRES) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'rank-genre-chip' + (g.slug === _rankingActiveGenre ? ' active' : '');
+    btn.dataset.genre = g.slug;
+    btn.textContent = g.label;
+    btn.addEventListener('click', () => {
+      if (g.slug === _rankingActiveGenre) return;
+      _rankingActiveGenre = g.slug;
+      // Update active chip styling without a full chip-rail rebuild
+      wrap.querySelectorAll('.rank-genre-chip').forEach(c => {
+        c.classList.toggle('active', c.dataset.genre === g.slug);
+      });
+      _loadRankingForGenre(g.slug);
+    });
+    wrap.appendChild(btn);
+  }
+}
+
+async function _loadRankingForGenre(genreSlug) {
+  const list = document.getElementById('rankList');
+  if (!list) return;
+  const seq = ++_rankingSeq;
+  list.innerHTML = '<div class="loading">Loading rankings…</div>';
+
+  let books;
+  try {
+    // Top 100 by all-time VIEWS — highest read count wins #1, matching the
+    // mobile App. Genre filter is optional (empty string = All).
+    books = await fetchSupabaseBooks(0, 100, 'most-read', genreSlug ? { genre: genreSlug } : {});
+  } catch (err) {
+    if (seq !== _rankingSeq) return;
+    console.warn('[Ranking] load failed:', err);
+    list.innerHTML = '<div class="rank-empty">Couldn\'t load rankings. Try again.</div>';
+    return;
+  }
+  if (seq !== _rankingSeq) return; // user switched genre mid-flight
+
+  if (!books.length) {
+    list.innerHTML = '<div class="rank-empty">No books in this category yet.</div>';
+    return;
+  }
+
+  list.innerHTML = '';
+  books.forEach((book, idx) => {
+    list.appendChild(_renderRankCard(book, idx + 1));
+  });
+}
+
+// Single ranked-list row — cover left with numbered ribbon, info right.
+// Mirrors the mobile app's leaderboard card: title, description, status
+// badge, paid/free badge, and an icon-stats row.
+function _renderRankCard(book, rank) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'rank-card';
+  card.dataset.rank = String(rank);
+  card.dataset.bookId = book.id;
+  card.onclick = () => openBookDetail(book.id);
+
+  const initial = (book.title || '?').trim().charAt(0).toUpperCase();
+  const cover = book.cover_url
+    ? `<img src="${escHTML(book.cover_url)}" alt="" loading="lazy"/>`
+    : `<div class="rank-card-cover-placeholder">${escHTML(initial)}</div>`;
+
+  const isCompleted = (book.status || '').toLowerCase() === 'completed';
+  const isPaid = (book.lock_from_chapter || 0) > 0;
+
+  // Synthesised rating (same scale as the v2 card so numbers stay consistent).
+  const rating = Math.min(5, (book.likes_count || 0) / 5).toFixed(2);
+  const views  = formatCompact(book.views_count || 0);
+  const likes  = formatCompact(book.likes_count || 0);
+  const chapters = book.chapters_count || 0;
+
+  const desc = (book.description || '').trim() || 'No description yet.';
+
+  card.innerHTML = `
+    <div class="rank-card-ribbon">${rank}</div>
+    <div class="rank-card-cover">${cover}</div>
+    <div class="rank-card-body">
+      <h3 class="rank-card-title">${escHTML(book.title || 'Untitled')}</h3>
+      <p class="rank-card-desc">${escHTML(desc)}</p>
+      <div class="rank-card-badges">
+        ${isCompleted
+          ? '<span class="rank-card-badge rank-card-badge-completed">Completed</span>'
+          : '<span class="rank-card-badge rank-card-badge-ongoing">Ongoing</span>'}
+        ${isPaid ? '<span class="rank-card-badge rank-card-badge-paid">Paid</span>' : ''}
+      </div>
+      <div class="rank-card-stats">
+        <span class="rank-card-stat rank-card-stat-rating"><span class="rank-card-stat-icon">★</span>${rating}</span>
+        <span class="rank-card-stat rank-card-stat-views"><span class="rank-card-stat-icon">👁</span>${views}</span>
+        <span class="rank-card-stat rank-card-stat-likes"><span class="rank-card-stat-icon">♥</span>${likes}</span>
+        <span class="rank-card-stat"><span class="rank-card-stat-icon">📋</span>${chapters}</span>
+      </div>
+    </div>`;
+  return card;
 }
 
 // ── Discover tab — genre-grouped rows ──────────────────────────────────────
@@ -5596,9 +5899,11 @@ async function _loadDiscoverTab() {
     sec.className = 'book-section';
     const safeG = escHTML(g);
     const pretty = escHTML(prettyGenre(g));
+    // Same head markup as For You / Ranking — keeps "See All" right-aligned
+    // and the title styling consistent across every tab.
     sec.innerHTML = `
-      <div class="book-discover-genre-head">
-        <h3 class="book-discover-genre-name">${pretty}</h3>
+      <div class="book-section-head">
+        <h2 class="book-section-title">${pretty}</h2>
         <button class="book-section-see-all" data-see-all="genre:${safeG}" type="button">See All</button>
       </div>
       <div class="book-section-track" data-track="genre:${safeG}"><div class="loading">Loading…</div></div>`;
@@ -5615,7 +5920,7 @@ async function _loadDiscoverGenreRow(genre) {
   const track = section?.querySelector(`.book-section-track[data-track="genre:${genre}"]`);
   if (!track) return;
   try {
-    const books = await fetchSupabaseBooks(0, 12, 'most-liked', { genre });
+    const books = await fetchSupabaseBooks(0, _SECTION_ROW_SIZE, 'most-liked', { genre });
     if (!books.length) {
       // Hide the section entirely — cleaner than an empty-state placeholder.
       if (section) section.style.display = 'none';
@@ -5629,8 +5934,8 @@ async function _loadDiscoverGenreRow(genre) {
   }
 }
 
-// ── Library / Reading List tabs (user-scoped collection grids) ─────────────
-async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg }) {
+// ── Reading List tab (user-scoped collection grid) ────────────────────────
+async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg, orderColumn }) {
   const grid = document.getElementById(gridId);
   const empty = document.getElementById(emptyId);
   if (!grid) return;
@@ -5642,12 +5947,18 @@ async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg
   grid.innerHTML = '<div class="loading">Loading…</div>';
   if (empty) empty.style.display = 'none';
   try {
-    // Join through the user's table (book_reads / book_bookmarks) so we can
-    // both fetch the book row AND keep the user's own ordering (latest first).
+    // Join through the user's pivot table (book_reads / book_bookmarks) so we
+    // both fetch the book row AND keep the user's own "latest first" order.
+    //
+    // CRITICAL: book_reads's timestamp column is `last_read_at`, NOT
+    // `created_at` — ordering by created_at on book_reads throws "column
+    // does not exist" and the whole tab errors out. The orderColumn arg
+    // lets each caller name its own.
+    const col = orderColumn || 'created_at';
     const { data, error } = await supabase.from(table)
-      .select(`book_id, created_at, books!${fkName}(${BOOK_CARD_SELECT})`)
+      .select(`book_id, ${col}, books!${fkName}(${BOOK_CARD_SELECT})`)
       .eq('user_id', currentUser.id)
-      .order('created_at', { ascending: false })
+      .order(col, { ascending: false })
       .limit(60);
     if (error) throw error;
     const books = _normalizeBookRows((data || []).map(r => r.books));
@@ -5656,9 +5967,11 @@ async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg
       if (empty) empty.style.display = 'block';
       return;
     }
+    // v2 cards (corner ribbon + rating + views) so Reading List looks
+    // identical to every other rail across the books page.
     grid.innerHTML = '';
     books.forEach((b, i) => {
-      const card = renderBookCard(b);
+      const card = _renderBookCardV2(b);
       card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
       grid.appendChild(card);
     });
@@ -5667,15 +5980,8 @@ async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg
     grid.innerHTML = '<div class="book-collection-empty"><p>Couldn\'t load. Try again.</p></div>';
   }
 }
-function _loadLibraryTab() {
-  return _loadCollectionTab({
-    table: 'book_reads',
-    fkName: 'book_reads_book_id_fkey',
-    gridId: 'bookLibraryGrid',
-    emptyId: 'bookLibraryEmpty',
-    signedOutMsg: 'Sign in to see your library',
-  });
-}
+// (Library tab loader was removed alongside its DOM. The web's existing
+// sidebar Bookmarks page is the canonical "Library" experience here.)
 function _loadReadingListTab() {
   return _loadCollectionTab({
     table: 'book_bookmarks',
@@ -5683,6 +5989,7 @@ function _loadReadingListTab() {
     gridId: 'bookReadingListGrid',
     emptyId: 'bookReadingListEmpty',
     signedOutMsg: 'Sign in to see your reading list',
+    orderColumn: 'created_at',
   });
 }
 
@@ -5754,17 +6061,26 @@ let _seeAllSeq = 0;
 let _seeAllOffset = 0;
 let _seeAllSort = '';
 let _seeAllGenre = null;
+// Optional custom predicate for See-All — set when the section had a `filter`
+// in _SEE_ALL_MAP (Hidden Gems, Quick Reads). Threaded through to fetchSupabaseBooks.
+let _seeAllFilter = null;
 let _seeAllHasMore = false;
 let _seeAllLoading = false;
 let _seeAllObserver = null;
 
 const _SEE_ALL_MAP = {
-  weeklyFeatured:     { sort: 'editors-pick', title: 'Weekly Featured' },
-  freshReads:         { sort: 'recent',       title: 'Fresh Reads' },
-  completedExcellent: { sort: 'completed',    title: 'Completed & Excellent Works' },
-  mostLoved:          { sort: 'most-liked',   title: 'Most Loved' },
-  mostRead:           { sort: 'most-read',    title: 'Most Read' },
-  trending:           { sort: 'trending',     title: 'Trending This Week' },
+  weeklyFeatured:     { sort: 'editors-pick',  title: 'Weekly Featured' },
+  recommended:        { sort: 'most-liked',    title: 'Recommended for You' },
+  trending:           { sort: 'trending',      title: 'Trending This Week' },
+  freshReads:         { sort: 'recent',        title: 'Fresh Reads' },
+  justUpdated:        { sort: 'just-updated',  title: 'Just Updated' },
+  hiddenGems:         { sort: 'most-liked',    title: 'Hidden Gems',
+                        filter: q => q.gte('likes_count', 3).lt('views_count', 500) },
+  quickReads:         { sort: 'most-liked',    title: 'Quick Reads',
+                        filter: q => q.gte('chapters_count', 1).lte('chapters_count', 5) },
+  mostLoved:          { sort: 'most-liked',    title: 'Most Loved' },
+  mostRead:           { sort: 'most-read',     title: 'Most Read' },
+  completedExcellent: { sort: 'completed',     title: 'Completed & Excellent Works' },
 };
 
 document.getElementById('bookPage')?.addEventListener('click', (e) => {
@@ -5798,6 +6114,7 @@ async function _openBookSeeAll(key) {
   _seeAllSeq++;
   _seeAllSort = cfg.sort;
   _seeAllGenre = genre;
+  _seeAllFilter = cfg.filter || null;
   _seeAllOffset = 0;
   _seeAllHasMore = true;
   if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
@@ -5824,11 +6141,12 @@ async function _loadMoreSeeAllBooks(initial = false) {
   const limit = 40;
 
   try {
-    // One fetcher path, two shapes — a sort-only list or a genre-filtered list.
-    const books = await fetchSupabaseBooks(
-      _seeAllOffset, limit, _seeAllSort,
-      _seeAllGenre ? { genre: _seeAllGenre } : {}
-    );
+    // One fetcher path, three optional shapes — sort-only, genre-filtered, or
+    // predicate-filtered (Hidden Gems / Quick Reads). All three combine cleanly.
+    const opts = {};
+    if (_seeAllGenre)  opts.genre  = _seeAllGenre;
+    if (_seeAllFilter) opts.filter = _seeAllFilter;
+    const books = await fetchSupabaseBooks(_seeAllOffset, limit, _seeAllSort, opts);
 
     if (seq !== _seeAllSeq) return; // user opened a different See-All
 
@@ -6363,6 +6681,9 @@ const _BOOK_SORT_PIPELINES = {
   completed:     (q) => q.eq('status', 'completed').order('likes_count', { ascending: false }),
   // Editor's Pick: filter then sort by editors_pick_at (indexed).
   'editors-pick':(q) => q.eq('is_editors_pick', true).order('editors_pick_at', { ascending: false, nullsFirst: false }),
+  // Just Updated: surfaces ongoing series with recent chapter drops.
+  'just-updated':(q) => q.order('updated_at', { ascending: false, nullsFirst: false })
+                          .order('created_at', { ascending: false }),
 };
 
 // Single fetcher for every browse-style book list. Supports server-side
@@ -6390,6 +6711,12 @@ async function fetchSupabaseBooks(offset = 0, limit = 80, sortBy = bookSortBy, o
       const safeG = String(opts.genre).toLowerCase().replace(/[^a-z0-9-]/g, '');
       if (safeG) q = q.or(`genre.eq.${safeG},tags.cs.{${safeG}}`);
     }
+
+    // Optional custom predicate — caller-supplied function that adds extra
+    // filters before the sort + range are applied. Used by Hidden Gems
+    // (low-views + min-likes) and Quick Reads (short chapter count) so
+    // those callers don't need their own duplicated query function.
+    if (typeof opts.filter === 'function') q = opts.filter(q);
 
     const pipeline = _BOOK_SORT_PIPELINES[sortBy] || _BOOK_SORT_PIPELINES.trending;
     const { data, error } = await pipeline(q).range(offset, offset + limit - 1);
@@ -6471,8 +6798,8 @@ async function fetchBooksServerSearch(query) {
 }
 
 // (renderBooks removed — the v2 books page renders into per-tab DOM targets:
-// section tracks for For You/Discover/Ranking, dedicated grids for Library and
-// Reading List, and bookSeeAllGrid for the See-All sub-view.)
+// section tracks for For You/Discover/Ranking, a dedicated grid for the
+// Reading List collection, and bookSeeAllGrid for the See-All sub-view.)
 
 function renderBookCard(b) {
   const card = document.createElement('button');
