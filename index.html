@@ -7,49 +7,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css"/>
   <link rel="stylesheet" href="css/style.css"/>
-
-  <!-- ─── Google Analytics ─────────────────────────────────────────────── -->
-  <!-- Replace G-XXXXXXXXXX with your real Measurement ID from
-       https://analytics.google.com → Admin → Data Streams → Web → Measurement ID -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-    gtag('config', 'G-XXXXXXXXXX', {
-      // Strip query params from page paths so we don't leak ids/tokens to GA
-      page_path: location.pathname,
-      anonymize_ip: true,
-    });
-  </script>
-
-  <!-- ─── Sentry error tracking ────────────────────────────────────────── -->
-  <!-- Replace YOUR_DSN_HERE with your Sentry project DSN from
-       https://sentry.io → Project → Settings → Client Keys (DSN) -->
-  <script src="https://browser.sentry-cdn.com/7.114.0/bundle.tracing.min.js"
-          crossorigin="anonymous"></script>
-  <script>
-    if (window.Sentry && 'YOUR_DSN_HERE' !== 'YOUR_DSN_HERE') {
-      Sentry.init({
-        dsn: 'YOUR_DSN_HERE',
-        environment: location.hostname.includes('vercel.app') ? 'staging' : 'production',
-        tracesSampleRate: 0.1,
-        // Don't capture noisy non-issues
-        ignoreErrors: [
-          'ResizeObserver loop',
-          'Non-Error promise rejection captured',
-          'Network request failed',           // user is offline — not our bug
-        ],
-        beforeSend(event) {
-          // Strip the access token from URLs accidentally captured in breadcrumbs
-          if (event.request?.url) event.request.url = event.request.url.replace(/access_token=[^&]+/, 'access_token=[redacted]');
-          return event;
-        },
-      });
-    }
-  </script>
 </head>
-<body class="is-auth">
+<body>
 
 <!-- AUTH SCREEN -->
 <div id="authScreen" class="auth-screen" style="display:none">
@@ -251,12 +210,12 @@
         </div>
       </div>
 
-    <!-- Feed mode tabs (For You / Following / Discover) -->
-    <nav class="feed-tabs" id="feedTabs">
-      <button class="feed-tab active" data-feed="foryou">For You</button>
-      <button class="feed-tab" data-feed="following">Following</button>
-      <button class="feed-tab" data-feed="discover">Discover</button>
-    </nav>
+    <!-- Feed tabs: For You / Following / Discover -->
+    <div id="feedTabs" class="feed-tabs">
+      <button class="feed-tab active" data-feed-tab="for-you">For You</button>
+      <button class="feed-tab" data-feed-tab="following">Following</button>
+      <button class="feed-tab" data-feed-tab="discover">Discover</button>
+    </div>
 
     <!-- Feed -->
     <div id="feed"><div class="loading">Loading feed...</div></div>
@@ -310,8 +269,6 @@
             <option value="recent">✨ Newest</option>
             <option value="most-liked">❤️ Most loved</option>
             <option value="most-read">👁 Most read</option>
-            <option value="completed">📘 Completed</option>
-            <option value="editors-pick">⭐ Editor's Pick</option>
           </select>
         </div>
       </div>
@@ -956,51 +913,63 @@
 
       <!-- Earnings tab -->
       <div class="earnings-tab-content" data-etab-content="earnings">
-        <!-- Balance cards — minimalist purple, peso-primary -->
+        <!-- Balance cards -->
         <div class="author-earnings-cards">
           <div class="author-earnings-card author-earnings-available">
-            <div class="author-earnings-card-head">
-              <span class="author-earnings-label">Available to withdraw</span>
+            <div class="author-earnings-icon">
+              <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
             </div>
-            <div class="author-earnings-amount-php" id="earningsAvailablePhp">₱0.00</div>
-            <button class="btn btn-purple author-earnings-payout-btn" id="btnRequestPayout">Request payout</button>
-            <div class="author-earnings-foot" id="earningsMinPayoutHint">Minimum payout: ₱100.00</div>
+            <div class="author-earnings-meta">
+              <div class="author-earnings-label">Available to withdraw</div>
+              <div class="author-earnings-value">
+                <span id="earningsAvailableCoins">0</span> coins
+                <span class="author-earnings-php" id="earningsAvailablePhp">≈ ₱0.00</span>
+              </div>
+            </div>
+            <button class="btn btn-purple" id="btnRequestPayout" disabled>Request payout</button>
           </div>
           <div class="author-earnings-card author-earnings-pending">
-            <div class="author-earnings-card-head">
-              <span class="author-earnings-label">Pending (hold period)</span>
+            <div class="author-earnings-icon">⏳</div>
+            <div class="author-earnings-meta">
+              <div class="author-earnings-label">Pending (in hold period)</div>
+              <div class="author-earnings-value">
+                <span id="earningsPendingCoins">0</span> coins
+                <span class="author-earnings-php" id="earningsPendingPhp">≈ ₱0.00</span>
+              </div>
+              <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 7 days after they're earned.</div>
             </div>
-            <div class="author-earnings-amount-php" id="earningsPendingPhp">₱0.00</div>
-            <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 1–3 days after they're earned.</div>
           </div>
         </div>
 
-        <!-- Earnings breakdown by source — peso primary -->
+        <!-- Earnings breakdown by source -->
         <div class="earnings-breakdown">
           <div class="earnings-breakdown-card">
-            <div class="earnings-breakdown-icon">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </div>
             <div class="earnings-breakdown-meta">
               <div class="earnings-breakdown-label">From Posts</div>
+              <div class="earnings-breakdown-value"><span id="breakdownPostsCoins">0</span> coins</div>
               <div class="earnings-breakdown-php" id="breakdownPostsPhp">₱0.00</div>
             </div>
           </div>
           <div class="earnings-breakdown-card">
-            <div class="earnings-breakdown-icon">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
             </div>
             <div class="earnings-breakdown-meta">
               <div class="earnings-breakdown-label">From Videos</div>
+              <div class="earnings-breakdown-value"><span id="breakdownVideosCoins">0</span> coins</div>
               <div class="earnings-breakdown-php" id="breakdownVideosPhp">₱0.00</div>
             </div>
           </div>
           <div class="earnings-breakdown-card">
-            <div class="earnings-breakdown-icon">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+            <div class="earnings-breakdown-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
             </div>
             <div class="earnings-breakdown-meta">
               <div class="earnings-breakdown-label">From Books</div>
+              <div class="earnings-breakdown-value"><span id="breakdownBooksCoins">0</span> coins</div>
               <div class="earnings-breakdown-php" id="breakdownBooksPhp">₱0.00</div>
             </div>
           </div>
@@ -1336,22 +1305,13 @@
       <button class="modal-close-btn" id="editProfileClose">×</button>
     </div>
     <label class="form-label">Display name</label>
-    <input class="form-input" id="editUsername" placeholder="Your name" maxlength="40"/>
-    <div class="edit-profile-hint" id="editUsernameHint">Letters, numbers and basic punctuation only — no emoji. You can change this once every 60 days.</div>
+    <input class="form-input" id="editUsername" placeholder="Your name"/>
     <label class="form-label">Bio</label>
-    <textarea class="form-input" id="editBio" rows="5" placeholder="Tell us about yourself..." maxlength="200"></textarea>
-    <div class="edit-profile-counter"><span id="editBioCount">0 / 200</span><span id="editBioLines">1 / 5 lines</span></div>
+    <textarea class="form-input" id="editBio" rows="3" placeholder="Tell us about yourself..."></textarea>
     <label class="form-label">Location</label>
-    <div class="edit-location-row">
-      <select class="form-input" id="editCountry">
-        <option value="">Select country…</option>
-      </select>
-      <select class="form-input" id="editCity" style="display:none">
-        <option value="">Select city…</option>
-      </select>
-      <input class="form-input" id="editCityInput" placeholder="City" maxlength="60"/>
-    </div>
-    <input type="hidden" id="editWebsite" value=""/>
+    <input class="form-input" id="editLocation" placeholder="City, Country"/>
+    <label class="form-label">Website</label>
+    <input class="form-input" id="editWebsite" placeholder="https://..."/>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" id="editProfileCancel">Cancel</button>
       <button class="btn btn-purple btn-sm" id="editProfileSave">Save</button>
@@ -1359,18 +1319,6 @@
   </div>
 </div>
   
-<!-- Post Detail Modal — opens when you click a post from search/notifications -->
-<div class="modal-overlay" id="postDetailModal">
-  <div class="modal-box post-detail-box">
-    <div class="post-detail-header">
-      <button class="modal-close-btn" id="postDetailClose" aria-label="Close">×</button>
-    </div>
-    <div class="post-detail-body" id="postDetailBody">
-      <div class="loading">Loading post…</div>
-    </div>
-  </div>
-</div>
-
 <!-- Repost Modal -->
 <div class="modal-overlay" id="repostModal">
   <div class="modal-box">
@@ -1756,75 +1704,32 @@
       </button>
     </div>
     <div class="vu-body">
-      <label class="vu-label">Amount (PHP)</label>
-      <input type="number" id="withdrawalAmount" class="vu-input" min="100" step="0.01" placeholder="100.00"/>
-      <div class="vu-hint" id="withdrawalAmountHint">Minimum ₱100.00.</div>
+      <label class="vu-label">Amount in coins</label>
+      <input type="number" id="withdrawalAmount" class="vu-input" min="500" step="1" placeholder="500"/>
+      <div class="vu-hint" id="withdrawalAmountHint">Minimum 500 coins. ₱1.00 per coin.</div>
 
-      <!-- Read-only summary of saved Payments Info — payouts are STRICT to
-           this saved account (no override). To change, use Payments Info → Request changes. -->
-      <div class="payout-account-card" id="withdrawalAccountCard">
-        <div class="payout-account-head">SENDING TO</div>
-        <div class="payout-account-method" id="withdrawalAccountMethod">—</div>
-        <div class="payout-account-name" id="withdrawalAccountName">—</div>
-        <div class="payout-account-foot">From your saved Payments Info. To change, go to Earnings → Payments Info → Request changes.</div>
-      </div>
+      <label class="vu-label">Payout method</label>
+      <select id="withdrawalMethod" class="vu-input">
+        <option value="gcash">GCash</option>
+        <option value="maya">Maya</option>
+        <option value="bank">Bank transfer</option>
+        <option value="other">Other (we'll contact you)</option>
+      </select>
+
+      <label class="vu-label">Account name</label>
+      <input type="text" id="withdrawalAccountName" class="vu-input" placeholder="Name registered on the account" maxlength="120"/>
+
+      <label class="vu-label">Account number / phone number</label>
+      <input type="text" id="withdrawalAccountNumber" class="vu-input" placeholder="11-digit GCash/Maya number, or bank account number" maxlength="64"/>
+
+      <label class="vu-label" id="withdrawalBankNameLabel" style="display:none">Bank name</label>
+      <input type="text" id="withdrawalBankName" class="vu-input" placeholder="e.g. BDO, BPI, UnionBank" maxlength="80" style="display:none"/>
 
       <p class="vu-hint">Funds are sent within 1–3 business days after admin approval. We'll email you a confirmation when paid.</p>
     </div>
     <div class="vu-footer">
       <button class="vu-btn vu-btn-secondary" id="withdrawalCancel">Cancel</button>
       <button class="vu-btn vu-btn-primary" id="withdrawalSubmit">Submit request</button>
-    </div>
-  </div>
-</div>
-
-<!-- ─── Min Payout Notice (popup when balance below minimum) ─── -->
-<div class="modal-overlay" id="minPayoutModal" style="display:none">
-  <div class="modal-box" style="max-width:440px">
-    <div class="modal-header">
-      <div class="modal-title">Not enough to withdraw yet</div>
-      <button class="modal-close-btn" id="minPayoutClose">×</button>
-    </div>
-    <div class="min-payout-body">
-      <div class="min-payout-icon">💸</div>
-      <p class="min-payout-msg" id="minPayoutMsg">
-        You need at least <strong>₱100.00</strong> available to request a payout. Keep earning and you'll unlock withdrawals soon.
-      </p>
-      <div class="min-payout-progress">
-        <div class="min-payout-progress-row">
-          <span>You have</span>
-          <strong id="minPayoutHave">₱0.00</strong>
-        </div>
-        <div class="min-payout-progress-row">
-          <span>Minimum</span>
-          <strong id="minPayoutMin">₱100.00</strong>
-        </div>
-        <div class="min-payout-progress-row min-payout-progress-row-need">
-          <span>Need</span>
-          <strong id="minPayoutNeed">₱100.00</strong>
-        </div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-purple btn-sm" id="minPayoutOk">Got it</button>
-    </div>
-  </div>
-</div>
-
-<!-- ─── Sign-out confirmation ─── -->
-<div class="modal-overlay" id="signOutModal" style="display:none">
-  <div class="modal-box" style="max-width:400px">
-    <div class="modal-header">
-      <div class="modal-title">Sign out?</div>
-      <button class="modal-close-btn" id="signOutClose">×</button>
-    </div>
-    <div class="signout-body">
-      <div class="signout-icon">👋</div>
-      <p class="signout-msg">You'll need to sign in again to access your account.</p>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost btn-sm" id="signOutCancel">Cancel</button>
-      <button class="btn btn-purple btn-sm" id="signOutConfirm">Sign out</button>
     </div>
   </div>
 </div>
@@ -1929,23 +1834,6 @@
 </div>
 
 <div id="toast" style="display:none"></div>
-
-<!-- Site footer (single-line, signed-in only) -->
-<footer class="site-footer">
-  <div class="site-footer-inner">
-    <strong class="site-footer-brand-name">Selebox</strong>
-    <span class="site-footer-sep">·</span>
-    <a href="mailto:support@selebox.com">support@selebox.com</a>
-    <a href="mailto:admin@selebox.com">admin@selebox.com</a>
-    <span class="site-footer-sep">·</span>
-    <a href="terms.html">Terms</a>
-    <a href="privacy.html">Privacy</a>
-    <a href="refund.html">Refund</a>
-    <a href="health.html">Status</a>
-    <span class="site-footer-sep">·</span>
-    <span class="site-footer-copy">© <span id="footerYear">2026</span> TOS Web Publishing</span>
-  </div>
-</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
