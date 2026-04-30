@@ -6,7 +6,7 @@
   <title>Selebox All-In-One</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css"/>
-  <link rel="stylesheet" href="css/style.css?v=2026-04-30-books-prod"/>
+  <link rel="stylesheet" href="css/style.css?v=2026-04-30-books-tightleft"/>
 
   <!-- ─── Google Analytics ─────────────────────────────────────────────── -->
   <!-- Replace G-XXXXXXXXXX with your real Measurement ID from
@@ -290,18 +290,21 @@
         <h1 class="books-title-min">Books</h1>
       </div>
 
-      <!-- Tabs: For You / Discover / Ranking / Library / Reading List -->
+      <!-- Tabs: For You / Discover / Ranking / Reading List
+           (Library was removed from web — the existing Bookmarks page in the
+           sidebar already covers that role; mobile app's Library == web's
+           Bookmarks page. Don't re-add this tab without dropping the other.) -->
       <div class="book-tabs" id="bookTabs" role="tablist">
-        <button class="book-tab active" data-book-tab="foryou"     role="tab" aria-selected="true">For You</button>
-        <button class="book-tab"        data-book-tab="discover"   role="tab">Discover</button>
-        <button class="book-tab"        data-book-tab="ranking"    role="tab">Ranking</button>
-        <button class="book-tab"        data-book-tab="library"    role="tab">Library</button>
+        <button class="book-tab active" data-book-tab="foryou"      role="tab" aria-selected="true">For You</button>
+        <button class="book-tab"        data-book-tab="discover"    role="tab">Discover</button>
+        <button class="book-tab"        data-book-tab="ranking"     role="tab">Ranking</button>
         <button class="book-tab"        data-book-tab="readinglist" role="tab">Reading List</button>
       </div>
 
-      <!-- Tab panels — only the active one is visible. Each tab is rendered lazily. -->
+      <!-- Tab panels — only the active one is visible. Each tab is rendered lazily.
+           The For You tab has 7 curated rails (Wattpad-inspired). -->
       <div class="book-tab-panel active" id="bookTabForYou" data-book-panel="foryou">
-        <!-- Weekly Featured (Editor's Picks) -->
+        <!-- 1. Weekly Featured — editor's picks; falls back to trending if none -->
         <div class="book-section" data-section="weeklyFeatured">
           <div class="book-section-head">
             <h2 class="book-section-title">Weekly Featured</h2>
@@ -310,7 +313,25 @@
           <div class="book-section-track" data-track="weeklyFeatured"></div>
         </div>
 
-        <!-- Fresh Reads (newest published) -->
+        <!-- 2. Recommended for You — personalised; falls back to top books for guests -->
+        <div class="book-section" data-section="recommended">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Recommended for You</h2>
+            <button class="book-section-see-all" data-see-all="recommended" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="recommended"></div>
+        </div>
+
+        <!-- 3. Trending This Week — last-7-days hotness -->
+        <div class="book-section" data-section="trending">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Trending This Week</h2>
+            <button class="book-section-see-all" data-see-all="trending" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="trending"></div>
+        </div>
+
+        <!-- 4. Fresh Reads — newest published -->
         <div class="book-section" data-section="freshReads">
           <div class="book-section-head">
             <h2 class="book-section-title">Fresh Reads</h2>
@@ -319,7 +340,52 @@
           <div class="book-section-track" data-track="freshReads"></div>
         </div>
 
-        <!-- Completed & Excellent Works -->
+        <!-- 5. Just Updated — ongoing series with recent chapter activity -->
+        <div class="book-section" data-section="justUpdated">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Just Updated</h2>
+            <button class="book-section-see-all" data-see-all="justUpdated" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="justUpdated"></div>
+        </div>
+
+        <!-- 6. Hidden Gems — high engagement, low view count (under-discovered) -->
+        <div class="book-section" data-section="hiddenGems">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Hidden Gems</h2>
+            <button class="book-section-see-all" data-see-all="hiddenGems" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="hiddenGems"></div>
+        </div>
+
+        <!-- 7. Quick Reads — short stories (≤5 chapters) -->
+        <div class="book-section" data-section="quickReads">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Quick Reads</h2>
+            <button class="book-section-see-all" data-see-all="quickReads" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="quickReads"></div>
+        </div>
+
+        <!-- 8. Most Loved — all-time top likes -->
+        <div class="book-section" data-section="mostLoved">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Most Loved</h2>
+            <button class="book-section-see-all" data-see-all="mostLoved" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="mostLoved"></div>
+        </div>
+
+        <!-- 9. Most Read — all-time top views -->
+        <div class="book-section" data-section="mostRead">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Most Read</h2>
+            <button class="book-section-see-all" data-see-all="mostRead" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="mostRead"></div>
+        </div>
+
+        <!-- 10. Completed & Excellent Works -->
         <div class="book-section" data-section="completedExcellent">
           <div class="book-section-head">
             <h2 class="book-section-title">Completed &amp; Excellent Works</h2>
@@ -336,45 +402,20 @@
         </div>
       </div>
 
-      <!-- Ranking tab: Most Loved + Most Read rows. -->
+      <!-- Ranking tab: matches the mobile App — genre chip filter + Top 100
+           numbered leaderboard. One ranked list per category. -->
       <div class="book-tab-panel" id="bookTabRanking" data-book-panel="ranking" style="display:none">
-        <div class="book-section" data-section="mostLoved">
-          <div class="book-section-head">
-            <h2 class="book-section-title">Most Loved</h2>
-            <button class="book-section-see-all" data-see-all="mostLoved" type="button">See All</button>
-          </div>
-          <div class="book-section-track" data-track="mostLoved"></div>
+        <div class="rank-genre-chips" id="rankGenreChips">
+          <!-- Populated by JS: an "All" chip + the top genres for filtering. -->
         </div>
-        <div class="book-section" data-section="mostRead">
-          <div class="book-section-head">
-            <h2 class="book-section-title">Most Read</h2>
-            <button class="book-section-see-all" data-see-all="mostRead" type="button">See All</button>
-          </div>
-          <div class="book-section-track" data-track="mostRead"></div>
-        </div>
-        <div class="book-section" data-section="trending">
-          <div class="book-section-head">
-            <h2 class="book-section-title">Trending This Week</h2>
-            <button class="book-section-see-all" data-see-all="trending" type="button">See All</button>
-          </div>
-          <div class="book-section-track" data-track="trending"></div>
+        <div class="rank-list" id="rankList">
+          <div class="loading">Loading rankings…</div>
         </div>
       </div>
 
-      <!-- Library tab: books the user has read. -->
-      <div class="book-tab-panel" id="bookTabLibrary" data-book-panel="library" style="display:none">
-        <div class="book-collection-head">
-          <h2 class="book-collection-title">Your Library</h2>
-          <p class="book-collection-sub">Books you've read on Selebox.</p>
-        </div>
-        <div class="book-grid" id="bookLibraryGrid">
-          <div class="loading">Loading your library…</div>
-        </div>
-        <div class="book-collection-empty" id="bookLibraryEmpty" style="display:none">
-          <h3>No reads yet</h3>
-          <p>Open a book to start your library.</p>
-        </div>
-      </div>
+      <!-- (Library tab removed — its role is filled by the sidebar's
+           Bookmarks page. Mobile app's "Library" == this web page's
+           Bookmarks; keep that mapping if you ever rewire navigation.) -->
 
       <!-- Reading List tab: bookmarks. -->
       <div class="book-tab-panel" id="bookTabReadingList" data-book-panel="readinglist" style="display:none">
@@ -382,7 +423,7 @@
           <h2 class="book-collection-title">Reading List</h2>
           <p class="book-collection-sub">Books you've bookmarked to read later.</p>
         </div>
-        <div class="book-grid" id="bookReadingListGrid">
+        <div class="book-collection-grid" id="bookReadingListGrid">
           <div class="loading">Loading your reading list…</div>
         </div>
         <div class="book-collection-empty" id="bookReadingListEmpty" style="display:none">
@@ -2018,6 +2059,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
-<script type="module" src="js/app.js?v=2026-04-30-books-prod"></script>
+<script type="module" src="js/app.js?v=2026-04-30-books-tightleft"></script>
 </body>
 </html>
