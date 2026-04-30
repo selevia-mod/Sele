@@ -6558,14 +6558,24 @@ function renderAuthorKycBanner() {
   const titleEl = document.getElementById('authorKycTitle');
   const subEl   = document.getElementById('authorKycSub');
   const btn     = document.getElementById('btnSubmitKyc');
-  if (!banner) return;
+  // Defensive: any of these can be missing if the Earnings/Payments markup
+  // changed (banner exists in index.html, but `btnSubmitKyc` was removed —
+  // the user is meant to switch to the Payments Info tab via a different
+  // CTA). Bail gracefully so loadAuthorEarnings doesn't crash on every
+  // page load and pollute the console.
+  if (!banner || !titleEl || !subEl) return;
+  // Helper so we don't throw when btn is missing.
+  const setBtn = (text, display) => {
+    if (!btn) return;
+    if (text != null) btn.textContent = text;
+    if (display != null) btn.style.display = display;
+  };
 
   const k = _authorKyc;
   if (!k) {
     titleEl.textContent = 'Complete KYC to enable payouts';
     subEl.textContent   = 'We need to verify your identity before sending you money. One-time step required by Philippine law.';
-    btn.textContent     = 'Submit KYC';
-    btn.style.display   = '';
+    setBtn('Submit KYC', '');
     banner.style.display = '';
     banner.className = 'author-kyc-banner is-required';
     return;
@@ -6573,7 +6583,7 @@ function renderAuthorKycBanner() {
   if (k.status === 'pending') {
     titleEl.textContent = 'KYC under review';
     subEl.textContent   = 'Submitted ' + timeAgo(k.submitted_at) + '. Usually approved within 1-2 business days.';
-    btn.style.display   = 'none';
+    setBtn(null, 'none');
     banner.className = 'author-kyc-banner is-pending';
     banner.style.display = '';
     return;
@@ -6581,7 +6591,7 @@ function renderAuthorKycBanner() {
   if (k.status === 'approved') {
     titleEl.textContent = 'KYC approved ✓';
     subEl.textContent   = 'You\'re cleared for payouts. You can request a withdrawal whenever your available balance hits the minimum.';
-    btn.style.display   = 'none';
+    setBtn(null, 'none');
     banner.className = 'author-kyc-banner is-approved';
     banner.style.display = '';
     return;
@@ -6589,8 +6599,7 @@ function renderAuthorKycBanner() {
   if (k.status === 'rejected') {
     titleEl.textContent = 'KYC rejected';
     subEl.textContent   = 'Reason: ' + (k.rejection_reason || 'unspecified') + '. Click Resubmit to update your details.';
-    btn.textContent     = 'Resubmit KYC';
-    btn.style.display   = '';
+    setBtn('Resubmit KYC', '');
     banner.className = 'author-kyc-banner is-rejected';
     banner.style.display = '';
     return;
