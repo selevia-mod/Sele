@@ -8780,12 +8780,16 @@ async function fetchCreatorsForSearch(query, kind = 'video', limit = 8) {
     const ids = profs.map(p => p.id);
 
     const countMap = {};
+    // Cap to 1000 — beyond that, "1000+" is more useful than an exact count, and
+    // it keeps the payload tiny for prolific creators (Selevia, etc).
+    const COUNT_CAP = 1000;
     if (kind === 'video') {
       const { data: rows } = await supabase.from('videos')
         .select('uploader_id')
         .in('uploader_id', ids)
         .eq('status', 'ready')
-        .eq('is_hidden', false);
+        .eq('is_hidden', false)
+        .limit(COUNT_CAP);
       (rows || []).forEach(r => { countMap[r.uploader_id] = (countMap[r.uploader_id] || 0) + 1; });
     } else if (kind === 'book') {
       const { data: rows } = await supabase.from('books')
@@ -8793,7 +8797,8 @@ async function fetchCreatorsForSearch(query, kind = 'video', limit = 8) {
         .in('author_id', ids)
         .eq('is_public', true)
         .eq('is_hidden', false)
-        .in('status', ['ongoing', 'completed']);
+        .in('status', ['ongoing', 'completed'])
+        .limit(COUNT_CAP);
       (rows || []).forEach(r => { countMap[r.author_id] = (countMap[r.author_id] || 0) + 1; });
     }
 
@@ -8882,8 +8887,17 @@ async function runSearch() {
 
   // Sanitize FIRST (strip , ( ) " — these break .or() / quoting), then ilike-escape.
   const safeQ = sanitizeSearchQuery(q);
+  // If sanitize stripped everything (e.g. the user typed only `,,,` or `()`),
+  // fall back to the personalized feed instead of running an unbounded `%%`
+  // query that would match every video on the platform.
+  if (!safeQ) {
+    renderVideoResults(getPersonalizedFeed?.() || allVideosCache);
+    return;
+  }
   const term = `%${escapeIlike(safeQ)}%`;
   const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
+  // Stale-query guard: a slow request mustn't clobber a newer query.
+  const savedQuery = activeSearchQuery;
 
   try {
     // Three parallel queries: title/description match, creator-name → videos, AND
@@ -8907,6 +8921,9 @@ async function runSearch() {
       })(),
       fetchCreatorsForSearch(safeQ, 'video', 8),
     ]);
+
+    // Stale-query guard — user kept typing while we awaited; abandon this run.
+    if (activeSearchQuery !== savedQuery) return;
 
     // Merge + dedupe + drop banned uploaders
     const seen = new Set();
@@ -8955,6 +8972,7 @@ async function runSearch() {
     // Fallback: cache filter (covers offline / RPC issues). Best-effort creators too.
     let creators = [];
     try { creators = await fetchCreatorsForSearch(safeQ, 'video', 8); } catch {}
+    if (activeSearchQuery !== savedQuery) return; // stale-guard for fallback path too
     renderVideoResults(searchVideos(q, activeTagFilter), creators);
   }
 }
