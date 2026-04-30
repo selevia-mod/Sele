@@ -1,33 +1,60 @@
 import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supabase.js';
 
+// ── Path → hash redirect ──────────────────────────────────────────────────────
+// Mobile shares URLs like /profile/<id>, /books/<id>, /videos/<id>, /home/<id>
+// (post), /clips/<id>. The SPA only routes via location.hash, so without this
+// translation, a shared link from the app drops the user onto the home feed
+// with no way to reach the target. We rewrite the path into the matching hash
+// route once at boot, BEFORE auth settles, so the existing hash router picks
+// it up. Also tracks a one-shot "post/clip not viewable on web" toast so users
+// who tap a /home/<id> or /clips/<id> link know they need the app.
+let __pendingShareToast = null;
+(() => {
+  try {
+    const path = window.location.pathname || "";
+    const m = path.match(/^\/(profile|books|videos|home|clips)\/([^\/?#]+)\/?$/);
+    if (!m) return;
+    const [, type, rawId] = m;
+    if (type === "home" || type === "clips") {
+      // No detail screen on web yet — drop them on the home feed and toast.
+      __pendingShareToast = type === "clips"
+        ? "Clips can only be viewed in the Selebox app right now."
+        : "Posts can only be viewed in the Selebox app right now.";
+      history.replaceState(null, "", "/");
+      return;
+    }
+    const hashType = type === "books" ? "book" : type === "videos" ? "video" : "profile";
+    history.replaceState(null, "", `/#${hashType}/${rawId}`);
+  } catch (_) { /* never block boot */ }
+})();
+
+// ── Cross-platform ID resolver ────────────────────────────────────────────────
+// Mobile share links may carry either a Supabase UUID (native posts) or a
+// legacy Appwrite hex ID (for content created before the migration). Resolve
+// any inbound ID to the canonical Supabase UUID by checking the
+// `legacy_appwrite_id` mirror column. Cached per-table to avoid re-fetching
+// on every navigation.
+const __UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const __idCache = { profiles: new Map(), books: new Map(), videos: new Map() };
+async function resolveSbId(table, rawId) {
+  if (!rawId) return null;
+  const id = String(rawId).startsWith("sb_") ? String(rawId).slice(3) : String(rawId);
+  if (__UUID_RE.test(id)) return id;
+  const cache = __idCache[table];
+  if (cache && cache.has(id)) return cache.get(id);
+  try {
+    const { data } = await supabase.from(table).select("id").eq("legacy_appwrite_id", id).maybeSingle();
+    const resolved = data?.id || null;
+    if (cache) cache.set(id, resolved);
+    return resolved;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
 const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at';
-
-// Set footer copyright year dynamically — never goes stale across new years
-{
-  const y = document.getElementById('footerYear');
-  if (y) y.textContent = new Date().getFullYear();
-}
-
-// ─── Sentry helper ────────────────────────────────────────────────────────
-// Wraps Sentry calls so the app keeps working if Sentry isn't loaded
-// (no DSN configured yet). Use everywhere we want to log a real error.
-function captureError(err, context = {}) {
-  if (typeof window.Sentry !== 'undefined' && Sentry.captureException) {
-    try {
-      Sentry.captureException(err, { extra: context });
-    } catch {}
-  }
-  // Always also log locally so DevTools shows it during dev
-  console.error(err, context);
-}
-
-// Catch unhandled errors that escape try/catch blocks. Sentry already does
-// this on its own, but having a fallback means logs reach the console even
-// when Sentry isn't initialized yet.
-window.addEventListener('error', (e) => captureError(e.error || new Error(e.message), { source: 'window.onerror', filename: e.filename, line: e.lineno }));
-window.addEventListener('unhandledrejection', (e) => captureError(e.reason || new Error('Unhandled promise rejection'), { source: 'unhandledrejection' }));
 
 // Reset window scroll across all common scroll containers (covers Safari edge
 // cases where `body` vs `documentElement` is the scrolling element).
@@ -136,11 +163,8 @@ async function initAuth() {
 
 async function onSignedIn(user) {
   currentUser = user;
-  // Defensive: if the profile row doesn't exist yet (rare race on first sign-in),
-  // keep currentProfile null so downstream code can short-circuit cleanly.
-  const { data: profile, error: profileErr } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
-  if (profileErr) console.warn('Profile fetch failed on sign-in:', profileErr.message);
-  currentProfile = profile || null;
+  const { data: profile } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
+  currentProfile = profile;
   updateTopbarUser();
   showApp();
 
@@ -205,12 +229,21 @@ async function onSignedIn(user) {
 function showAuth() {
   document.getElementById('authScreen').style.display = 'flex';
   document.getElementById('appScreen').style.display = 'none';
-  document.body.classList.add('is-auth');
+  __surfacePendingShareToast();
 }
 function showApp() {
   document.getElementById('authScreen').style.display = 'none';
   document.getElementById('appScreen').style.display = 'block';
-  document.body.classList.remove('is-auth');
+  __surfacePendingShareToast();
+}
+// Fire the one-shot toast set by the path → hash redirect (e.g. /home/<id>
+// or /clips/<id>) once the UI is ready to display it. Self-clears so a refresh
+// of a different page doesn't re-show it.
+function __surfacePendingShareToast() {
+  if (!__pendingShareToast) return;
+  const msg = __pendingShareToast;
+  __pendingShareToast = null;
+  setTimeout(() => toast(msg), 400);
 }
 
 function updateTopbarUser() {
@@ -262,50 +295,12 @@ document.getElementById('btnGuest').addEventListener('click', async () => {
 });
 
 async function signOut() {
-  // Tear down ALL user-scoped realtime channels BEFORE auth.signOut() so we
-  // don't leak callbacks that try to write into stale state for the next
-  // session. Public broadcast channels (e.g. 'public-feed') stay subscribed.
-  const teardown = (ch) => { try { if (ch) supabase.removeChannel(ch); } catch {} };
-
-  // Wallet
-  teardown(_walletChannel);              _walletChannel = null;
-  // Notifications
-  teardown(_notifChannel);               _notifChannel = null;
-  // DMs (inbox + per-thread + presence)
-  if (typeof dmState !== 'undefined' && dmState) {
-    teardown(dmState.inboxChannel);      dmState.inboxChannel = null;
-    teardown(dmState.realtimeChannel);   dmState.realtimeChannel = null;
-    teardown(dmState.presenceChannel);   dmState.presenceChannel = null;
-  }
-
   await supabase.auth.signOut();
-
-  // Reset all user-scoped state — leaving stale data in memory was causing
-  // the next signed-in user to briefly see the previous user's wallet/profile.
-  currentUser = null;
-  currentProfile = null;
-  posts = [];
+  currentUser = null; currentProfile = null; posts = [];
+  // Tear down wallet realtime
+  if (_walletChannel) { supabase.removeChannel(_walletChannel); _walletChannel = null; }
   _wallet = { coin_balance: 0, star_balance: 0 };
   _userUnlocks.clear();
-  // Reset book caches so the next user doesn't see prior browsing state
-  if (typeof allBooksCache !== 'undefined') allBooksCache = [];
-  if (typeof allBooksRaw   !== 'undefined') allBooksRaw   = [];
-  // Reset user-taste cache (book reads + likes) — would otherwise show
-  // previous user's reading interests in the Discover ribbon.
-  if (typeof _userBookTasteCache !== 'undefined') {
-    _userBookTasteCache = null;
-    _userBookTasteAt = 0;
-  }
-  // Personalised book recs cache is also user-scoped
-  if (typeof _bookRecsCache !== 'undefined') {
-    _bookRecsCache = null;
-    _bookRecsTimestamp = 0;
-  }
-  // Earnings/withdrawal/bookmarks page-load timestamps so the next user
-  // doesn't inherit "we already loaded this" stale gates.
-  ['_earningsLoadedAt', '_authorLoadedAt', '_bookmarksLoadedAt', '_dmListLoadedAt'].forEach(k => {
-    if (k in window) window[k] = 0;
-  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -506,9 +501,7 @@ async function setupVideoMonetGate(player, sbId, video) {
     if (player.currentTime < nextThreshold) return;
 
     modalOpen = true;
-    // Note: video keeps playing during the prompt. The 5s auto-coin fallback
-    // means most users won't even notice an interruption — they get a brief
-    // glance at the choice, then it auto-deducts and dismisses.
+    player.pause();
     openVideoMonetThresholdDialog({
       videoTitle: video.title,
       videoId:    sbId,
@@ -525,13 +518,12 @@ async function setupVideoMonetGate(player, sbId, video) {
           nextThreshold = computeNext(paidThrough);
         }
         renderTopbarCoinPill();
-        // No need to call play — we never paused
+        player.play().catch(() => {});
       },
       onCancel: () => {
-        // Modal closed without payment. Pause now so the user has to
-        // re-engage; on next play, listener re-fires and re-prompts.
+        // Modal closed without payment — leave video paused. User can hit
+        // play again, which will re-fire timeupdate and re-prompt.
         modalOpen = false;
-        try { player.pause(); } catch {}
       },
     });
   };
@@ -559,56 +551,39 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
 
   document.querySelector('.unlock-modal-backdrop')?.remove();
   const modal = document.createElement('div');
-  modal.className = 'unlock-modal-backdrop video-monet-backdrop';
+  modal.className = 'unlock-modal-backdrop';
   modal.innerHTML = `
     <div class="unlock-modal video-monet-modal" role="dialog" aria-modal="true">
       <button class="unlock-modal-close" aria-label="Close">×</button>
-      <div class="video-monet-icon-wrap">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      </div>
+      <div class="unlock-modal-icon">▶️</div>
       <h2>Keep watching</h2>
       ${videoTitle ? `<p class="unlock-modal-title">${escHTML(videoTitle)}</p>` : ''}
-      <p class="unlock-modal-sub">First ${Math.floor(threshold / 60)} minutes done — pick how to continue:</p>
+      <p class="unlock-modal-sub">You've enjoyed the first ${Math.floor(threshold / 60)} minutes. Pick how to continue:</p>
       <div class="video-monet-options">
         <button class="video-monet-option video-monet-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
           <div class="video-monet-option-icon">
-            <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
+            <svg viewBox="0 0 24 24" width="36" height="36"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
           </div>
           <div class="video-monet-option-cost">${coinCost} <small>coin${coinCost === 1 ? '' : 's'}</small></div>
-          <div class="video-monet-option-mode">Forever</div>
+          <div class="video-monet-option-mode">One-time forever</div>
+          <div class="video-monet-option-hint">${canCoin ? 'No more deductions ever' : `You have ${_wallet.coin_balance}`}</div>
         </button>
         <button class="video-monet-option video-monet-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
           <div class="video-monet-option-icon">
-            <svg viewBox="0 0 24 24" width="28" height="28"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
+            <svg viewBox="0 0 24 24" width="36" height="36"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
           </div>
           <div class="video-monet-option-cost">${starCost} <small>star${starCost === 1 ? '' : 's'}</small></div>
           <div class="video-monet-option-mode">${recurringMin}-min window</div>
+          <div class="video-monet-option-hint">${canStar ? `Charged again every ${recurringMin} min` : `You have ${_wallet.star_balance}`}</div>
         </button>
       </div>
-      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Out of coins and stars. Top up in the Store.</p>' : `
-        <div class="video-monet-countdown" id="vmCountdown">
-          <span class="video-monet-countdown-bar"><span class="video-monet-countdown-fill" id="vmCountdownFill"></span></span>
-          <span class="video-monet-countdown-text">Auto-paying with <strong>${coinCost} coin</strong> in <span id="vmCountdownNum">5</span>s · tap to choose differently</span>
-        </div>`}
+      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Out of coins and stars. Top up in the Store, or watch ads in the mobile app to earn stars.</p>' : ''}
     </div>
   `;
   document.body.appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('open'));
 
-  // ── 5-second auto-coin countdown ──────────────────────────────────
-  // If user does nothing, we silently deduct a coin and dismiss the dialog
-  // so the video keeps playing without interruption. Any click cancels.
-  let countdownTimer = null;
-  let countdownInterval = null;
-  let cancelCountdown = () => {
-    if (countdownTimer)    { clearTimeout(countdownTimer);    countdownTimer = null; }
-    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
-    const cd = modal.querySelector('#vmCountdown');
-    if (cd) cd.classList.add('is-cancelled');
-  };
-
   const close = (cancelled) => {
-    cancelCountdown();
     modal.classList.remove('open');
     setTimeout(() => modal.remove(), 180);
     if (cancelled && typeof onCancel === 'function') onCancel();
@@ -616,52 +591,31 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
   modal.querySelector('.unlock-modal-close').onclick = () => close(true);
   modal.addEventListener('click', (e) => { if (e.target === modal) close(true); });
 
-  const tryUnlock = async (currency, btn) => {
-    if (btn?.disabled) return;
-    cancelCountdown();
-    if (btn) btn.classList.add('is-loading');
-    const { data, error } = await supabase.rpc('unlock_video_threshold', {
-      p_video_id:          videoId,
-      p_currency:          currency,
-      p_threshold_seconds: threshold,
-    });
-    if (btn) btn.classList.remove('is-loading');
-    if (error) { toast(error.message, 'error'); return false; }
-    if (!data?.ok) {
-      toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
-      return false;
-    }
-    if (currency === 'coin') _wallet.coin_balance = data.balance_after;
-    else                     _wallet.star_balance = data.balance_after;
-    renderTopbarCoinPill();
-    close(false);
-    toast(data.mode === 'permanent' ? `Unlocked forever! −${data.cost} coin` : `Continuing ${recurringMin} more min · −${data.cost} star`, 'success');
-    onSuccess({ mode: data.mode || (currency === 'coin' ? 'permanent' : 'window') });
-    return true;
-  };
-
   modal.querySelectorAll('.video-monet-option').forEach(btn => {
-    btn.addEventListener('click', () => tryUnlock(btn.dataset.cur, btn));
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      const currency = btn.dataset.cur;
+      btn.classList.add('is-loading');
+      const { data, error } = await supabase.rpc('unlock_video_threshold', {
+        p_video_id:          videoId,
+        p_currency:          currency,
+        p_threshold_seconds: threshold,
+      });
+      btn.classList.remove('is-loading');
+      if (error) { toast(error.message, 'error'); return; }
+      if (!data?.ok) {
+        toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
+        return;
+      }
+      // Update local balance optimistically (Realtime will sync too)
+      if (currency === 'coin') _wallet.coin_balance = data.balance_after;
+      else                     _wallet.star_balance = data.balance_after;
+      renderTopbarCoinPill();
+      close(false);
+      toast(data.mode === 'permanent' ? `Unlocked forever! −${data.cost} coin` : `Continuing for ${recurringMin} more min · −${data.cost} star`, 'success');
+      onSuccess({ mode: data.mode || (currency === 'coin' ? 'permanent' : 'window') });
+    });
   });
-
-  // Start countdown only if the user can actually afford coin auto-pay.
-  // If they're out of coins but have stars, they need to choose manually.
-  if (canCoin) {
-    let secsLeft = 5;
-    const fill = modal.querySelector('#vmCountdownFill');
-    const num  = modal.querySelector('#vmCountdownNum');
-    if (fill) fill.style.width = '0%';
-    requestAnimationFrame(() => { if (fill) fill.style.width = '100%'; });
-    countdownInterval = setInterval(() => {
-      secsLeft--;
-      if (num) num.textContent = secsLeft;
-      if (secsLeft <= 0) clearInterval(countdownInterval);
-    }, 1000);
-    countdownTimer = setTimeout(() => {
-      // Auto-deduct silently. tryUnlock handles success + cleanup.
-      tryUnlock('coin', modal.querySelector('.video-monet-option-coin'));
-    }, 5000);
-  }
 }
 
 // ── Bulk book unlock dialog (Phase 6) ─────────────────────────────────────
@@ -744,7 +698,7 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
 document.getElementById('topbarCoinPill')?.addEventListener('click', () => showStore());
 
 // ── Earnings page (Phase 7 — own sidebar entry, tabs) ────────────────────
-function showEarnings(forceReload = false) {
+function showEarnings() {
   hideAllMainPages();
   if (!earningsPage) return;
   earningsPage.style.display = 'block';
@@ -752,15 +706,7 @@ function showEarnings(forceReload = false) {
   setSidebarActive('btnEarnings');
   // Default to the Earnings tab on every open
   switchEarningsTab('earnings');
-  // Earnings reloads on every visit by default — withdrawal status changes
-  // matter and the user expects the most recent figures. But if it's a quick
-  // tab-flick (reload < 30 seconds ago), skip the network call.
-  const now = Date.now();
-  const stale = !window._earningsLoadedAt || (now - window._earningsLoadedAt) > 30_000;
-  if (forceReload || stale) {
-    loadAuthorEarnings();
-    window._earningsLoadedAt = now;
-  }
+  loadAuthorEarnings();
 }
 
 function switchEarningsTab(name) {
@@ -1088,30 +1034,7 @@ function handleStoreReturn() {
 }
 // Run on initial load (after auth has had a chance to mount).
 setTimeout(handleStoreReturn, 800);
-// Sign-out confirmation: show a modal, only sign out on explicit confirm.
-// Prevents the awkward case where someone misclicks the sidebar Logout entry.
-function _openSignOutModal() {
-  const m = document.getElementById('signOutModal');
-  if (!m) { signOut(); return; }   // graceful fallback if modal HTML is missing
-  m.style.display = 'flex';
-  m.classList.add('open');
-}
-function _closeSignOutModal() {
-  const m = document.getElementById('signOutModal');
-  if (!m) return;
-  m.style.display = 'none';
-  m.classList.remove('open');
-}
-document.getElementById('btnSignOut')?.addEventListener('click', _openSignOutModal);
-document.getElementById('signOutClose')?.addEventListener('click', _closeSignOutModal);
-document.getElementById('signOutCancel')?.addEventListener('click', _closeSignOutModal);
-document.getElementById('signOutConfirm')?.addEventListener('click', () => {
-  _closeSignOutModal();
-  signOut();
-});
-document.getElementById('signOutModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'signOutModal') _closeSignOutModal();
-});
+document.getElementById('btnSignOut').addEventListener('click', signOut);
 
 // ── Compose ──
 const composeText = document.getElementById('composeText');
@@ -1219,35 +1142,57 @@ let _feedPostObserver = null;
 
 const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration))`;
 
-// Feed mode — 'foryou' (default), 'following', or 'discover'
-let _feedMode = 'foryou';
+// Active feed tab — "for-you" (default), "following", or "discover".
+// All three call Postgres RPCs defined in migration_feed_algorithm.sql.
+let _currentFeedTab = localStorage.getItem('selebox_feed_tab') || 'for-you';
 
-// Velocity score for ranking — recent engagement per hour, weighted.
-// likes×1, comments×2, reposts×3 (stronger signals weighted heavier).
-function _feedVelocity(p) {
-  const created = new Date(p.created_at || Date.now()).getTime();
-  const hours   = Math.max(1, (Date.now() - created) / 3600_000);
-  const eng     = (p.likes_count || 0)
-                + (p.comments_count || 0) * 2
-                + (p.reposts_count  || 0) * 3;
-  return eng / hours;
+// Hydrates a list of post-id rows (returned by feed_for_you / feed_discover)
+// into the FEED_SELECT shape the renderer expects, preserving the RPC's
+// score order. The follow-up SELECT is one round-trip, IN-clause keyed.
+async function _hydrateRankedPosts(rankedRows) {
+  const orderedIds = (rankedRows || []).map(r => r.id).filter(Boolean);
+  if (!orderedIds.length) return [];
+  const { data, error } = await supabase.from('posts').select(FEED_SELECT).in('id', orderedIds);
+  if (error) throw error;
+  const byId = new Map((data || []).map(p => [p.id, p]));
+  return orderedIds.map(id => byId.get(id)).filter(Boolean);
 }
 
-// Apply diversity penalty: skip showing the same author twice in a row.
-// Pushes those posts down rather than removing them.
-function _feedDiversify(arr) {
-  const out = [];
-  const queue = [...arr];
-  let lastAuthor = null;
-  while (queue.length) {
-    // Find next post whose author differs from lastAuthor; if none, take the head.
-    let i = queue.findIndex(p => p.user_id !== lastAuthor);
-    if (i === -1) i = 0;
-    const p = queue.splice(i, 1)[0];
-    out.push(p);
-    lastAuthor = p.user_id;
+// Fetch one page of the active feed. `offset` is integer (0 for refresh).
+// For You + Discover use offset paging because score isn't monotonic with
+// time. Following uses a created_at cursor — for offset symmetry we just
+// re-fetch from the top each time on refresh, then page via offset too.
+async function _fetchFeedPageForTab(tab, offset) {
+  const userId = currentUser?.id || null;
+  if (tab === 'following') {
+    if (!userId) return [];
+    const { data, error } = await supabase.rpc('feed_following', {
+      p_user_id: userId,
+      p_limit: FEED_PAGE_SIZE,
+      p_cursor: null,  // first page; loadMoreFeed passes a cursor
+    });
+    if (error) throw error;
+    return _hydrateRankedPosts(data);
   }
-  return out;
+  if (tab === 'discover') {
+    if (!userId) return [];
+    const { data, error } = await supabase.rpc('feed_discover', {
+      p_user_id: userId,
+      p_limit: FEED_PAGE_SIZE,
+      p_offset: offset || 0,
+    });
+    if (error) throw error;
+    return _hydrateRankedPosts(data);
+  }
+  // For You (default)
+  if (!userId) return [];
+  const { data, error } = await supabase.rpc('feed_for_you', {
+    p_user_id: userId,
+    p_limit: FEED_PAGE_SIZE,
+    p_offset: offset || 0,
+  });
+  if (error) throw error;
+  return _hydrateRankedPosts(data);
 }
 
 window.loadFeed = async function() {
@@ -1264,84 +1209,41 @@ window.loadFeed = async function() {
   if (_feedVideoObserver)  { _feedVideoObserver.disconnect();  _feedVideoObserver = null; }
   if (_feedPostObserver)   { _feedPostObserver.disconnect();   _feedPostObserver = null; }
 
-  // Resolve which posts to fetch based on the active mode
-  let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
-  let scoreClientSide = false;
-  let followIds = null;
+  // Sync the tab UI with the saved preference each time we reload.
+  document.querySelectorAll('#feedTabs .feed-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.feedTab === _currentFeedTab);
+  });
 
-  if (_feedMode === 'following' || _feedMode === 'discover') {
-    // Need follow set for both
-    const { data: f } = await supabase.from('follows')
-      .select('following_id')
-      .eq('follower_id', currentUser.id);
-    followIds = (f || []).map(r => r.following_id);
+  let data;
+  try {
+    data = await _fetchFeedPageForTab(_currentFeedTab, 0);
+  } catch (error) {
+    feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`;
+    return;
   }
-
-  if (_feedMode === 'following') {
-    if (!followIds.length) {
-      feed.innerHTML = `
-        <div class="empty">
-          <h3>You're not following anyone yet</h3>
-          <p>Switch to <strong>Discover</strong> or <strong>For You</strong> to find creators worth following.</p>
-        </div>`;
-      return;
-    }
-    q = q.in('user_id', followIds).order('created_at', { ascending: false });
-  } else if (_feedMode === 'discover') {
-    // Exclude follows and self. Pull a wider pool, score client-side.
-    const exclude = [...followIds, currentUser.id];
-    if (exclude.length) {
-      q = q.not('user_id', 'in', `(${exclude.map(id => `"${id}"`).join(',')})`);
-    }
-    // Last 14 days only — keeps the section feeling fresh
-    q = q.gt('created_at', new Date(Date.now() - 14*86400_000).toISOString())
-         .order('created_at', { ascending: false });
-    scoreClientSide = true;
-  } else {
-    // For You — wider pool, then client-side velocity scoring + follow boost
-    q = q.gt('created_at', new Date(Date.now() - 14*86400_000).toISOString())
-         .order('created_at', { ascending: false });
-    scoreClientSide = true;
+  // Tab-specific empty-state messaging
+  if (!data || !data.length) {
+    const emptyMsg = _currentFeedTab === 'following'
+      ? '<h3>No posts in your following feed</h3><p>Follow some creators to see their posts here.</p>'
+      : _currentFeedTab === 'discover'
+      ? '<h3>Nothing trending right now</h3><p>Check back soon!</p>'
+      : '<h3>No posts yet</h3><p>Be the first to share something!</p>';
+    feed.innerHTML = `<div class="empty">${emptyMsg}</div>`;
+    return;
   }
-
-  // Pull a wider page so client-side scoring has material to work with
-  const fetchLimit = scoreClientSide ? FEED_PAGE_SIZE * 3 : FEED_PAGE_SIZE;
-  const { data, error } = await q.range(0, fetchLimit - 1);
-
+  // Shim into the format the rest of loadFeed expects (it used to be the
+  // raw .from('posts') select result — now it's the hydrated posts list).
+  const error = null;
   if (error) { feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`; return; }
 
   // Filter happens client-side using the cached filter set (loaded once on sign-in).
-  let result = (data || []).filter(p => !shouldHidePost(p));
-
-  if (scoreClientSide) {
-    // For You: boost posts from people you follow by 1.5×
-    if (_feedMode === 'foryou' && !followIds) {
-      const { data: f } = await supabase.from('follows')
-        .select('following_id')
-        .eq('follower_id', currentUser.id);
-      followIds = (f || []).map(r => r.following_id);
-    }
-    const followSet = new Set(followIds || []);
-    result.forEach(p => {
-      p._score = _feedVelocity(p) * (followSet.has(p.user_id) ? 1.5 : 1.0);
-    });
-    result.sort((a, b) => (b._score || 0) - (a._score || 0));
-    // Diversity: don't show the same author twice in a row
-    result = _feedDiversify(result);
-    // Trim back to the page size
-    result = result.slice(0, FEED_PAGE_SIZE);
-  }
-
-  posts = result;
-
-  if ((data || []).length < fetchLimit) _hasMoreFeedPosts = false;
+  // No re-fetch here — keeps feed load fast.
+  posts = (data || []).filter(p => !shouldHidePost(p));
+  if ((data || []).length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
   _feedOffset = (data || []).length;
 
   if (!posts.length) {
-    const emptyMsg = _feedMode === 'discover'
-      ? '<h3>No fresh posts to discover</h3><p>Check back soon — new content drops daily.</p>'
-      : '<h3>No posts yet</h3><p>Be the first to share something!</p>';
-    feed.innerHTML = `<div class="empty">${emptyMsg}</div>`;
+    feed.innerHTML = '<div class="empty"><h3>No posts yet</h3><p>Be the first to share something!</p></div>';
     return;
   }
 
@@ -1353,74 +1255,8 @@ window.loadFeed = async function() {
   });
 
   setupFeedLazyLoaders(feed);
-  setupCollapsibleBodies(feed);
   if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
 };
-
-// ── Collapsible post bodies (Facebook-style "See more / less") ──
-// Auto-detects bodies that overflow ~6 lines and lets users tap the text
-// itself to expand/collapse. Short posts get no toggle. Per-session state
-// in `_expandedPosts` so toggle persists while scrolling but resets on refresh.
-const _expandedPosts = new Set();
-function setupCollapsibleBodies(root) {
-  if (!root) return;
-  const bodies = root.querySelectorAll('.collapsible-body:not([data-collapse-checked])');
-  bodies.forEach(el => {
-    el.dataset.collapseChecked = '1';
-    const id = el.dataset.postId;
-
-    // First pass: collapse and measure. If content fits without overflow, leave it.
-    el.classList.add('is-collapsed');
-    requestAnimationFrame(() => {
-      const overflows = el.scrollHeight > el.clientHeight + 2;
-      if (!overflows) {
-        // Short post — no toggle needed.
-        el.classList.remove('is-collapsed');
-        return;
-      }
-
-      // Restore expanded state if user already opened this post earlier this session
-      if (id && _expandedPosts.has(id)) {
-        el.classList.remove('is-collapsed');
-        el.classList.add('is-expanded');
-      }
-
-      // Append the See more / See less label inside the body itself
-      const more = document.createElement('span');
-      more.className = 'collapsible-toggle';
-      more.textContent = el.classList.contains('is-expanded') ? 'See less' : 'See more';
-      el.appendChild(more);
-
-      // Tap anywhere on the body toggles — but ignore real links/buttons/images
-      el.addEventListener('click', (e) => {
-        const targetIsLink = e.target.tagName === 'A' || e.target.closest('a');
-        const targetIsBtn  = e.target.tagName === 'BUTTON' || e.target.closest('button');
-        const targetIsImg  = e.target.tagName === 'IMG' || e.target.closest('img');
-        if (targetIsLink || targetIsBtn || targetIsImg) return;
-        e.stopPropagation();
-        const expanded = !el.classList.contains('is-expanded');
-        el.classList.toggle('is-expanded', expanded);
-        el.classList.toggle('is-collapsed', !expanded);
-        more.textContent = expanded ? 'See less' : 'See more';
-        if (id) {
-          if (expanded) _expandedPosts.add(id);
-          else          _expandedPosts.delete(id);
-        }
-      });
-    });
-  });
-}
-
-// Wire feed mode tabs (For You / Following / Discover)
-document.querySelectorAll('#feedTabs .feed-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    const mode = tab.dataset.feed;
-    if (mode === _feedMode) return;
-    document.querySelectorAll('#feedTabs .feed-tab').forEach(t => t.classList.toggle('active', t === tab));
-    _feedMode = mode;
-    loadFeed();
-  });
-});
 
 async function loadMoreFeed() {
   if (_isLoadingMoreFeed || !_hasMoreFeedPosts) return;
@@ -1431,14 +1267,10 @@ async function loadMoreFeed() {
   sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
 
   try {
-    const { data, error } = await supabase
-      .from('posts')
-      .select(FEED_SELECT)
-      .eq('is_hidden', false)
-      .order('created_at', { ascending: false })
-      .range(_feedOffset, _feedOffset + FEED_PAGE_SIZE - 1);
-
-    if (error) throw error;
+    // Same dispatcher loadFeed() uses — keeps mobile + web consistent.
+    // _feedOffset reflects how many posts we've already rendered, which is
+    // exactly the offset the score-ordered RPCs want.
+    const data = await _fetchFeedPageForTab(_currentFeedTab, _feedOffset);
 
     const rawMore = data || [];
     const more    = rawMore.filter(p => !shouldHidePost(p));
@@ -1456,8 +1288,6 @@ async function loadMoreFeed() {
         if (_feedPostObserver) _feedPostObserver.observe(el);
         el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
       });
-      // Apply collapsible logic to the newly-appended posts
-      setupCollapsibleBodies(feed);
       posts = posts.concat(more);
     }
 
@@ -1655,7 +1485,7 @@ function renderPost(post) {
       </div>
     ` : ''}
 
-    ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id}">${linkify(post.body)}</div>` : ''}
+    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
     ${post.body ? renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
     ${post.videos ? `
@@ -1673,7 +1503,7 @@ function renderPost(post) {
             <div class="post-time">${timeAgo(post.original.created_at)}</div>
           </div>
         </div>
-        ${post.original.body ? `<div class="post-body collapsible-body" data-post-id="${post.original.id}">${linkify(post.original.body)}</div>` : ''}
+        ${post.original.body ? `<div class="post-body">${linkify(post.original.body)}</div>` : ''}
         ${post.original.body ? renderLinkPreview(post.original.body) : ''}
         ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
         ${post.original.videos ? `
@@ -2658,63 +2488,13 @@ function updateReactionUI(targetId, targetType, counts, userReaction) {
 
 async function handleReaction(targetId, targetType, emojiKey) {
   if (!currentUser) return toast('Sign in to react', 'error');
-
-  // Optimistic UI update: flip the trigger label/icon immediately so the
-  // user sees their reaction land instantly. loadReactions() reconciles
-  // with the server result a moment later.
-  try {
-    const wraps = document.querySelectorAll(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
-    const r = REACTIONS.find(x => x.key === emojiKey);
-    wraps.forEach(wrap => {
-      const trigger = wrap.querySelector('.reaction-trigger');
-      if (!trigger || !r) return;
-      const icon = trigger.querySelector('.r-icon');
-      const label = trigger.querySelector('.r-label-text');
-      if (icon)  icon.innerHTML = `<span>${r.emoji}</span>`;
-      if (label) label.textContent = r.label;
-      trigger.classList.add('reacted');
-    });
-  } catch {}
-
-  const { data: existing, error: lookupErr } = await supabase
-    .from('reactions')
-    .select('id, emoji')
-    .eq('user_id', currentUser.id)
-    .eq('target_id', targetId)
-    .eq('target_type', targetType)
-    .maybeSingle();
-
-  if (lookupErr) {
-    toast('Reaction failed: ' + lookupErr.message, 'error');
-    loadReactions(targetId, targetType);   // resync UI to server truth
-    return;
-  }
-
-  let mutErr = null;
+  const { data: existing } = await supabase.from('reactions').select('id, emoji').eq('user_id', currentUser.id).eq('target_id', targetId).eq('target_type', targetType).maybeSingle();
   if (existing) {
-    if (existing.emoji === emojiKey) {
-      const { error } = await supabase.from('reactions').delete().eq('id', existing.id);
-      mutErr = error;
-    } else {
-      const { error } = await supabase.from('reactions').update({ emoji: emojiKey }).eq('id', existing.id);
-      mutErr = error;
-    }
+    if (existing.emoji === emojiKey) await supabase.from('reactions').delete().eq('id', existing.id);
+    else await supabase.from('reactions').update({ emoji: emojiKey }).eq('id', existing.id);
   } else {
-    const { error } = await supabase.from('reactions').insert({
-      user_id: currentUser.id,
-      target_id: targetId,
-      target_type: targetType,
-      emoji: emojiKey,
-    });
-    mutErr = error;
+    await supabase.from('reactions').insert({ user_id: currentUser.id, target_id: targetId, target_type: targetType, emoji: emojiKey });
   }
-
-  if (mutErr) {
-    // Surface the real reason so we can debug RLS / schema / FK issues.
-    // Without this, reactions just silently fail and look broken.
-    toast('Reaction failed: ' + mutErr.message, 'error');
-  }
-  // Always resync — pulls server truth + updates counts everywhere
   loadReactions(targetId, targetType);
 }
 
@@ -3018,7 +2798,7 @@ window.repostPost = (postId) => {
       <div class="avatar">${avatarHTML}</div>
       <div><span class="post-author">${escHTML(name)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
     </div>
-    ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id || post.$id || ''}">${linkify(post.body)}</div>` : ''}
+    ${post.body ? `<div class="post-body">${linkify(post.body)}</div>` : ''}
     ${post.body ? renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div style="border-radius:8px;overflow:hidden;margin-top:0.5rem"><img src="${post.image_url}"/></div>` : ''}
   `;
@@ -3086,9 +2866,6 @@ function showFeed() {
   // storiesEl intentionally untouched — inline display:none in HTML keeps it hidden.
   // To bring stories back, remove `style="display:none"` from #storiesRow in index.html.
   composeEl.style.display = '';
-  // Restore feed mode tabs (For You / Following / Discover) — Home only
-  const feedTabs = document.getElementById('feedTabs');
-  if (feedTabs) feedTabs.style.display = '';
   // Restore the feed sentinel only when there's actually more to load and posts already rendered
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel && _hasMoreFeedPosts && feedEl.querySelector('.post-card')) {
@@ -3114,6 +2891,11 @@ function showProfileView() {
 
 async function openProfile(userId) {
   showProfileView();
+  // Cross-platform: shared links may carry an Appwrite hex ID. Resolve to the
+  // canonical Supabase UUID before any queries fire downstream. We keep the
+  // raw inbound ID in the hash so refresh-to-restore stays in sync.
+  const __resolvedProfileId = (await resolveSbId("profiles", userId)) || userId;
+  userId = __resolvedProfileId;
   viewingProfileId = userId;
   // Set URL hash so refresh keeps user on profile
   if (window.location.hash !== `#profile/${userId}`) {
@@ -3281,10 +3063,14 @@ async function openProfile(userId) {
 // Exponential backoff (200ms → 500ms → 1.2s) so transient misses don't waste
 // 600ms in a tight loop; existing accounts return immediately on attempt 1.
 async function fetchProfileWithRetry(userId, attempts = 3) {
+  // Cross-platform: shared profile links may carry an Appwrite hex ID instead
+  // of a Supabase UUID. Resolve through the legacy_appwrite_id mirror column.
+  const resolvedId = await resolveSbId("profiles", userId);
+  const lookupId = resolvedId || userId;
   const delays = [0, 200, 500];
   for (let i = 0; i < attempts; i++) {
     if (delays[i]) await new Promise(r => setTimeout(r, delays[i]));
-    const { data } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', userId).single();
+    const { data } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', lookupId).single();
     if (data) return data;
   }
   return null;
@@ -3627,8 +3413,6 @@ async function loadProfilePosts(userId) {
     if (_feedPostObserver) _feedPostObserver.observe(el);
     el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
   });
-  // Apply Facebook-style collapsing to long post bodies
-  setupCollapsibleBodies(wrap);
   // Fall back: if no observers (first time), load eagerly
   if (!_feedPostObserver) {
     wrap.querySelectorAll('.post-card').forEach(c => triggerPostLazyLoad(c));
@@ -3648,7 +3432,7 @@ async function loadProfileVideos(userId) {
   // Supabase videos uploaded by this user
   let q = supabase
     .from('videos')
-    .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
+    .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
     .eq('uploader_id', userId)
     .order('created_at', { ascending: false });
   // Non-owners only see ready videos
@@ -3691,13 +3475,6 @@ async function loadProfileVideos(userId) {
       videoUrl: v.video_url,
       uri: v.video_url,
       videoStats: { views: v.views || 0, duration: v.duration || 0 },
-      // Monetization fields — without these, clicking a video from a user's
-      // wall doesn't trigger setupVideoMonetGate (auto-deduct at 3:00 fails).
-      is_locked:          !!v.is_locked,
-      is_monetized:       !!v.is_monetized,
-      duration:           v.duration || 0,
-      unlock_cost_coins:  v.unlock_cost_coins ?? null,
-      unlock_cost_stars:  v.unlock_cost_stars ?? null,
       status: v.status || 'ready',
       $createdAt: v.created_at,
       _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
@@ -3796,307 +3573,38 @@ document.querySelectorAll('.profile-tab').forEach(tab => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Edit profile modal — display-name cooldown, emoji-free, bio char/line limits
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Tunables loaded from app_config — falls back to sensible defaults so the
-// modal works even if the migration hasn't been applied yet.
-const _profileEditDefaults = {
-  max_bio_characters: 200,
-  max_bio_lines: 5,
-  display_name_change_cooldown_days: 60,
-};
-async function loadProfileEditDefaults() {
-  try {
-    const { data } = await supabase.from('app_config')
-      .select('key, value_int')
-      .in('key', Object.keys(_profileEditDefaults));
-    for (const r of (data || [])) {
-      if (r.value_int != null) _profileEditDefaults[r.key] = Number(r.value_int);
-    }
-  } catch {}
-  return _profileEditDefaults;
-}
-
-// Reject anything in pictographic/emoji Unicode blocks. Allows accented letters,
-// digits, and common punctuation — international names work fine.
-function stripEmoji(s) {
-  return (s || '').replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}]/gu, '');
-}
-function hasEmoji(s) {
-  return /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}]/u.test(s || '');
-}
-
-// ── Country / City lists ─────────────────────────────────────────────
-// Philippines is the primary market — its cities are pre-listed for a clean
-// dropdown UX. Other countries fall back to a free-text city input.
-const COUNTRY_LIST = [
-  'Philippines','United States','Canada','United Kingdom','Australia','Singapore','Malaysia','Indonesia','Thailand','Vietnam','Japan','South Korea','China','Hong Kong','Taiwan','India','Pakistan','Bangladesh','United Arab Emirates','Saudi Arabia','Qatar','Kuwait','Bahrain','Oman','Israel','Turkey','Germany','France','Spain','Italy','Portugal','Netherlands','Belgium','Switzerland','Sweden','Norway','Denmark','Finland','Ireland','Poland','Russia','Ukraine','Greece','Czechia','Austria','Hungary','Romania','New Zealand','Mexico','Brazil','Argentina','Chile','Colombia','Peru','South Africa','Egypt','Nigeria','Kenya','Morocco','Other'
-];
-const PH_CITIES = [
-  'Manila','Quezon City','Caloocan','Pasig','Taguig','Makati','Parañaque','Las Piñas','Muntinlupa','Mandaluyong','San Juan','Marikina','Pasay','Valenzuela','Malabon','Navotas','Pateros',
-  'Cebu City','Mandaue','Lapu-Lapu','Davao City','Iloilo City','Bacolod','Cagayan de Oro','Zamboanga City','General Santos','Baguio','Antipolo','Dasmariñas','Bacoor','Imus','Calamba','Santa Rosa','Lipa','Batangas City','Tarlac City','Angeles','San Fernando (Pampanga)','Olongapo','Naga','Legazpi','Tacloban','Butuan','Cotabato City','Iligan','Tagum','Puerto Princesa','Malolos','Meycauayan','San Jose del Monte','Other'
-];
-
-function populateCountryDropdown() {
-  const sel = document.getElementById('editCountry');
-  if (!sel || sel.dataset.populated === '1') return;
-  for (const c of COUNTRY_LIST) {
-    const opt = document.createElement('option');
-    opt.value = c; opt.textContent = c;
-    sel.appendChild(opt);
-  }
-  sel.dataset.populated = '1';
-}
-function populatePhCityDropdown() {
-  const sel = document.getElementById('editCity');
-  if (!sel || sel.dataset.populated === '1') return;
-  for (const c of PH_CITIES) {
-    const opt = document.createElement('option');
-    opt.value = c; opt.textContent = c;
-    sel.appendChild(opt);
-  }
-  sel.dataset.populated = '1';
-}
-
-function applyCountryUI(country) {
-  // Country = Philippines → show city dropdown. Anything else → show city text input.
-  const citySel  = document.getElementById('editCity');
-  const cityInp  = document.getElementById('editCityInput');
-  if (!citySel || !cityInp) return;
-  if (country === 'Philippines') {
-    citySel.style.display = '';
-    cityInp.style.display = 'none';
-  } else {
-    citySel.style.display = 'none';
-    cityInp.style.display = '';
-  }
-}
-
-function getCurrentCity() {
-  const country = document.getElementById('editCountry').value || '';
-  if (country === 'Philippines') {
-    const v = document.getElementById('editCity').value || '';
-    return v === 'Other' ? '' : v;
-  }
-  return (document.getElementById('editCityInput').value || '').trim();
-}
-
-// Parse a stored location string ("City, Country") into {country, city}.
-// Tolerates older free-form values — falls back to dumping the whole string
-// into city if we can't match the country.
-function parseLocation(loc) {
-  if (!loc) return { country: '', city: '' };
-  const parts = loc.split(',').map(s => s.trim()).filter(Boolean);
-  if (parts.length >= 2) {
-    const tail = parts[parts.length - 1];
-    const matchedCountry = COUNTRY_LIST.find(c => c.toLowerCase() === tail.toLowerCase());
-    if (matchedCountry) {
-      const city = parts.slice(0, -1).join(', ');
-      return { country: matchedCountry, city };
-    }
-  }
-  // Fallback — country unknown
-  return { country: '', city: loc };
-}
-
-async function openEditProfile(profile) {
-  const cfg = await loadProfileEditDefaults();
-  const usernameEl = document.getElementById('editUsername');
-  const bioEl      = document.getElementById('editBio');
-  const hintEl     = document.getElementById('editUsernameHint');
-
-  // Strip emoji on initial load too — old saved values (from before the emoji
-  // rule shipped) would otherwise re-display in the input.
-  usernameEl.value = stripEmoji(profile.username || '');
-  // Clamp bio on initial load to the line limit (in case it was saved before
-  // the limit existed)
-  bioEl.value      = clampBioLines(profile.bio || '');
-  document.getElementById('editWebsite').value  = profile.website  || '';
-
-  // ── Country + City ──
-  populateCountryDropdown();
-  populatePhCityDropdown();
-  const { country, city } = parseLocation(profile.location);
-  document.getElementById('editCountry').value = country;
-  applyCountryUI(country);
-  if (country === 'Philippines') {
-    const phMatch = PH_CITIES.find(c => c.toLowerCase() === (city || '').toLowerCase());
-    document.getElementById('editCity').value = phMatch || '';
-    document.getElementById('editCityInput').value = '';
-  } else {
-    document.getElementById('editCityInput').value = city || '';
-    document.getElementById('editCity').value = '';
-  }
-
-  // ── Display-name cooldown UI ──
-  // Fetch the cooldown timestamp on-demand. Tolerates the column being absent
-  // (returns null) so the rest of the app still works before the migration runs.
-  let dnChangedAt = profile.display_name_changed_at || null;
-  if (!dnChangedAt) {
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('display_name_changed_at')
-        .eq('id', currentUser.id)
-        .single();
-      if (!error && data) dnChangedAt = data.display_name_changed_at || null;
-    } catch {} // column doesn't exist yet — treat as never-changed
-  }
-  const lastChange = dnChangedAt ? new Date(dnChangedAt) : null;
-  const cooldownMs = (cfg.display_name_change_cooldown_days || 60) * 86400 * 1000;
-  const nextAllowed = lastChange ? new Date(lastChange.getTime() + cooldownMs) : null;
-  const onCooldown = nextAllowed && nextAllowed > new Date();
-
-  if (onCooldown) {
-    usernameEl.disabled = true;
-    hintEl.classList.add('is-locked');
-    const dateStr = nextAllowed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-    const days = Math.ceil((nextAllowed - new Date()) / 86400000);
-    hintEl.textContent = `Display name is locked. You can change it again on ${dateStr} (${days} day${days===1?'':'s'} from now).`;
-  } else {
-    usernameEl.disabled = false;
-    hintEl.classList.remove('is-locked');
-    hintEl.textContent = `Letters, numbers and basic punctuation only — no emoji. You can change this once every ${cfg.display_name_change_cooldown_days || 60} days.`;
-  }
-
-  // ── Bio counters ──
-  updateBioCounter();
-
+// Edit profile modal
+function openEditProfile(profile) {
+  document.getElementById('editUsername').value = profile.username || '';
+  document.getElementById('editBio').value = profile.bio || '';
+  document.getElementById('editLocation').value = profile.location || '';
+  document.getElementById('editWebsite').value = profile.website || '';
   document.getElementById('editProfileModal').classList.add('open');
   document.body.style.overflow = 'hidden';
 }
-
 function closeEditProfile() {
   document.getElementById('editProfileModal').classList.remove('open');
   document.body.style.overflow = '';
 }
-
-function updateBioCounter() {
-  const el = document.getElementById('editBio');
-  const countEl = document.getElementById('editBioCount');
-  const linesEl = document.getElementById('editBioLines');
-  if (!el || !countEl || !linesEl) return;
-  const v = el.value || '';
-  const maxC = _profileEditDefaults.max_bio_characters || 200;
-  const maxL = _profileEditDefaults.max_bio_lines || 5;
-  const lines = v ? (v.split('\n').length) : 1;
-  countEl.textContent = `${v.length} / ${maxC}`;
-  linesEl.textContent = `${lines} / ${maxL} lines`;
-  countEl.classList.remove('is-warn','is-bad');
-  linesEl.classList.remove('is-warn','is-bad');
-  if (v.length > maxC) countEl.classList.add('is-bad');
-  else if (v.length > maxC * 0.9) countEl.classList.add('is-warn');
-  if (lines > maxL) linesEl.classList.add('is-bad');
-  else if (lines === maxL) linesEl.classList.add('is-warn');
-}
-
 document.getElementById('editProfileClose').addEventListener('click', closeEditProfile);
 document.getElementById('editProfileCancel').addEventListener('click', closeEditProfile);
 document.getElementById('editProfileModal').addEventListener('click', (e) => { if (e.target.id === 'editProfileModal') closeEditProfile(); });
 
-// Live: strip emoji as user types into display name
-document.getElementById('editUsername').addEventListener('input', (e) => {
-  const cleaned = stripEmoji(e.target.value);
-  if (cleaned !== e.target.value) e.target.value = cleaned;
-});
-
-// Hard-cap bio at the configured line count. Blocks Enter past the limit and
-// trims pasted multi-line text down to N lines.
-function clampBioLines(text) {
-  const max = _profileEditDefaults.max_bio_lines || 5;
-  const lines = (text || '').split('\n');
-  if (lines.length <= max) return text || '';
-  return lines.slice(0, max).join('\n');
-}
-
-const _bioEl = document.getElementById('editBio');
-_bioEl.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter') return;
-  const max = _profileEditDefaults.max_bio_lines || 5;
-  const lines = (e.target.value || '').split('\n').length;
-  if (lines >= max) e.preventDefault();   // refuse new line at the cap
-});
-_bioEl.addEventListener('paste', (e) => {
-  // Re-clamp after paste so pasting a 12-line block gets trimmed to 5
-  setTimeout(() => {
-    const clamped = clampBioLines(e.target.value);
-    if (clamped !== e.target.value) e.target.value = clamped;
-    updateBioCounter();
-  }, 0);
-});
-
-// Live: bio counter updates
-_bioEl.addEventListener('input', updateBioCounter);
-
-// Country change: swap city UI between dropdown (PH) and free-text input
-document.getElementById('editCountry').addEventListener('change', (e) => {
-  applyCountryUI(e.target.value);
-  // Clear stale city value on country swap
-  document.getElementById('editCity').value = '';
-  document.getElementById('editCityInput').value = '';
-});
-
 document.getElementById('editProfileSave').addEventListener('click', async () => {
   const btn = document.getElementById('editProfileSave');
-  const usernameEl = document.getElementById('editUsername');
-
-  // Client-side guards — server still re-validates as source of truth
-  let username = stripEmoji(usernameEl.value).trim();
-  const bio    = (document.getElementById('editBio').value || '').trim();
-  const country = (document.getElementById('editCountry').value || '').trim();
-  const city   = getCurrentCity();
-  // Compose location: "City, Country" if both present, just country if no city,
-  // empty string to clear.
-  const loc = (city && country) ? `${city}, ${country}` : (country || '');
-  // Website field removed from the form — pass null to preserve any existing
-  // value in the DB (the RPC's coalesce-style update won't overwrite when null).
-  const web    = null;
-
-  if (!username) { toast('Display name is required', 'error'); return; }
-  if (hasEmoji(username)) { toast('Display name cannot contain emoji', 'error'); return; }
-
-  const maxC = _profileEditDefaults.max_bio_characters || 200;
-  const maxL = _profileEditDefaults.max_bio_lines || 5;
-  if (bio.length > maxC) { toast(`Bio is too long (max ${maxC} characters)`, 'error'); return; }
-  if (bio && bio.split('\n').length > maxL) { toast(`Bio has too many lines (max ${maxL})`, 'error'); return; }
-
   btn.disabled = true; btn.textContent = 'Saving...';
-
-  // If display name field is disabled (cooldown), don't try to send it
-  const sendUsername = usernameEl.disabled ? null : username;
-
-  const { data, error } = await supabase.rpc('update_profile', {
-    p_username: sendUsername,
-    p_bio: bio,
-    p_location: loc,
-    p_website: web,
-  });
-
+  const { error } = await supabase.from('profiles').update({
+    username: document.getElementById('editUsername').value.trim() || 'User',
+    bio: document.getElementById('editBio').value.trim(),
+    location: document.getElementById('editLocation').value.trim(),
+    website: document.getElementById('editWebsite').value.trim()
+  }).eq('id', currentUser.id);
   btn.disabled = false; btn.textContent = 'Save';
-
   if (error) { toast(error.message, 'error'); return; }
-  if (!data || data.ok === false) {
-    const code = data?.error;
-    const msg = {
-      not_authenticated:    'Please sign in again',
-      username_required:    'Display name is required',
-      emoji_not_allowed:    'Display name cannot contain emoji',
-      name_change_cooldown: data?.next_allowed_at
-        ? `You can change your name again on ${new Date(data.next_allowed_at).toLocaleDateString()}`
-        : `Display name is locked for ${data?.cooldown_days || 60} days between changes`,
-      bio_too_long:         `Bio is too long (max ${data?.max_chars || maxC} characters)`,
-      bio_too_many_lines:   `Bio has too many lines (max ${data?.max_lines || maxL})`,
-    }[code] || (code || 'Could not save profile');
-    toast(msg, 'error');
-    return;
-  }
-
   toast('Profile updated!', 'success');
   closeEditProfile();
   const { data: updated } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
-  if (updated) currentProfile = updated;   // keep stale on fetch fail rather than nulling
+  currentProfile = updated;
   updateTopbarUser();
   openProfile(currentUser.id);
 });
@@ -4227,10 +3735,8 @@ async function openMyProfile() {
   }
   // Make sure profile is loaded before opening
   if (!currentProfile) {
-    const { data: profile, error } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
-    if (error) { toast('Could not load your profile', 'error'); return; }
-    currentProfile = profile || null;
-    if (!currentProfile) { toast('Profile not found', 'error'); return; }
+    const { data: profile } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
+    currentProfile = profile;
   }
   openProfile(currentUser.id);
 }
@@ -4254,6 +3760,21 @@ function setSidebarActive(buttonId) {
 document.getElementById('btnHome')?.addEventListener('click', () => {
   setSidebarActive('btnHome');
   showFeed();
+});
+
+// Feed tabs: For You / Following / Discover. Persist the choice in
+// localStorage so refresh keeps the user where they were.
+document.querySelectorAll('#feedTabs .feed-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const next = btn.dataset.feedTab || 'for-you';
+    if (next === _currentFeedTab) return;
+    _currentFeedTab = next;
+    localStorage.setItem('selebox_feed_tab', next);
+    document.querySelectorAll('#feedTabs .feed-tab').forEach(b => {
+      b.classList.toggle('active', b === btn);
+    });
+    loadFeed();
+  });
 });
 
 // Logo click → home + scroll to top (whether already on feed or elsewhere)
@@ -4391,21 +3912,9 @@ async function runFeedSearch(query) {
   searchResultsEl.classList.add('open');
   searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
 
-  // Fetch more people so substring matches like "Ligaya" pull users like
-  // "LIGAYA_ba1f" too (they alphabetically rank below other "Ligaya*" hits).
-  // Bumped from 5 → 20 with explicit username ordering for predictability.
   const [{ data: profiles }, { data: posts }] = await Promise.all([
-    supabase.from('profiles')
-      .select('id, username, avatar_url, bio, is_guest, is_banned')
-      .ilike('username', `%${query}%`)
-      .eq('is_banned', false)
-      .order('username', { ascending: true })
-      .limit(20),
-    supabase.from('posts')
-      .select('*, profiles!user_id(username, avatar_url, is_guest)')
-      .ilike('body', `%${query}%`)
-      .order('created_at', { ascending: false })
-      .limit(8)
+    supabase.from('profiles').select('id, username, avatar_url, bio, is_guest').ilike('username', `%${query}%`).limit(5),
+    supabase.from('posts').select('*, profiles!user_id(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
   ]);
 
   let html = '';
@@ -4451,72 +3960,11 @@ async function runFeedSearch(query) {
       const id = item.dataset.id;
       searchResultsEl.classList.remove('open');
       searchInput.value = '';
-
+      
       if (type === 'profile') openProfile(id);
-      else if (type === 'post') openPostFromSearch(id);
     };
   });
 }
-
-// Open a focused post detail modal — works for ANY post, even old ones not
-// in the loaded feed. Reuses renderPost so the post stays visually identical
-// to the feed version (same actions, same comments, same look).
-async function openPostFromSearch(postId) {
-  const modal = document.getElementById('postDetailModal');
-  const body  = document.getElementById('postDetailBody');
-  if (!modal || !body) return;
-  body.innerHTML = '<div class="loading">Loading post…</div>';
-  modal.classList.add('open');
-  modal.style.display = 'flex';
-  document.body.style.overflow = 'hidden';
-
-  try {
-    const { data: post, error } = await supabase
-      .from('posts')
-      .select(FEED_SELECT)
-      .eq('id', postId)
-      .maybeSingle();
-    if (error) throw error;
-    if (!post) {
-      body.innerHTML = '<div class="empty"><h3>Post not found</h3><p>It may have been deleted or hidden.</p></div>';
-      return;
-    }
-    if (shouldHidePost(post)) {
-      body.innerHTML = '<div class="empty"><h3>Post unavailable</h3><p>You\'ve hidden this post or its author.</p></div>';
-      return;
-    }
-
-    body.innerHTML = '';
-    const card = renderPost(post);
-    body.appendChild(card);
-    // Activate "See more" collapsing for long bodies (same as feed)
-    if (typeof setupCollapsibleBodies === 'function') setupCollapsibleBodies(body);
-    // Lazy-load reactions/comments (same observer pattern as feed)
-    if (typeof triggerPostLazyLoad === 'function') triggerPostLazyLoad(card);
-    // Hook up post-video lazy attachment
-    card.querySelectorAll('.post-video').forEach(v => {
-      if (typeof attachHlsToPostVideo === 'function') attachHlsToPostVideo(v);
-    });
-  } catch (err) {
-    body.innerHTML = `<div class="empty"><h3>Couldn't load post</h3><p>${escHTML(err.message || 'Network error')}</p></div>`;
-  }
-}
-
-// Wire close handlers for the post detail modal
-function _closePostDetailModal() {
-  const m = document.getElementById('postDetailModal');
-  if (!m) return;
-  m.classList.remove('open');
-  m.style.display = 'none';
-  document.body.style.overflow = '';
-  // Clear the body so the next open shows the loading state, not stale content
-  const body = document.getElementById('postDetailBody');
-  if (body) body.innerHTML = '<div class="loading">Loading post…</div>';
-}
-document.getElementById('postDetailClose')?.addEventListener('click', _closePostDetailModal);
-document.getElementById('postDetailModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'postDetailModal') _closePostDetailModal();
-});
 
 window.addEventListener('hashchange', updateSearchPlaceholder);
 updateSearchPlaceholder();
@@ -5131,9 +4579,6 @@ function hideAllMainPages() {
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
-  // Feed mode tabs (For You / Following / Discover) — only on Home
-  const feedTabs = document.getElementById('feedTabs');
-  if (feedTabs) feedTabs.style.display = 'none';
   if (profilePage) profilePage.style.display = 'none';
   if (videosPage) videosPage.style.display = 'none';
   if (videoPlayerPage) videoPlayerPage.style.display = 'none';
@@ -5204,26 +4649,19 @@ function showVideos(forceReload = false) {
   }
 }
 
-function showStudio(forceReload = false) {
+function showStudio() {
   hideAllMainPages();
   studioPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#studio');
-  // Studio shows the user's own uploads — those don't change unless they
-  // upload something new, so skip reload if we already rendered.
-  const grid = document.getElementById('studioGrid') || studioPage.querySelector('.video-grid, .studio-grid');
-  const alreadyRendered = grid && grid.children.length > 0 && !grid.querySelector('.loading');
-  if (forceReload || !alreadyRendered) {
-    loadStudio();
-  }
+  loadStudio();
 }
 
 // ════════════════════════════════════════
 // BOOK / READER
 // ════════════════════════════════════════
-let allBooksCache = [];     // filtered + sorted view (what's rendered)
-let allBooksRaw   = [];     // unfiltered raw books fetched from server (for fast tab switching)
+let allBooksCache = [];
 let bookGenreFilter = '';
 let bookSortBy = 'trending';
 let activeBookSearchQuery = '';
@@ -5232,16 +4670,13 @@ let currentChapterIndex = 0;
 let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
 
 // ── Book (Reader) page ──
-function showBook(forceReload = false) {
+function showBook() {
   hideAllMainPages();
   bookPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#book');
-  // Only reload if cache is empty or forced — instant return when revisiting
-  if (forceReload || !allBooksRaw.length) {
-    loadBooks();
-  }
+  loadBooks();
 }
 
 // ── Pagination state for the public Book browse page ──
@@ -5274,9 +4709,6 @@ async function loadBooks() {
     if (books.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
     _booksOffset = books.length;
 
-    // Keep both caches: raw (unfiltered) for fast tab switching,
-    // and filtered+sorted view for rendering.
-    allBooksRaw = books;
     let merged = applyBookFilterAndSort(books);
     allBooksCache = merged;
 
@@ -5312,30 +4744,15 @@ function applyBookFilterAndSort(list) {
 
   const dateOf = b => new Date(b.published_at || b.created_at || 0);
   if (bookSortBy === 'recent') {
-    // Newest = most recently published
     merged.sort((a, b) => dateOf(b) - dateOf(a));
   } else if (bookSortBy === 'most-liked') {
-    // All-time most liked
     merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
   } else if (bookSortBy === 'most-read') {
-    // All-time most viewed
     merged.sort((a, b) => (b.views_count || 0) - (a.views_count || 0));
-  } else if (bookSortBy === 'completed') {
-    // Filter to completed-status only, sort by likes (binge-readable)
-    merged = merged.filter(b => (b.status || '').toLowerCase() === 'completed');
-    merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
-  } else if (bookSortBy === 'editors-pick') {
-    // Admin-curated; sort by editors_pick_at desc (newest pick first)
-    merged = merged.filter(b => b.is_editors_pick === true);
-    merged.sort((a, b) => new Date(b.editors_pick_at || 0) - new Date(a.editors_pick_at || 0));
-  } else { // trending — last-7-days hotness, weighted by likes
+  } else { // trending
     merged.sort((a, b) => {
-      const sa = (a.trending_score != null) ? Number(a.trending_score) : ((a.views_last_7d || 0) + (a.likes_last_7d || 0) * 5);
-      const sb = (b.trending_score != null) ? Number(b.trending_score) : ((b.views_last_7d || 0) + (b.likes_last_7d || 0) * 5);
-      if (sb !== sa) return sb - sa;
-      // Tie-break: all-time likes, then newest
-      const lDiff = (b.likes_count || 0) - (a.likes_count || 0);
-      if (lDiff !== 0) return lDiff;
+      const diff = (b.likes_count || 0) - (a.likes_count || 0);
+      if (diff !== 0) return diff;
       return dateOf(b) - dateOf(a);
     });
   }
@@ -5356,10 +4773,6 @@ async function loadMoreBooks() {
     _booksOffset += more.length;
 
     if (more.length) {
-      // Append to raw cache (deduped) — used by sort-tab switches without re-fetch.
-      const seenIds = new Set(allBooksRaw.map(b => b.id));
-      for (const b of more) if (!seenIds.has(b.id)) allBooksRaw.push(b);
-
       // Merge into cache, re-apply current filter/sort to keep order consistent
       const allMerged = applyBookFilterAndSort([...allBooksCache, ...more]);
       allBooksCache = allMerged;
@@ -5532,26 +4945,6 @@ function prettyGenre(slug) {
   return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
-// Cache for user's book reading taste (reads + likes) — used by both
-// renderBookChips() and loadBookRecommendations() in the same page load.
-// 60-second TTL so stale-but-fresh-enough data doesn't trigger 2 round-trips.
-let _userBookTasteCache = null;
-let _userBookTasteAt = 0;
-async function getUserBookTaste() {
-  if (!currentUser) return { reads: [], likes: [] };
-  const now = Date.now();
-  if (_userBookTasteCache && (now - _userBookTasteAt) < 60_000) {
-    return _userBookTasteCache;
-  }
-  const [{ data: reads }, { data: likes }] = await Promise.all([
-    supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(50),
-    supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
-  ]);
-  _userBookTasteCache = { reads: reads || [], likes: likes || [] };
-  _userBookTasteAt = now;
-  return _userBookTasteCache;
-}
-
 async function renderBookChips() {
   const wrap = document.getElementById('bookGenreChips');
   if (!wrap) return;
@@ -5575,8 +4968,11 @@ async function renderBookChips() {
   // User reading taste (only for signed-in users)
   if (currentUser) {
     try {
-      const { reads, likes } = await getUserBookTaste();
-      const seedIds = [...new Set([...reads, ...likes].map(r => r.book_id))].slice(0, 30);
+      const [{ data: reads }, { data: likes }] = await Promise.all([
+        supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30),
+        supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(30),
+      ]);
+      const seedIds = [...new Set([...(reads || []), ...(likes || [])].map(r => r.book_id))].slice(0, 30);
       if (seedIds.length) {
         const { data: seedBooks } = await supabase
           .from('books').select('id, genre, tags').in('id', seedIds);
@@ -5646,11 +5042,14 @@ async function loadBookRecommendations() {
   }
 
   try {
-    // Pull user's reading taste from shared cache (avoids duplicate fetch
-    // since renderBookChips() already pulled this seconds ago)
-    const { reads, likes } = await getUserBookTaste();
-    const readIds  = new Set(reads.map(r => r.book_id));
-    const likedIds = new Set(likes.map(l => l.book_id));
+    // Pull user's recent reads + likes for the interest signal
+    const [{ data: reads }, { data: likes }] = await Promise.all([
+      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
+      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
+    ]);
+
+    const readIds  = new Set((reads || []).map(r => r.book_id));
+    const likedIds = new Set((likes || []).map(l => l.book_id));
     const seedIds  = [...new Set([...readIds, ...likedIds])].slice(0, 30);
 
     // Fetch a candidate pool (most recent public books)
@@ -5759,10 +5158,8 @@ async function fetchSupabaseBooks(offset = 0, limit = 80) {
     const { data, error } = await supabase
       .from('books')
       .select(`
-        id, title, description, cover_url, genre, tags, status,
+        id, title, description, cover_url, genre, tags,
         views_count, likes_count, chapters_count, word_count,
-        views_last_7d, likes_last_7d, trending_score,
-        is_editors_pick, editors_pick_at, editors_pick_note,
         published_at, created_at,
         author_id,
         profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
@@ -5894,17 +5291,9 @@ function renderBookCard(b) {
     : `<div class="book-cover-placeholder">${initialLetter}</div>`;
   const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
 
-  const editorsPickBadge = b.is_editors_pick
-    ? `<div class="book-editors-pick-badge" title="${escHTML(b.editors_pick_note || 'Editor\'s Pick')}">
-         <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-         Editor's Pick
-       </div>`
-    : '';
-
   card.innerHTML = `
     <div class="book-cover">
       ${cover}
-      ${editorsPickBadge}
       <div class="book-stats">
         <span title="Views" data-stat="views">👁 ${formatCompact(b.views_count || 0)}</span>
         <span title="Likes" data-stat="likes">❤ ${formatCompact(b.likes_count || 0)}</span>
@@ -5946,50 +5335,11 @@ document.getElementById('bookGenreChips')?.addEventListener('click', (e) => {
 });
 document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
   bookSortBy = e.target.value;
-
-  // Fast path: we already have raw books cached. Just re-derive the
-  // filtered+sorted view and swap the grid in one shot — no server round-trip,
-  // no "Loading…" flash, no staggered fade-in cascade.
-  if (allBooksRaw.length > 0) {
-    allBooksCache = applyBookFilterAndSort(allBooksRaw);
-    renderBooksFast();
-    return;
-  }
-
-  // Cold path: cache empty (page just opened) — fall back to full load.
   const savedY = window.scrollY;
   loadBooks().then(() => {
     requestAnimationFrame(() => window.scrollTo({ top: savedY, behavior: 'instant' }));
   });
 });
-
-// Fast renderer — no entrance animation, no flash. Used for in-place re-sorts
-// when the user switches tabs (Trending / Newest / Most Loved / etc.).
-function renderBooksFast() {
-  const grid = document.getElementById('bookGrid');
-  const empty = document.getElementById('bookEmpty');
-
-  if (!allBooksCache.length) {
-    grid.style.display = 'none';
-    empty.style.display = 'flex';
-    return;
-  }
-
-  grid.style.display = 'grid';
-  empty.style.display = 'none';
-
-  // Build new content off-DOM, then swap atomically so the user never sees
-  // an empty grid mid-render. Skip the staggered cascade that renderBooks()
-  // uses on first load.
-  const frag = document.createDocumentFragment();
-  for (const b of allBooksCache) {
-    const card = renderBookCard(b);
-    card.style.animationDelay = '0s';
-    card.style.animation = 'none';
-    frag.appendChild(card);
-  }
-  grid.replaceChildren(frag);
-}
 
 // ── Book detail page ──
 async function openBookDetail(bookId) {
@@ -6003,7 +5353,9 @@ async function openBookDetail(bookId) {
 
   try {
     // All books are now Supabase. Bare UUID or "sb_<uuid>" — strip the prefix if present.
-    const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
+    // Cross-platform: shared book links may also carry the legacy Appwrite hex
+    // ID. resolveSbId falls through to the legacy_appwrite_id mirror column.
+    const realId = (await resolveSbId("books", bookId)) || (bookId.startsWith('sb_') ? bookId.slice(3) : bookId);
     const [{ data: supBook, error: bookErr }, { data: supChapters, error: chErr }] = await Promise.all([
       supabase.from('books')
         .select(`
@@ -6070,13 +5422,14 @@ function renderBookDetail() {
         const locked = isLockedDef && !isUnlocked('chapter', realId);
         const lockBadge = locked
           ? `<span class="chapter-row-lock" title="Locked — tap to unlock">
-               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+               ${resolveUnlockCost('chapter', 'coin', c)}🪙 / ${resolveUnlockCost('chapter', 'star', c)}⭐
              </span>`
           : '';
         return `
           <div class="chapter-row${locked ? ' is-locked' : ''}" data-chapter-id="${c.id}">
-            <span class="chapter-row-num">#${c.chapter_number}</span>
-            <span class="chapter-row-title">${escHTML(c.title || `#${c.chapter_number}`)}</span>
+            <span class="chapter-row-num">Ch ${c.chapter_number}</span>
+            <span class="chapter-row-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
             ${lockBadge}
             <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
           </div>
@@ -6138,12 +5491,6 @@ function renderBookDetail() {
             <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
             <span class="book-action-label">Bookmark</span>
           </button>
-          ${(currentProfile?.role === 'admin' || currentProfile?.role === 'moderator') ? `
-            <button class="btn btn-sm book-action-btn book-editors-pick-btn ${book.is_editors_pick ? 'is-picked' : ''}" id="btnEditorsPick" data-picked="${book.is_editors_pick ? '1' : '0'}" title="${book.is_editors_pick ? "Remove Editor's Pick" : "Mark as Editor's Pick"}">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="${book.is_editors_pick ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-              <span class="book-action-label">${book.is_editors_pick ? "Editor's Pick" : 'Pick'}</span>
-            </button>
-          ` : ''}
         </div>
         <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
         ${bulkUnlockCard}
@@ -6186,46 +5533,6 @@ function renderBookDetail() {
   const bookmarkBtn = document.getElementById('btnBookmarkBook');
   likeBtn?.addEventListener('click', () => toggleBookLike(book.id));
   bookmarkBtn?.addEventListener('click', () => toggleBookBookmark(book.id));
-
-  // Editor's Pick toggle (mods/admins only — button is gated server-side too)
-  document.getElementById('btnEditorsPick')?.addEventListener('click', async (e) => {
-    const btn = e.currentTarget;
-    const currentlyPicked = btn.dataset.picked === '1';
-    const willPick = !currentlyPicked;
-    btn.disabled = true;
-    let note = null;
-    if (willPick) {
-      // Optional editorial note — short blurb that shows up in tooltips/lists
-      note = prompt('Optional — short editorial note (why is this an Editor\'s Pick?):', '') || null;
-    }
-    try {
-      const { data, error } = await supabase.rpc('set_editors_pick', {
-        p_book_id: book.id,
-        p_pick: willPick,
-        p_note: note,
-      });
-      if (error) throw error;
-      if (!data?.ok) throw new Error(data?.error || 'Failed to update Editor\'s Pick');
-      // Update UI inline
-      btn.dataset.picked = willPick ? '1' : '0';
-      btn.classList.toggle('is-picked', willPick);
-      btn.querySelector('.book-action-label').textContent = willPick ? "Editor's Pick" : 'Pick';
-      btn.querySelector('svg').setAttribute('fill', willPick ? 'currentColor' : 'none');
-      btn.title = willPick ? "Remove Editor's Pick" : "Mark as Editor's Pick";
-      // Mutate cached book so re-renders stay in sync
-      if (currentBookDetail?.book) {
-        currentBookDetail.book.is_editors_pick = willPick;
-        currentBookDetail.book.editors_pick_at = willPick ? new Date().toISOString() : null;
-        currentBookDetail.book.editors_pick_note = willPick ? note : null;
-      }
-      toast(willPick ? 'Marked as Editor\'s Pick ⭐' : 'Removed from Editor\'s Pick', 'success');
-    } catch (err) {
-      toast(err.message || String(err), 'error');
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
   // Load initial state (whether the user has already liked/bookmarked)
   loadBookActionState(book.id);
 }
@@ -6574,21 +5881,14 @@ document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => 
 });
 
 // ── Author (Manuscript Studio) page ──
-function showAuthor(forceReload = false) {
+function showAuthor() {
   hideAllMainPages();
   authorPage.style.display = 'block';
   setAuthorView('dashboard');
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#author');
-  // Author dashboard shows their books — reload on first visit, or after
-  // 60 seconds for freshness. Quick tab-flicks reuse the rendered DOM.
-  const now = Date.now();
-  const stale = !window._authorLoadedAt || (now - window._authorLoadedAt) > 60_000;
-  if (forceReload || stale) {
-    loadAuthorDashboard();
-    window._authorLoadedAt = now;
-  }
+  loadAuthorDashboard();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -6700,20 +6000,13 @@ else vcInitControls();
 // ════════════════════════════════════════════════════════════════════════════
 let _bookmarksActiveTab = 'videos';
 
-function showBookmarks(forceReload = false) {
+function showBookmarks() {
   hideAllMainPages();
   if (bookmarksPage) bookmarksPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#bookmarks');
-  // Reload on first visit or after 60 seconds (bookmarks change rarely
-  // but the user expects them to be current).
-  const now = Date.now();
-  const stale = !window._bookmarksLoadedAt || (now - window._bookmarksLoadedAt) > 60_000;
-  if (forceReload || stale) {
-    loadBookmarks();
-    window._bookmarksLoadedAt = now;
-  }
+  loadBookmarks();
 }
 
 async function loadBookmarks() {
@@ -7027,7 +6320,7 @@ async function loadAuthorDashboard() {
 
   const { data, error } = await supabase
     .from('books')
-    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, lock_from_chapter, locked_at, created_at, updated_at, published_at')
+    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, created_at, updated_at, published_at')
     .eq('author_id', user.id)
     .order('updated_at', { ascending: false });
 
@@ -7095,7 +6388,6 @@ function renderAuthorBookRow(b) {
       <div class="author-book-row-stat">${(b.chapters_count || 0)} ch</div>
       <div class="author-book-row-stat">${(b.views_count || 0).toLocaleString()} 👁</div>
       <div class="author-book-row-actions">
-        ${b.lock_from_chapter ? `<span class="author-book-pro-tag" title="Premium book — locked from chapter ${b.lock_from_chapter}">PRO</span>` : ''}
         <button class="author-book-action-btn" data-author-action="edit" data-id="${b.id}" title="Edit">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
         </button>
@@ -7186,29 +6478,13 @@ function renderEarningsBreakdown(rows) {
 
 function renderAuthorEarningsBalance() {
   const b = _authorBalance || {};
-  // ── Rate-locked at earning time ─────────────────────────────────────
-  // available_php_minor and pending_php_minor are summed from author_earnings
-  // rows, each of which snapshotted its coin_to_php_minor at the moment the
-  // reader paid. So when admin changes the rate from ₱0.20 → ₱0.25, only
-  // FUTURE earnings use the new rate. Existing balances are immune.
-  const availMinor = b.available_php_minor || 0;
-  const pendMinor  = b.pending_php_minor   || 0;
-
-  document.getElementById('earningsAvailablePhp').textContent = formatPhpFromMinor(availMinor);
-  document.getElementById('earningsPendingPhp').textContent   = formatPhpFromMinor(pendMinor);
-
-  // Hold copy — kept as "1–3 days" range regardless of underlying config
+  document.getElementById('earningsAvailableCoins').textContent = (b.available_coins || 0).toLocaleString();
+  document.getElementById('earningsPendingCoins').textContent   = (b.pending_coins   || 0).toLocaleString();
+  document.getElementById('earningsAvailablePhp').textContent = '≈ ' + formatPhpFromMinor(b.available_php_minor || 0);
+  document.getElementById('earningsPendingPhp').textContent   = '≈ ' + formatPhpFromMinor(b.pending_php_minor   || 0);
+  const holdDays = _walletConfigDefaults.author_earnings_hold_days || 7;
   const foot = document.getElementById('earningsHoldFootnote');
-  if (foot) foot.textContent = "Earnings become available 1–3 days after they're earned.";
-
-  // Minimum payout hint — show admin-configured floor, or ₱100 by default
-  const minPayoutMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
-  const minHint = document.getElementById('earningsMinPayoutHint');
-  if (minHint) minHint.textContent = `Minimum payout: ${formatPhpFromMinor(minPayoutMinor)}`;
-
-  // Cache for the payout-button gate
-  _authorBalance._computed_available_minor = availMinor;
-  _authorBalance._computed_pending_minor   = pendMinor;
+  if (foot) foot.textContent = `Earnings become available ${holdDays} day${holdDays === 1 ? '' : 's'} after they're earned.`;
 }
 
 function formatPhpFromMinor(m) {
@@ -7272,45 +6548,40 @@ function renderAuthorKycBanner() {
   const banner  = document.getElementById('authorKycBanner');
   const titleEl = document.getElementById('authorKycTitle');
   const subEl   = document.getElementById('authorKycSub');
-  // btnSubmitKyc was removed from HTML when Payments Info became inline —
-  // kept a defensive null check so rendering doesn't crash if the element
-  // is ever missing again. The "Submit Payments Info" CTA now lives in the
-  // Payments Info tab button itself.
   const btn     = document.getElementById('btnSubmitKyc');
-  const setBtn = (txt, show) => { if (!btn) return; if (txt != null) btn.textContent = txt; btn.style.display = show ? '' : 'none'; };
-  const setText = (el, txt) => { if (el) el.textContent = txt; };
-
   if (!banner) return;
 
   const k = _authorKyc;
   if (!k) {
-    setText(titleEl, 'Complete Payments Info to enable payouts');
-    setText(subEl, 'We need to verify your identity before sending you money. One-time step required by Philippine law.');
-    setBtn('Submit Payments Info', true);
+    titleEl.textContent = 'Complete KYC to enable payouts';
+    subEl.textContent   = 'We need to verify your identity before sending you money. One-time step required by Philippine law.';
+    btn.textContent     = 'Submit KYC';
+    btn.style.display   = '';
     banner.style.display = '';
     banner.className = 'author-kyc-banner is-required';
     return;
   }
   if (k.status === 'pending') {
-    setText(titleEl, 'Payments Info under review');
-    setText(subEl, 'Submitted ' + timeAgo(k.submitted_at) + '. Usually approved within 1-2 business days.');
-    setBtn(null, false);
+    titleEl.textContent = 'KYC under review';
+    subEl.textContent   = 'Submitted ' + timeAgo(k.submitted_at) + '. Usually approved within 1-2 business days.';
+    btn.style.display   = 'none';
     banner.className = 'author-kyc-banner is-pending';
     banner.style.display = '';
     return;
   }
   if (k.status === 'approved') {
-    setText(titleEl, 'Payments Info approved ✓');
-    setText(subEl, 'You\'re cleared for payouts. You can request a withdrawal whenever your available balance hits the minimum.');
-    setBtn(null, false);
+    titleEl.textContent = 'KYC approved ✓';
+    subEl.textContent   = 'You\'re cleared for payouts. You can request a withdrawal whenever your available balance hits the minimum.';
+    btn.style.display   = 'none';
     banner.className = 'author-kyc-banner is-approved';
     banner.style.display = '';
     return;
   }
   if (k.status === 'rejected') {
-    setText(titleEl, 'Payments Info rejected');
-    setText(subEl, 'Reason: ' + (k.rejection_reason || 'unspecified') + '. Open Payments Info to update your details.');
-    setBtn('Update Payments Info', true);
+    titleEl.textContent = 'KYC rejected';
+    subEl.textContent   = 'Reason: ' + (k.rejection_reason || 'unspecified') + '. Click Resubmit to update your details.';
+    btn.textContent     = 'Resubmit KYC';
+    btn.style.display   = '';
     banner.className = 'author-kyc-banner is-rejected';
     banner.style.display = '';
     return;
@@ -7320,20 +6591,14 @@ function renderAuthorKycBanner() {
 function syncAuthorPayoutButton() {
   const btn = document.getElementById('btnRequestPayout');
   if (!btn) return;
-  // Always keep the button ENABLED — when the user can't withdraw, the click
-  // handler shows a friendly popup explaining why (need to fill Payments Info,
-  // or below ₱100 minimum). A silently-disabled button just confuses people.
-  btn.disabled = false;
-
-  const minPhpMinor   = _walletConfigDefaults.min_payout_php_minor || 10000;
-  const availPhpMinor = _authorBalance?._computed_available_minor ?? (_authorBalance?.available_php_minor || 0);
+  const min  = _walletConfigDefaults.author_payout_min_coins || 500;
+  const avail = _authorBalance?.available_coins || 0;
   const kycOk = !_walletConfigDefaults.author_payout_kyc_required ||
                 _authorKyc?.status === 'approved';
-  // Tooltip is just a hint — actual blocking happens in the click handler
-  if (!_authorKyc?.payment_method)  btn.title = 'Fill in your Payments Info first';
-  else if (availPhpMinor < minPhpMinor) btn.title = `Need at least ${formatPhpFromMinor(minPhpMinor)} available`;
-  else if (!kycOk)                 btn.title = 'KYC must be approved first';
-  else                             btn.title = '';
+  btn.disabled = avail < min || !kycOk;
+  if (avail < min)        btn.title = `Need at least ${min} coins available`;
+  else if (!kycOk)        btn.title = 'KYC must be approved first';
+  else                    btn.title = '';
 }
 
 // ── Payments Info form (inline, replaces the old modal) ─────────────────
@@ -7391,7 +6656,7 @@ const _piUploads = { qr: null, id: null, sig: null };
 
 // Pre-fill the form when the Payments Info tab loads (idempotent — safe to
 // call any time _authorKyc is fresh).
-async function fillPaymentsInfoForm() {
+function fillPaymentsInfoForm() {
   const k = _authorKyc;
   document.getElementById('piFullName').value = k?.full_name || '';
   document.getElementById('piPhone').value    = k?.phone || '';
@@ -7414,204 +6679,6 @@ async function fillPaymentsInfoForm() {
   _piUploads.qr  = null;
   _piUploads.id  = null;
   _piUploads.sig = null;
-
-  // ── Lock-after-first-save logic ──
-  // If the user has already saved their info (record exists), the form goes
-  // read-only and they have to use the "Request changes" flow which routes
-  // through admin review. Prevents impulse edits / fraud.
-  const hasRecord = !!(k && k.full_name);
-
-  // Check for any pending change request to surface the "awaiting review" banner
-  let pendingRequest = null;
-  if (hasRecord) {
-    try {
-      const { data } = await supabase
-        .from('payment_info_change_requests')
-        .select('id, requested_at, status')
-        .eq('user_id', currentUser.id)
-        .eq('status', 'pending')
-        .order('requested_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (data) pendingRequest = data;
-    } catch {}
-  }
-
-  applyPaymentsInfoLockState(hasRecord, pendingRequest);
-}
-
-// Toggle the form between editable (first-time) and read-only (post-save).
-// In read-only mode, all inputs/uploads are disabled and the save button is
-// replaced with "Request changes" — which opens a modal that submits a request
-// for admin approval (see payment_info_change_requests table).
-function applyPaymentsInfoLockState(hasRecord, pendingRequest) {
-  const inputs = [
-    document.getElementById('piFullName'),
-    document.getElementById('piPhone'),
-    document.getElementById('piEmail'),
-    document.getElementById('piDob'),
-    document.getElementById('piAddress'),
-  ];
-  const radios = document.querySelectorAll('input[name="piMethod"]');
-  const uploadBoxes = document.querySelectorAll('.pi-upload, #piQrUploadBox, #piIdUploadBox, #piSigUploadBox');
-
-  inputs.forEach(el => { if (el) el.readOnly = hasRecord; });
-  radios.forEach(r => { r.disabled = hasRecord; });
-  uploadBoxes.forEach(box => {
-    if (hasRecord) box.classList.add('pi-locked');
-    else           box.classList.remove('pi-locked');
-  });
-
-  // Swap action buttons
-  const saveBtn      = document.getElementById('piSaveBtn');
-  const requestBtn   = document.getElementById('piRequestChangeBtn');
-  const pendingBanner = document.getElementById('piPendingBanner');
-
-  if (saveBtn) saveBtn.style.display = hasRecord ? 'none' : '';
-
-  // Lazily inject the "Request changes" button + pending banner if missing
-  if (hasRecord && !requestBtn) {
-    const saveContainer = saveBtn?.parentElement;
-    if (saveContainer) {
-      const btn = document.createElement('button');
-      btn.id = 'piRequestChangeBtn';
-      btn.className = 'pi-save-btn';
-      btn.style.background = 'linear-gradient(135deg, #7c3aed, #a78bfa)';
-      btn.innerHTML = '<span>Request changes</span>';
-      btn.onclick = openPaymentInfoChangeModal;
-      saveContainer.appendChild(btn);
-    }
-  } else if (!hasRecord && requestBtn) {
-    requestBtn.remove();
-  }
-
-  // Pending banner
-  let banner = document.getElementById('piPendingBanner');
-  if (pendingRequest) {
-    if (!banner) {
-      banner = document.createElement('div');
-      banner.id = 'piPendingBanner';
-      banner.className = 'pi-pending-banner';
-      const formContainer = document.querySelector('.pi-card')?.parentElement;
-      if (formContainer) formContainer.insertBefore(banner, formContainer.firstChild);
-    }
-    const requestedAt = new Date(pendingRequest.requested_at).toLocaleDateString();
-    banner.innerHTML = `<span>⏳</span><span>Change request pending admin review (submitted ${requestedAt}). You'll be notified when it's reviewed.</span>`;
-  } else if (banner) {
-    banner.remove();
-  }
-}
-
-async function openPaymentInfoChangeModal() {
-  const k = _authorKyc || {};
-  const modal = document.getElementById('piChangeModal') || createPaymentInfoChangeModal();
-  // Pre-fill with current values so the user only edits what's changing
-  modal.querySelector('#piChangeFullName').value = k.full_name || '';
-  modal.querySelector('#piChangePhone').value    = k.phone || '';
-  modal.querySelector('#piChangeEmail').value    = k.email || '';
-  modal.querySelector('#piChangeAddress').value  = k.address || '';
-  modal.querySelector('#piChangeMethod').value   = k.payment_method || '';
-  modal.querySelector('#piChangeReason').value   = '';
-  modal.classList.add('open');
-  document.body.style.overflow = 'hidden';
-}
-
-function closePaymentInfoChangeModal() {
-  document.getElementById('piChangeModal')?.classList.remove('open');
-  document.body.style.overflow = '';
-}
-
-function createPaymentInfoChangeModal() {
-  const m = document.createElement('div');
-  m.id = 'piChangeModal';
-  m.className = 'modal-overlay';
-  m.innerHTML = `
-    <div class="modal-box" style="max-width:520px">
-      <div class="modal-header">
-        <div class="modal-title">Request changes to Payments Info</div>
-        <button class="modal-close-btn" id="piChangeClose">×</button>
-      </div>
-      <p style="font-size:0.86rem; color:var(--text2); margin-bottom:1rem; line-height:1.5">
-        Edit only the fields you want to change. An admin will review your request — you'll get a notification when approved or rejected.
-      </p>
-      <label class="form-label">Full name</label>
-      <input class="form-input" id="piChangeFullName" maxlength="100"/>
-      <label class="form-label">Phone</label>
-      <input class="form-input" id="piChangePhone" maxlength="30"/>
-      <label class="form-label">Email</label>
-      <input class="form-input" id="piChangeEmail" maxlength="120"/>
-      <label class="form-label">Address</label>
-      <input class="form-input" id="piChangeAddress" maxlength="200"/>
-      <label class="form-label">Payment method</label>
-      <select class="form-input" id="piChangeMethod">
-        <option value="">— Select —</option>
-        <option value="gcash">GCash</option>
-        <option value="maya">Maya</option>
-        <option value="bank">Bank transfer</option>
-        <option value="gotyme">GoTyme</option>
-      </select>
-      <label class="form-label">Why are you making this change? (required)</label>
-      <textarea class="form-input" id="piChangeReason" rows="3" maxlength="500" placeholder="e.g. I switched to a new bank, my address changed…"></textarea>
-      <div class="modal-footer">
-        <button class="btn btn-ghost btn-sm" id="piChangeCancel">Cancel</button>
-        <button class="btn btn-purple btn-sm" id="piChangeSubmit">Submit request</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(m);
-  m.querySelector('#piChangeClose').onclick = closePaymentInfoChangeModal;
-  m.querySelector('#piChangeCancel').onclick = closePaymentInfoChangeModal;
-  m.addEventListener('click', (e) => { if (e.target === m) closePaymentInfoChangeModal(); });
-  m.querySelector('#piChangeSubmit').onclick = submitPaymentInfoChange;
-  return m;
-}
-
-async function submitPaymentInfoChange() {
-  const reason = document.getElementById('piChangeReason').value.trim();
-  if (!reason) { toast('Please explain why you need this change', 'error'); return; }
-
-  const k = _authorKyc || {};
-  // Only include fields that actually changed — keeps the diff focused
-  const changed = {};
-  const fields = [
-    ['piChangeFullName', 'full_name',      k.full_name],
-    ['piChangePhone',    'phone',          k.phone],
-    ['piChangeEmail',    'email',          k.email],
-    ['piChangeAddress',  'address',        k.address],
-    ['piChangeMethod',   'payment_method', k.payment_method],
-  ];
-  for (const [id, key, current] of fields) {
-    const v = document.getElementById(id).value.trim();
-    if (v && v !== (current || '')) changed[key] = v;
-  }
-  if (Object.keys(changed).length === 0) {
-    toast('No fields changed — edit at least one before submitting', 'error');
-    return;
-  }
-
-  const btn = document.getElementById('piChangeSubmit');
-  btn.disabled = true; btn.textContent = 'Submitting…';
-
-  const { data, error } = await supabase.rpc('request_payment_info_change', {
-    p_requested_data: changed,
-    p_reason: reason,
-  });
-
-  btn.disabled = false; btn.textContent = 'Submit request';
-
-  if (error) { toast(error.message, 'error'); return; }
-  if (!data?.ok) {
-    const msg = data?.error === 'pending_request_exists'
-      ? 'You already have a pending change request — wait for admin review first.'
-      : (data?.error || 'Failed to submit request');
-    toast(msg, 'error');
-    return;
-  }
-
-  toast('Change request submitted — admin will review it shortly', 'success');
-  closePaymentInfoChangeModal();
-  // Re-render the locked form so the pending banner appears
-  fillPaymentsInfoForm();
 }
 
 // Wire each upload control once at module load
@@ -7705,128 +6772,63 @@ document.getElementById('kycSubmit')?.addEventListener('click', async () => {
   await loadAuthorEarnings();
 });
 
-// ── Withdrawal modal wiring (strict — server pulls saved Payments Info) ─
-const PAYMENT_METHOD_LABELS = { gcash: 'GCash', maya: 'Maya', bank: 'Bank transfer', gotyme: 'GoTyme' };
-
+// ── Withdrawal modal wiring ─────────────────────────────────────────────
 document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
-  // Always re-derive these from cache so admin rate changes are reflected
-  const minPhpMinor   = _walletConfigDefaults.min_payout_php_minor || 10000;
-  const availPhpMinor = _authorBalance?._computed_available_minor ??
-                        (_authorBalance?.available_php_minor || 0);
-
-  const minModal = document.getElementById('minPayoutModal');
-
-  // ── PRIORITY 1: No Payments Info saved → walk them to it ──
-  // Even if they have ₱0 they should know payment info is required.
-  if (!_authorKyc?.payment_method) {
-    document.getElementById('minPayoutMsg').innerHTML =
-      "You haven't saved your Payments Info yet — we need that before sending money. It only takes a minute.";
-    const okBtn = document.getElementById('minPayoutOk');
-    okBtn.textContent = 'Open Payments Info';
-    okBtn.dataset.action = 'go-to-payments-info';
-    const progress = minModal.querySelector('.min-payout-progress');
-    if (progress) progress.style.display = 'none';
-    const title = minModal.querySelector('.modal-title');
-    if (title) title.textContent = 'Add Payments Info first';
-    // Show with both inline display + .open class to be safe across themes
-    minModal.style.display = 'flex';
-    minModal.classList.add('open');
-    return;
-  }
-
-  // ── PRIORITY 2: Below minimum → friendly explainer popup ──
-  if (availPhpMinor < minPhpMinor) {
-    const haveStr = formatPhpFromMinor(availPhpMinor);
-    const minStr  = formatPhpFromMinor(minPhpMinor);
-    const needStr = formatPhpFromMinor(Math.max(0, minPhpMinor - availPhpMinor));
-    document.getElementById('minPayoutMsg').innerHTML =
-      `You need at least <strong>${minStr}</strong> available to request a payout. Keep earning and you'll unlock withdrawals soon.`;
-    document.getElementById('minPayoutHave').textContent = haveStr;
-    document.getElementById('minPayoutMin').textContent  = minStr;
-    document.getElementById('minPayoutNeed').textContent = needStr;
-    const okBtn = document.getElementById('minPayoutOk');
-    okBtn.textContent = 'Got it';
-    okBtn.dataset.action = 'close';
-    const progress = minModal.querySelector('.min-payout-progress');
-    if (progress) progress.style.display = '';
-    const title = minModal.querySelector('.modal-title');
-    if (title) title.textContent = 'Not enough to withdraw yet';
-    minModal.style.display = 'flex';
-    minModal.classList.add('open');
-    return;
-  }
-
-  // ── Open the simple modal ──
   const m = document.getElementById('withdrawalModal');
   if (!m) return;
-
-  const amountInput = document.getElementById('withdrawalAmount');
-  amountInput.min  = (minPhpMinor / 100).toFixed(2);
-  amountInput.max  = (availPhpMinor / 100).toFixed(2);
-  amountInput.value = (availPhpMinor / 100).toFixed(2);   // default to full balance
-  amountInput.step = '0.01';
+  const avail = _authorBalance?.available_coins || 0;
+  const min   = _walletConfigDefaults.author_payout_min_coins || 500;
+  document.getElementById('withdrawalAmount').value = avail;
+  document.getElementById('withdrawalAmount').min   = min;
+  document.getElementById('withdrawalAmount').max   = avail;
+  const rate = _walletConfigDefaults.coin_to_php_minor || 100;
   document.getElementById('withdrawalAmountHint').textContent =
-    `Minimum ${formatPhpFromMinor(minPhpMinor)}. Max available: ${formatPhpFromMinor(availPhpMinor)}.`;
-
-  // Read-only saved account display
-  const methodLabel = PAYMENT_METHOD_LABELS[_authorKyc.payment_method] || _authorKyc.payment_method;
-  document.getElementById('withdrawalAccountMethod').textContent = methodLabel;
-  document.getElementById('withdrawalAccountName').textContent   = _authorKyc.full_name || '(no name on file)';
-
+    `Minimum ${min} coins. ₱${(rate / 100).toFixed(2)} per coin. Max available: ${avail.toLocaleString()}.`;
+  document.getElementById('withdrawalAccountName').value   = '';
+  document.getElementById('withdrawalAccountNumber').value = '';
+  document.getElementById('withdrawalBankName').value      = '';
+  syncWithdrawalBankField();
   m.style.display = 'flex';
 });
-
-// Min-payout popup helpers — close fully (both inline display + .open class)
-function _closeMinPayoutModal() {
-  const m = document.getElementById('minPayoutModal');
-  if (!m) return;
-  m.style.display = 'none';
-  m.classList.remove('open');
+function syncWithdrawalBankField() {
+  const method = document.getElementById('withdrawalMethod')?.value;
+  const isBank = method === 'bank';
+  const lbl = document.getElementById('withdrawalBankNameLabel');
+  const inp = document.getElementById('withdrawalBankName');
+  if (lbl) lbl.style.display = isBank ? '' : 'none';
+  if (inp) inp.style.display = isBank ? '' : 'none';
 }
-document.getElementById('minPayoutClose')?.addEventListener('click', _closeMinPayoutModal);
-document.getElementById('minPayoutOk')?.addEventListener('click', (e) => {
-  const action = e.currentTarget.dataset.action;
-  _closeMinPayoutModal();
-  if (action === 'go-to-payments-info') {
-    if (typeof switchEarningsTab === 'function') switchEarningsTab('payments');
-  }
-});
-document.getElementById('minPayoutModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'minPayoutModal') _closeMinPayoutModal();
-});
-
+document.getElementById('withdrawalMethod')?.addEventListener('change', syncWithdrawalBankField);
 document.getElementById('withdrawalClose')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
 document.getElementById('withdrawalCancel')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
 document.getElementById('withdrawalSubmit')?.addEventListener('click', async () => {
-  const amountPhp   = parseFloat(document.getElementById('withdrawalAmount').value);
-  const minPhpMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
-
-  if (!Number.isFinite(amountPhp) || amountPhp <= 0) { toast('Enter a valid amount', 'error'); return; }
-  const amountMinor = Math.round(amountPhp * 100);
-  if (amountMinor < minPhpMinor) {
-    toast(`Need at least ${formatPhpFromMinor(minPhpMinor)}`, 'error');
-    return;
-  }
+  const amount       = parseInt(document.getElementById('withdrawalAmount').value, 10);
+  const method       = document.getElementById('withdrawalMethod').value;
+  const accountName  = document.getElementById('withdrawalAccountName').value.trim();
+  const accountNum   = document.getElementById('withdrawalAccountNumber').value.trim();
+  const bankName     = document.getElementById('withdrawalBankName').value.trim();
+  const min          = _walletConfigDefaults.author_payout_min_coins || 500;
+  if (!Number.isFinite(amount) || amount < min) { toast(`Enter at least ${min} coins`, 'error'); return; }
+  if (!accountName || !accountNum) { toast('Account name and number are required', 'error'); return; }
+  if (method === 'bank' && !bankName) { toast('Bank name is required', 'error'); return; }
+  const details = { account_name: accountName, account_number: accountNum };
+  if (method === 'bank') details.bank_name = bankName;
 
   const btn = document.getElementById('withdrawalSubmit');
   btn.disabled = true; btn.textContent = 'Submitting…';
-
-  // Strict: server pulls payment_method + account details from author_kyc.
-  // Client only provides the amount.
-  const { data, error } = await supabase.rpc('request_author_withdrawal_php', {
-    p_amount_php_minor: amountMinor,
+  const { data, error } = await supabase.rpc('request_author_withdrawal', {
+    p_amount_coins:   amount,
+    p_payout_method:  method,
+    p_payout_details: details,
   });
-
   btn.disabled = false; btn.textContent = 'Submit request';
   if (error) { toast(error.message, 'error'); return; }
   if (data?.ok === false) {
-    const msg = data.error === 'kyc_not_approved'         ? 'KYC must be approved first.' :
-                data.error === 'kyc_not_submitted'        ? 'Submit Payments Info first.' :
-                data.error === 'no_payment_method_saved'  ? 'Save a payment method in Payments Info first.' :
-                data.error === 'below_minimum'            ? `Need at least ${formatPhpFromMinor(data.minimum_php_minor || minPhpMinor)}.` :
-                data.error === 'insufficient_available'   ? `Only ${formatPhpFromMinor(data.available_php_minor || 0)} available.` :
-                data.error === 'withdrawal_in_progress'   ? 'You already have a pending or approved request.' :
-                data.error === 'no_eligible_earnings'     ? 'No eligible earnings yet — your balance might still be in the hold period.' :
+    const msg = data.error === 'kyc_not_approved' ? 'KYC must be approved first.' :
+                data.error === 'kyc_not_submitted' ? 'Submit KYC first.' :
+                data.error === 'below_minimum'     ? `Need at least ${data.minimum_coins} coins.` :
+                data.error === 'insufficient_available' ? `Only ${data.available_coins} coins available.` :
+                data.error === 'withdrawal_in_progress' ? 'You already have a pending or approved request.' :
                 data.error || 'Failed';
     toast(msg, 'error');
     return;
@@ -8484,8 +7486,9 @@ function maybeFlushDueScheduledChapters() {
   const now = Date.now();
   if (now - _lastChapterPublishCheck < 5 * 60 * 1000) return; // 5 min throttle
   _lastChapterPublishCheck = now;
-  supabase.rpc('publish_due_scheduled_chapters').then(({ error }) => {
-    if (error) console.warn('publish_due_scheduled_chapters:', error.message);
+  supabase.rpc('publish_due_scheduled_chapters').then(({ data, error }) => {
+    if (error) { console.warn('publish_due_scheduled_chapters:', error.message); return; }
+    if (data && data > 0) console.log(`[schedule] ${data} chapter(s) flipped public in the last 24h`);
   }).catch(() => {});
 }
 
@@ -8895,8 +7898,9 @@ function maybeFlushDueScheduledVideos() {
   if (now - _lastSchedulePublishCheck < 5 * 60 * 1000) return; // 5 min throttle
   _lastSchedulePublishCheck = now;
   // Fire-and-forget — never block UI on this.
-  supabase.rpc('publish_due_scheduled_videos').then(({ error }) => {
-    if (error) console.warn('publish_due_scheduled_videos:', error.message);
+  supabase.rpc('publish_due_scheduled_videos').then(({ data, error }) => {
+    if (error) { console.warn('publish_due_scheduled_videos:', error.message); return; }
+    if (data && data > 0) console.log(`[schedule] flipped ${data} scheduled video post(s) to public`);
   }).catch(() => {});
 }
 
@@ -9055,62 +8059,16 @@ function renderStudio() {
     });
   }
   
-  // Wire up monetize/edit/delete buttons via delegation
+  // Wire up edit/delete buttons via delegation
   content.querySelectorAll('[data-studio-action]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const action = btn.dataset.studioAction;
       const id = btn.dataset.id;
-      if (action === 'edit')          openStudioEditModal(id);
-      else if (action === 'delete')   deleteStudioVideo(id);
-      else if (action === 'monetize') toggleStudioMonetize(id, btn);
+      if (action === 'edit') openStudioEditModal(id);
+      else if (action === 'delete') deleteStudioVideo(id);
     });
   });
-}
-
-// Inline monetize toggle from the studio list — no need to open the edit modal.
-// Same gate as the modal: video duration must be ≥ 3 min (else show why).
-async function toggleStudioMonetize(videoId, btn) {
-  const v = studioVideosCache.find(x => x.id === videoId);
-  if (!v) return;
-  const minSec = _walletConfigDefaults.video_initial_unlock_seconds || 180;
-
-  // Already monetized → just turn it off (no gate needed)
-  if (v.is_monetized) {
-    btn.disabled = true;
-    const { error } = await supabase.from('videos').update({ is_monetized: false }).eq('id', videoId);
-    btn.disabled = false;
-    if (error) { toast(error.message, 'error'); return; }
-    v.is_monetized = false;
-    btn.classList.remove('is-on');
-    btn.title = 'Toggle monetization';
-    toast('Monetization disabled', 'success');
-    return;
-  }
-
-  // Turning on → check duration. If 0 (legacy/migrated), prompt them to open
-  // edit modal which auto-probes the file for actual duration.
-  if (!v.duration || v.duration === 0) {
-    toast('Open Edit to read this video\'s duration first, then toggle monetization there.', 'error');
-    openStudioEditModal(videoId);
-    return;
-  }
-  if (v.duration < minSec) {
-    const mins = Math.floor(v.duration / 60);
-    const secs = Math.floor(v.duration % 60);
-    toast(`Video must be at least ${minSec/60} min to monetize. This one is ${mins}m ${secs}s.`, 'error');
-    return;
-  }
-
-  // Eligible — flip it on
-  btn.disabled = true;
-  const { error } = await supabase.from('videos').update({ is_monetized: true }).eq('id', videoId);
-  btn.disabled = false;
-  if (error) { toast(error.message, 'error'); return; }
-  v.is_monetized = true;
-  btn.classList.add('is-on');
-  btn.title = 'Monetized — click to disable';
-  toast('Monetization enabled 💰', 'success');
 }
 
 function renderStudioRow(v) {
@@ -9146,13 +8104,6 @@ function renderStudioRow(v) {
       <td>${(v.likes || 0).toLocaleString()}</td>
       <td>
         <div class="studio-actions">
-          <button class="studio-btn studio-btn-monetize ${v.is_monetized ? 'is-on' : ''}" data-studio-action="monetize" data-id="${v.id}" title="${v.is_monetized ? 'Monetized — click to disable' : 'Toggle monetization'}">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9"/>
-              <path d="M14.8 9.5c-.4-1-1.4-1.5-2.8-1.5-1.7 0-3 1-3 2.5 0 1.4 1.3 2 2.7 2.4 1.6.4 3.3.9 3.3 2.6 0 1.5-1.3 2.5-3 2.5-1.6 0-2.8-.6-3.2-1.7"/>
-              <path d="M12 6v2"/><path d="M12 16v2"/>
-            </svg>
-          </button>
           <button class="studio-btn" data-studio-action="edit" data-id="${v.id}" title="Edit details">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
           </button>
@@ -9194,53 +8145,18 @@ function openStudioEditModal(videoId) {
   const monCb     = document.getElementById('studioEditMonetized');
   const monLabel  = monCb?.closest('.lock-toggle');
   const minSec    = _walletConfigDefaults.video_initial_unlock_seconds || 180;
-
-  // Helper: render the gate state given a duration in seconds.
-  const applyGate = (duration) => {
-    const eligible = (duration || 0) >= minSec;
-    if (!monCb) return;
+  const eligible  = (v.duration || 0) >= minSec;
+  if (monCb) {
     monCb.checked  = !!v.is_monetized && eligible;
     monCb.disabled = !eligible;
     if (monLabel) monLabel.classList.toggle('is-disabled', !eligible);
+    // Update sub-text to explain the gate
     const subEl = monLabel?.querySelector('.lock-toggle-sub');
-    if (!subEl) return;
-    if (duration == null) {
-      subEl.textContent = 'Reading video duration…';
-    } else if (eligible) {
-      subEl.innerHTML = 'Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.';
-    } else {
-      subEl.textContent = `Video must be at least ${Math.floor(minSec/60)} minute${minSec/60 === 1 ? '' : 's'} long to monetize. This one is ${Math.floor((duration||0)/60)}m ${Math.floor((duration||0)%60)}s.`;
+    if (subEl) {
+      subEl.innerHTML = eligible
+        ? 'Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.'
+        : `Video must be at least ${Math.floor(minSec/60)} minute${minSec/60 === 1 ? '' : 's'} long to monetize. This one is ${Math.floor((v.duration||0)/60)}m ${Math.floor((v.duration||0)%60)}s.`;
     }
-  };
-
-  // Initial render with whatever the DB has (may be 0 for legacy/migrated videos)
-  applyGate(v.duration || 0);
-
-  // Backfill from the actual video file if duration is missing or zero.
-  // Reads metadata client-side, then UPDATEs the videos row so the gate works
-  // immediately and stays correct on future opens.
-  if (!v.duration && (v.video_url || v.videoUrl)) {
-    const probe = document.createElement('video');
-    probe.preload = 'metadata';
-    probe.muted   = true;
-    probe.crossOrigin = 'anonymous';
-    probe.style.display = 'none';
-    probe.src = v.video_url || v.videoUrl;
-    const cleanup = () => probe.remove();
-    probe.onloadedmetadata = async () => {
-      const real = Math.round(probe.duration || 0);
-      if (real > 0) {
-        v.duration = real;       // patch in-memory cache so save sees the right value
-        applyGate(real);
-        // Persist back to DB so we don't probe again on next open
-        try {
-          await supabase.from('videos').update({ duration: real }).eq('id', studioEditingVideoId);
-        } catch {}
-      }
-      cleanup();
-    };
-    probe.onerror = () => { applyGate(0); cleanup(); };
-    document.body.appendChild(probe);
   }
 
   document.getElementById('studioEditModal').style.display = 'flex';
@@ -9376,11 +8292,6 @@ document.getElementById('btnStudioUpload')?.addEventListener('click', () => {
 function showVideoPlayer() {
   hideAllMainPages();
   videoPlayerPage.style.display = 'block';
-  // CRITICAL: enables full-bleed layout (body.on-videos .main-wrap rule).
-  // Without this the player gets the default narrow main-wrap width when
-  // navigating from a user's wall (skipping showVideos), leaving big empty
-  // gutters left/right of the video.
-  document.body.classList.add('on-videos');
 }
 
 document.getElementById('btnVideos').addEventListener('click', () => {
@@ -9436,10 +8347,6 @@ async function fetchSupabaseVideos() {
         duration,
         created_at,
         uploader_id,
-        is_locked,
-        is_monetized,
-        unlock_cost_coins,
-        unlock_cost_stars,
         profiles!videos_uploader_id_fkey (
           id,
           username,
@@ -9473,14 +8380,6 @@ async function fetchSupabaseVideos() {
         videoUrl: v.video_url,
         uri: v.video_url,
         videoStats: { views: v.views || 0, duration: v.duration || 0 },
-        // Monetization fields (Phase 6) — needed by setupVideoMonetGate to
-        // decide whether to set up the time-based unlock listener.
-        // Without these the gate silently no-ops, breaking auto-deduct.
-        is_locked:          !!v.is_locked,
-        is_monetized:       !!v.is_monetized,
-        duration:           v.duration || 0,
-        unlock_cost_coins:  v.unlock_cost_coins ?? null,
-        unlock_cost_stars:  v.unlock_cost_stars ?? null,
         status: 'ready',
         $createdAt: v.created_at,
         // Pre-populated uploader info (saves an extra fetch)
@@ -9719,65 +8618,11 @@ function renderTagPills() {
 async function runSearch() {
   const q = (activeSearchQuery || '').trim();
 
-  // Empty query — show personalized feed, or tag-filtered results.
-  // For tag filters we must hit the server (not the 100-video in-memory cache),
-  // otherwise older videos in that category never show. Without this fix,
-  // clicking "Comedy" only surfaced comedy videos that happened to be in the
-  // most recent 100 uploads.
+  // Empty query — show personalized feed (or tag-filtered cache)
   if (!q) {
     if (activeTagFilter) {
-      const grid = document.getElementById('videoGrid');
-      grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Loading…</div>';
-      const tagLower = activeTagFilter.toLowerCase();
-      try {
-        // Match category OR any tag that equals the filter — covers both
-        // schema patterns (category column + tags array).
-        const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
-        const [byCat, byTag] = await Promise.all([
-          supabase.from('videos').select(baseSelect)
-            .eq('status', 'ready').eq('is_hidden', false)
-            .ilike('category', tagLower)
-            .order('created_at', { ascending: false })
-            .limit(100),
-          supabase.from('videos').select(baseSelect)
-            .eq('status', 'ready').eq('is_hidden', false)
-            .contains('tags', [activeTagFilter])
-            .order('created_at', { ascending: false })
-            .limit(100),
-        ]);
-        // Merge + dedupe + drop banned uploaders
-        const seen = new Set();
-        const merged = [];
-        [...(byCat.data || []), ...(byTag.data || [])].forEach(v => {
-          if (seen.has(v.id) || v.profiles?.is_banned) return;
-          seen.add(v.id);
-          merged.push(v);
-        });
-        const formatted = merged.map(v => ({
-          $id: 'sb_' + v.id, _supabase: true, _supabaseId: v.id,
-          title: v.title, description: v.description || '',
-          tags: v.tags || [], uploader: v.uploader_id,
-          thumbnail: v.thumbnail_url, videoUrl: v.video_url, uri: v.video_url,
-          videoStats: { views: v.views || 0, duration: v.duration || 0 },
-          is_locked: !!v.is_locked, is_monetized: !!v.is_monetized,
-          duration: v.duration || 0,
-          unlock_cost_coins: v.unlock_cost_coins ?? null,
-          unlock_cost_stars: v.unlock_cost_stars ?? null,
-          status: 'ready', $createdAt: v.created_at,
-          _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
-        }));
-        // Hydrate cache so playVideo finds these
-        formatted.forEach(v => {
-          if (!allVideosCache.find(x => x.$id === v.$id)) allVideosCache.push(v);
-          if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
-            allUploadersCache[v.uploader] = v._uploaderInfo;
-          }
-        });
-        renderVideoResults(formatted);
-      } catch (err) {
-        console.warn('Tag filter server fetch failed, falling back to cache:', err);
-        renderVideoResults(searchVideos('', activeTagFilter));
-      }
+      const filtered = searchVideos('', activeTagFilter);
+      renderVideoResults(filtered);
     } else {
       renderVideoResults(getPersonalizedFeed?.() || allVideosCache);
     }
@@ -9797,12 +8642,10 @@ async function runSearch() {
   grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Searching…</div>';
 
   const term = `%${q.replace(/[%_]/g, m => '\\' + m)}%`;
-  const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
+  const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
 
   try {
     // Two parallel queries: title/description match, and creator-name match.
-    // Also collect matching CREATOR profiles to surface them as channel cards.
-    let matchingCreators = [];
     const [byText, byUploader] = await Promise.all([
       supabase.from('videos').select(baseSelect)
         .eq('status', 'ready').eq('is_hidden', false)
@@ -9811,12 +8654,8 @@ async function runSearch() {
         .limit(60),
       (async () => {
         const { data: profs } = await supabase.from('profiles')
-          .select('id, username, avatar_url, bio, is_banned')
-          .ilike('username', term)
-          .eq('is_banned', false)
-          .limit(8);
+          .select('id').ilike('username', term).limit(25);
         if (!profs?.length) return { data: [] };
-        matchingCreators = profs;
         const ids = profs.map(p => p.id);
         return await supabase.from('videos').select(baseSelect)
           .eq('status', 'ready').eq('is_hidden', false)
@@ -9848,12 +8687,6 @@ async function runSearch() {
       videoUrl: v.video_url,
       uri: v.video_url,
       videoStats: { views: v.views || 0, duration: v.duration || 0 },
-      // Monetization fields needed by setupVideoMonetGate (auto-deduct at 3:00)
-      is_locked:          !!v.is_locked,
-      is_monetized:       !!v.is_monetized,
-      duration:           v.duration || 0,
-      unlock_cost_coins:  v.unlock_cost_coins ?? null,
-      unlock_cost_stars:  v.unlock_cost_stars ?? null,
       status: 'ready',
       $createdAt: v.created_at,
       _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
@@ -9873,25 +8706,7 @@ async function runSearch() {
       out = formatted.filter(v => (v.tags || []).some(t => t.toLowerCase() === activeTagFilter.toLowerCase()));
     }
 
-    // Decorate matching creators with video count + total views drawn from
-    // the search results we already have in hand. Cheap, no extra round-trip.
-    const creatorStats = new Map();
-    for (const v of formatted) {
-      const s = creatorStats.get(v.uploader) || { videos: 0, views: 0 };
-      s.videos += 1;
-      s.views  += (v.videoStats?.views || 0);
-      creatorStats.set(v.uploader, s);
-    }
-    const creators = (matchingCreators || []).map(p => ({
-      id: p.id,
-      username: p.username,
-      avatar_url: p.avatar_url,
-      bio: p.bio || '',
-      videos_count: creatorStats.get(p.id)?.videos || 0,
-      views_count:  creatorStats.get(p.id)?.views  || 0,
-    }));
-
-    renderVideoResults(out, creators);
+    renderVideoResults(out);
   } catch (err) {
     console.error('Search failed:', err);
     // Fallback: cache filter (covers offline / RPC issues)
@@ -9899,10 +8714,9 @@ async function runSearch() {
   }
 }
 
-function renderVideoResults(videos, creators = []) {
+function renderVideoResults(videos) {
   const grid = document.getElementById('videoGrid');
-  // No videos AND no matching creators → empty state
-  if (!videos.length && !creators.length) {
+  if (!videos.length) {
     grid.innerHTML = `
       <div class="video-search-empty">
         <h3>No videos found</h3>
@@ -9913,59 +8727,11 @@ function renderVideoResults(videos, creators = []) {
   }
 
   grid.innerHTML = '';
-
-  // ── Creator channel cards (YouTube-style, top of search results) ──
-  if (creators?.length) {
-    const header = document.createElement('div');
-    header.className = 'video-creators-header';
-    header.textContent = creators.length === 1 ? 'Creator' : 'Creators';
-    grid.appendChild(header);
-
-    const channelRow = document.createElement('div');
-    channelRow.className = 'video-creators-row';
-    creators.forEach(c => channelRow.appendChild(renderCreatorChannelCard(c)));
-    grid.appendChild(channelRow);
-
-    if (videos.length) {
-      const videosHeader = document.createElement('div');
-      videosHeader.className = 'video-creators-header';
-      videosHeader.textContent = 'Videos';
-      grid.appendChild(videosHeader);
-    }
-  }
-
   videos.slice(0, 100).forEach((v, i) => {
     const card = renderVideoCard(v, allUploadersCache[v.uploader]);
     card.style.animationDelay = `${i * 0.03}s`;
     grid.appendChild(card);
   });
-}
-
-// Creator channel card (search result top row, YouTube-style)
-function renderCreatorChannelCard(creator) {
-  const card = document.createElement('button');
-  card.className = 'creator-channel-card';
-  card.type = 'button';
-  card.onclick = () => openProfile(creator.id);
-
-  const initial = (creator.username || '?').trim().charAt(0).toUpperCase();
-  const avatar = creator.avatar_url
-    ? `<img src="${escHTML(creator.avatar_url)}" alt=""/>`
-    : `<div class="creator-channel-avatar-placeholder">${initial}</div>`;
-
-  const videosLabel = creator.videos_count === 1 ? '1 video' : `${formatCompact(creator.videos_count)} videos`;
-  const viewsLabel  = creator.views_count > 0 ? ` · ${formatCompact(creator.views_count)} views` : '';
-
-  card.innerHTML = `
-    <div class="creator-channel-avatar">${avatar}</div>
-    <div class="creator-channel-info">
-      <div class="creator-channel-name">${escHTML(creator.username || 'Unknown')}</div>
-      <div class="creator-channel-meta">${videosLabel}${viewsLabel}</div>
-      ${creator.bio ? `<div class="creator-channel-bio">${escHTML(creator.bio.slice(0, 90))}${creator.bio.length > 90 ? '…' : ''}</div>` : ''}
-    </div>
-    <div class="creator-channel-cta">View channel →</div>
-  `;
-  return card;
 }
 
 function renderVideoCard(video, uploader) {
@@ -10099,7 +8865,9 @@ async function playVideo(videoId) {
     if (!cached) {
       // Cache miss — fetch this specific video by ID (works for older videos
       // outside the top-100 window, deep links, and shared URLs).
-      const rawId = videoId.startsWith('sb_') ? videoId.slice(3) : videoId;
+      // Cross-platform: shared video links may carry the legacy Appwrite hex
+      // ID. resolveSbId falls through to the legacy_appwrite_id mirror column.
+      const rawId = (await resolveSbId("videos", videoId)) || (videoId.startsWith('sb_') ? videoId.slice(3) : videoId);
       const { data, error } = await supabase
         .from('videos')
         .select(`id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, status, is_hidden, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`)
@@ -10653,9 +9421,8 @@ async function initNotifications() {
         _notifUnreadCount += 1;
         updateNotifBadge();
         renderNotifications();
-        // No toast on incoming notifications — the bell badge + dropdown
-        // already surfaces them. Toast was too intrusive (especially for DMs
-        // where the unread badge on the Messages sidebar entry is enough).
+        // Subtle toast so the user knows something happened
+        toast(notificationLabel(n), 'success');
       })
       .on('postgres_changes', {
         event: 'UPDATE',
@@ -11286,17 +10053,7 @@ async function showMessages(targetUserId = null) {
   history.pushState(null, '', '#messages');
   setSidebarActive('btnMessages');
 
-  // DMs have a realtime subscription that keeps the list fresh — so on a
-  // quick tab-flick the list is already up to date. Only re-fetch on first
-  // load, when forced (targetUserId), or after 30 seconds.
-  const dmList = document.getElementById('dmList') || messagesPage?.querySelector('.dm-list');
-  const alreadyRendered = dmList && dmList.children.length > 0 && !dmList.querySelector('.loading');
-  const now = Date.now();
-  const stale = !window._dmListLoadedAt || (now - window._dmListLoadedAt) > 30_000;
-  if (!alreadyRendered || stale || targetUserId) {
-    await loadConversationList();
-    window._dmListLoadedAt = now;
-  }
+  await loadConversationList();
 
   if (targetUserId) {
     // Open or create conversation with this user
@@ -11657,21 +10414,14 @@ async function openConversation(convId) {
   // Load messages
   await loadMessages(convId);
 
-  // ── Optimistically clear unread BEFORE the RPC call ──
-  // Even if mark_conversation_read fails (RPC missing, network error, etc.),
-  // the user sees the badge clear immediately. Real-time correction happens
-  // on next loadConversationList if the server disagrees.
-  const _zeroUnread = () => {
+  // Mark as read (server-side) — fire-and-forget
+  supabase.rpc('mark_conversation_read', { p_conversation_id: convId }).then(() => {
     const c = dmState.conversations.find(x => x.id === convId);
     if (c) c.unread = 0;
     renderConversationList();
     const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
     updateUnreadBadge(total);
-  };
-  _zeroUnread();
-  supabase.rpc('mark_conversation_read', { p_conversation_id: convId })
-    .then(_zeroUnread)
-    .catch(() => {});  // Already cleared optimistically; ignore RPC errors
+  });
 
   // Subscribe to realtime updates for this conversation
   subscribeToThread(convId);
@@ -12139,37 +10889,7 @@ function subscribeToThread(convId) {
       filter: `conversation_id=eq.${convId}`,
     }, (payload) => {
       const newMsg = payload.new;
-      // Already in the array by real id? skip (covers the case where the
-      // HTTP insert response landed first and we already swapped tempId → real).
       if (dmState.messages.some(m => m.id === newMsg.id)) return;
-
-      // Race fix: if MY own message echoes back from realtime BEFORE the HTTP
-      // insert response returns, the temp-XXX placeholder is still in the
-      // array. Without this match, we'd push a second copy and the user
-      // would see the message twice. Find the matching temp and swap in
-      // place rather than push.
-      if (newMsg.sender_id === currentUser.id) {
-        const tempIdx = dmState.messages.findIndex(m =>
-          String(m.id).startsWith('temp-') &&
-          m.sender_id === currentUser.id &&
-          (m.body || '') === (newMsg.body || '')
-        );
-        if (tempIdx >= 0) {
-          const oldId = dmState.messages[tempIdx].id;
-          dmState.messages[tempIdx] = newMsg;
-          // Migrate the rendered-id tracker so the bubble doesn't re-animate
-          if (_renderedMessageIds.has(oldId)) {
-            _renderedMessageIds.delete(oldId);
-            _renderedMessageIds.add(newMsg.id);
-          }
-          // Update the DOM in-place — same as the HTTP-response path does
-          document.querySelectorAll(`[data-msg-id="${oldId}"]`).forEach(el => {
-            el.dataset.msgId = newMsg.id;
-          });
-          return;
-        }
-      }
-
       dmState.messages.push(newMsg);
       renderMessages();
       scrollMessagesToBottom();
@@ -12177,15 +10897,6 @@ function subscribeToThread(convId) {
         // The other side just sent — clear typing indicator
         dmState.otherIsTyping = false;
         supabase.rpc('mark_conversation_read', { p_conversation_id: convId });
-        // Also reset local unread immediately so the sidebar badge doesn't
-        // tick up while the user is actively reading the thread. The inbox
-        // channel's guard already skips totalUnread bump, but the per-conv
-        // count needs explicit clearing here in case it drifted.
-        const c = dmState.conversations.find(x => x.id === convId);
-        if (c) c.unread = 0;
-        const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
-        updateUnreadBadge(total);
-        renderConversationList();
       }
     })
     .on('postgres_changes', {
