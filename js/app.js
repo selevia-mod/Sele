@@ -290,6 +290,8 @@ async function signOut() {
   // Reset book caches so the next user doesn't see prior browsing state
   if (typeof allBooksCache !== 'undefined') allBooksCache = [];
   if (typeof allBooksRaw   !== 'undefined') allBooksRaw   = [];
+  if (typeof _booksLoadedSort  !== 'undefined') _booksLoadedSort  = null;
+  if (typeof _booksLoadedGenre !== 'undefined') _booksLoadedGenre = null;
   // Reset user-taste cache (book reads + likes) — would otherwise show
   // previous user's reading interests in the Discover ribbon.
   if (typeof _userBookTasteCache !== 'undefined') {
@@ -1241,7 +1243,7 @@ let _realtimeRefreshTimer = null;
 // One reusable query+score+filter pipeline so loadFeed and loadMoreFeed produce
 // the SAME shape of results — no more "Following tab silently shows everyone
 // after page 1" or "For You loses velocity scoring on scroll".
-async function _buildAndExecFeedQuery({ offset, isFirstPage }) {
+async function _buildAndExecFeedQuery({ offset }) {
   if (!currentUser?.id) return { data: [], scoreClientSide: false, followIds: null };
 
   let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
@@ -1376,7 +1378,7 @@ window.loadFeed = async function() {
 
   let queryResult;
   try {
-    queryResult = await _buildAndExecFeedQuery({ offset: 0, isFirstPage: true });
+    queryResult = await _buildAndExecFeedQuery({ offset: 0 });
   } catch (err) {
     if (seq !== _feedSeq) return;
     console.error('Feed query failed:', err);
@@ -1552,7 +1554,7 @@ async function loadMoreFeed() {
   try {
     // Reuse the same query-builder loadFeed uses. Pagination now respects the
     // active mode — Following stays Following, For You keeps its scoring, etc.
-    const queryResult = await _buildAndExecFeedQuery({ offset: _feedOffset, isFirstPage: false });
+    const queryResult = await _buildAndExecFeedQuery({ offset: _feedOffset });
 
     if (seq !== _feedSeq) return; // user switched tabs while we were waiting
 
@@ -5496,13 +5498,30 @@ let _booksOffset = 0;
 let _hasMoreBooks = true;
 let _isLoadingMoreBooks = false;
 let _bookScrollObserver = null;
+// Stale-query guard for loadBooks/loadMoreBooks — same pattern as the feed.
+// Switching sort tabs rapidly used to race; the slowest fetch would land
+// last and overwrite the user's chosen sort.
+let _booksSeq = 0;
+// The sort/filter snapshot the current page set was loaded against. If sort
+// or filter changes between loadBooks and loadMoreBooks, this triggers a
+// fresh load instead of appending mismatched results.
+let _booksLoadedSort = null;
+let _booksLoadedGenre = null;
 
 async function loadBooks() {
   const grid = document.getElementById('bookGrid');
   const empty = document.getElementById('bookEmpty');
   const sentinel = document.getElementById('bookGridSentinel');
+  if (!grid) return;
+
+  // Bump the seq up front so any in-flight loadBooks/loadMoreBooks bails
+  // before mutating the DOM or caches with results from the previous sort.
+  const seq = ++_booksSeq;
+  const sortAtStart  = bookSortBy;
+  const genreAtStart = bookGenreFilter;
+
   empty.style.display = 'none';
-  sentinel.style.display = 'none';
+  if (sentinel) sentinel.style.display = 'none';
   grid.style.display = 'grid';
   grid.innerHTML = '<div class="loading">Loading books...</div>';
 
@@ -5510,113 +5529,104 @@ async function loadBooks() {
   _booksOffset = 0;
   _hasMoreBooks = true;
   _isLoadingMoreBooks = false;
+  if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
 
   // Kick off recommendation rail + adaptive chip render in parallel (don't block grid)
   loadBookRecommendations().catch(e => console.warn('[recs] failed', e));
   renderBookChips().catch(e => console.warn('[chips] failed', e));
 
+  let books;
   try {
-    const books = await fetchSupabaseBooks(0, BOOKS_PAGE_SIZE);
-    if (books.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
-    _booksOffset = books.length;
-
-    // Keep both caches: raw (unfiltered) for fast tab switching,
-    // and filtered+sorted view for rendering.
-    allBooksRaw = books;
-    let merged = applyBookFilterAndSort(books);
-    allBooksCache = merged;
-
-    if (!merged.length) {
-      grid.style.display = 'none';
-      empty.style.display = 'flex';
-      return;
-    }
-
-    renderBooks();
-    if (_hasMoreBooks) setupBooksInfiniteScroll();
+    books = await fetchSupabaseBooks(0, BOOKS_PAGE_SIZE, sortAtStart);
   } catch (err) {
+    if (seq !== _booksSeq) return;
     console.error('Failed to load books:', err);
-    grid.innerHTML = '<div class="loading">Couldn\'t load books</div>';
+    grid.innerHTML = '<div class="loading">Couldn\'t load books — try refreshing.</div>';
+    return;
   }
+  if (seq !== _booksSeq) return; // user switched sort/filter mid-flight
+
+  if (books.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
+  _booksOffset = books.length;
+  _booksLoadedSort  = sortAtStart;
+  _booksLoadedGenre = genreAtStart;
+
+  // Keep both caches: raw (server-sorted, no genre filter applied yet) for the
+  // fast-path on subsequent sort tab swaps, and the filtered view for rendering.
+  allBooksRaw = books;
+  allBooksCache = applyBookFilter(books);
+
+  if (!allBooksCache.length) {
+    grid.style.display = 'none';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  renderBooks();
+  if (_hasMoreBooks) setupBooksInfiniteScroll();
 }
 
-// Shared filter+sort so loadMoreBooks can reuse the same predicate
-function applyBookFilterAndSort(list) {
-  let merged = list;
+// Filter only — server now does the heavy ORDER BY (see _BOOK_SORT_PIPELINES),
+// so this function just applies the genre/tag filter on top of whatever
+// sorted results came back. Returns a NEW array (no input mutation — the
+// previous version sorted in-place, which corrupted shared caches).
+function applyBookFilter(list) {
+  if (!bookGenreFilter) return [...list];
 
-  if (bookGenreFilter) {
-    const filterLower = bookGenreFilter.toLowerCase();
-    const filterWords = filterLower.replace(/-/g, ' ');
-    merged = merged.filter(b => {
-      if (b.genre === bookGenreFilter) return true;
-      return (b.tags || []).some(t => {
-        const tagLower = (t || '').toLowerCase();
-        return tagLower === filterLower || tagLower === filterWords;
-      });
+  const filterLower = bookGenreFilter.toLowerCase();
+  const filterWords = filterLower.replace(/-/g, ' ');
+  return list.filter(b => {
+    if (b.genre === bookGenreFilter) return true;
+    return (b.tags || []).some(t => {
+      const tagLower = (t || '').toLowerCase();
+      return tagLower === filterLower || tagLower === filterWords;
     });
-  }
-
-  const dateOf = b => new Date(b.published_at || b.created_at || 0);
-  if (bookSortBy === 'recent') {
-    // Newest = most recently published
-    merged.sort((a, b) => dateOf(b) - dateOf(a));
-  } else if (bookSortBy === 'most-liked') {
-    // All-time most liked
-    merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
-  } else if (bookSortBy === 'most-read') {
-    // All-time most viewed
-    merged.sort((a, b) => (b.views_count || 0) - (a.views_count || 0));
-  } else if (bookSortBy === 'completed') {
-    // Filter to completed-status only, sort by likes (binge-readable)
-    merged = merged.filter(b => (b.status || '').toLowerCase() === 'completed');
-    merged.sort((a, b) => (b.likes_count || 0) - (a.likes_count || 0));
-  } else if (bookSortBy === 'editors-pick') {
-    // Admin-curated; sort by editors_pick_at desc (newest pick first)
-    merged = merged.filter(b => b.is_editors_pick === true);
-    merged.sort((a, b) => new Date(b.editors_pick_at || 0) - new Date(a.editors_pick_at || 0));
-  } else { // trending — last-7-days hotness, weighted by likes
-    merged.sort((a, b) => {
-      const sa = (a.trending_score != null) ? Number(a.trending_score) : ((a.views_last_7d || 0) + (a.likes_last_7d || 0) * 5);
-      const sb = (b.trending_score != null) ? Number(b.trending_score) : ((b.views_last_7d || 0) + (b.likes_last_7d || 0) * 5);
-      if (sb !== sa) return sb - sa;
-      // Tie-break: all-time likes, then newest
-      const lDiff = (b.likes_count || 0) - (a.likes_count || 0);
-      if (lDiff !== 0) return lDiff;
-      return dateOf(b) - dateOf(a);
-    });
-  }
-  return merged;
+  });
 }
 
 async function loadMoreBooks() {
   if (_isLoadingMoreBooks || !_hasMoreBooks) return;
+  // If the active sort/filter changed since the page set was loaded, do a
+  // full reload instead — appending mismatched results would mix orderings.
+  if (bookSortBy !== _booksLoadedSort || bookGenreFilter !== _booksLoadedGenre) {
+    return loadBooks();
+  }
+
   _isLoadingMoreBooks = true;
+  const seq = _booksSeq;
 
   const sentinel = document.getElementById('bookGridSentinel');
-  sentinel.style.display = 'block';
-  sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
+  if (sentinel) {
+    sentinel.style.display = 'block';
+    sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
+  }
 
   try {
-    const more = await fetchSupabaseBooks(_booksOffset, BOOKS_PAGE_SIZE);
+    // Use the same sort the current page set was loaded with — so page 2 of
+    // "Most Loved" continues by likes_count, not chronologically.
+    const more = await fetchSupabaseBooks(_booksOffset, BOOKS_PAGE_SIZE, _booksLoadedSort);
+
+    if (seq !== _booksSeq) return; // sort/filter changed during fetch
+
     if (more.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
     _booksOffset += more.length;
 
     if (more.length) {
-      // Append to raw cache (deduped) — used by sort-tab switches without re-fetch.
-      const seenIds = new Set(allBooksRaw.map(b => b.id));
-      for (const b of more) if (!seenIds.has(b.id)) allBooksRaw.push(b);
+      // Append to raw cache (deduped). Server already returned them in the
+      // correct order for this sort, so we just concat — no re-sort needed.
+      const seenInRaw = new Set(allBooksRaw.map(b => b.id));
+      for (const b of more) if (!seenInRaw.has(b.id)) allBooksRaw.push(b);
 
-      // Merge into cache, re-apply current filter/sort to keep order consistent
-      const allMerged = applyBookFilterAndSort([...allBooksCache, ...more]);
-      allBooksCache = allMerged;
-      // For appended cards we just append rendering — don't re-render entire grid (jank)
+      const seenInCache = new Set(allBooksCache.map(b => b.id));
+      // Apply genre filter to the new batch only (no resort — server's order is the truth)
+      const filteredMore = applyBookFilter(more).filter(b => !seenInCache.has(b.id));
+      allBooksCache = allBooksCache.concat(filteredMore);
+
+      // Append to DOM in arrival order — that's the correct sorted position.
       const grid = document.getElementById('bookGrid');
-      // Only render the cards that aren't already in the DOM
       const presentIds = new Set(Array.from(grid.querySelectorAll('.book-card')).map(c => c.dataset.bookId));
-      more
+      filteredMore
         .filter(b => !presentIds.has(b.id))
-        // Reapply filter to the new batch only (don't show filtered-out cards)
-        .filter(b => allBooksCache.includes(b))
         .forEach((b, i) => {
           const card = renderBookCard(b);
           card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
@@ -5624,16 +5634,18 @@ async function loadMoreBooks() {
         });
     }
 
-    if (_hasMoreBooks) {
-      sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
-    } else {
-      sentinel.innerHTML = '<div class="book-grid-end-msg">You\'ve reached the end · ' + allBooksCache.length.toLocaleString() + ' books</div>';
-      // Stop observing
-      if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
+    if (sentinel) {
+      if (_hasMoreBooks) {
+        sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
+      } else {
+        sentinel.innerHTML = '<div class="book-grid-end-msg">You\'ve reached the end · ' + allBooksCache.length.toLocaleString() + ' books</div>';
+        if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
+      }
     }
   } catch (err) {
+    if (seq !== _booksSeq) return;
     console.error('Failed to load more books:', err);
-    sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
+    if (sentinel) sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
   } finally {
     _isLoadingMoreBooks = false;
   }
@@ -6054,9 +6066,29 @@ function renderBookRecsRail(books) {
   rail.style.display = 'block';
 }
 
-async function fetchSupabaseBooks(offset = 0, limit = 80) {
+// Server-side sort matrix. Each entry returns the chained query so callers
+// can range() it. Keeping the per-sort logic centralised here means
+// loadBooks AND loadMoreBooks always paginate the same axis as page 1.
+const _BOOK_SORT_PIPELINES = {
+  // Trending: precomputed by refresh_book_trending_stats() (indexed).
+  trending:      (q) => q.order('trending_score', { ascending: false, nullsFirst: false })
+                          .order('likes_count',  { ascending: false })
+                          .order('created_at',   { ascending: false }),
+  recent:        (q) => q.order('published_at', { ascending: false, nullsFirst: false })
+                          .order('created_at',  { ascending: false }),
+  'most-liked':  (q) => q.order('likes_count', { ascending: false })
+                          .order('created_at', { ascending: false }),
+  'most-read':   (q) => q.order('views_count', { ascending: false })
+                          .order('created_at', { ascending: false }),
+  // Completed: filter then sort (likes_count index covers exactly this case).
+  completed:     (q) => q.eq('status', 'completed').order('likes_count', { ascending: false }),
+  // Editor's Pick: filter then sort by editors_pick_at (indexed).
+  'editors-pick':(q) => q.eq('is_editors_pick', true).order('editors_pick_at', { ascending: false, nullsFirst: false }),
+};
+
+async function fetchSupabaseBooks(offset = 0, limit = 80, sortBy = bookSortBy) {
   try {
-    const { data, error } = await supabase
+    let q = supabase
       .from('books')
       .select(`
         id, title, description, cover_url, genre, tags, status,
@@ -6068,11 +6100,19 @@ async function fetchSupabaseBooks(offset = 0, limit = 80) {
         profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
       `)
       .eq('is_public', true)
-      .eq('is_hidden', false)
-      .in('status', ['ongoing', 'completed'])
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .eq('is_hidden', false);
 
+    // The Completed and Editor's-Pick pipelines apply their own status filter,
+    // so only add the public-status filter for the OTHER sorts (otherwise
+    // .in('status', [...]) overrides .eq('status', 'completed')).
+    if (sortBy !== 'completed' && sortBy !== 'editors-pick') {
+      q = q.in('status', ['ongoing', 'completed']);
+    }
+
+    const pipeline = _BOOK_SORT_PIPELINES[sortBy] || _BOOK_SORT_PIPELINES.trending;
+    q = pipeline(q).range(offset, offset + limit - 1);
+
+    const { data, error } = await q;
     if (error) {
       console.error('Supabase books fetch error:', error);
       return [];
@@ -6267,52 +6307,27 @@ document.getElementById('bookGenreChips')?.addEventListener('click', (e) => {
 });
 document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
   bookSortBy = e.target.value;
-
-  // Fast path: we already have raw books cached. Just re-derive the
-  // filtered+sorted view and swap the grid in one shot — no server round-trip,
-  // no "Loading…" flash, no staggered fade-in cascade.
-  if (allBooksRaw.length > 0) {
-    allBooksCache = applyBookFilterAndSort(allBooksRaw);
-    renderBooksFast();
-    return;
-  }
-
-  // Cold path: cache empty (page just opened) — fall back to full load.
+  // Always re-fetch — the cached `allBooksRaw` was sorted by the PREVIOUS sort
+  // tab, so the truly top-N books for the new sort live on the server (e.g.
+  // the most-liked book of all time may sit beyond the first 80 of "Newest").
+  // The seq guard inside loadBooks handles rapid tab-flicks safely.
   const savedY = window.scrollY;
   loadBooks().then(() => {
     requestAnimationFrame(() => window.scrollTo({ top: savedY, behavior: 'instant' }));
   });
 });
 
-// Fast renderer — no entrance animation, no flash. Used for in-place re-sorts
-// when the user switches tabs (Trending / Newest / Most Loved / etc.).
-function renderBooksFast() {
-  const grid = document.getElementById('bookGrid');
-  const empty = document.getElementById('bookEmpty');
-
-  if (!allBooksCache.length) {
-    grid.style.display = 'none';
-    empty.style.display = 'flex';
-    return;
-  }
-
-  grid.style.display = 'grid';
-  empty.style.display = 'none';
-
-  // Build new content off-DOM, then swap atomically so the user never sees
-  // an empty grid mid-render. Skip the staggered cascade that renderBooks()
-  // uses on first load.
-  const frag = document.createDocumentFragment();
-  for (const b of allBooksCache) {
-    const card = renderBookCard(b);
-    card.style.animationDelay = '0s';
-    card.style.animation = 'none';
-    frag.appendChild(card);
-  }
-  grid.replaceChildren(frag);
-}
+// (renderBooksFast removed — it was the in-memory re-sort fast path used by
+// the sort tab change handler. That path was incorrect for any all-time sort
+// because allBooksRaw only ever held the loaded pages, not the catalog —
+// so the truly top-N book for "Most Loved" / "Most Read" / etc. would never
+// appear if it lived past the first batch. Sort tab now always re-fetches.)
 
 // ── Book detail page ──
+// Stale-fetch guard so rapid taps (open A → tap B before A loads) don't
+// render whichever happens to resolve last. Captures the bookId in a token
+// and only renders if it still matches when the queries return.
+let _openBookToken = null;
 async function openBookDetail(bookId) {
   hideAllMainPages();
   bookDetailPage.style.display = 'block';
@@ -6322,10 +6337,18 @@ async function openBookDetail(bookId) {
   const content = document.getElementById('bookDetailContent');
   content.innerHTML = '<div class="loading">Loading book...</div>';
 
+  // Only the LATEST openBookDetail call gets to render. Earlier ones bail
+  // when their token no longer matches — fixes the "open A, tap B quickly,
+  // see A's cover with B's chapters" race.
+  const token = bookId;
+  _openBookToken = token;
+
+  // All books are now Supabase. Bare UUID or "sb_<uuid>" — strip the prefix if present.
+  const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
+
+  let supBook, supChapters;
   try {
-    // All books are now Supabase. Bare UUID or "sb_<uuid>" — strip the prefix if present.
-    const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
-    const [{ data: supBook, error: bookErr }, { data: supChapters, error: chErr }] = await Promise.all([
+    const [bookRes, chRes] = await Promise.all([
       supabase.from('books')
         .select(`
           id, title, description, cover_url, genre, tags,
@@ -6341,18 +6364,27 @@ async function openBookDetail(bookId) {
         .eq('is_published', true)
         .order('chapter_number', { ascending: true })
     ]);
-
-    if (bookErr || !supBook) throw new Error(bookErr?.message || 'Book not found');
-    if (chErr) console.warn('Failed to load chapters:', chErr);
-
-    const book = supBook;
-    const chapters = supChapters || [];
-
-    currentBookDetail = { book, chapters };
-    renderBookDetail();
+    if (bookRes.error || !bookRes.data) throw new Error(bookRes.error?.message || 'Book not found');
+    if (chRes.error) console.warn('Failed to load chapters:', chRes.error);
+    supBook = bookRes.data;
+    supChapters = chRes.data;
   } catch (err) {
-    content.innerHTML = `<div class="loading">Couldn't load book: ${escHTML(err.message)}</div>`;
+    if (_openBookToken !== token) return; // user already tapped a different book
+    console.error('openBookDetail failed:', err);
+    const friendly = /timeout|canceling statement/i.test(err.message || '')
+      ? 'This book is taking too long to load. Tap to retry.'
+      : /not found/i.test(err.message || '')
+      ? 'This book isn\'t available — it may have been unpublished.'
+      : 'Couldn\'t load this book. Tap to retry.';
+    content.innerHTML = `<div class="loading" id="bookRetry" style="cursor:pointer">${escHTML(friendly)}</div>`;
+    document.getElementById('bookRetry')?.addEventListener('click', () => openBookDetail(bookId));
+    return;
   }
+
+  if (_openBookToken !== token) return; // stale — user tapped a different book
+
+  currentBookDetail = { book: supBook, chapters: supChapters || [] };
+  renderBookDetail();
 }
 
 function renderBookDetail() {
@@ -6685,7 +6717,14 @@ async function openChapterReader(chapterIndex) {
     resolvedChapterId = data.id;
     chapterRow = data;
   } catch (err) {
-    content.innerHTML = `<div class="loading">Couldn't load chapter: ${escHTML(err.message)}</div>`;
+    console.error('openChapterReader failed:', err);
+    const friendly = /timeout|canceling statement/i.test(err.message || '')
+      ? 'This chapter is taking too long to load. Tap to retry.'
+      : /not found/i.test(err.message || '')
+      ? 'This chapter isn\'t available — it may have been unpublished.'
+      : 'Couldn\'t load this chapter. Tap to retry.';
+    content.innerHTML = `<div class="loading" id="chapterRetry" style="cursor:pointer">${escHTML(friendly)}</div>`;
+    document.getElementById('chapterRetry')?.addEventListener('click', () => openChapterReader(chapterIndex));
     return;
   }
 
