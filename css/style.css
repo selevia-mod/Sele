@@ -1986,6 +1986,36 @@ body.light .ql-editor { color: #1f2937; }
   border: none; transition: all 0.15s; display: inline-flex; align-items: center;
   justify-content: center; gap: 0.5rem;
 }
+/* Feed tabs (For You / Following / Discover) — pill row above #feed.
+   Active pill uses the purple gradient; inactive pills are ghost.
+   Mirrors the mobile home tab bar so the two platforms feel identical. */
+.feed-tabs {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.6rem 0 0.4rem;
+  margin: 0 0 0.4rem;
+  align-items: center;
+}
+.feed-tab {
+  padding: 0.45rem 1rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted, #9ca3af);
+  font-weight: 500;
+  font-size: 0.85rem;
+  letter-spacing: 0.1px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.feed-tab:hover { color: var(--text); }
+.feed-tab.active {
+  background: var(--purple-grad);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.25);
+}
+
 .btn-purple { background: var(--purple-grad); color: #fff; box-shadow: 0 4px 16px rgba(124,58,237,0.3); }
 .btn-purple:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(124,58,237,0.5); }
 .btn-purple:active { transform: scale(0.97); }
@@ -2185,13 +2215,8 @@ body.light .reaction-picker {
 
 /* ── COMMENTS ── */
 .comments-section { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
-.comment-item { display: flex; gap: 0.6rem; margin-bottom: 0.85rem; position: relative; }
+.comment-item { display: flex; gap: 0.6rem; margin-bottom: 0.85rem; }
 .comment-body { flex: 1; min-width: 0; }
-/* Ensure the reaction picker isn't clipped by parent comment containers.
-   Without this, the picker can appear below the visible viewport when a
-   comment has many siblings. */
-.comment-item .reaction-picker { z-index: 100; }
-.comment-item .reaction-wrap { position: relative; z-index: 1; }
 .comment-bubble { background: var(--bg3); border-radius: 4px 16px 16px 16px; padding: 0.65rem 0.85rem; font-size: 0.87rem; line-height: 1.6; color: var(--text); word-break: break-word; }
 .comment-bubble a { color: var(--purple-lt); text-decoration: underline; }
 .comment-meta { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 3px; }
@@ -2739,29 +2764,13 @@ body.light .profile-badge.guest { background: rgba(245,158,11,0.1); color: #d977
 .video-card-info .avatar.video-card-creator-clickable:hover { border-color: var(--purple-lt); transform: scale(1.05); }
 .video-card-info .avatar.video-card-creator-clickable { transition: transform 0.15s ease, border-color 0.15s ease; }
 
-/* Video player page (keep premium look).
-   No fixed aspect-ratio — let the video drive its own height so portrait
-   uploads (9:16) don't get letterboxed and landscape (16:9) doesn't get
-   chopped. min-aspect prevents tiny squares from looking weird. */
+/* Video player page (keep premium look) */
 .video-player-wrap {
-  background: #000;
-  border-radius: 12px;
-  overflow: hidden;
-  margin-bottom: 1rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 320px;
-  max-height: 75vh;
+  background: #000; border-radius: 12px; overflow: hidden;
+  margin-bottom: 1rem; aspect-ratio: 16 / 9; max-height: 70vh;
   box-shadow: 0 8px 24px rgba(0,0,0,0.3);
 }
-.video-player-wrap video {
-  width: 100%;
-  height: auto;
-  max-height: 75vh;
-  display: block;
-  object-fit: contain;
-}
+.video-player-wrap video { width: 100%; height: 100%; display: block; }
 
 .video-info { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
 .video-title-big { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.5rem; }
@@ -4452,30 +4461,6 @@ body.light .vu-btn-secondary {
   color: #dc2626;
 }
 
-/* Monetize toggle — gold-tinted when active, neutral grey when off */
-.studio-btn-monetize:hover {
-  background: rgba(217, 119, 6, 0.12);
-  color: #d97706;
-}
-.studio-btn-monetize.is-on {
-  background: linear-gradient(135deg, #fbbf24, #f59e0b);
-  color: #fff;
-  box-shadow: 0 3px 10px rgba(217, 119, 6, 0.30);
-}
-.studio-btn-monetize.is-on:hover {
-  filter: brightness(1.05);
-  transform: scale(1.05);
-  color: #fff;
-}
-body:not(.light) .studio-btn-monetize:hover {
-  background: rgba(251, 191, 36, 0.18);
-  color: #fcd34d;
-}
-body:not(.light) .studio-btn-monetize.is-on {
-  background: linear-gradient(135deg, #fcd34d, #fbbf24);
-  color: #1a1428;
-}
-
 /* ─── Empty state ─── */
 .studio-empty {
   text-align: center;
@@ -5051,6 +5036,7 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
    ════════════════════════════════════════════════════════════════════════════ */
 
 .genre-picker {
+<<<<<<< HEAD
   position: relative;
   margin: 0.5rem 0 1.1rem;
   border: 1px solid rgba(124, 58, 237, 0.16);
@@ -5061,6 +5047,13 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
   overflow: hidden;
   box-shadow: 0 1px 0 rgba(124, 58, 237, 0.04), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
   transition: border-color 0.18s, box-shadow 0.18s;
+=======
+  margin: 0.4rem 0 1rem;
+  padding: 0.7rem 0.85rem 0.55rem;
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-radius: 12px;
+  background: rgba(124, 58, 237, 0.03);
+>>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
 .genre-picker:focus-within {
   border-color: rgba(124, 58, 237, 0.35);
@@ -5069,6 +5062,7 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
 
 /* ─── Sticky counter header ─── */
 .genre-picker-counter {
+<<<<<<< HEAD
   display: flex;
   align-items: center;
   gap: 0.45rem;
@@ -5083,6 +5077,13 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
   color: #6b7280;
   letter-spacing: 0.01em;
   text-transform: uppercase;
+=======
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: #6b7280;
+  margin-bottom: 0.55rem;
+  letter-spacing: -0.005em;
+>>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
 .genre-picker-count {
   display: inline-flex;
@@ -5107,6 +5108,7 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
 }
 /* Bounce on count change is just nice — done via JS class toggle, but baseline is here */
 
+<<<<<<< HEAD
 /* ─── Scrollable chip area — exactly 3 rows visible ─── */
 .genre-picker-chips {
   display: flex;
@@ -5153,7 +5155,28 @@ body:not(.light) .genre-picker-counter {
 body:not(.light) .genre-picker-chips::-webkit-scrollbar-thumb {
   background: linear-gradient(180deg, #a78bfa, #7c3aed);
   border-color: rgba(255, 255, 255, 0.06);
+=======
+/* Bounded scroll area — ~3 rows visible, smooth scroll for the rest */
+.genre-picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  max-height: 132px;       /* ~3 rows of chips */
+  overflow-y: auto;
+  padding-right: 0.3rem;   /* room for scrollbar so chips don't shift */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124, 58, 237, 0.3) transparent;
+>>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
+.genre-picker-chips::-webkit-scrollbar { width: 6px; }
+.genre-picker-chips::-webkit-scrollbar-track { background: transparent; }
+.genre-picker-chips::-webkit-scrollbar-thumb {
+  background: rgba(124, 58, 237, 0.25);
+  border-radius: 999px;
+}
+.genre-picker-chips::-webkit-scrollbar-thumb:hover { background: rgba(124, 58, 237, 0.45); }
+body:not(.light) .genre-picker-chips::-webkit-scrollbar-thumb { background: rgba(167, 139, 250, 0.3); }
+body:not(.light) .genre-picker-chips::-webkit-scrollbar-thumb:hover { background: rgba(167, 139, 250, 0.5); }
 
 .genre-chip {
   font-family: inherit;
@@ -5164,11 +5187,18 @@ body:not(.light) .genre-picker-chips::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.85);
   border: 1px solid rgba(17, 24, 39, 0.08);
   border-radius: 999px;
+<<<<<<< HEAD
   padding: 0.34rem 0.78rem;
+=======
+  padding: 0.32rem 0.7rem;
+>>>>>>> 4de586e (Phase 6 batched insert + progress)
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+<<<<<<< HEAD
   transition: border-color 0.18s, color 0.18s, background 0.18s, transform 0.12s, box-shadow 0.18s;
+=======
+>>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
 .genre-chip:hover {
   border-color: rgba(124, 58, 237, 0.35);
@@ -8425,211 +8455,17 @@ body:not(.light) .lock-cost-row input { background: rgba(255,255,255,0.06); bord
 .chapter-row-lock {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  margin: 0 0.7rem;            /* breathing room on both sides so word count doesn't overlap */
-  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
-  border-radius: 999px;
-  color: #fff;
-  flex-shrink: 0;
-  box-shadow:
-    0 4px 12px rgba(124, 58, 237, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.20);
-  transition: transform 0.12s ease, box-shadow 0.18s ease;
-}
-.chapter-row:hover .chapter-row-lock {
-  transform: scale(1.05);
-  box-shadow:
-    0 6px 16px rgba(124, 58, 237, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.24);
-}
-.chapter-row-lock svg { width: 13px; height: 13px; }
-body:not(.light) .chapter-row-lock {
-  background: linear-gradient(135deg, #a78bfa 0%, #c4b5fd 100%);
-  box-shadow:
-    0 4px 14px rgba(167, 139, 250, 0.36),
-    inset 0 1px 0 rgba(255, 255, 255, 0.16);
-}
-
-/* ════════════════════════════════════════════════════════════════════════════
-   Editor's Pick badge — premium gold-purple gradient, top-left of book card
-   ════════════════════════════════════════════════════════════════════════════ */
-.book-editors-pick-badge {
-  position: absolute;
-  top: 0.5rem;
-  left: 0.5rem;
-  display: inline-flex;
-  align-items: center;
   gap: 0.3rem;
-  padding: 0.28rem 0.6rem 0.28rem 0.5rem;
-  background: linear-gradient(135deg, #fbbf24 0%, #a78bfa 60%, #7c3aed 100%);
-  color: #fff;
-  font-size: 0.66rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  padding: 0.2rem 0.55rem;
+  margin-left: 0.5rem;
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
   border-radius: 999px;
-  box-shadow:
-    0 4px 12px rgba(124, 58, 237, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.25);
-  z-index: 2;
-  pointer-events: none;
-  white-space: nowrap;
-}
-.book-editors-pick-badge svg {
-  flex-shrink: 0;
-  filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.4));
-}
-
-/* Admin/mod pick button on book detail */
-.book-editors-pick-btn {
-  background: rgba(124, 58, 237, 0.06);
-  border: 1.5px solid rgba(124, 58, 237, 0.30);
-  color: #6b21a8;
-}
-.book-editors-pick-btn:hover {
-  background: rgba(124, 58, 237, 0.12);
-  border-color: rgba(124, 58, 237, 0.55);
-}
-.book-editors-pick-btn.is-picked {
-  background: linear-gradient(135deg, #fbbf24 0%, #a78bfa 60%, #7c3aed 100%);
-  border-color: transparent;
-  color: #fff;
-  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.32);
-}
-.book-editors-pick-btn.is-picked:hover {
-  filter: brightness(1.05);
-}
-body:not(.light) .book-editors-pick-btn {
-  background: rgba(167, 139, 250, 0.10);
-  border-color: rgba(167, 139, 250, 0.32);
-  color: #ddd6fe;
-}
-
-/* ════════════════════════════════════════════════════════════════════════════
-   Video search — Creator channel cards (top of search results)
-   ════════════════════════════════════════════════════════════════════════════ */
-
-.video-creators-header {
-  grid-column: 1 / -1;
-  font-size: 0.78rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text2);
-  margin: 0.35rem 0.25rem -0.25rem;
-}
-
-.video-creators-row {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.7rem;
-  margin-bottom: 0.6rem;
-}
-
-.creator-channel-card {
-  flex: 1 1 320px;
-  min-width: 280px;
-  max-width: 480px;
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-  padding: 0.85rem 1rem;
-  background: linear-gradient(135deg, rgba(124,58,237,0.05), rgba(167,139,250,0.06));
-  border: 1.5px solid rgba(124,58,237,0.20);
-  border-radius: 14px;
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  transition: transform 0.12s ease, border-color 0.18s ease, box-shadow 0.2s ease, background 0.18s ease;
-}
-.creator-channel-card:hover {
-  transform: translateY(-1px);
-  background: linear-gradient(135deg, rgba(124,58,237,0.10), rgba(167,139,250,0.10));
-  border-color: rgba(124,58,237,0.45);
-  box-shadow: 0 6px 18px rgba(124,58,237,0.18);
-}
-
-.creator-channel-avatar {
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  overflow: hidden;
-  flex-shrink: 0;
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-weight: 800;
-  font-size: 1.4rem;
-}
-.creator-channel-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.creator-channel-avatar-placeholder {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  color: #fff;
-}
-
-.creator-channel-info {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-.creator-channel-name {
-  font-weight: 800;
-  font-size: 1rem;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.creator-channel-meta {
-  font-size: 0.78rem;
-  color: var(--text2);
-  font-weight: 600;
-  margin-top: 0.15rem;
-}
-.creator-channel-bio {
-  font-size: 0.78rem;
-  color: var(--text2);
-  margin-top: 0.25rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.creator-channel-cta {
-  flex-shrink: 0;
-  font-size: 0.84rem;
+  font-size: 0.74rem;
   font-weight: 700;
-  color: #7c3aed;
+  color: #92400e;
   white-space: nowrap;
 }
-
-body:not(.light) .creator-channel-card {
-  background: linear-gradient(135deg, rgba(167,139,250,0.07), rgba(124,58,237,0.08));
-  border-color: rgba(167,139,250,0.22);
-}
-body:not(.light) .creator-channel-card:hover {
-  background: linear-gradient(135deg, rgba(167,139,250,0.14), rgba(124,58,237,0.16));
-  border-color: rgba(167,139,250,0.45);
-}
-body:not(.light) .creator-channel-cta { color: #c4b5fd; }
-
-@media (max-width: 600px) {
-  .creator-channel-card { min-width: 100%; max-width: 100%; }
-  .creator-channel-cta { display: none; }
-}
+.chapter-row-lock svg { width: 12px; height: 12px; }
 
 /* ── Reader paywall ────────────────────────────────────────────────────── */
 .reader-paywall {
@@ -9478,320 +9314,82 @@ body:not(.light) .book-lock-warning { color: #fcd34d; background: rgba(251,191,3
   #btnBulkUnlockBook { width: 100%; }
 }
 
-/* ─── Time-based video monetization modal — glass design, purple touch ─── */
-/* Minimalist premium: backdrop-filter blur, semi-transparent white,
-   compact sizing so it doesn't dominate the player. */
-.video-monet-backdrop {
-  background: rgba(15, 10, 28, 0.55);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
+/* ─── Time-based video monetization modal ─── */
 .video-monet-modal {
-  max-width: 380px;
-  padding: 1.5rem 1.5rem 1.2rem;
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  border: 1px solid rgba(124, 58, 237, 0.18);
-  box-shadow:
-    0 20px 50px rgba(15, 10, 28, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.60);
+  max-width: 500px;
 }
-/* Purple play-icon header — replaces the default emoji */
-.video-monet-icon-wrap {
-  display: grid; place-items: center;
-  width: 44px; height: 44px;
-  margin: 0 auto 0.5rem;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  box-shadow: 0 6px 18px rgba(124, 58, 237, 0.32);
-}
-.video-monet-modal h2 {
-  font-size: 1.1rem;
-  margin: 0 0 0.15rem;
-  letter-spacing: -0.01em;
-}
-.video-monet-modal .unlock-modal-title {
-  font-size: 0.84rem;
-  margin: 0 0 0.2rem;
-  font-style: normal;
-  font-weight: 600;
-  color: var(--text);
-  opacity: 0.85;
-}
-.video-monet-modal .unlock-modal-sub {
-  font-size: 0.8rem;
-  margin: 0 0 1rem;
-  color: var(--text2);
-}
-
 .video-monet-options {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.6rem;
-  margin-top: 0.2rem;
+  gap: 0.8rem;
+  margin-top: 0.4rem;
 }
 .video-monet-option {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 0.25rem;
-  padding: 0.85rem 0.5rem 0.7rem;
-  background: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  border: 1.5px solid rgba(124, 58, 237, 0.14);
-  border-radius: 12px;
+  gap: 0.3rem;
+  padding: 1.2rem 0.9rem 1rem;
+  background: linear-gradient(135deg, #fff, #fefefe);
+  border: 2px solid rgba(17,24,39,0.10);
+  border-radius: 14px;
   cursor: pointer;
   font: inherit;
   color: inherit;
-  transition: transform 0.1s ease, box-shadow 0.18s ease, border-color 0.15s ease, background 0.15s ease;
+  transition: transform 0.1s ease, box-shadow 0.18s ease, border-color 0.15s ease;
 }
-.video-monet-option:hover:not(.is-disabled) {
-  transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.85);
-  border-color: rgba(124, 58, 237, 0.45);
-  box-shadow: 0 8px 18px rgba(124, 58, 237, 0.16);
-}
-.video-monet-option-coin:hover:not(.is-disabled) {
-  border-color: #fbbf24;
-  box-shadow: 0 8px 18px rgba(217, 119, 6, 0.20);
-}
-.video-monet-option.is-disabled { opacity: 0.4; cursor: not-allowed; }
-.video-monet-option.is-loading { opacity: 0.55; pointer-events: none; }
-
+.video-monet-option:hover:not(.is-disabled) { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(0,0,0,0.08); }
+.video-monet-option-coin { background: linear-gradient(135deg, #fffbeb, #fef3c7); }
+.video-monet-option-coin:hover:not(.is-disabled) { border-color: #fbbf24; box-shadow: 0 10px 24px rgba(180, 83, 9, 0.20); }
+.video-monet-option-star { background: linear-gradient(135deg, #f5f3ff, #ede9fe); }
+.video-monet-option-star:hover:not(.is-disabled) { border-color: #a855f7; box-shadow: 0 10px 24px rgba(124, 58, 237, 0.20); }
+.video-monet-option.is-disabled { opacity: 0.45; cursor: not-allowed; }
+.video-monet-option.is-loading { opacity: 0.6; pointer-events: none; }
 .video-monet-option-icon {
   display: grid; place-items: center;
-  width: 40px; height: 40px;
+  width: 52px; height: 52px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.85);
-  margin-bottom: 0.1rem;
+  background: rgba(255,255,255,0.7);
+  margin-bottom: 0.2rem;
 }
 .video-monet-option-cost {
-  font-size: 1.25rem;
+  font-size: 1.6rem;
   font-weight: 800;
   color: #92400e;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
-  letter-spacing: -0.01em;
 }
 .video-monet-option-cost small {
-  font-size: 0.7rem;
-  font-weight: 600;
+  font-size: 0.78rem;
+  font-weight: 700;
   color: var(--text2);
   display: block;
-  margin-top: 0.05rem;
+  margin-top: 0.1rem;
 }
 .video-monet-option-star .video-monet-option-cost { color: #6b21a8; }
 .video-monet-option-mode {
-  font-size: 0.66rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text);
-  padding: 0.16rem 0.5rem;
-  background: rgba(124, 58, 237, 0.08);
-  border-radius: 999px;
-  margin-top: 0.2rem;
-}
-.video-monet-option-coin .video-monet-option-mode {
-  background: rgba(217, 119, 6, 0.12);
-  color: #92400e;
-}
-.video-monet-option-star .video-monet-option-mode {
-  background: rgba(124, 58, 237, 0.12);
-  color: #6b21a8;
-}
-
-/* Auto-pay countdown — thin purple bar that drains over 5 seconds */
-.video-monet-countdown {
-  margin-top: 0.85rem;
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-.video-monet-countdown-bar {
-  display: block;
-  width: 100%;
-  height: 3px;
-  background: rgba(124, 58, 237, 0.10);
-  border-radius: 999px;
-  overflow: hidden;
-}
-.video-monet-countdown-fill {
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, #7c3aed, #a78bfa);
-  transform-origin: right;
-  transition: width 5s linear;
-  /* When the dialog mounts, JS sets width:0% then animates to width:100%
-     reverse-pattern. Here it starts full and shrinks to 0. */
-  width: 100%;
-}
-.video-monet-countdown:not(.is-cancelled) .video-monet-countdown-fill {
-  animation: vmDrain 5s linear forwards;
-}
-@keyframes vmDrain {
-  from { width: 100%; }
-  to   { width: 0%;   }
-}
-.video-monet-countdown.is-cancelled .video-monet-countdown-fill { width: 0%; }
-.video-monet-countdown-text {
-  font-size: 0.74rem;
-  color: var(--text2);
-  font-weight: 500;
-}
-.video-monet-countdown-text strong { color: #6b21a8; font-weight: 700; }
-
-@media (max-width: 480px) {
-  .video-monet-modal { max-width: 320px; padding: 1.2rem 1.2rem 1rem; }
-  .video-monet-options { grid-template-columns: 1fr 1fr; }
-}
-
-body:not(.light) .video-monet-modal {
-  background: rgba(26, 20, 40, 0.85);
-  border-color: rgba(167, 139, 250, 0.30);
-  color: #f3f4f6;
-}
-body:not(.light) .video-monet-option {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(167, 139, 250, 0.18);
-  color: #f3f4f6;
-}
-body:not(.light) .video-monet-option:hover:not(.is-disabled) {
-  background: rgba(167, 139, 250, 0.10);
-  border-color: rgba(167, 139, 250, 0.50);
-}
-body:not(.light) .video-monet-option-cost { color: #fcd34d; }
-body:not(.light) .video-monet-option-star .video-monet-option-cost { color: #c4b5fd; }
-body:not(.light) .video-monet-countdown-text strong { color: #c4b5fd; }
-
-/* Briefly highlight a post that was navigated to from search results */
-/* PRO badge for monetized books in My Books list — gold→purple gradient
-   matching the studio video monetize button, but as a text pill to fit the
-   horizontal action row */
-/* ════════════════════════════════════════════════════════════════════════════
-   Site footer — always visible at bottom of every page
-   ════════════════════════════════════════════════════════════════════════════ */
-.site-footer {
-  margin-top: 1.5rem;
-  padding: 0.7rem 1.5rem;
-  background: rgba(124, 58, 237, 0.03);
-  border-top: 1px solid rgba(124, 58, 237, 0.10);
-  /* Account for the left sidebar so the footer aligns with main content */
-  padding-left: calc(var(--sidebar-w, 240px) + 1.5rem);
-}
-/* Hide footer on auth screen + during initial auth resolve on refresh */
-body.is-auth .site-footer { display: none; }
-.site-footer-inner {
-  max-width: 1100px;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 0.55rem;
   font-size: 0.78rem;
-  color: var(--text2);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  padding: 0.2rem 0.55rem;
+  background: rgba(0,0,0,0.06);
+  border-radius: 999px;
+  margin-top: 0.25rem;
+}
+.video-monet-option-coin .video-monet-option-mode { background: #fde68a; color: #92400e; }
+.video-monet-option-star .video-monet-option-mode { background: #ddd6fe; color: #6b21a8; }
+.video-monet-option-hint {
+  font-size: 0.74rem;
+  color: rgba(0,0,0,0.55);
+  margin-top: 0.3rem;
   line-height: 1.4;
 }
-.site-footer-brand-name {
-  font-size: 0.85rem;
-  font-weight: 800;
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  letter-spacing: 0.01em;
-}
-.site-footer-inner a {
-  color: var(--text2);
-  text-decoration: none;
-  font-weight: 500;
-  transition: color 0.15s ease;
-}
-.site-footer-inner a:hover { color: #7c3aed; }
-.site-footer-sep {
-  color: var(--text2);
-  opacity: 0.45;
-  user-select: none;
-}
-.site-footer-copy { color: var(--text2); opacity: 0.85; }
-body:not(.light) .site-footer {
-  background: rgba(167, 139, 250, 0.04);
-  border-top-color: rgba(167, 139, 250, 0.15);
-}
-@media (max-width: 900px) {
-  .site-footer { padding-left: 1.5rem; padding-right: 1.5rem; }
-  .site-footer-inner { font-size: 0.74rem; gap: 0.4rem; }
-}
 
-.author-book-pro-tag {
-  display: inline-block;
-  font-size: 0.62rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  padding: 0.18rem 0.45rem;
-  margin-right: 0.4rem;
-  border-radius: 4px;
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  color: #fff;
-  user-select: none;
-  cursor: default;
-}
-
-.post-card.post-flash {
-  animation: postFlash 1.4s ease-out;
-}
-@keyframes postFlash {
-  0%   { box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.0); }
-  20%  { box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.45), 0 8px 24px rgba(124, 58, 237, 0.20); }
-  100% { box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.0); }
-}
-
-/* ════════════════════════════════════════════════════════════════════════════
-   Post Detail Modal — opens when you click a post from search results
-   ════════════════════════════════════════════════════════════════════════════ */
-.post-detail-box {
-  max-width: 640px;
-  width: 100%;
-  max-height: 90vh;
-  display: flex;
-  flex-direction: column;
-  padding: 0;
-  overflow: hidden;
-}
-.post-detail-header {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0.6rem 0.8rem 0;
-  flex-shrink: 0;
-}
-.post-detail-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 1.2rem 1.2rem;
-}
-.post-detail-body .post-card {
-  margin: 0;
-  border: none;
-  background: transparent;
-  box-shadow: none;
-  animation: none;
-}
-.post-detail-body .empty,
-.post-detail-body .loading {
-  padding: 3rem 1rem;
-  text-align: center;
-  color: var(--text2);
-}
-@media (max-width: 720px) {
-  .post-detail-box { max-height: 95vh; }
-  .post-detail-body { padding: 0 0.85rem 0.85rem; }
+@media (max-width: 480px) {
+  .video-monet-options { grid-template-columns: 1fr; }
 }
 
 body:not(.light) .video-monet-option { background: linear-gradient(135deg, #1a1726, #221a32); border-color: rgba(255,255,255,0.10); }
@@ -9825,72 +9423,57 @@ body:not(.light) .video-monet-option-mode { background: rgba(255,255,255,0.10); 
   gap: 1rem;
   margin-bottom: 1rem;
 }
-/* Minimalist premium earnings cards — peso primary, touch of purple */
 .author-earnings-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  padding: 1.4rem 1.5rem;
-  background: #fff;
-  border: 1px solid rgba(17, 24, 39, 0.06);
-  border-radius: 16px;
-  transition: border-color 0.18s ease, box-shadow 0.2s ease;
-}
-.author-earnings-card:hover {
-  border-color: rgba(124, 58, 237, 0.18);
-  box-shadow: 0 6px 22px rgba(124, 58, 237, 0.06);
+  display: flex; align-items: center; gap: 1rem;
+  padding: 1.2rem 1.3rem;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, rgba(17, 24, 39, 0.08));
+  border-radius: 14px;
+  box-shadow: 0 2px 10px rgba(15, 10, 28, 0.04);
 }
 .author-earnings-available {
-  background: linear-gradient(135deg, #ffffff 0%, rgba(167, 139, 250, 0.04) 100%);
-  border-color: rgba(124, 58, 237, 0.16);
+  background: linear-gradient(135deg, #fffbeb, #fef3c7);
+  border-color: rgba(180, 83, 9, 0.20);
 }
 .author-earnings-pending {
-  background: #fff;
-  border-color: rgba(17, 24, 39, 0.06);
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.04), rgba(167, 139, 250, 0.06));
+  border-color: rgba(124, 58, 237, 0.16);
 }
-.author-earnings-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.author-earnings-icon {
+  width: 48px; height: 48px;
+  display: grid; place-items: center;
+  background: rgba(255,255,255,0.7);
+  border-radius: 14px;
+  font-size: 1.6rem;
+  flex-shrink: 0;
 }
+.author-earnings-meta { flex: 1; min-width: 0; }
 .author-earnings-label {
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   font-weight: 700;
   color: var(--text2);
+  margin-bottom: 0.18rem;
 }
-.author-earnings-amount-php {
-  font-size: 2.2rem;
+.author-earnings-value {
+  font-size: 1.4rem;
   font-weight: 800;
   color: var(--text);
-  letter-spacing: -0.02em;
-  line-height: 1.05;
+  letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
-  margin-top: 0.15rem;
 }
-.author-earnings-available .author-earnings-amount-php {
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-.author-earnings-amount-sub {
-  font-size: 0.84rem;
+.author-earnings-php {
+  font-size: 0.86rem;
   font-weight: 600;
   color: var(--text2);
-  font-variant-numeric: tabular-nums;
-  margin-top: 0.05rem;
-}
-.author-earnings-payout-btn {
-  align-self: flex-start;
-  margin-top: 0.7rem;
+  margin-left: 0.5rem;
 }
 .author-earnings-foot {
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   color: var(--text2);
-  margin-top: 0.5rem;
-  font-style: normal;
+  margin-top: 0.2rem;
+  font-style: italic;
 }
 
 /* KYC banner */
@@ -9961,271 +9544,9 @@ body:not(.light) .video-monet-option-mode { background: rgba(255,255,255,0.10); 
   .author-kyc-banner { flex-wrap: wrap; }
 }
 
-/* Payments Info — locked / read-only state */
-.pi-input:read-only,
-.pi-input[readonly] {
-  background: rgba(0, 0, 0, 0.025);
-  cursor: not-allowed;
-  color: var(--text2);
-}
-.pi-method-pill input:disabled + * { cursor: not-allowed; }
-.pi-method-pill:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-.pi-upload.pi-locked {
-  cursor: not-allowed;
-  opacity: 0.7;
-  pointer-events: none;
-}
-.pi-pending-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  padding: 0.85rem 1.05rem;
-  margin-bottom: 1rem;
-  background: linear-gradient(135deg, rgba(217,119,6,0.08), rgba(245,158,11,0.06));
-  border: 1px solid rgba(217,119,6,0.22);
-  border-radius: 12px;
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: #92400e;
-  line-height: 1.4;
-}
-body:not(.light) .pi-input:read-only,
-body:not(.light) .pi-input[readonly] {
-  background: rgba(255, 255, 255, 0.02);
-  color: rgba(255,255,255,0.55);
-}
-body:not(.light) .pi-pending-banner {
-  background: linear-gradient(135deg, rgba(217,119,6,0.18), rgba(245,158,11,0.12));
-  border-color: rgba(217,119,6,0.36);
-  color: #fcd34d;
-}
-
-/* ════════════════════════════════════════════════════════════════════════════
-   Home Feed v1 — For You / Following / Discover tabs (compact)
-   ════════════════════════════════════════════════════════════════════════════ */
-.feed-tabs {
-  display: flex;
-  gap: 0.3rem;
-  padding: 0.2rem 0 0.5rem;
-  margin: 0.4rem 0 0.5rem;
-}
-.feed-tab {
-  background: transparent;
-  border: none;
-  padding: 0.32rem 0.8rem;
-  border-radius: 999px;
-  font: inherit;
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: var(--text2);
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-.feed-tab:hover {
-  background: rgba(124, 58, 237, 0.06);
-  color: #6b21a8;
-}
-.feed-tab.active {
-  background: linear-gradient(135deg, #7c3aed, #a78bfa);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.20);
-}
-body:not(.light) .feed-tab { color: rgba(255, 255, 255, 0.65); }
-body:not(.light) .feed-tab:hover { background: rgba(167, 139, 250, 0.12); color: #ddd6fe; }
-body:not(.light) .feed-tab.active { background: linear-gradient(135deg, #a78bfa, #c4b5fd); color: #1a1428; }
-
-@media (max-width: 600px) {
-  .feed-tab { padding: 0.3rem 0.7rem; font-size: 0.76rem; }
-}
-
-/* ════════════════════════════════════════════════════════════════════════════
-   Withdrawal modal — read-only saved-account card + min-payout popup
-   ════════════════════════════════════════════════════════════════════════════ */
-
-.payout-account-card {
-  margin: 0.85rem 0 1rem;
-  padding: 0.95rem 1.1rem;
-  background: linear-gradient(135deg, rgba(124, 58, 237, 0.05), rgba(167, 139, 250, 0.07));
-  border: 1px solid rgba(124, 58, 237, 0.18);
-  border-radius: 12px;
-}
-.payout-account-head {
-  font-size: 0.7rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text2);
-  margin-bottom: 0.25rem;
-}
-.payout-account-method {
-  font-size: 1rem;
-  font-weight: 800;
-  color: #6b21a8;
-  margin-bottom: 0.1rem;
-}
-.payout-account-name {
-  font-size: 0.9rem;
-  color: var(--text);
-  font-weight: 600;
-}
-.payout-account-foot {
-  font-size: 0.74rem;
-  color: var(--text2);
-  margin-top: 0.5rem;
-  line-height: 1.4;
-}
-body:not(.light) .payout-account-card {
-  background: linear-gradient(135deg, rgba(167, 139, 250, 0.10), rgba(124, 58, 237, 0.08));
-  border-color: rgba(167, 139, 250, 0.26);
-}
-body:not(.light) .payout-account-method { color: #c4b5fd; }
-
-/* Min-payout popup */
-.min-payout-body {
-  text-align: center;
-  padding: 0.5rem 0 1rem;
-}
-.min-payout-icon {
-  font-size: 2.6rem;
-  margin-bottom: 0.5rem;
-}
-.min-payout-msg {
-  font-size: 0.95rem;
-  line-height: 1.5;
-  color: var(--text);
-  margin-bottom: 1.1rem;
-}
-.min-payout-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin: 0 auto;
-  max-width: 280px;
-  padding: 0.85rem 1rem;
-  background: rgba(0, 0, 0, 0.025);
-  border-radius: 10px;
-}
-.min-payout-progress-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.88rem;
-  color: var(--text2);
-  font-variant-numeric: tabular-nums;
-}
-.min-payout-progress-row strong { color: var(--text); }
-.min-payout-progress-row-need {
-  border-top: 1px dashed rgba(124, 58, 237, 0.25);
-  padding-top: 0.4rem;
-  margin-top: 0.2rem;
-}
-.min-payout-progress-row-need strong { color: #7c3aed; }
-
-body:not(.light) .min-payout-progress {
-  background: rgba(255, 255, 255, 0.04);
-}
-body:not(.light) .min-payout-progress-row-need strong { color: #c4b5fd; }
-
-/* ════════════════════════════════════════════════════════════════════════════
-   Collapsible post bodies — Facebook-style "See more / less" with tap-to-toggle
-   ════════════════════════════════════════════════════════════════════════════ */
-
-.collapsible-body {
-  position: relative;
-  cursor: pointer;
-  /* Reserve a tiny right-padding so the toggle text doesn't crowd the edge */
-  padding-bottom: 0;
-  transition: max-height 0.18s ease;
-}
-.collapsible-body.is-collapsed {
-  display: -webkit-box;
-  -webkit-line-clamp: 6;
-  line-clamp: 6;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-/* Soft gradient fade at the bottom of the truncated text — signals "more below" */
-.collapsible-body.is-collapsed::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 2.4em;
-  pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    rgba(255, 255, 255, 0) 0%,
-    rgba(255, 255, 255, 0.85) 60%,
-    rgba(255, 255, 255, 1) 100%
-  );
-}
-
-/* Tap-anywhere hint: subtle hover dims the body slightly so users sense it's clickable */
-.collapsible-body:hover { filter: brightness(0.985); }
-
-/* The "See more" / "See less" inline label — premium purple, never blue */
-.collapsible-toggle {
-  display: inline-block;
-  margin-top: 0.45rem;
-  color: #7c3aed;
-  font-weight: 700;
-  font-size: 0.9rem;
-  cursor: pointer;
-  user-select: none;
-}
-.collapsible-toggle:hover {
-  color: #6b21a8;
-  text-decoration: underline;
-}
-/* When inside the collapsed body, the toggle floats inline above the gradient */
-.collapsible-body.is-collapsed .collapsible-toggle {
-  position: absolute;
-  bottom: 0.2rem;
-  right: 0;
-  background: #fff;
-  padding: 0 0.3rem 0 0.6rem;
-  z-index: 1;
-}
-
-/* Dark mode — match the post card bg so the gradient doesn't clash */
-body:not(.light) .collapsible-body.is-collapsed::after {
-  background: linear-gradient(
-    to bottom,
-    rgba(15, 10, 28, 0) 0%,
-    rgba(15, 10, 28, 0.85) 60%,
-    rgba(15, 10, 28, 1) 100%
-  );
-}
-body:not(.light) .collapsible-toggle { color: #c4b5fd; }
-body:not(.light) .collapsible-toggle:hover { color: #ddd6fe; }
-body:not(.light) .collapsible-body.is-collapsed .collapsible-toggle {
-  background: var(--bg2, #1a1428);
-}
-
-/* Sign-out confirmation popup */
-.signout-body {
-  text-align: center;
-  padding: 0.5rem 0 1rem;
-}
-.signout-icon {
-  font-size: 2.6rem;
-  margin-bottom: 0.4rem;
-}
-.signout-msg {
-  font-size: 0.92rem;
-  line-height: 1.5;
-  color: var(--text2);
-  margin: 0;
-}
-
 body:not(.light) .earnings-row { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
-body:not(.light) .author-earnings-card { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
-body:not(.light) .author-earnings-available { background: linear-gradient(135deg, rgba(167,139,250,0.10) 0%, rgba(124,58,237,0.04) 100%); border-color: rgba(167,139,250,0.24); }
-body:not(.light) .author-earnings-available .author-earnings-amount-php { background: linear-gradient(135deg, #a78bfa, #c4b5fd); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-body:not(.light) .earnings-breakdown-icon { background: rgba(167,139,250,0.12); color: #c4b5fd; }
+body:not(.light) .author-earnings-card { background: rgba(255,255,255,0.03); }
+body:not(.light) .author-earnings-available { background: linear-gradient(135deg, rgba(251,191,36,0.10), rgba(245,158,11,0.06)); }
 
 /* ════════════════════════════════════════════════════════════════════════════
    PHASE 7 — Admin Payouts tab
@@ -10365,46 +9686,35 @@ body:not(.light) .earnings-breakdown-icon { background: rgba(167,139,250,0.12); 
   margin: 1.4rem 0 1.5rem;
 }
 .earnings-breakdown-card {
-  display: flex; align-items: center; gap: 0.95rem;
-  padding: 1.1rem 1.2rem;
-  background: #fff;
-  border: 1px solid rgba(17, 24, 39, 0.06);
-  border-radius: 14px;
-  transition: border-color 0.18s ease, box-shadow 0.2s ease;
-}
-.earnings-breakdown-card:hover {
-  border-color: rgba(124, 58, 237, 0.18);
-  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.05);
+  display: flex; align-items: center; gap: 0.85rem;
+  padding: 1rem 1.1rem;
+  background: var(--card, #fff);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 12px;
 }
 .earnings-breakdown-icon {
-  width: 38px; height: 38px;
-  border-radius: 10px;
+  width: 42px; height: 42px;
+  border-radius: 12px;
   display: grid; place-items: center;
-  background: rgba(124, 58, 237, 0.08);
-  color: #7c3aed;
+  color: #fff;
   flex-shrink: 0;
 }
-.earnings-breakdown-meta { min-width: 0; flex: 1; }
+.earnings-breakdown-meta { min-width: 0; }
 .earnings-breakdown-label {
-  font-size: 0.7rem; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 0.72rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em;
   color: var(--text2);
-  margin-bottom: 0.2rem;
+  margin-bottom: 0.18rem;
+}
+.earnings-breakdown-value {
+  font-size: 1.05rem; font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 .earnings-breakdown-php {
-  font-size: 1.15rem;
-  font-weight: 800;
-  color: var(--text);
-  letter-spacing: -0.01em;
+  font-size: 0.78rem; color: var(--text2);
+  margin-top: 0.1rem;
   font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-}
-.earnings-breakdown-sub {
-  font-size: 0.74rem;
-  color: var(--text2);
-  margin-top: 0.15rem;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
 }
 
 .payments-info-help {
@@ -10747,69 +10057,3 @@ body:not(.light) .lock-cost-select { background: rgba(255,255,255,0.06); border-
 body:not(.light) .chapter-meta-strip.wc-under .chapter-wc-hint { background: rgba(217, 119, 6, 0.20); color: #fcd34d; }
 body:not(.light) .chapter-meta-strip.wc-ok    .chapter-wc-hint { background: rgba(34, 197, 94, 0.20);  color: #6ee7b7; }
 body:not(.light) .chapter-meta-strip.wc-over  .chapter-wc-hint { background: rgba(220, 38, 38, 0.20);  color: #fca5a5; }
-
-/* ════════════════════════════════════════════════════════════════════════════
-   Edit Profile — hints, counters, cooldown banner
-   ════════════════════════════════════════════════════════════════════════════ */
-
-.edit-profile-hint {
-  font-size: 0.75rem;
-  color: var(--text2);
-  margin: -0.5rem 0 0.85rem;
-  line-height: 1.45;
-}
-
-.edit-profile-hint.is-locked {
-  color: #92400e;
-  background: rgba(217, 119, 6, 0.10);
-  border: 1px solid rgba(217, 119, 6, 0.20);
-  padding: 0.5rem 0.7rem;
-  border-radius: 8px;
-  font-weight: 600;
-  margin: 0.4rem 0 0.85rem;
-}
-
-.edit-profile-counter {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.74rem;
-  font-weight: 600;
-  color: var(--text2);
-  font-variant-numeric: tabular-nums;
-  margin: -0.55rem 0 0.85rem;
-}
-.edit-profile-counter .is-warn { color: #d97706; }
-.edit-profile-counter .is-bad  { color: #dc2626; }
-
-/* Disabled (read-only) display name input during cooldown */
-.form-input:disabled,
-.form-input[readonly] {
-  opacity: 0.7;
-  cursor: not-allowed;
-  background: rgba(0, 0, 0, 0.04);
-}
-
-body:not(.light) .edit-profile-hint.is-locked {
-  background: rgba(217, 119, 6, 0.16);
-  border-color: rgba(217, 119, 6, 0.32);
-  color: #fcd34d;
-}
-body:not(.light) .form-input:disabled,
-body:not(.light) .form-input[readonly] {
-  background: rgba(255, 255, 255, 0.03);
-}
-
-/* Edit profile — Country + City row */
-.edit-location-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.6rem;
-  margin-bottom: 0.85rem;
-}
-.edit-location-row select,
-.edit-location-row input {
-  margin-bottom: 0;
-}
-@media (max-width: 600px) {
-  .edit-location-row { grid-template-columns: 1fr; }
-}
