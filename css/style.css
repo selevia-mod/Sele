@@ -5036,7 +5036,6 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
    ════════════════════════════════════════════════════════════════════════════ */
 
 .genre-picker {
-<<<<<<< HEAD
   position: relative;
   margin: 0.5rem 0 1.1rem;
   border: 1px solid rgba(124, 58, 237, 0.16);
@@ -5047,13 +5046,6 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
   overflow: hidden;
   box-shadow: 0 1px 0 rgba(124, 58, 237, 0.04), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
   transition: border-color 0.18s, box-shadow 0.18s;
-=======
-  margin: 0.4rem 0 1rem;
-  padding: 0.7rem 0.85rem 0.55rem;
-  border: 1px solid rgba(124, 58, 237, 0.15);
-  border-radius: 12px;
-  background: rgba(124, 58, 237, 0.03);
->>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
 .genre-picker:focus-within {
   border-color: rgba(124, 58, 237, 0.35);
@@ -5062,7 +5054,6 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
 
 /* ─── Sticky counter header ─── */
 .genre-picker-counter {
-<<<<<<< HEAD
   display: flex;
   align-items: center;
   gap: 0.45rem;
@@ -5077,13 +5068,6 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
   color: #6b7280;
   letter-spacing: 0.01em;
   text-transform: uppercase;
-=======
-  font-size: 0.74rem;
-  font-weight: 600;
-  color: #6b7280;
-  margin-bottom: 0.55rem;
-  letter-spacing: -0.005em;
->>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
 .genre-picker-count {
   display: inline-flex;
@@ -5108,7 +5092,6 @@ body:not(.light) .recommend-card-author { color: #9ca3af; }
 }
 /* Bounce on count change is just nice — done via JS class toggle, but baseline is here */
 
-<<<<<<< HEAD
 /* ─── Scrollable chip area — exactly 3 rows visible ─── */
 .genre-picker-chips {
   display: flex;
@@ -5155,18 +5138,6 @@ body:not(.light) .genre-picker-counter {
 body:not(.light) .genre-picker-chips::-webkit-scrollbar-thumb {
   background: linear-gradient(180deg, #a78bfa, #7c3aed);
   border-color: rgba(255, 255, 255, 0.06);
-=======
-/* Bounded scroll area — ~3 rows visible, smooth scroll for the rest */
-.genre-picker-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-  max-height: 132px;       /* ~3 rows of chips */
-  overflow-y: auto;
-  padding-right: 0.3rem;   /* room for scrollbar so chips don't shift */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(124, 58, 237, 0.3) transparent;
->>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
 .genre-picker-chips::-webkit-scrollbar { width: 6px; }
 .genre-picker-chips::-webkit-scrollbar-track { background: transparent; }
@@ -5187,18 +5158,11 @@ body:not(.light) .genre-picker-chips::-webkit-scrollbar-thumb:hover { background
   background: rgba(255, 255, 255, 0.85);
   border: 1px solid rgba(17, 24, 39, 0.08);
   border-radius: 999px;
-<<<<<<< HEAD
   padding: 0.34rem 0.78rem;
-=======
-  padding: 0.32rem 0.7rem;
->>>>>>> 4de586e (Phase 6 batched insert + progress)
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-<<<<<<< HEAD
   transition: border-color 0.18s, color 0.18s, background 0.18s, transform 0.12s, box-shadow 0.18s;
-=======
->>>>>>> 4de586e (Phase 6 batched insert + progress)
 }
 .genre-chip:hover {
   border-color: rgba(124, 58, 237, 0.35);
