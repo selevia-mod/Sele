@@ -10826,3 +10826,297 @@ body:not(.light) .form-input[readonly] {
 @media (max-width: 600px) {
   .edit-location-row { grid-template-columns: 1fr; }
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Books Page v2 — mirrors the mobile-app shape:
+   tabs + multiple curated sections + horizontal-scroll tracks of v2 book cards
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Tab bar ────────────────────────────────────────────────────────────── */
+.book-tabs {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin: 0.4rem 0 1.4rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.book-tabs::-webkit-scrollbar { display: none; }
+.book-tab {
+  flex: 0 0 auto;
+  padding: 0.55rem 1.15rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text2);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+.book-tab:hover { background: var(--bg3); color: var(--text); }
+.book-tab.active {
+  background: var(--purple, #7c3aed);
+  color: #fff;
+  border-color: transparent;
+}
+body.light .book-tab.active { background: #7c3aed; }
+
+/* ── Tab panel ──────────────────────────────────────────────────────────── */
+.book-tab-panel { display: block; }
+.book-tab-panel:not(.active) { display: none; }
+
+/* ── Section (Weekly Featured / Fresh Reads / etc.) ─────────────────────── */
+.book-section {
+  margin: 0 0 2rem;
+}
+.book-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0.25rem 0.85rem;
+}
+.book-section-title {
+  font-size: 1.4rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+}
+.book-section-see-all {
+  background: transparent;
+  border: none;
+  color: var(--purple, #7c3aed);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+.book-section-see-all:hover { background: rgba(124,58,237,0.10); text-decoration: underline; }
+body:not(.light) .book-section-see-all { color: #c4b5fd; }
+body:not(.light) .book-section-see-all:hover { color: #ddd6fe; background: rgba(196,181,253,0.10); }
+
+/* ── Horizontal scroll track ────────────────────────────────────────────── */
+.book-section-track {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity;
+  padding: 0.25rem 0.25rem 1rem;
+  scrollbar-width: thin;
+}
+.book-section-track::-webkit-scrollbar { height: 8px; }
+.book-section-track::-webkit-scrollbar-track { background: transparent; }
+.book-section-track::-webkit-scrollbar-thumb {
+  background: var(--bg3);
+  border-radius: 4px;
+}
+.book-section-track::-webkit-scrollbar-thumb:hover { background: var(--border); }
+.book-section-track .loading,
+.book-section-track .book-section-empty {
+  flex: 1; min-height: 240px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text3);
+  font-size: 0.9rem;
+}
+
+/* ── v2 book card (matches mobile look: cover, badge ribbon, stats) ─────── */
+.book-card-v2 {
+  flex: 0 0 200px;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  transition: transform 0.18s ease;
+}
+.book-card-v2:hover { transform: translateY(-3px); }
+.book-card-v2:active { transform: translateY(-1px); }
+
+.book-card-v2-cover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2/3;
+  border-radius: 14px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #d6cdf6 0%, #ece8fd 100%);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.18);
+  transition: box-shadow 0.18s ease;
+}
+.book-card-v2:hover .book-card-v2-cover {
+  box-shadow: 0 14px 32px rgba(124,58,237,0.30);
+}
+.book-card-v2-cover img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.book-card-v2-cover-placeholder {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text3);
+  font-size: 2.2rem;
+}
+
+/* ── Corner ribbon badge: Free / Paid ───────────────────────────────────── */
+.book-card-v2-badge {
+  position: absolute;
+  top: 0; right: 0;
+  width: 86px;
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #fff;
+  padding: 0.32rem 0;
+  transform: rotate(45deg) translate(22px, -8px);
+  transform-origin: 100% 0;
+  text-transform: capitalize;
+  pointer-events: none;
+  user-select: none;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+}
+.book-card-v2-badge-free {
+  background: linear-gradient(135deg, #10b981, #059669);
+}
+.book-card-v2-badge-paid {
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+}
+
+/* ── Card body ──────────────────────────────────────────────────────────── */
+.book-card-v2-body {
+  padding: 0.7rem 0.15rem 0.2rem;
+}
+.book-card-v2-title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--text);
+  margin: 0 0 0.15rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.book-card-v2-author {
+  font-size: 0.8rem;
+  color: var(--text3);
+  margin: 0 0 0.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Stats row (rating + view count) ────────────────────────────────────── */
+.book-card-v2-stats {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.book-card-v2-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.book-card-v2-stat-rating {
+  background: rgba(251, 191, 36, 0.18);
+  color: #b45309;
+}
+body:not(.light) .book-card-v2-stat-rating {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fcd34d;
+}
+.book-card-v2-stat-views {
+  background: rgba(124, 58, 237, 0.14);
+  color: #6d28d9;
+}
+body:not(.light) .book-card-v2-stat-views {
+  background: rgba(167, 139, 250, 0.18);
+  color: #c4b5fd;
+}
+
+/* ── Discover tab — genre-grouped rows ──────────────────────────────────── */
+.book-discover-genres { display: block; }
+.book-discover-genre-head {
+  display: flex; align-items: center; gap: 0.5rem;
+  margin: 0 0.25rem 0.6rem;
+}
+.book-discover-genre-name {
+  font-size: 1.3rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--text);
+}
+
+/* ── Library / Reading List collection header ───────────────────────────── */
+.book-collection-head {
+  margin: 0.4rem 0.25rem 1.2rem;
+}
+.book-collection-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0 0 0.25rem;
+}
+.book-collection-sub {
+  font-size: 0.9rem;
+  color: var(--text3);
+  margin: 0;
+}
+.book-collection-empty {
+  text-align: center;
+  padding: 3.5rem 1rem;
+  color: var(--text3);
+}
+.book-collection-empty h3 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text2);
+  margin: 0 0 0.4rem;
+}
+.book-collection-empty p { margin: 0; font-size: 0.92rem; }
+
+/* ── See All sub-view (within the books page) ───────────────────────────── */
+.book-see-all { display: block; }
+.book-see-all-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0.4rem 0.25rem 1.2rem;
+}
+
+/* ── Mobile tweaks ──────────────────────────────────────────────────────── */
+@media (max-width: 700px) {
+  .book-card-v2 { flex-basis: 150px; }
+  .book-card-v2-title { font-size: 0.92rem; }
+  .book-card-v2-author { font-size: 0.74rem; }
+  .book-section-title { font-size: 1.15rem; }
+  .book-collection-title { font-size: 1.25rem; }
+  .book-card-v2-badge { width: 76px; font-size: 0.65rem; transform: rotate(45deg) translate(20px, -7px); }
+}
