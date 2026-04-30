@@ -11702,38 +11702,73 @@ async function loadConversationList() {
     `;
   }
 
-  // Fetch all conversations I'm a participant of (uses participant-based RLS).
-  // Two-step: get my participant rows, then load conversations for those ids.
-  const { data: myParts, error: partErr } = await supabase
-    .from('conversation_participants')
-    .select('conversation_id')
-    .eq('user_id', currentUser.id);
+  // Fetch in two parallel queries — matches the mobile pattern in
+  // selebox-mobile/lib/messages-supabase.js so both clients agree on
+  // what "my conversations" means.
+  //
+  //   1. 1:1 conversations: read directly from `conversations` filtered
+  //      by `user_a` or `user_b`. The row itself encodes membership; no
+  //      participant rows are required (and after the Phase-2 cleanup
+  //      migration, no 1:1 participant rows EXIST). This eliminates
+  //      the prior dependency on `conversation_participants` carrying
+  //      a row for every 1:1.
+  //   2. Group conversations: join via `conversation_participants` and
+  //      filter the joined row to `is_group=true` so a stale 1:1
+  //      participant row could never accidentally surface here as a
+  //      phantom group.
+  //
+  // We deliberately don't push `.limit(100)` into either query — a user
+  // with 80 active 1:1s and 50 groups should still see the most recent
+  // 100 across both, not 100 of one and miss the other. The slice
+  // after merge handles the cap.
+  const [oneOnOneRes, groupPartsRes] = await Promise.all([
+    supabase
+      .from('conversations')
+      .select('id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
+      .eq('is_group', false)
+      .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`),
+    supabase
+      .from('conversation_participants')
+      .select('conversations!inner(id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b)')
+      .eq('user_id', currentUser.id)
+      .eq('conversations.is_group', true),
+  ]);
 
-  if (partErr) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(partErr.message)}</div>`;
+  if (oneOnOneRes.error) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(oneOnOneRes.error.message)}</div>`;
     return;
   }
-  const convIds = (myParts || []).map(p => p.conversation_id);
-  if (!convIds.length) {
-    wrap.innerHTML = DM_EMPTY_HTML;
-    dmState.conversations = [];
-    updateUnreadBadge(0);
+  if (groupPartsRes.error) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(groupPartsRes.error.message)}</div>`;
     return;
   }
 
-  const { data: convs, error } = await supabase
-    .from('conversations')
-    .select('id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
-    .in('id', convIds)
-    .order('last_message_at', { ascending: false, nullsFirst: false })
-    .limit(100);
+  const oneOnOne = oneOnOneRes.data || [];
+  const groupRows = (groupPartsRes.data || []).map(p => p.conversations).filter(Boolean);
 
-  if (error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(error.message)}</div>`;
-    return;
-  }
+  // Defensive merge — dedupe by id and drop any 1:1 row where the
+  // current user isn't actually on user_a or user_b. The dedup guards
+  // against the same conversation appearing in both query results
+  // (shouldn't happen now, but a stray 1:1 cp row pre-Phase-2 could
+  // theoretically slip through). The membership check guards against
+  // a 1:1 row leaking in via any future code change and getting
+  // mis-rendered with the wrong username.
+  const seen = new Set();
+  const convs = [...oneOnOne, ...groupRows]
+    .filter(c => {
+      if (!c?.id || seen.has(c.id)) return false;
+      seen.add(c.id);
+      if (!c.is_group && c.user_a !== currentUser.id && c.user_b !== currentUser.id) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+      const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+      return tb - ta;
+    })
+    .slice(0, 100);
 
-  if (!convs || !convs.length) {
+  if (!convs.length) {
     wrap.innerHTML = DM_EMPTY_HTML;
     dmState.conversations = [];
     updateUnreadBadge(0);
