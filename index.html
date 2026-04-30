@@ -6,7 +6,7 @@
   <title>Selebox All-In-One</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css"/>
-  <link rel="stylesheet" href="css/style.css?v=2026-04-30-books-final"/>
+  <link rel="stylesheet" href="css/style.css?v=2026-04-30-books-prod"/>
 
   <!-- ─── Google Analytics ─────────────────────────────────────────────── -->
   <!-- Replace G-XXXXXXXXXX with your real Measurement ID from
@@ -283,56 +283,124 @@
       </div>
     </div>
 
-    <!-- Book (Reader) Page -->
+    <!-- Books Page — mirrors the mobile-app layout: tabbed sections with curated rows -->
     <div id="bookPage" style="display:none">
-      <!-- Minimalist header — just the title, premium gradient -->
+      <!-- Header -->
       <div class="books-header-min">
         <h1 class="books-title-min">Books</h1>
       </div>
 
-      <!-- Recommended for you carousel (logged-in only, populated by JS) -->
-      <div class="book-recommend-rail" id="bookRecommendRail" style="display:none">
-        <div class="book-recommend-head">
-          <h3 class="book-recommend-title">Recommended for you</h3>
-          <span class="book-recommend-sub" id="bookRecommendSub">Based on your reading taste</span>
-        </div>
-        <div class="book-recommend-track" id="bookRecommendTrack"></div>
+      <!-- Tabs: For You / Discover / Ranking / Library / Reading List -->
+      <div class="book-tabs" id="bookTabs" role="tablist">
+        <button class="book-tab active" data-book-tab="foryou"     role="tab" aria-selected="true">For You</button>
+        <button class="book-tab"        data-book-tab="discover"   role="tab">Discover</button>
+        <button class="book-tab"        data-book-tab="ranking"    role="tab">Ranking</button>
+        <button class="book-tab"        data-book-tab="library"    role="tab">Library</button>
+        <button class="book-tab"        data-book-tab="readinglist" role="tab">Reading List</button>
       </div>
 
-      <!-- Genre / sort bar — single-line horizontal scroll, adaptive -->
-      <div class="book-toolbar">
-        <div class="book-genre-chips" id="bookGenreChips">
-          <!-- Populated by renderBookChips() based on user's reading history + platform popularity -->
+      <!-- Tab panels — only the active one is visible. Each tab is rendered lazily. -->
+      <div class="book-tab-panel active" id="bookTabForYou" data-book-panel="foryou">
+        <!-- Weekly Featured (Editor's Picks) -->
+        <div class="book-section" data-section="weeklyFeatured">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Weekly Featured</h2>
+            <button class="book-section-see-all" data-see-all="weeklyFeatured" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="weeklyFeatured"></div>
         </div>
-        <div class="book-sort">
-          <select id="bookSortSelect" class="book-sort-select" title="Sort books">
-            <option value="trending">🔥 Trending</option>
-            <option value="recent">✨ Newest</option>
-            <option value="most-liked">❤️ Most loved</option>
-            <option value="most-read">👁 Most read</option>
-            <option value="completed">📘 Completed</option>
-            <option value="editors-pick">⭐ Editor's Pick</option>
-          </select>
+
+        <!-- Fresh Reads (newest published) -->
+        <div class="book-section" data-section="freshReads">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Fresh Reads</h2>
+            <button class="book-section-see-all" data-see-all="freshReads" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="freshReads"></div>
+        </div>
+
+        <!-- Completed & Excellent Works -->
+        <div class="book-section" data-section="completedExcellent">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Completed &amp; Excellent Works</h2>
+            <button class="book-section-see-all" data-see-all="completedExcellent" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="completedExcellent"></div>
         </div>
       </div>
 
-      <!-- Books grid + empty state -->
-      <div id="bookGrid" class="book-grid">
-        <div class="loading">Loading books...</div>
-      </div>
-      <div id="bookGridSentinel" class="book-grid-sentinel" style="display:none">
-        <div class="book-grid-loadmore">Loading more books…</div>
-      </div>
-      <div id="bookEmpty" class="page-empty" style="display:none">
-        <div class="page-empty-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
+      <!-- Discover tab: genre-grouped rows. -->
+      <div class="book-tab-panel" id="bookTabDiscover" data-book-panel="discover" style="display:none">
+        <div class="book-discover-genres" id="bookDiscoverGenres">
+          <div class="loading">Loading genres…</div>
         </div>
-        <h2 class="page-empty-title">No books to show</h2>
-        <p class="page-empty-body">Try a different genre or be the first to publish — head to <strong>Author</strong> and start writing.</p>
-        <button class="btn btn-purple btn-sm" id="btnGoToAuthor">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/></svg>
-          Become an author
-        </button>
+      </div>
+
+      <!-- Ranking tab: Most Loved + Most Read rows. -->
+      <div class="book-tab-panel" id="bookTabRanking" data-book-panel="ranking" style="display:none">
+        <div class="book-section" data-section="mostLoved">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Most Loved</h2>
+            <button class="book-section-see-all" data-see-all="mostLoved" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="mostLoved"></div>
+        </div>
+        <div class="book-section" data-section="mostRead">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Most Read</h2>
+            <button class="book-section-see-all" data-see-all="mostRead" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="mostRead"></div>
+        </div>
+        <div class="book-section" data-section="trending">
+          <div class="book-section-head">
+            <h2 class="book-section-title">Trending This Week</h2>
+            <button class="book-section-see-all" data-see-all="trending" type="button">See All</button>
+          </div>
+          <div class="book-section-track" data-track="trending"></div>
+        </div>
+      </div>
+
+      <!-- Library tab: books the user has read. -->
+      <div class="book-tab-panel" id="bookTabLibrary" data-book-panel="library" style="display:none">
+        <div class="book-collection-head">
+          <h2 class="book-collection-title">Your Library</h2>
+          <p class="book-collection-sub">Books you've read on Selebox.</p>
+        </div>
+        <div class="book-grid" id="bookLibraryGrid">
+          <div class="loading">Loading your library…</div>
+        </div>
+        <div class="book-collection-empty" id="bookLibraryEmpty" style="display:none">
+          <h3>No reads yet</h3>
+          <p>Open a book to start your library.</p>
+        </div>
+      </div>
+
+      <!-- Reading List tab: bookmarks. -->
+      <div class="book-tab-panel" id="bookTabReadingList" data-book-panel="readinglist" style="display:none">
+        <div class="book-collection-head">
+          <h2 class="book-collection-title">Reading List</h2>
+          <p class="book-collection-sub">Books you've bookmarked to read later.</p>
+        </div>
+        <div class="book-grid" id="bookReadingListGrid">
+          <div class="loading">Loading your reading list…</div>
+        </div>
+        <div class="book-collection-empty" id="bookReadingListEmpty" style="display:none">
+          <h3>Nothing saved yet</h3>
+          <p>Tap the bookmark icon on any book to add it here.</p>
+        </div>
+      </div>
+
+      <!-- See All view (in-page sub-view, opens when user taps any "See All" link) -->
+      <div class="book-see-all" id="bookSeeAllView" style="display:none">
+        <button class="btn btn-ghost btn-sm" id="btnBookSeeAllBack">← Back</button>
+        <h2 class="book-see-all-title" id="bookSeeAllTitle">All Books</h2>
+        <div class="book-grid" id="bookSeeAllGrid">
+          <div class="loading">Loading…</div>
+        </div>
+        <div class="book-grid-sentinel" id="bookSeeAllSentinel" style="display:none">
+          <div class="book-grid-loadmore">Loading more books…</div>
+        </div>
       </div>
     </div>
 
@@ -1950,6 +2018,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
-<script type="module" src="js/app.js?v=2026-04-30-books-final"></script>
+<script type="module" src="js/app.js?v=2026-04-30-books-prod"></script>
 </body>
 </html>
