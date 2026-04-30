@@ -1369,20 +1369,24 @@ function setupCollapsibleBodies(root) {
     el.dataset.collapseChecked = '1';
     const id = el.dataset.postId;
 
-    // First pass: collapse and measure. If content fits without overflow, leave it.
-    el.classList.add('is-collapsed');
-    requestAnimationFrame(() => {
-      const overflows = el.scrollHeight > el.clientHeight + 2;
-      if (!overflows) {
-        // Short post — no toggle needed.
-        el.classList.remove('is-collapsed');
-        return;
-      }
+    // Measure overflow against the SAME max-height the .is-collapsed CSS uses,
+    // computed from the actual line-height so it adapts if styles change.
+    const measureAndDecide = () => {
+      const cs = getComputedStyle(el);
+      const lineHeight = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) * 1.5);
+      const maxLines = 6;
+      const cap = lineHeight * maxLines;
+      // Read natural height BEFORE applying clamp — most reliable across browsers.
+      const naturalHeight = el.scrollHeight;
+      const overflows = naturalHeight > cap + 4; // small fudge for sub-pixel layout
 
-      // Restore expanded state if user already opened this post earlier this session
+      if (!overflows) return; // short post → no toggle, no clamp
+
+      // Default to collapsed; restore previously-expanded state for this session
       if (id && _expandedPosts.has(id)) {
-        el.classList.remove('is-collapsed');
         el.classList.add('is-expanded');
+      } else {
+        el.classList.add('is-collapsed');
       }
 
       // Append the See more / See less label inside the body itself
@@ -1407,7 +1411,23 @@ function setupCollapsibleBodies(root) {
           else          _expandedPosts.delete(id);
         }
       });
-    });
+    };
+
+    // Two-stage measure: once now, once after fonts load. A custom-font swap
+    // can change the natural height; without the second pass, posts that
+    // *just* overflow may be left without a toggle.
+    requestAnimationFrame(measureAndDecide);
+    if (document.fonts && typeof document.fonts.ready?.then === 'function') {
+      document.fonts.ready.then(() => {
+        if (el.dataset.collapseChecked === '1' && !el.querySelector('.collapsible-toggle')) {
+          // Re-run measurement once fonts are ready (idempotent — toggle existence guard)
+          el.dataset.collapseChecked = '';
+          el.classList.remove('is-collapsed', 'is-expanded');
+          el.dataset.collapseChecked = '1';
+          measureAndDecide();
+        }
+      });
+    }
   });
 }
 
