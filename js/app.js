@@ -2863,6 +2863,10 @@ let viewingProfileId = null;
 function showFeed() {
   hideAllMainPages();
   feedEl.style.display = '';
+  // Re-show the feed tabs (For You / Following / Discover) — hideAllMainPages
+  // hid them on the way in.
+  const feedTabs = document.getElementById('feedTabs');
+  if (feedTabs) feedTabs.style.display = '';
   // storiesEl intentionally untouched — inline display:none in HTML keeps it hidden.
   // To bring stories back, remove `style="display:none"` from #storiesRow in index.html.
   composeEl.style.display = '';
@@ -4594,6 +4598,11 @@ function hideAllMainPages() {
   // Sibling sentinels (live outside the page divs) — also hide
   const feedSentinel = document.getElementById('feedSentinel');
   if (feedSentinel) feedSentinel.style.display = 'none';
+  // Feed tabs (For You / Following / Discover) live outside #feed too,
+  // so they need explicit hiding on nav-away — otherwise they leak onto
+  // Store, Videos, Books, etc.
+  const feedTabs = document.getElementById('feedTabs');
+  if (feedTabs) feedTabs.style.display = 'none';
   // Reset scroll on every page nav so tabs always start at the top.
   scrollToTop();
 }
