@@ -98,29 +98,65 @@ async function loadInbox() {
   const subEl  = document.getElementById('inboxSubtitle');
   listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
 
+  // Migrated from `post_reports` → unified `content_reports` table
+  // (migration_content_reports_supabase.sql). Now captures reports across
+  // posts / videos / books / chapters / comments / users / messages.
+  // Existing post_reports rows were backfilled by the migration so the
+  // historical queue is preserved.
+  //
+  // Field mapping vs the old query:
+  //   post_id      → content_id (text — UUID for posts/videos/books, Appwrite
+  //                               hex for users)
+  //   details      → notes
+  //   reason       → reason  (unchanged)
+  //   status       → status  (unchanged)
+  //   created_at   → created_at  (unchanged)
+  //   reporter_id  → reporter_id (unchanged, but now text not uuid)
+  //   (new)        → content_type ('post' | 'video' | 'book' | 'chapter' |
+  //                                'comment' | 'user' | 'message')
   let q = supabase
-    .from('post_reports')
-    .select('id, reason, details, status, created_at, reporter_id, post_id')
+    .from('content_reports')
+    .select('id, reason, notes, status, created_at, reporter_id, content_id, content_type, owner_id')
     .order('created_at', { ascending: true })
     .limit(100);
 
   if (filter !== 'all') q = q.eq('status', filter);
 
-  const { data: reports, error } = await q;
+  const { data: allReports, error } = await q;
   if (error) {
     listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
     return;
   }
-  if (!reports.length) {
+  if (!allReports.length) {
     listEl.innerHTML = `<div class="admin-empty">No ${filter === 'all' ? '' : filter + ' '}reports.</div>`;
     subEl.textContent = '0 reports';
     document.getElementById('inboxCount').textContent = '0';
     return;
   }
 
+  // Split: post reports get the full rendering with hydrated post body +
+  // mod actions. Other content types (video / book / chapter / user / chat)
+  // render in a compact list at the bottom — basic info + dismiss action.
+  // Full per-type UIs land in follow-ups; right now mods at least SEE
+  // every incoming report and can dismiss / track them.
+  const reports       = allReports.filter(r => r.content_type === 'post');
+  const otherReports  = allReports.filter(r => r.content_type !== 'post');
+
+  // Map content_id → post_id alias for the rest of this function so the
+  // existing post-rendering code below doesn't need every reference
+  // rewritten. The per-report.details legacy field maps to .notes.
+  reports.forEach(r => {
+    r.post_id = r.content_id;
+    r.details = r.notes;
+  });
+
   // Hydrate with post + reporter context
   const postIds     = [...new Set(reports.map(r => r.post_id).filter(Boolean))];
-  const reporterIds = [...new Set(reports.map(r => r.reporter_id).filter(Boolean))];
+  // Reporter ids span both Appwrite hex (mobile) and Supabase UUID (web).
+  // The profiles lookup uses Supabase UUIDs so for now we just look up
+  // whatever subset is UUID-shaped; non-matches just render "Unknown".
+  const __UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const reporterIds = [...new Set(allReports.map(r => r.reporter_id).filter(id => id && __UUID_RE.test(id)))];
 
   const [{ data: posts }, { data: reporters }] = await Promise.all([
     postIds.length
@@ -140,8 +176,13 @@ async function loadInbox() {
     groupedByPost[r.post_id].push(r);
   }
 
-  document.getElementById('inboxCount').textContent = filter === 'pending' ? reports.length : '';
-  subEl.textContent = `${reports.length} ${filter === 'all' ? 'total' : filter} · across ${Object.keys(groupedByPost).length} posts`;
+  // Total queue count includes BOTH post reports and other-content reports
+  // so the sidebar count chip reflects the full inbox, not just posts.
+  document.getElementById('inboxCount').textContent = filter === 'pending' ? allReports.length : '';
+  const otherSummary = otherReports.length
+    ? ` · ${otherReports.length} non-post (chat/video/book)`
+    : '';
+  subEl.textContent = `${reports.length} ${filter === 'all' ? 'total' : filter} · across ${Object.keys(groupedByPost).length} posts${otherSummary}`;
 
   listEl.innerHTML = '';
   for (const postId of Object.keys(groupedByPost)) {
@@ -197,6 +238,74 @@ async function loadInbox() {
 
     listEl.appendChild(card);
   }
+
+  // ── Other content types (chat / video / book / chapter / comment) ──
+  // Compact list — the per-type rich rendering (preview the video, jump
+  // to the chat thread, etc.) is a follow-up. For now mods at least SEE
+  // every report and can dismiss them; the full report payload (reason,
+  // notes, content_id, reporter) is on the card.
+  if (otherReports.length) {
+    const sectionHeader = document.createElement('div');
+    sectionHeader.className = 'report-section-header';
+    sectionHeader.style.cssText = 'margin: 16px 0 8px; padding: 8px 12px; font-size: 0.85rem; font-weight: 600; color: var(--text2); border-top: 1px solid var(--border);';
+    sectionHeader.textContent = `Other reports (${otherReports.length}) — chat / video / book / comment`;
+    listEl.appendChild(sectionHeader);
+
+    // Group by content_type for visual scanning
+    const byType = {};
+    for (const r of otherReports) {
+      if (!byType[r.content_type]) byType[r.content_type] = [];
+      byType[r.content_type].push(r);
+    }
+
+    for (const ctype of Object.keys(byType)) {
+      const group = byType[ctype];
+      for (const r of group) {
+        const reporter = reporterMap[r.reporter_id];
+        const card = document.createElement('div');
+        card.className = 'report-card report-card-compact';
+        card.dataset.reportId = r.id;
+        card.style.cssText = 'padding: 12px 14px; margin-bottom: 8px;';
+        card.innerHTML = `
+          <div class="report-card-head">
+            <div class="report-card-meta">
+              <span class="report-reason-badge" style="text-transform: capitalize">${esc(ctype)}</span>
+              <span class="report-reason-badge">${esc(REASON_LABELS[r.reason] || r.reason || 'reported')}</span>
+              <span class="report-time">${timeAgo(r.created_at)}</span>
+            </div>
+          </div>
+          <div class="report-card-body" style="padding: 6px 0">
+            <div class="report-post-body" style="font-size: 0.85rem">
+              <strong>Content:</strong> <code style="font-family: ui-monospace, monospace; font-size: 0.8rem">${esc(r.content_id)}</code>
+            </div>
+            ${r.notes ? `<div class="report-post-body" style="margin-top: 4px"><i>${esc(String(r.notes).slice(0, 200))}</i></div>` : ''}
+          </div>
+          <div class="report-card-footer">
+            <div class="report-reporter">Reported by ${esc(reporter?.username || r.reporter_id || 'Unknown')}</div>
+            <div class="report-actions">
+              <button class="report-btn" data-action="dismiss-other">Dismiss</button>
+            </div>
+          </div>
+        `;
+        card.querySelector('[data-action="dismiss-other"]').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            await supabase.from('content_reports').update({
+              status: 'dismissed',
+              reviewed_by: currentMod.id,
+              reviewed_at: new Date().toISOString(),
+            }).eq('id', r.id);
+            card.style.opacity = '0.5';
+            toast('Dismissed');
+            setTimeout(loadInbox, 600);
+          } catch (err) {
+            alert('Dismiss failed: ' + (err.message || err));
+          }
+        });
+        listEl.appendChild(card);
+      }
+    }
+  }
 }
 
 document.getElementById('inboxFilter').addEventListener('change', loadInbox);
@@ -215,8 +324,11 @@ async function handleAction(action, ctx) {
 
   try {
     if (action === 'dismiss') {
-      // Mark all reports on this post as dismissed
-      await supabase.from('post_reports').update({
+      // Mark all reports on this post as dismissed.
+      // Now writes to `content_reports` (the unified queue). Backfilled
+      // legacy rows preserved their original ids so .in('id', ...) still
+      // matches them.
+      await supabase.from('content_reports').update({
         status: 'dismissed',
         reviewed_by: currentMod.id,
         reviewed_at: new Date().toISOString(),
@@ -287,7 +399,8 @@ async function handleAction(action, ctx) {
 }
 
 async function markReportsResolved(reportGroup, postId) {
-  await supabase.from('post_reports').update({
+  // Migrated to content_reports — backfilled legacy ids match.
+  await supabase.from('content_reports').update({
     status: 'resolved',
     reviewed_by: currentMod.id,
     reviewed_at: new Date().toISOString(),
