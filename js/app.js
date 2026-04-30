@@ -11213,7 +11213,10 @@ function notificationLabel(n, knownUsername) {
     // ── Direct messages ──
     case 'dm_message': {
       const preview = n.metadata?.preview ? ` <em style="color:var(--text2)">"${escHTML(String(n.metadata.preview).slice(0, 80))}"</em>` : '';
-      return `${actorTag} sent you a message${preview}`;
+      // Group chats read differently from 1:1 — the trigger sets
+      // metadata.is_group so we can pick the right verb without another query.
+      const verb = n.metadata?.is_group ? 'sent a message in a group' : 'sent you a message';
+      return `${actorTag} ${verb}${preview}`;
     }
 
     default:                       return `${actorTag} did something on Selebox`;
@@ -12083,6 +12086,35 @@ async function openConversation(convId) {
   supabase.rpc('mark_conversation_read', { p_conversation_id: convId })
     .then(_zeroUnread)
     .catch(() => {});  // Already cleared optimistically; ignore RPC errors
+
+  // ── Also clear bell-panel dm_message rows for this conversation ──
+  // The bell panel surfaces a coalesced notification per (recipient,
+  // conversation) via the trg_notify_chat_message trigger. Opening the
+  // thread is the same gesture as "I've seen this," so flip every unread
+  // dm_message bell row for this conversation. Optimistically zero the
+  // local count first so the bell badge updates without waiting for the
+  // round-trip; the realtime UPDATE handler will reconcile.
+  const _clearBellForConv = () => {
+    let cleared = 0;
+    _notifications.forEach(n => {
+      if (n.type === 'dm_message'
+          && n.parent_target_type === 'conversation'
+          && n.parent_target_id === convId
+          && !n.is_read) {
+        n.is_read = true;
+        cleared += 1;
+      }
+    });
+    if (cleared > 0) {
+      _notifUnreadCount = Math.max(0, _notifUnreadCount - cleared);
+      updateNotifBadge();
+      renderNotifications();
+    }
+  };
+  _clearBellForConv();
+  supabase.rpc('mark_chat_notifications_read', { p_conversation_id: convId })
+    .then(() => {})  // Already cleared optimistically
+    .catch(() => {}); // RPC missing or network error — bell will resync on next open
 
   // Subscribe to realtime updates for this conversation
   subscribeToThread(convId);
