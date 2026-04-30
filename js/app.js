@@ -1578,6 +1578,32 @@ function linkify(str) {
   return escaped.replace(/(https?:\/\/[^\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
 }
 
+// ── Search helpers ────────────────────────────────────────────────────────────
+// PostgREST's .or() filter splits on commas and uses parens for grouping.
+// If those characters end up inside the user's query, the entire OR clause
+// breaks (causing "no results" for searches like `Romeo, Juliet` or `What's up?`).
+// Strip them defensively — users still get matches on the remaining tokens.
+function sanitizeSearchQuery(raw) {
+  return (raw || '')
+    .replace(/[,\(\)"]/g, ' ')   // PostgREST or() splitters / quote chars
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// Escape ilike wildcards (% _ \) so a literal underscore doesn't match every char.
+function escapeIlike(s) {
+  return (s || '').replace(/[\\%_]/g, m => '\\' + m);
+}
+// Strip diacritics + lowercase, so "café" matches "cafe" on local cache filters.
+// (Server-side ilike is bytewise; full diacritic-insensitive search would need
+// a Postgres `unaccent` index — tracked as a future improvement.)
+function normalizeForSearch(s) {
+  return (s || '')
+    .toString()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase();
+}
+
 // Translate vertical mouse-wheel scrolling into horizontal scroll on chip rails
 // (Trackpads already do this natively; this fixes mouse-wheel users.)
 function enableHorizontalWheelScroll(el) {
@@ -3910,22 +3936,52 @@ document.addEventListener('click', (e) => {
 });
 
 async function runFeedSearch(query) {
-  query = query.trim().toLowerCase();
-  if (!query) { searchResultsEl.classList.remove('open'); return; }
+  const raw = (query || '').trim();
+  if (!raw) { searchResultsEl.classList.remove('open'); return; }
+
+  // Sanitize FIRST so commas / parens / quotes in the user's query don't
+  // break the PostgREST .or() filter (the silent root cause behind
+  // "search returns nothing" reports).
+  const safeQ = sanitizeSearchQuery(raw);
+  if (!safeQ) { searchResultsEl.classList.remove('open'); return; }
+  const term = `%${escapeIlike(safeQ)}%`;
 
   searchResultsEl.classList.add('open');
   searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
 
-  const [{ data: profiles }, { data: posts }] = await Promise.all([
-    supabase.from('profiles').select('id, username, avatar_url, bio, is_guest').ilike('username', `%${query}%`).limit(5),
-    supabase.from('posts').select('*, profiles!user_id(username, avatar_url, is_guest)').ilike('body', `%${query}%`).order('created_at', { ascending: false }).limit(8)
+  // YouTube-style: a single search bar reaches People, Posts, Videos, AND Books.
+  const [profilesRes, postsRes, videosRes, booksRes] = await Promise.all([
+    supabase.from('profiles')
+      .select('id, username, avatar_url, bio, is_guest')
+      .ilike('username', term).eq('is_banned', false).limit(5),
+    supabase.from('posts')
+      .select('*, profiles!user_id(username, avatar_url, is_guest)')
+      .ilike('body', term).order('created_at', { ascending: false }).limit(6),
+    supabase.from('videos')
+      .select('id, title, thumbnail_url, uploader_id, profiles!videos_uploader_id_fkey(username, avatar_url, is_banned)')
+      .eq('status', 'ready').eq('is_hidden', false)
+      .or(`title.ilike.${term},description.ilike.${term}`)
+      .order('created_at', { ascending: false }).limit(5),
+    supabase.from('books')
+      .select('id, title, cover_url, author_id, profiles!books_author_id_fkey(username, avatar_url, is_banned)')
+      .eq('is_public', true).eq('is_hidden', false).in('status', ['ongoing', 'completed'])
+      .or(`title.ilike.${term},description.ilike.${term}`)
+      .limit(5),
   ]);
 
+  // Stale-query guard
+  if ((searchInput.value || '').trim() !== raw) return;
+
+  const profiles = profilesRes?.data || [];
+  const posts    = (postsRes?.data || []).filter(p => !p.profiles?.is_banned);
+  const videos   = (videosRes?.data || []).filter(v => !v.profiles?.is_banned);
+  const books    = (booksRes?.data || []).filter(b => !b.profiles?.is_banned);
+
   let html = '';
-  if (profiles?.length) {
+  if (profiles.length) {
     html += `<div class="search-result-section">People</div>`;
     profiles.forEach(p => {
-      const avatar = p.avatar_url ? `<img src="${p.avatar_url}"/>` : initials(p.username);
+      const avatar = p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username);
       html += `
         <div class="search-result-item" data-type="profile" data-id="${p.id}">
           <div class="avatar">${avatar}</div>
@@ -3933,15 +3989,46 @@ async function runFeedSearch(query) {
             <div class="search-result-title">${escHTML(p.username)}</div>
             <div class="search-result-meta">${p.is_guest ? 'Guest' : 'Member'}</div>
           </div>
-        </div>
-      `;
+        </div>`;
     });
   }
-  if (posts?.length) {
+  if (videos.length) {
+    html += `<div class="search-result-section">Videos</div>`;
+    videos.forEach(v => {
+      const thumb = v.thumbnail_url
+        ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>`
+        : '';
+      html += `
+        <div class="search-result-item" data-type="video" data-id="${v.id}">
+          <div class="search-result-thumb">${thumb}</div>
+          <div class="search-result-info">
+            <div class="search-result-title">${escHTML(v.title || 'Untitled')}</div>
+            <div class="search-result-meta">by ${escHTML(v.profiles?.username || 'Unknown')}</div>
+          </div>
+        </div>`;
+    });
+  }
+  if (books.length) {
+    html += `<div class="search-result-section">Books</div>`;
+    books.forEach(b => {
+      const cover = b.cover_url
+        ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
+        : `<span class="search-creator-initials">${escHTML((b.title || '?').charAt(0).toUpperCase())}</span>`;
+      html += `
+        <div class="search-result-item" data-type="book" data-id="${b.id}">
+          <div class="search-result-thumb search-result-thumb-book">${cover}</div>
+          <div class="search-result-info">
+            <div class="search-result-title">${escHTML(b.title || 'Untitled')}</div>
+            <div class="search-result-meta">by ${escHTML(b.profiles?.username || 'Unknown')}</div>
+          </div>
+        </div>`;
+    });
+  }
+  if (posts.length) {
     html += `<div class="search-result-section">Posts</div>`;
     posts.forEach(p => {
       const author = p.profiles || {};
-      const avatar = author.avatar_url ? `<img src="${author.avatar_url}"/>` : initials(author.username || 'U');
+      const avatar = author.avatar_url ? `<img src="${escHTML(author.avatar_url)}"/>` : initials(author.username || 'U');
       const snippet = (p.body || '').slice(0, 80);
       html += `
         <div class="search-result-item" data-type="post" data-id="${p.id}">
@@ -3950,8 +4037,7 @@ async function runFeedSearch(query) {
             <div class="search-result-title">${escHTML(snippet)}${p.body && p.body.length > 80 ? '...' : ''}</div>
             <div class="search-result-meta">by ${escHTML(author.username || 'Unknown')}</div>
           </div>
-        </div>
-      `;
+        </div>`;
     });
   }
   if (!html) html = '<div style="padding:1rem;color:var(--text3);text-align:center">No results found</div>';
@@ -3964,8 +4050,16 @@ async function runFeedSearch(query) {
       const id = item.dataset.id;
       searchResultsEl.classList.remove('open');
       searchInput.value = '';
-      
+      if (topbarSearchClear) topbarSearchClear.style.display = 'none';
+
       if (type === 'profile') openProfile(id);
+      else if (type === 'video') {
+        // Route into the video player for the supabase video id
+        location.hash = `#video/sb_${id}`;
+      } else if (type === 'book') {
+        location.hash = `#book/${id}`;
+      }
+      // posts: handled elsewhere via existing post-open flow (no router for individual posts here)
     };
   });
 }
@@ -4819,23 +4913,23 @@ async function loadMoreBooks() {
 // Searches: title, description, tags, genre, author/uploader name.
 // `#tag` prefix restricts to tag-only matches. Suspends infinite scroll while active.
 function searchBooks(query) {
-  query = (query || '').trim().toLowerCase();
+  query = (query || '').trim();
   if (!query) return allBooksCache;
 
   const hashtagMatch = query.match(/^#(\w+)/);
   const isHashtag = !!hashtagMatch;
-  const cleanQuery = isHashtag ? hashtagMatch[1].toLowerCase() : query;
+  const cleanQuery = normalizeForSearch(isHashtag ? hashtagMatch[1] : query);
 
   return allBooksCache.filter(b => {
     if (isHashtag) {
-      return (b.tags || []).some(t => (t || '').toLowerCase().includes(cleanQuery));
+      return (b.tags || []).some(t => normalizeForSearch(t).includes(cleanQuery));
     }
 
-    const title  = (b.title || '').toLowerCase();
-    const desc   = (b.description || '').toLowerCase();
-    const tags   = (b.tags || []).join(' ').toLowerCase();
-    const genre  = (b.genre || '').replace(/-/g, ' ').toLowerCase();
-    const author = (b.profiles?.username || b.author?.username || '').toLowerCase();
+    const title  = normalizeForSearch(b.title);
+    const desc   = normalizeForSearch(b.description);
+    const tags   = normalizeForSearch((b.tags || []).join(' '));
+    const genre  = normalizeForSearch((b.genre || '').replace(/-/g, ' '));
+    const author = normalizeForSearch(b.profiles?.username || b.author?.username || '');
 
     return title.includes(cleanQuery)
         || desc.includes(cleanQuery)
@@ -4872,34 +4966,54 @@ async function runBookSearch() {
     return;
   }
 
-  // Local cache filter first (matches title, desc, tags, genre, author)
-  let filtered = searchBooks(activeBookSearchQuery);
+  // Always run local cache filter AND server search in parallel — the old
+  // "only call server if local has <6 hits" gave inconsistent results
+  // depending on how far the user had scrolled (books at offset >80 were
+  // invisible). Also fetch matching writers for the YouTube-style rail.
+  const savedQuery = activeBookSearchQuery;
+  const localPromise = Promise.resolve(searchBooks(savedQuery));
+  const serverPromise = fetchBooksServerSearch(savedQuery).catch(() => []);
+  const writersPromise = fetchCreatorsForSearch(savedQuery, 'book', 8).catch(() => []);
 
-  // If local cache misses (pagination — author may have books outside the
-  // first 80), hit the server: books matching title/description AND books
-  // whose author's username matches.
-  if (filtered.length < 6) {
-    const serverHits = await fetchBooksServerSearch(activeBookSearchQuery);
-    // Dedupe — local cache wins for already-known ids
-    const seen = new Set(filtered.map(b => b.id));
-    for (const b of serverHits) {
-      if (!seen.has(b.id)) { filtered.push(b); seen.add(b.id); }
-    }
+  const [localHits, serverHits, writers] = await Promise.all([
+    localPromise, serverPromise, writersPromise,
+  ]);
+
+  // Stale-query guard: if user kept typing while we awaited, ignore this run.
+  if (activeBookSearchQuery !== savedQuery) return;
+
+  // Merge — local cache wins for known ids (it has annotated objects), server
+  // fills in everything else.
+  const seen = new Set(localHits.map(b => b.id));
+  const filtered = [...localHits];
+  for (const b of serverHits) {
+    if (!seen.has(b.id)) { filtered.push(b); seen.add(b.id); }
   }
+
   empty.style.display = 'none';
   grid.style.display = 'grid';
+  grid.innerHTML = '';
+
+  // Writers rail (YouTube-style) above the book grid
+  if (writers && writers.length) {
+    const row = renderCreatorRow(writers, 'Writers', (uid) => openProfile(uid));
+    if (row) {
+      row.style.gridColumn = '1 / -1';
+      grid.appendChild(row);
+    }
+  }
 
   if (!filtered.length) {
-    grid.innerHTML = `
-      <div class="video-search-empty" style="grid-column:1/-1">
-        <h3>No books found</h3>
-        <p>Try a different keyword, author, or #tag — or scroll the full list to load more books first.</p>
-      </div>
-    `;
+    const empty2 = document.createElement('div');
+    empty2.className = 'video-search-empty';
+    empty2.style.gridColumn = '1 / -1';
+    empty2.innerHTML = (writers && writers.length)
+      ? '<h3>No books found</h3><p>The writers above match — open one of their pages to see their work.</p>'
+      : '<h3>No books found</h3><p>Try a different keyword, author, or #tag.</p>';
+    grid.appendChild(empty2);
     return;
   }
 
-  grid.innerHTML = '';
   filtered.forEach((b, i) => {
     const card = renderBookCard(b);
     card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
@@ -5203,8 +5317,12 @@ async function fetchSupabaseBooks(offset = 0, limit = 80) {
 // matching author usernames. Used as a fallback when the local cache misses
 // because pagination only loaded the first 80 books.
 async function fetchBooksServerSearch(query) {
-  if (!query || !query.trim()) return [];
-  const q = query.trim().replace(/[%_\\]/g, '\\$&');
+  // Sanitize FIRST — strips comma/parens/quotes that break PostgREST .or() —
+  // THEN escape ilike wildcards. Without sanitize, queries like `Romeo, Juliet`
+  // or `What's next?` returned 0 rows because the OR clause was malformed.
+  const safeQ = sanitizeSearchQuery(query);
+  if (!safeQ) return [];
+  const q = escapeIlike(safeQ);
   try {
     // Two parallel queries: content match + author username match
     const [contentRes, authorRes] = await Promise.all([
@@ -8537,34 +8655,35 @@ let activeSearchQuery = '';
 let activeTagFilter = null;
 
 function searchVideos(query, tagFilter) {
-  query = (query || '').trim().toLowerCase();
+  query = (query || '').trim();
   if (!query && !tagFilter) return allVideosCache;
 
   // Detect hashtag search (e.g. "#music")
   const hashtagMatch = query.match(/^#(\w+)/);
   const isHashtag = !!hashtagMatch;
-  const cleanQuery = isHashtag ? hashtagMatch[1].toLowerCase() : query;
+  // Normalize so "café" matches "cafe" and "Mañana" matches "manana"
+  const cleanQuery = normalizeForSearch(isHashtag ? hashtagMatch[1] : query);
 
   return allVideosCache.filter(v => {
     // Tag filter (when user clicks a tag pill)
     if (tagFilter) {
-      const hasTag = (v.tags || []).some(t => t.toLowerCase() === tagFilter.toLowerCase());
+      const hasTag = (v.tags || []).some(t => normalizeForSearch(t) === normalizeForSearch(tagFilter));
       if (!hasTag) return false;
     }
     if (!cleanQuery) return true;
 
     // Hashtag mode: ONLY match tags
     if (isHashtag) {
-      return (v.tags || []).some(t => t.toLowerCase().includes(cleanQuery));
+      return (v.tags || []).some(t => normalizeForSearch(t).includes(cleanQuery));
     }
 
     // Normal search: match title, description, tags, category, uploader
-    const title    = (v.title || '').toLowerCase();
-    const desc     = (v.description || '').toLowerCase();
-    const tags     = (v.tags || []).join(' ').toLowerCase();
-    const category = (v.category || '').replace(/-/g, ' ').toLowerCase();
+    const title    = normalizeForSearch(v.title);
+    const desc     = normalizeForSearch(v.description);
+    const tags     = normalizeForSearch((v.tags || []).join(' '));
+    const category = normalizeForSearch((v.category || '').replace(/-/g, ' '));
     const uploader = allUploadersCache[v.uploader];
-    const uploaderName = (uploader?.username || v._uploaderInfo?.username || '').toLowerCase();
+    const uploaderName = normalizeForSearch(uploader?.username || v._uploaderInfo?.username || '');
 
     return title.includes(cleanQuery)
         || desc.includes(cleanQuery)
@@ -8643,6 +8762,98 @@ function renderTagPills() {
   });
 }
 
+// ── Unified creator/writer search (used by Videos, Books, and the home dropdown).
+// Returns top matching profiles enriched with a count of public works in the
+// requested kind ('video' | 'book'). Sorting prefers profiles who actually
+// have content in that kind, then prefix matches, then shorter usernames.
+async function fetchCreatorsForSearch(query, kind = 'video', limit = 8) {
+  const q = sanitizeSearchQuery(query);
+  if (!q) return [];
+  const term = `%${escapeIlike(q)}%`;
+  try {
+    const { data: profs } = await supabase.from('profiles')
+      .select('id, username, avatar_url, bio, is_guest, is_banned')
+      .ilike('username', term)
+      .eq('is_banned', false)
+      .limit(limit * 3); // overfetch — we'll prefer ones with works
+    if (!profs?.length) return [];
+    const ids = profs.map(p => p.id);
+
+    const countMap = {};
+    if (kind === 'video') {
+      const { data: rows } = await supabase.from('videos')
+        .select('uploader_id')
+        .in('uploader_id', ids)
+        .eq('status', 'ready')
+        .eq('is_hidden', false);
+      (rows || []).forEach(r => { countMap[r.uploader_id] = (countMap[r.uploader_id] || 0) + 1; });
+    } else if (kind === 'book') {
+      const { data: rows } = await supabase.from('books')
+        .select('author_id')
+        .in('author_id', ids)
+        .eq('is_public', true)
+        .eq('is_hidden', false)
+        .in('status', ['ongoing', 'completed']);
+      (rows || []).forEach(r => { countMap[r.author_id] = (countMap[r.author_id] || 0) + 1; });
+    }
+
+    const ql = q.toLowerCase();
+    return profs
+      .map(p => ({ ...p, _workCount: countMap[p.id] || 0 }))
+      .sort((a, b) => {
+        // 1. Has-works wins
+        if ((b._workCount > 0) !== (a._workCount > 0)) return (b._workCount > 0) ? 1 : -1;
+        // 2. Prefix match wins
+        const ap = (a.username || '').toLowerCase().startsWith(ql) ? 0 : 1;
+        const bp = (b.username || '').toLowerCase().startsWith(ql) ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        // 3. Higher work count
+        if (b._workCount !== a._workCount) return b._workCount - a._workCount;
+        // 4. Shorter username (closer match)
+        return (a.username || '').length - (b.username || '').length;
+      })
+      .slice(0, limit);
+  } catch (err) {
+    console.warn('fetchCreatorsForSearch failed:', err);
+    return [];
+  }
+}
+
+// Render a horizontal "Creators" / "Writers" rail. Returns a DOM node or null.
+// The caller decides where to mount it (above a grid, inside a dropdown, etc).
+function renderCreatorRow(profiles, label, onOpen) {
+  if (!profiles || !profiles.length) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'search-creator-row';
+  const head = document.createElement('div');
+  head.className = 'search-creator-row-head';
+  head.textContent = label;
+  wrap.appendChild(head);
+  const track = document.createElement('div');
+  track.className = 'search-creator-track';
+  profiles.forEach(p => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'search-creator-card';
+    const av = p.avatar_url
+      ? `<img src="${escHTML(p.avatar_url)}" alt="" loading="lazy"/>`
+      : `<span class="search-creator-initials">${escHTML(initials(p.username || 'U'))}</span>`;
+    const meta = p._workCount > 0
+      ? `${p._workCount.toLocaleString()} ${p._workCount === 1 ? 'work' : 'works'}`
+      : (p.is_guest ? 'Guest' : 'Member');
+    card.innerHTML = `
+      <div class="search-creator-avatar">${av}</div>
+      <div class="search-creator-name">${escHTML(p.username || '—')}</div>
+      <div class="search-creator-meta">${escHTML(meta)}</div>`;
+    card.addEventListener('click', () => onOpen && onOpen(p.id));
+    track.appendChild(card);
+  });
+  // Allow mouse-wheel users to scroll the rail horizontally
+  setTimeout(() => { try { enableHorizontalWheelScroll(track); } catch {} }, 0);
+  wrap.appendChild(track);
+  return wrap;
+}
+
 async function runSearch() {
   const q = (activeSearchQuery || '').trim();
 
@@ -8669,12 +8880,15 @@ async function runSearch() {
   const grid = document.getElementById('videoGrid');
   grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Searching…</div>';
 
-  const term = `%${q.replace(/[%_]/g, m => '\\' + m)}%`;
+  // Sanitize FIRST (strip , ( ) " — these break .or() / quoting), then ilike-escape.
+  const safeQ = sanitizeSearchQuery(q);
+  const term = `%${escapeIlike(safeQ)}%`;
   const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
 
   try {
-    // Two parallel queries: title/description match, and creator-name match.
-    const [byText, byUploader] = await Promise.all([
+    // Three parallel queries: title/description match, creator-name → videos, AND
+    // the standalone creator-row (so the user sees Selevia herself, not just her vids).
+    const [byText, byUploader, creators] = await Promise.all([
       supabase.from('videos').select(baseSelect)
         .eq('status', 'ready').eq('is_hidden', false)
         .or(`title.ilike.${term},description.ilike.${term}`)
@@ -8682,7 +8896,7 @@ async function runSearch() {
         .limit(60),
       (async () => {
         const { data: profs } = await supabase.from('profiles')
-          .select('id').ilike('username', term).limit(25);
+          .select('id').ilike('username', term).eq('is_banned', false).limit(25);
         if (!profs?.length) return { data: [] };
         const ids = profs.map(p => p.id);
         return await supabase.from('videos').select(baseSelect)
@@ -8691,6 +8905,7 @@ async function runSearch() {
           .order('created_at', { ascending: false })
           .limit(60);
       })(),
+      fetchCreatorsForSearch(safeQ, 'video', 8),
     ]);
 
     // Merge + dedupe + drop banned uploaders
@@ -8734,27 +8949,41 @@ async function runSearch() {
       out = formatted.filter(v => (v.tags || []).some(t => t.toLowerCase() === activeTagFilter.toLowerCase()));
     }
 
-    renderVideoResults(out);
+    renderVideoResults(out, creators);
   } catch (err) {
     console.error('Search failed:', err);
-    // Fallback: cache filter (covers offline / RPC issues)
-    renderVideoResults(searchVideos(q, activeTagFilter));
+    // Fallback: cache filter (covers offline / RPC issues). Best-effort creators too.
+    let creators = [];
+    try { creators = await fetchCreatorsForSearch(safeQ, 'video', 8); } catch {}
+    renderVideoResults(searchVideos(q, activeTagFilter), creators);
   }
 }
 
-function renderVideoResults(videos) {
+function renderVideoResults(videos, creators) {
   const grid = document.getElementById('videoGrid');
+  grid.innerHTML = '';
+
+  // YouTube-style: matching creators get their own rail above the video grid.
+  // Spans the whole grid via grid-column:1/-1 so it doesn't disrupt the layout.
+  if (creators && creators.length) {
+    const row = renderCreatorRow(creators, 'Creators', (uid) => openProfile(uid));
+    if (row) {
+      row.style.gridColumn = '1 / -1';
+      grid.appendChild(row);
+    }
+  }
+
   if (!videos.length) {
-    grid.innerHTML = `
-      <div class="video-search-empty">
-        <h3>No videos found</h3>
-        <p>Try a different keyword or tag</p>
-      </div>
-    `;
+    const empty = document.createElement('div');
+    empty.className = 'video-search-empty';
+    empty.style.gridColumn = '1 / -1';
+    empty.innerHTML = creators && creators.length
+      ? '<h3>No videos found</h3><p>The creators above match — try opening one of their channels.</p>'
+      : '<h3>No videos found</h3><p>Try a different keyword or tag</p>';
+    grid.appendChild(empty);
     return;
   }
 
-  grid.innerHTML = '';
   videos.slice(0, 100).forEach((v, i) => {
     const card = renderVideoCard(v, allUploadersCache[v.uploader]);
     card.style.animationDelay = `${i * 0.03}s`;
