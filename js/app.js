@@ -1222,6 +1222,93 @@ const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest, is_
 // Feed mode — 'foryou' (default), 'following', or 'discover'
 let _feedMode = 'foryou';
 
+// Stale-query guard. Every loadFeed/loadMoreFeed call increments this; results
+// are only applied if their captured seq still matches. Makes rapid tab-flicks
+// and overlapping pagination requests safe.
+let _feedSeq = 0;
+
+// Cached follow set per loadFeed run — avoids a second fetch when For You needs
+// it for the boost AND Discover needed it for the exclusion. Reset each loadFeed.
+let _cachedFollowIds = null;
+
+// Pending debounce timer for realtime-triggered feed refreshes. Declared up
+// here so loadFeed can cancel it (a user-initiated load supersedes any
+// pending auto-refresh). The function and Supabase channel that USE this
+// timer live further down — by the time a realtime WS event actually fires,
+// every dependency is initialized.
+let _realtimeRefreshTimer = null;
+
+// One reusable query+score+filter pipeline so loadFeed and loadMoreFeed produce
+// the SAME shape of results — no more "Following tab silently shows everyone
+// after page 1" or "For You loses velocity scoring on scroll".
+async function _buildAndExecFeedQuery({ offset, isFirstPage }) {
+  if (!currentUser?.id) return { data: [], scoreClientSide: false, followIds: null };
+
+  let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
+  let scoreClientSide = false;
+
+  // Always need the follow set for foryou (boost) / following (filter) / discover (exclude).
+  // Cached for the duration of one loadFeed run.
+  if (_cachedFollowIds === null) {
+    const { data: f } = await supabase.from('follows')
+      .select('following_id').eq('follower_id', currentUser.id);
+    _cachedFollowIds = (f || []).map(r => r.following_id);
+  }
+  const followIds = _cachedFollowIds;
+
+  if (_feedMode === 'following') {
+    if (!followIds.length) return { data: [], scoreClientSide: false, followIds, emptyReason: 'no-follows' };
+    q = q.in('user_id', followIds).order('created_at', { ascending: false });
+  } else if (_feedMode === 'discover') {
+    const exclude = [...followIds, currentUser.id];
+    if (exclude.length) {
+      q = q.not('user_id', 'in', `(${exclude.map(id => `"${id}"`).join(',')})`);
+    }
+    q = q.gt('created_at', new Date(Date.now() - 14 * 86400_000).toISOString())
+         .order('created_at', { ascending: false });
+    scoreClientSide = true;
+  } else { // foryou
+    q = q.gt('created_at', new Date(Date.now() - 14 * 86400_000).toISOString())
+         .order('created_at', { ascending: false });
+    scoreClientSide = true;
+  }
+
+  // Pull a wider page so client-side scoring has material to work with.
+  const fetchLimit = scoreClientSide ? FEED_PAGE_SIZE * 3 : FEED_PAGE_SIZE;
+  const { data, error } = await q.range(offset, offset + fetchLimit - 1);
+  if (error) throw error;
+  return { data: data || [], scoreClientSide, followIds, fetchLimit };
+}
+
+// Apply hide-list filter, scoring (For You / Discover), and diversity penalty.
+// Returns the page-sized result PLUS the count of raw rows fetched so callers
+// can advance pagination correctly.
+function _processFeedRows({ data, scoreClientSide, followIds }) {
+  let result = data.filter(p => !shouldHidePost(p));
+  if (scoreClientSide) {
+    const followSet = new Set(followIds || []);
+    result.forEach(p => {
+      p._score = _feedVelocity(p) * (followSet.has(p.user_id) ? 1.5 : 1.0);
+    });
+    result.sort((a, b) => (b._score || 0) - (a._score || 0));
+    result = _feedDiversify(result);
+    result = result.slice(0, FEED_PAGE_SIZE);
+  }
+  return result;
+}
+
+// Friendly user-facing message instead of leaking raw Postgres errors.
+function _feedFriendlyError(err) {
+  const raw = (err && err.message) || '';
+  if (/timeout|canceling statement/i.test(raw)) {
+    return 'Feed is taking longer than usual. Tap to retry.';
+  }
+  if (/Failed to fetch|NetworkError/i.test(raw)) {
+    return 'Network hiccup. Check your connection and tap to retry.';
+  }
+  return 'Couldn\'t load the feed. Tap to retry.';
+}
+
 // Velocity score for ranking — recent engagement per hour, weighted.
 // likes×1, comments×2, reposts×3 (stronger signals weighted heavier).
 function _feedVelocity(p) {
@@ -1253,6 +1340,20 @@ function _feedDiversify(arr) {
 window.loadFeed = async function() {
   const feed = document.getElementById('feed');
   const sentinel = document.getElementById('feedSentinel');
+  if (!feed) return;
+
+  // Bump the seq — any in-flight loadFeed/loadMoreFeed from a previous tap
+  // will see its captured seq no longer matches and bail out before touching
+  // the DOM. Eliminates the "fast tab-flick shows wrong tab" race.
+  const seq = ++_feedSeq;
+
+  // Cancel any pending realtime debounce — a user-triggered load supersedes
+  // a "platform got a new post" auto-refresh. Saves one redundant DB round-trip.
+  if (_realtimeRefreshTimer) {
+    clearTimeout(_realtimeRefreshTimer);
+    _realtimeRefreshTimer = null;
+  }
+
   feed.innerHTML = '<div class="loading">Loading feed...</div>';
   if (sentinel) sentinel.style.display = 'none';
 
@@ -1260,82 +1361,57 @@ window.loadFeed = async function() {
   _feedOffset = 0;
   _hasMoreFeedPosts = true;
   _isLoadingMoreFeed = false;
+  _cachedFollowIds = null;
   if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
   if (_feedVideoObserver)  { _feedVideoObserver.disconnect();  _feedVideoObserver = null; }
   if (_feedPostObserver)   { _feedPostObserver.disconnect();   _feedPostObserver = null; }
 
-  // Resolve which posts to fetch based on the active mode
-  let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
-  let scoreClientSide = false;
-  let followIds = null;
-
-  if (_feedMode === 'following' || _feedMode === 'discover') {
-    // Need follow set for both
-    const { data: f } = await supabase.from('follows')
-      .select('following_id')
-      .eq('follower_id', currentUser.id);
-    followIds = (f || []).map(r => r.following_id);
+  // Guard: feed needs an authenticated user (the follow query depends on it).
+  // Without this, an early-firing realtime listener could call loadFeed before
+  // sign-in resolves and crash on `currentUser.id`.
+  if (!currentUser?.id) {
+    feed.innerHTML = '<div class="empty"><h3>Sign in to see your feed</h3></div>';
+    return;
   }
 
-  if (_feedMode === 'following') {
-    if (!followIds.length) {
-      feed.innerHTML = `
-        <div class="empty">
-          <h3>You're not following anyone yet</h3>
-          <p>Switch to <strong>Discover</strong> or <strong>For You</strong> to find creators worth following.</p>
-        </div>`;
-      return;
-    }
-    q = q.in('user_id', followIds).order('created_at', { ascending: false });
-  } else if (_feedMode === 'discover') {
-    // Exclude follows and self. Pull a wider pool, score client-side.
-    const exclude = [...followIds, currentUser.id];
-    if (exclude.length) {
-      q = q.not('user_id', 'in', `(${exclude.map(id => `"${id}"`).join(',')})`);
-    }
-    // Last 14 days only — keeps the section feeling fresh
-    q = q.gt('created_at', new Date(Date.now() - 14*86400_000).toISOString())
-         .order('created_at', { ascending: false });
-    scoreClientSide = true;
-  } else {
-    // For You — wider pool, then client-side velocity scoring + follow boost
-    q = q.gt('created_at', new Date(Date.now() - 14*86400_000).toISOString())
-         .order('created_at', { ascending: false });
-    scoreClientSide = true;
+  let queryResult;
+  try {
+    queryResult = await _buildAndExecFeedQuery({ offset: 0, isFirstPage: true });
+  } catch (err) {
+    if (seq !== _feedSeq) return;
+    console.error('Feed query failed:', err);
+    const msg = _feedFriendlyError(err);
+    feed.innerHTML = `<div class="empty" id="feedRetry" style="cursor:pointer"><p>${escHTML(msg)}</p></div>`;
+    document.getElementById('feedRetry')?.addEventListener('click', () => loadFeed());
+    return;
   }
 
-  // Pull a wider page so client-side scoring has material to work with
-  const fetchLimit = scoreClientSide ? FEED_PAGE_SIZE * 3 : FEED_PAGE_SIZE;
-  const { data, error } = await q.range(0, fetchLimit - 1);
-
-  if (error) { feed.innerHTML = `<div class="empty"><p>${error.message}</p></div>`; return; }
-
-  // Filter happens client-side using the cached filter set (loaded once on sign-in).
-  let result = (data || []).filter(p => !shouldHidePost(p));
-
-  if (scoreClientSide) {
-    // For You: boost posts from people you follow by 1.5×
-    if (_feedMode === 'foryou' && !followIds) {
-      const { data: f } = await supabase.from('follows')
-        .select('following_id')
-        .eq('follower_id', currentUser.id);
-      followIds = (f || []).map(r => r.following_id);
-    }
-    const followSet = new Set(followIds || []);
-    result.forEach(p => {
-      p._score = _feedVelocity(p) * (followSet.has(p.user_id) ? 1.5 : 1.0);
-    });
-    result.sort((a, b) => (b._score || 0) - (a._score || 0));
-    // Diversity: don't show the same author twice in a row
-    result = _feedDiversify(result);
-    // Trim back to the page size
-    result = result.slice(0, FEED_PAGE_SIZE);
+  // Stale-query guard — user switched tabs / refreshed mid-flight.
+  if (seq !== _feedSeq) return;
+  // Sign-out mid-flight — currentUser may have flipped to null while we awaited.
+  if (!currentUser?.id) {
+    feed.innerHTML = '<div class="empty"><h3>Sign in to see your feed</h3></div>';
+    return;
   }
 
+  // Following tab with no follows → friendly empty state (special-case)
+  if (queryResult.emptyReason === 'no-follows') {
+    feed.innerHTML = `
+      <div class="empty">
+        <h3>You're not following anyone yet</h3>
+        <p>Switch to <strong>Discover</strong> or <strong>For You</strong> to find creators worth following.</p>
+      </div>`;
+    return;
+  }
+
+  const result = _processFeedRows(queryResult);
   posts = result;
 
-  if ((data || []).length < fetchLimit) _hasMoreFeedPosts = false;
-  _feedOffset = (data || []).length;
+  // Pagination state — for scored modes, _feedOffset advances by the WIDER
+  // fetch so we don't refetch the same rows we just trimmed away.
+  const advance = queryResult.data.length;
+  if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
+  _feedOffset = advance;
 
   if (!posts.length) {
     const emptyMsg = _feedMode === 'discover'
@@ -1352,10 +1428,16 @@ window.loadFeed = async function() {
     feed.appendChild(el);
   });
 
-  setupFeedLazyLoaders(feed);
-  setupCollapsibleBodies(feed);
+  _wireUpNewPosts(feed);
   if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
 };
+
+// Fold the post-render setup into one helper. Two callers (initial load and
+// load-more) used to call these as separate steps — easy to forget one.
+function _wireUpNewPosts(container) {
+  setupFeedLazyLoaders(container);
+  setupCollapsibleBodies(container);
+}
 
 // ── Collapsible post bodies (Facebook-style "See more / less") ──
 // Auto-detects bodies that overflow ~6 lines and lets users tap the text
@@ -1369,18 +1451,33 @@ function setupCollapsibleBodies(root) {
     el.dataset.collapseChecked = '1';
     const id = el.dataset.postId;
 
-    // Measure overflow against the SAME max-height the .is-collapsed CSS uses,
-    // computed from the actual line-height so it adapts if styles change.
+    // Measure overflow against a cap computed from the element's own line-height,
+    // so the threshold automatically adapts if .post-body styling changes later.
+    //
+    // CRITICAL: idempotent guard at the top. Because we run this in BOTH a
+    // requestAnimationFrame AND a document.fonts.ready callback (cached fonts
+    // make the latter resolve before rAF), without this guard we'd attach two
+    // toggles + two click handlers — and clicks would cancel each other out
+    // (toggle state flips twice on the same click), so the post looked frozen.
     const measureAndDecide = () => {
+      if (el.dataset.collapseDone === '1') return; // already configured — no-op
+      if (el.querySelector('.collapsible-toggle')) {
+        el.dataset.collapseDone = '1';
+        return;
+      }
+
       const cs = getComputedStyle(el);
       const lineHeight = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) * 1.5);
-      const maxLines = 6;
-      const cap = lineHeight * maxLines;
-      // Read natural height BEFORE applying clamp — most reliable across browsers.
+      const cap = lineHeight * 6; // matches the 6-ish lines visible at max-height: 9.9em
       const naturalHeight = el.scrollHeight;
       const overflows = naturalHeight > cap + 4; // small fudge for sub-pixel layout
 
-      if (!overflows) return; // short post → no toggle, no clamp
+      if (!overflows) {
+        // Short post → no toggle ever needed; mark done so a later font-load
+        // pass doesn't second-guess this decision.
+        el.dataset.collapseDone = '1';
+        return;
+      }
 
       // Default to collapsed; restore previously-expanded state for this session
       if (id && _expandedPosts.has(id)) {
@@ -1394,14 +1491,18 @@ function setupCollapsibleBodies(root) {
       more.className = 'collapsible-toggle';
       more.textContent = el.classList.contains('is-expanded') ? 'See less' : 'See more';
       el.appendChild(more);
+      el.dataset.collapseDone = '1';
 
-      // Tap anywhere on the body toggles — but ignore real links/buttons/images
+      // Tap anywhere on the body toggles — but ignore real links/buttons/images.
+      // stopImmediatePropagation (vs stopPropagation) is belt-and-braces: even
+      // if a stray duplicate listener somehow gets attached, only one fires.
       el.addEventListener('click', (e) => {
-        const targetIsLink = e.target.tagName === 'A' || e.target.closest('a');
-        const targetIsBtn  = e.target.tagName === 'BUTTON' || e.target.closest('button');
-        const targetIsImg  = e.target.tagName === 'IMG' || e.target.closest('img');
-        if (targetIsLink || targetIsBtn || targetIsImg) return;
+        const t = e.target;
+        if (t.tagName === 'A'      || t.closest('a'))      return;
+        if (t.tagName === 'BUTTON' || t.closest('button')) return;
+        if (t.tagName === 'IMG'    || t.closest('img'))    return;
         e.stopPropagation();
+        e.stopImmediatePropagation();
         const expanded = !el.classList.contains('is-expanded');
         el.classList.toggle('is-expanded', expanded);
         el.classList.toggle('is-collapsed', !expanded);
@@ -1413,20 +1514,11 @@ function setupCollapsibleBodies(root) {
       });
     };
 
-    // Two-stage measure: once now, once after fonts load. A custom-font swap
-    // can change the natural height; without the second pass, posts that
-    // *just* overflow may be left without a toggle.
+    // Two-stage measure: once now (rAF after layout), once after fonts load.
+    // Both paths are safe to call repeatedly thanks to the idempotent guard above.
     requestAnimationFrame(measureAndDecide);
     if (document.fonts && typeof document.fonts.ready?.then === 'function') {
-      document.fonts.ready.then(() => {
-        if (el.dataset.collapseChecked === '1' && !el.querySelector('.collapsible-toggle')) {
-          // Re-run measurement once fonts are ready (idempotent — toggle existence guard)
-          el.dataset.collapseChecked = '';
-          el.classList.remove('is-collapsed', 'is-expanded');
-          el.dataset.collapseChecked = '1';
-          measureAndDecide();
-        }
-      });
+      document.fonts.ready.then(measureAndDecide);
     }
   });
 }
@@ -1446,50 +1538,58 @@ async function loadMoreFeed() {
   if (_isLoadingMoreFeed || !_hasMoreFeedPosts) return;
   _isLoadingMoreFeed = true;
 
+  // Capture the seq at the START. If a tab switch (or fresh loadFeed) bumps
+  // the seq while we're awaiting, the response is stale and we discard it
+  // instead of appending posts from the wrong mode to the new feed.
+  const seq = _feedSeq;
+
   const sentinel = document.getElementById('feedSentinel');
-  sentinel.style.display = 'block';
-  sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
+  if (sentinel) {
+    sentinel.style.display = 'block';
+    sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
+  }
 
   try {
-    const { data, error } = await supabase
-      .from('posts')
-      .select(FEED_SELECT)
-      .eq('is_hidden', false)
-      .order('created_at', { ascending: false })
-      .range(_feedOffset, _feedOffset + FEED_PAGE_SIZE - 1);
+    // Reuse the same query-builder loadFeed uses. Pagination now respects the
+    // active mode — Following stays Following, For You keeps its scoring, etc.
+    const queryResult = await _buildAndExecFeedQuery({ offset: _feedOffset, isFirstPage: false });
 
-    if (error) throw error;
+    if (seq !== _feedSeq) return; // user switched tabs while we were waiting
 
-    const rawMore = data || [];
-    const more    = rawMore.filter(p => !shouldHidePost(p));
-    if (rawMore.length < FEED_PAGE_SIZE) _hasMoreFeedPosts = false;
-    _feedOffset += rawMore.length;
+    const rawMore = queryResult.data;
+    const more = _processFeedRows(queryResult);
+    const advance = rawMore.length;
+    if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
+    _feedOffset += advance;
 
     if (more.length) {
       const feed = document.getElementById('feed');
       const presentIds = new Set(Array.from(feed.querySelectorAll('.post-card')).map(c => c.dataset.postid));
-      more.filter(p => !presentIds.has(p.id)).forEach((post, i) => {
+      const fresh = more.filter(p => !presentIds.has(p.id));
+      fresh.forEach((post, i) => {
         const el = renderPost(post);
         el.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
         feed.appendChild(el);
-        // Re-observe new card for lazy loaders
+        // Hand off to the existing observers so the new cards lazy-load too
         if (_feedPostObserver) _feedPostObserver.observe(el);
         el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
       });
-      // Apply collapsible logic to the newly-appended posts
       setupCollapsibleBodies(feed);
-      posts = posts.concat(more);
+      posts = posts.concat(fresh);
     }
 
-    if (_hasMoreFeedPosts) {
-      sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
-    } else {
-      sentinel.innerHTML = `<div class="book-grid-end-msg">You\'re all caught up · ${posts.length.toLocaleString()} posts</div>`;
-      if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
+    if (sentinel) {
+      if (_hasMoreFeedPosts) {
+        sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
+      } else {
+        sentinel.innerHTML = `<div class="book-grid-end-msg">You're all caught up · ${posts.length.toLocaleString()} posts</div>`;
+        if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
+      }
     }
   } catch (err) {
+    if (seq !== _feedSeq) return;
     console.error('Failed to load more feed:', err);
-    sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
+    if (sentinel) sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
   } finally {
     _isLoadingMoreFeed = false;
   }
@@ -3114,9 +3214,50 @@ window.shareTo = (platform, postId) => {
 };
 
 // ── Realtime ──
+// Debounced + scoped feed refresh. The old version reloaded the WHOLE feed on
+// every INSERT or DELETE platform-wide — which on a busy site meant constant
+// re-renders, broken scroll position, and DB hammering. Now:
+//   • DELETEs are filtered to posts the viewer is actually showing.
+//   • INSERTs only refresh if they're from someone the viewer follows
+//     (Following tab) or themselves (so their own new post appears).
+//   • Both go through a debounce so a burst of changes coalesces into one reload.
+//   • Reload only fires when the home feed is the active page.
+//
+// The `_realtimeRefreshTimer` itself is declared up top with the other feed
+// state so loadFeed can cancel it cleanly.
+function _scheduleRealtimeFeedRefresh() {
+  if (_realtimeRefreshTimer) return; // already pending
+  _realtimeRefreshTimer = setTimeout(() => {
+    _realtimeRefreshTimer = null;
+    const feedVisible = feedEl && feedEl.style.display !== 'none' && !document.hidden;
+    if (feedVisible && currentUser?.id) loadFeed();
+  }, 800);
+}
+
 supabase.channel('public-feed')
-  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, () => loadFeed())
-  .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'posts' }, () => loadFeed())
+  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, (payload) => {
+    const newPost = payload?.new;
+    if (!newPost || !currentUser?.id) return;
+    // Always refresh on the viewer's own posts
+    if (newPost.user_id === currentUser.id) return _scheduleRealtimeFeedRefresh();
+    // For Following tab, only refresh if the author is one the viewer follows
+    if (_feedMode === 'following') {
+      if (_cachedFollowIds && _cachedFollowIds.includes(newPost.user_id)) {
+        _scheduleRealtimeFeedRefresh();
+      }
+      return;
+    }
+    // For You / Discover — refresh, but the debounce prevents storms
+    _scheduleRealtimeFeedRefresh();
+  })
+  .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'posts' }, (payload) => {
+    const deletedId = payload?.old?.id;
+    if (!deletedId) return;
+    // Only react if the deleted post is currently rendered
+    if (Array.isArray(posts) && posts.some(p => p.id === deletedId)) {
+      _scheduleRealtimeFeedRefresh();
+    }
+  })
   .subscribe();
 
 // ── Profile page ──
