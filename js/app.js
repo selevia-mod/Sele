@@ -136,6 +136,13 @@ async function initAuth() {
 
 async function onSignedIn(user) {
   currentUser = user;
+  // Books page: invalidate the user-scoped tab caches (Library / Reading List)
+  // so a fresh sign-in re-fetches them instead of reusing the previous user's
+  // (or the signed-out) state.
+  if (typeof _bookTabLoaded !== 'undefined') {
+    _bookTabLoaded.library = false;
+    _bookTabLoaded.readinglist = false;
+  }
   // Defensive: if the profile row doesn't exist yet (rare race on first sign-in),
   // keep currentProfile null so downstream code can short-circuit cleanly.
   const { data: profile, error: profileErr } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
@@ -287,11 +294,21 @@ async function signOut() {
   posts = [];
   _wallet = { coin_balance: 0, star_balance: 0 };
   _userUnlocks.clear();
-  // Reset book caches so the next user doesn't see prior browsing state
+  // Reset book caches so the next user doesn't see prior browsing state.
   if (typeof allBooksCache !== 'undefined') allBooksCache = [];
   if (typeof allBooksRaw   !== 'undefined') allBooksRaw   = [];
   if (typeof _booksLoadedSort  !== 'undefined') _booksLoadedSort  = null;
   if (typeof _booksLoadedGenre !== 'undefined') _booksLoadedGenre = null;
+  // Reset the v2 tabbed-books "first-visit" flags so personal tabs (Library /
+  // Reading List) re-fetch when the user signs back in. Otherwise they'd stay
+  // stuck showing "Sign in to see your library" until a hard reload.
+  if (typeof _bookTabLoaded !== 'undefined') {
+    _bookTabLoaded.foryou      = false;
+    _bookTabLoaded.discover    = false;
+    _bookTabLoaded.ranking     = false;
+    _bookTabLoaded.library     = false;
+    _bookTabLoaded.readinglist = false;
+  }
   // Reset user-taste cache (book reads + likes) — would otherwise show
   // previous user's reading interests in the Discover ribbon.
   if (typeof _userBookTasteCache !== 'undefined') {
@@ -4470,10 +4487,19 @@ const searchResultsEl = document.getElementById('searchResults');
 const topbarSearchClear = document.getElementById('topbarSearchClear');
 let searchDebounce = null;
 
+// Search context decides which renderer the topbar search input feeds.
+//   'videos' → renders into the videos page grid
+//   'books'  → renders into the books page See-All view
+//   default  → home-feed dropdown (People / Videos / Books / Posts)
+//
+// Important: book DETAIL pages (#book/<uuid>) used to be 'books' too, which
+// meant typing in search tried to render into a hidden bookPage and the
+// search results vanished into the void. We now route detail pages to the
+// feed dropdown, so users can find another book without leaving the reader.
 function getSearchContext() {
   const hash = window.location.hash;
   if (hash === '#videos' || hash.startsWith('#video/')) return 'videos';
-  if (hash === '#book'   || hash.startsWith('#book/'))   return 'books';
+  if (hash === '#book') return 'books'; // listing only — detail pages use the feed dropdown
   return 'feed';
 }
 
@@ -4537,20 +4563,15 @@ if (topbarSearchClear) {
       runSearch();
     } else if (ctx === 'books') {
       activeBookSearchQuery = '';
-      // Restore the original (filter+sort) view
-      const grid = document.getElementById('bookGrid');
-      grid.innerHTML = '';
-      allBooksCache.forEach((b, i) => {
-        const card = renderBookCard(b);
-        card.style.animationDelay = `${i * 0.025}s`;
-        grid.appendChild(card);
+      // Close the See-All search view and return to the active tab panel.
+      // (No "restore the cached grid" step — the v2 books page is tabbed.)
+      const seeAll = document.getElementById('bookSeeAllView');
+      if (seeAll) seeAll.style.display = 'none';
+      document.querySelectorAll('.book-tab-panel').forEach(p => {
+        const isActive = p.dataset.bookPanel === _activeBookTab;
+        p.style.display = isActive ? '' : 'none';
+        p.classList.toggle('active', isActive);
       });
-      // Resume infinite scroll if there's more to load
-      const sentinel = document.getElementById('bookGridSentinel');
-      if (sentinel && _hasMoreBooks) {
-        sentinel.style.display = 'block';
-        setupBooksInfiniteScroll();
-      }
     }
   });
 }
@@ -5479,176 +5500,417 @@ let currentBookDetail = null;       // { book, chapters }
 let currentChapterIndex = 0;
 let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
 
-// ── Book (Reader) page ──
-function showBook(forceReload = false) {
+// ── Books page (mirrors mobile-app shape: tabbed sections of curated rows) ──
+//
+// Tabs:
+//   foryou      → Weekly Featured (editor's picks) / Fresh Reads / Completed & Excellent
+//   discover    → Genre-grouped rows of top books
+//   ranking     → Most Loved / Most Read / Trending This Week
+//   library     → User's reads
+//   readinglist → User's bookmarks
+//
+// Each section has a See All link that opens an in-page list view with
+// infinite scroll, sorted/filtered the same way that section was populated.
+// ────────────────────────────────────────────────────────────────────────────
+let _activeBookTab = 'foryou';
+const _bookTabLoaded = { foryou: false, discover: false, ranking: false, library: false, readinglist: false };
+
+function showBook(force = false) {
   hideAllMainPages();
   bookPage.style.display = 'block';
   document.body.classList.remove('on-videos');
   stopVideoPlayer();
   history.pushState(null, '', '#book');
-  // Only reload if cache is empty or forced — instant return when revisiting
-  if (forceReload || !allBooksRaw.length) {
-    loadBooks();
+  // Hide See-All sub-view if it was open from a previous visit.
+  const seeAll = document.getElementById('bookSeeAllView');
+  if (seeAll) seeAll.style.display = 'none';
+  // Show the active tab's panel; hide the rest.
+  document.querySelectorAll('.book-tab-panel').forEach(p => {
+    const isActive = p.dataset.bookPanel === _activeBookTab;
+    p.style.display = isActive ? '' : 'none';
+    p.classList.toggle('active', isActive);
+  });
+  loadBooksTab(_activeBookTab, force);
+}
+
+function loadBooksTab(tab, force = false) {
+  _activeBookTab = tab;
+  if (!force && _bookTabLoaded[tab]) return;
+  _bookTabLoaded[tab] = true;
+  if (tab === 'foryou')      return _loadForYouTab();
+  if (tab === 'discover')    return _loadDiscoverTab();
+  if (tab === 'ranking')     return _loadRankingTab();
+  if (tab === 'library')     return _loadLibraryTab();
+  if (tab === 'readinglist') return _loadReadingListTab();
+}
+
+// Generic section loader: populate a horizontal-scroll track with v2 cards.
+async function _loadBookSection(sectionKey, fetcher, emptyMsg) {
+  const track = document.querySelector(`.book-section-track[data-track="${sectionKey}"]`);
+  if (!track) return;
+  track.innerHTML = '<div class="loading">Loading…</div>';
+  try {
+    const books = await fetcher();
+    if (!books?.length) {
+      track.innerHTML = `<div class="book-section-empty">${escHTML(emptyMsg)}</div>`;
+      return;
+    }
+    track.innerHTML = '';
+    books.forEach(b => track.appendChild(_renderBookCardV2(b)));
+  } catch (err) {
+    console.warn(`Section "${sectionKey}" failed:`, err);
+    track.innerHTML = '<div class="book-section-empty">Couldn\'t load this section.</div>';
   }
 }
 
-// ── Pagination state for the public Book browse page ──
+// ── For You tab ────────────────────────────────────────────────────────────
+async function _loadForYouTab() {
+  await Promise.all([
+    _loadBookSection('weeklyFeatured', () => fetchSupabaseBooks(0, 12, 'editors-pick'), 'No editor picks yet'),
+    _loadBookSection('freshReads',     () => fetchSupabaseBooks(0, 12, 'recent'),       'No fresh reads'),
+    _loadBookSection('completedExcellent', () => fetchSupabaseBooks(0, 12, 'completed'), 'No completed books yet'),
+  ]);
+}
+
+// ── Ranking tab ────────────────────────────────────────────────────────────
+async function _loadRankingTab() {
+  await Promise.all([
+    _loadBookSection('mostLoved', () => fetchSupabaseBooks(0, 12, 'most-liked'), 'Nothing here yet'),
+    _loadBookSection('mostRead',  () => fetchSupabaseBooks(0, 12, 'most-read'),  'Nothing here yet'),
+    _loadBookSection('trending',  () => fetchSupabaseBooks(0, 12, 'trending'),   'Nothing trending yet'),
+  ]);
+}
+
+// ── Discover tab — genre-grouped rows ──────────────────────────────────────
+const _DISCOVER_GENRES = [
+  'hot-romance', 'dark-romance', 'mafia-boss', 'enemies-to-lovers',
+  'forbidden-love', 'sci-fi', 'teen-fiction', 'general-fiction',
+];
+async function _loadDiscoverTab() {
+  const wrap = document.getElementById('bookDiscoverGenres');
+  if (!wrap) return;
+  // Build the section skeletons so each row gets its own loading state.
+  wrap.innerHTML = '';
+  _DISCOVER_GENRES.forEach(g => {
+    const sec = document.createElement('div');
+    sec.className = 'book-section';
+    const safeG = escHTML(g);
+    const pretty = escHTML(prettyGenre(g));
+    sec.innerHTML = `
+      <div class="book-discover-genre-head">
+        <h3 class="book-discover-genre-name">${pretty}</h3>
+        <button class="book-section-see-all" data-see-all="genre:${safeG}" type="button">See All</button>
+      </div>
+      <div class="book-section-track" data-track="genre:${safeG}"><div class="loading">Loading…</div></div>`;
+    wrap.appendChild(sec);
+  });
+  // Hydrate each row in parallel.
+  await Promise.all(_DISCOVER_GENRES.map(g => _loadDiscoverGenreRow(g)));
+}
+
+async function _loadDiscoverGenreRow(genre) {
+  // Find the entire section (not just the track) so we can hide it if empty —
+  // mobile-app parity: a genre with zero books shouldn't take up space.
+  const section = document.querySelector(`.book-section-track[data-track="genre:${genre}"]`)?.closest('.book-section');
+  const track = section?.querySelector(`.book-section-track[data-track="genre:${genre}"]`);
+  if (!track) return;
+  try {
+    const books = await fetchSupabaseBooks(0, 12, 'most-liked', { genre });
+    if (!books.length) {
+      // Hide the section entirely — cleaner than an empty-state placeholder.
+      if (section) section.style.display = 'none';
+      return;
+    }
+    track.innerHTML = '';
+    books.forEach(b => track.appendChild(_renderBookCardV2(b)));
+  } catch (err) {
+    console.warn(`Discover genre "${genre}" failed:`, err);
+    track.innerHTML = '<div class="book-section-empty">Couldn\'t load.</div>';
+  }
+}
+
+// ── Library / Reading List tabs (user-scoped collection grids) ─────────────
+async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg }) {
+  const grid = document.getElementById(gridId);
+  const empty = document.getElementById(emptyId);
+  if (!grid) return;
+  if (!currentUser?.id) {
+    grid.innerHTML = `<div class="book-collection-empty"><h3>${escHTML(signedOutMsg)}</h3></div>`;
+    if (empty) empty.style.display = 'none';
+    return;
+  }
+  grid.innerHTML = '<div class="loading">Loading…</div>';
+  if (empty) empty.style.display = 'none';
+  try {
+    // Join through the user's table (book_reads / book_bookmarks) so we can
+    // both fetch the book row AND keep the user's own ordering (latest first).
+    const { data, error } = await supabase.from(table)
+      .select(`book_id, created_at, books!${fkName}(${BOOK_CARD_SELECT})`)
+      .eq('user_id', currentUser.id)
+      .order('created_at', { ascending: false })
+      .limit(60);
+    if (error) throw error;
+    const books = _normalizeBookRows((data || []).map(r => r.books));
+    if (!books.length) {
+      grid.innerHTML = '';
+      if (empty) empty.style.display = 'block';
+      return;
+    }
+    grid.innerHTML = '';
+    books.forEach((b, i) => {
+      const card = renderBookCard(b);
+      card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
+      grid.appendChild(card);
+    });
+  } catch (err) {
+    console.error(`${table} load failed:`, err);
+    grid.innerHTML = '<div class="book-collection-empty"><p>Couldn\'t load. Try again.</p></div>';
+  }
+}
+function _loadLibraryTab() {
+  return _loadCollectionTab({
+    table: 'book_reads',
+    fkName: 'book_reads_book_id_fkey',
+    gridId: 'bookLibraryGrid',
+    emptyId: 'bookLibraryEmpty',
+    signedOutMsg: 'Sign in to see your library',
+  });
+}
+function _loadReadingListTab() {
+  return _loadCollectionTab({
+    table: 'book_bookmarks',
+    fkName: 'book_bookmarks_book_id_fkey',
+    gridId: 'bookReadingListGrid',
+    emptyId: 'bookReadingListEmpty',
+    signedOutMsg: 'Sign in to see your reading list',
+  });
+}
+
+// ── v2 book card (matches mobile look: cover + corner badge + stats) ───────
+function _renderBookCardV2(b) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'book-card-v2';
+  card.dataset.bookId = b.id;
+  card.onclick = () => openBookDetail(b.id);
+
+  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
+  const cover = b.cover_url
+    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy" onerror="this.style.display='none'"/>`
+    : `<div class="book-card-v2-cover-placeholder">${escHTML(initialLetter)}</div>`;
+  const isPaid = (b.lock_from_chapter || 0) > 0;
+  const author = b.author?.username || b.profiles?.username || 'Unknown';
+  // Visual rating that mirrors the mobile-app card. We don't have a real
+  // ratings table yet, so we synthesise a 0-5 star from likes_count using
+  // the same scale the mobile UI seems to apply: ~25 likes → 5.0 stars.
+  const rating = Math.min(5, (b.likes_count || 0) / 5).toFixed(1);
+  const views = formatCompact(b.views_count || 0);
+
+  card.innerHTML = `
+    <div class="book-card-v2-cover">
+      ${cover}
+      <div class="book-card-v2-badge ${isPaid ? 'book-card-v2-badge-paid' : 'book-card-v2-badge-free'}">${isPaid ? 'Paid' : 'Free'}</div>
+    </div>
+    <div class="book-card-v2-body">
+      <h3 class="book-card-v2-title">${escHTML(b.title || 'Untitled')}</h3>
+      <p class="book-card-v2-author">by ${escHTML(author)}</p>
+      <div class="book-card-v2-stats">
+        <span class="book-card-v2-stat book-card-v2-stat-rating">★ ${rating}</span>
+        <span class="book-card-v2-stat book-card-v2-stat-views">👁 ${views}</span>
+      </div>
+    </div>`;
+  return card;
+}
+
+// ── Tab switching (event delegation) ───────────────────────────────────────
+// One listener on the tab bar instead of one-per-button — robust if the bar
+// is ever rebuilt (e.g., by a future feature flag) and one less DOM walk.
+document.getElementById('bookTabs')?.addEventListener('click', (e) => {
+  const tabBtn = e.target.closest('.book-tab');
+  if (!tabBtn) return;
+  const t = tabBtn.dataset.bookTab;
+  if (!t || t === _activeBookTab) return;
+  _activeBookTab = t;
+  document.querySelectorAll('#bookTabs .book-tab').forEach(x => {
+    const isActive = x === tabBtn;
+    x.classList.toggle('active', isActive);
+    x.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+  document.querySelectorAll('.book-tab-panel').forEach(p => {
+    const isActive = p.dataset.bookPanel === t;
+    p.style.display = isActive ? '' : 'none';
+    p.classList.toggle('active', isActive);
+  });
+  // Close any open See-All sub-view when switching tabs.
+  const seeAll = document.getElementById('bookSeeAllView');
+  if (seeAll) seeAll.style.display = 'none';
+  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
+  loadBooksTab(t);
+  window.scrollTo({ top: 0, behavior: 'instant' });
+});
+
+// ── See All sub-view ───────────────────────────────────────────────────────
+let _seeAllSeq = 0;
+let _seeAllOffset = 0;
+let _seeAllSort = '';
+let _seeAllGenre = null;
+let _seeAllHasMore = false;
+let _seeAllLoading = false;
+let _seeAllObserver = null;
+
+const _SEE_ALL_MAP = {
+  weeklyFeatured:     { sort: 'editors-pick', title: 'Weekly Featured' },
+  freshReads:         { sort: 'recent',       title: 'Fresh Reads' },
+  completedExcellent: { sort: 'completed',    title: 'Completed & Excellent Works' },
+  mostLoved:          { sort: 'most-liked',   title: 'Most Loved' },
+  mostRead:           { sort: 'most-read',    title: 'Most Read' },
+  trending:           { sort: 'trending',     title: 'Trending This Week' },
+};
+
+document.getElementById('bookPage')?.addEventListener('click', (e) => {
+  const seeAllBtn = e.target.closest('.book-section-see-all');
+  if (!seeAllBtn) return;
+  e.preventDefault();
+  _openBookSeeAll(seeAllBtn.dataset.seeAll);
+});
+
+document.getElementById('btnBookSeeAllBack')?.addEventListener('click', () => {
+  const seeAll = document.getElementById('bookSeeAllView');
+  if (seeAll) seeAll.style.display = 'none';
+  document.querySelectorAll('.book-tab-panel').forEach(p => {
+    const isActive = p.dataset.bookPanel === _activeBookTab;
+    p.style.display = isActive ? '' : 'none';
+    p.classList.toggle('active', isActive);
+  });
+  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
+  window.scrollTo({ top: 0, behavior: 'instant' });
+});
+
+async function _openBookSeeAll(key) {
+  let cfg = _SEE_ALL_MAP[key];
+  let genre = null;
+  if (!cfg && key && key.startsWith('genre:')) {
+    genre = key.slice('genre:'.length).replace(/[^a-z0-9-]/gi, '');
+    cfg = { sort: 'most-liked', title: prettyGenre(genre) };
+  }
+  if (!cfg) return;
+
+  _seeAllSeq++;
+  _seeAllSort = cfg.sort;
+  _seeAllGenre = genre;
+  _seeAllOffset = 0;
+  _seeAllHasMore = true;
+  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
+
+  document.querySelectorAll('.book-tab-panel').forEach(p => p.style.display = 'none');
+  const seeAll = document.getElementById('bookSeeAllView');
+  if (!seeAll) return;
+  seeAll.style.display = 'block';
+  document.getElementById('bookSeeAllTitle').textContent = cfg.title;
+  document.getElementById('bookSeeAllGrid').innerHTML = '<div class="loading">Loading…</div>';
+  const sentinel = document.getElementById('bookSeeAllSentinel');
+  if (sentinel) sentinel.style.display = 'none';
+
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  await _loadMoreSeeAllBooks(true);
+}
+
+async function _loadMoreSeeAllBooks(initial = false) {
+  if (_seeAllLoading || (!_seeAllHasMore && !initial)) return;
+  _seeAllLoading = true;
+  const seq = _seeAllSeq;
+  const grid = document.getElementById('bookSeeAllGrid');
+  const sentinel = document.getElementById('bookSeeAllSentinel');
+  const limit = 40;
+
+  try {
+    // One fetcher path, two shapes — a sort-only list or a genre-filtered list.
+    const books = await fetchSupabaseBooks(
+      _seeAllOffset, limit, _seeAllSort,
+      _seeAllGenre ? { genre: _seeAllGenre } : {}
+    );
+
+    if (seq !== _seeAllSeq) return; // user opened a different See-All
+
+    if (initial) grid.innerHTML = '';
+    if (initial && !books.length) {
+      grid.innerHTML = '<div class="book-collection-empty"><p>Nothing here yet.</p></div>';
+      _seeAllHasMore = false;
+      if (sentinel) sentinel.style.display = 'none';
+      return;
+    }
+
+    books.forEach((b, i) => {
+      const card = renderBookCard(b);
+      card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
+      grid.appendChild(card);
+    });
+    _seeAllOffset += books.length;
+
+    if (books.length < limit) {
+      _seeAllHasMore = false;
+      if (sentinel) {
+        sentinel.style.display = 'block';
+        sentinel.innerHTML = `<div class="book-grid-end-msg">You've reached the end · ${_seeAllOffset.toLocaleString()} books</div>`;
+      }
+      if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
+    } else {
+      if (sentinel) {
+        sentinel.style.display = 'block';
+        sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
+      }
+      _setupSeeAllInfiniteScroll();
+    }
+  } catch (err) {
+    if (seq !== _seeAllSeq) return;
+    console.error('See-all load failed:', err);
+    if (initial) grid.innerHTML = '<div class="book-collection-empty"><p>Couldn\'t load. Try again.</p></div>';
+    if (sentinel) sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more.</div>';
+  } finally {
+    _seeAllLoading = false;
+  }
+}
+
+function _setupSeeAllInfiniteScroll() {
+  if (_seeAllObserver || !('IntersectionObserver' in window)) return;
+  const sentinel = document.getElementById('bookSeeAllSentinel');
+  if (!sentinel) return;
+  _seeAllObserver = new IntersectionObserver(entries => {
+    if (entries[0].isIntersecting) _loadMoreSeeAllBooks(false);
+  }, { root: null, rootMargin: '600px 0px', threshold: 0.01 });
+  _seeAllObserver.observe(sentinel);
+}
+
+// ── Pagination state for the See All sub-view (back-compat shims kept for
+// any older code paths that still reference these names) ──
 const BOOKS_PAGE_SIZE = 80;
 let _booksOffset = 0;
 let _hasMoreBooks = true;
 let _isLoadingMoreBooks = false;
 let _bookScrollObserver = null;
-// Stale-query guard for loadBooks/loadMoreBooks — same pattern as the feed.
-// Switching sort tabs rapidly used to race; the slowest fetch would land
-// last and overwrite the user's chosen sort.
 let _booksSeq = 0;
-// The sort/filter snapshot the current page set was loaded against. If sort
-// or filter changes between loadBooks and loadMoreBooks, this triggers a
-// fresh load instead of appending mismatched results.
 let _booksLoadedSort = null;
 let _booksLoadedGenre = null;
 
-async function loadBooks() {
-  const grid = document.getElementById('bookGrid');
-  const empty = document.getElementById('bookEmpty');
-  const sentinel = document.getElementById('bookGridSentinel');
-  if (!grid) return;
+// (loadBooks / loadMoreBooks removed — the books page is now tabbed, with
+// curated sections rendered by _loadForYouTab / _loadDiscoverTab / etc., and
+// the See-All sub-view's pagination is handled by _loadMoreSeeAllBooks.)
 
-  // Bump the seq up front so any in-flight loadBooks/loadMoreBooks bails
-  // before mutating the DOM or caches with results from the previous sort.
-  const seq = ++_booksSeq;
-  const sortAtStart  = bookSortBy;
-  const genreAtStart = bookGenreFilter;
-
-  empty.style.display = 'none';
-  if (sentinel) sentinel.style.display = 'none';
-  grid.style.display = 'grid';
-  grid.innerHTML = '<div class="loading">Loading books...</div>';
-
-  // Reset pagination state on every fresh load (filter/sort/page open)
-  _booksOffset = 0;
-  _hasMoreBooks = true;
-  _isLoadingMoreBooks = false;
-  if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
-
-  // Kick off recommendation rail + adaptive chip render in parallel (don't block grid)
-  loadBookRecommendations().catch(e => console.warn('[recs] failed', e));
-  renderBookChips().catch(e => console.warn('[chips] failed', e));
-
-  let books;
-  try {
-    books = await fetchSupabaseBooks(0, BOOKS_PAGE_SIZE, sortAtStart);
-  } catch (err) {
-    if (seq !== _booksSeq) return;
-    console.error('Failed to load books:', err);
-    grid.innerHTML = '<div class="loading">Couldn\'t load books — try refreshing.</div>';
-    return;
-  }
-  if (seq !== _booksSeq) return; // user switched sort/filter mid-flight
-
-  if (books.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
-  _booksOffset = books.length;
-  _booksLoadedSort  = sortAtStart;
-  _booksLoadedGenre = genreAtStart;
-
-  // Keep both caches: raw (server-sorted, no genre filter applied yet) for the
-  // fast-path on subsequent sort tab swaps, and the filtered view for rendering.
-  allBooksRaw = books;
-  allBooksCache = applyBookFilter(books);
-
-  if (!allBooksCache.length) {
-    grid.style.display = 'none';
-    empty.style.display = 'flex';
-    return;
-  }
-
-  renderBooks();
-  if (_hasMoreBooks) setupBooksInfiniteScroll();
-}
-
-// Filter only — server now does the heavy ORDER BY (see _BOOK_SORT_PIPELINES),
-// so this function just applies the genre/tag filter on top of whatever
-// sorted results came back. Returns a NEW array (no input mutation — the
-// previous version sorted in-place, which corrupted shared caches).
-function applyBookFilter(list) {
-  if (!bookGenreFilter) return [...list];
-
-  const filterLower = bookGenreFilter.toLowerCase();
+// applyBookFilter — kept as a small helper. Currently unused by the v2 flow
+// (server-side genre filter handles it for the See-All view), but cheap to
+// keep around for future call sites.
+function applyBookFilter(list, genre) {
+  const filter = genre || '';
+  if (!filter) return [...list];
+  const filterLower = filter.toLowerCase();
   const filterWords = filterLower.replace(/-/g, ' ');
   return list.filter(b => {
-    if (b.genre === bookGenreFilter) return true;
+    if (b.genre === filter) return true;
     return (b.tags || []).some(t => {
       const tagLower = (t || '').toLowerCase();
       return tagLower === filterLower || tagLower === filterWords;
     });
   });
-}
-
-async function loadMoreBooks() {
-  if (_isLoadingMoreBooks || !_hasMoreBooks) return;
-  // If the active sort/filter changed since the page set was loaded, do a
-  // full reload instead — appending mismatched results would mix orderings.
-  if (bookSortBy !== _booksLoadedSort || bookGenreFilter !== _booksLoadedGenre) {
-    return loadBooks();
-  }
-
-  _isLoadingMoreBooks = true;
-  const seq = _booksSeq;
-
-  const sentinel = document.getElementById('bookGridSentinel');
-  if (sentinel) {
-    sentinel.style.display = 'block';
-    sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
-  }
-
-  try {
-    // Use the same sort the current page set was loaded with — so page 2 of
-    // "Most Loved" continues by likes_count, not chronologically.
-    const more = await fetchSupabaseBooks(_booksOffset, BOOKS_PAGE_SIZE, _booksLoadedSort);
-
-    if (seq !== _booksSeq) return; // sort/filter changed during fetch
-
-    if (more.length < BOOKS_PAGE_SIZE) _hasMoreBooks = false;
-    _booksOffset += more.length;
-
-    if (more.length) {
-      // Append to raw cache (deduped). Server already returned them in the
-      // correct order for this sort, so we just concat — no re-sort needed.
-      const seenInRaw = new Set(allBooksRaw.map(b => b.id));
-      for (const b of more) if (!seenInRaw.has(b.id)) allBooksRaw.push(b);
-
-      const seenInCache = new Set(allBooksCache.map(b => b.id));
-      // Apply genre filter to the new batch only (no resort — server's order is the truth)
-      const filteredMore = applyBookFilter(more).filter(b => !seenInCache.has(b.id));
-      allBooksCache = allBooksCache.concat(filteredMore);
-
-      // Append to DOM in arrival order — that's the correct sorted position.
-      const grid = document.getElementById('bookGrid');
-      const presentIds = new Set(Array.from(grid.querySelectorAll('.book-card')).map(c => c.dataset.bookId));
-      filteredMore
-        .filter(b => !presentIds.has(b.id))
-        .forEach((b, i) => {
-          const card = renderBookCard(b);
-          card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
-          grid.appendChild(card);
-        });
-    }
-
-    if (sentinel) {
-      if (_hasMoreBooks) {
-        sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
-      } else {
-        sentinel.innerHTML = '<div class="book-grid-end-msg">You\'ve reached the end · ' + allBooksCache.length.toLocaleString() + ' books</div>';
-        if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
-      }
-    }
-  } catch (err) {
-    if (seq !== _booksSeq) return;
-    console.error('Failed to load more books:', err);
-    if (sentinel) sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
-  } finally {
-    _isLoadingMoreBooks = false;
-  }
 }
 
 // ── Book search (filters the currently-loaded book cache) ──
@@ -5682,88 +5944,84 @@ function searchBooks(query) {
 }
 
 async function runBookSearch() {
-  const grid = document.getElementById('bookGrid');
-  const sentinel = document.getElementById('bookGridSentinel');
-  const empty = document.getElementById('bookEmpty');
+  // The v2 books page has no flat grid — search results render into the
+  // See-All sub-view, which already has its own grid + infinite scroll.
+  const grid = document.getElementById('bookSeeAllGrid');
+  const seeAllRoot = document.getElementById('bookSeeAllView');
+  const titleEl = document.getElementById('bookSeeAllTitle');
+  if (!grid || !seeAllRoot || !titleEl) return;
 
-  // While search is active, hide the infinite-scroll sentinel so we don't
-  // append off-results books underneath.
-  if (sentinel) sentinel.style.display = 'none';
-  if (_bookScrollObserver) { _bookScrollObserver.disconnect(); _bookScrollObserver = null; }
+  // Defensive: only render into the books page when it's actually visible.
+  // (getSearchContext now restricts books-context to the listing page, but
+  // this is a belt-and-braces check in case future code changes that.)
+  if (bookPage && bookPage.style.display === 'none') return;
 
   if (!activeBookSearchQuery.trim()) {
-    // Empty query → restore full view
-    empty.style.display = 'none';
-    grid.style.display = 'grid';
-    grid.innerHTML = '';
-    allBooksCache.forEach((b, i) => {
-      const card = renderBookCard(b);
-      card.style.animationDelay = `${i * 0.025}s`;
-      grid.appendChild(card);
+    // Empty query → close the search view and return to the active tab panel
+    seeAllRoot.style.display = 'none';
+    document.querySelectorAll('.book-tab-panel').forEach(p => {
+      const isActive = p.dataset.bookPanel === _activeBookTab;
+      p.style.display = isActive ? '' : 'none';
+      p.classList.toggle('active', isActive);
     });
-    if (sentinel && _hasMoreBooks) {
-      sentinel.style.display = 'block';
-      setupBooksInfiniteScroll();
-    }
     return;
   }
 
-  // Always run local cache filter AND server search in parallel — the old
-  // "only call server if local has <6 hits" gave inconsistent results
-  // depending on how far the user had scrolled (books at offset >80 were
-  // invisible). Server now also returns matching writers for the YouTube-style rail.
+  // Show the See-All view and treat search as its own kind of "list"
+  document.querySelectorAll('.book-tab-panel').forEach(p => p.style.display = 'none');
+  seeAllRoot.style.display = 'block';
+  titleEl.textContent = `Search: "${activeBookSearchQuery}"`;
+  // Disable any pending see-all infinite scroll — search isn't paginated here
+  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
+  _seeAllHasMore = false;
+  const sentinel = document.getElementById('bookSeeAllSentinel');
+  if (sentinel) sentinel.style.display = 'none';
+  grid.innerHTML = '<div class="loading">Searching books…</div>';
+
   const savedQuery = activeBookSearchQuery;
-  const localHits = searchBooks(savedQuery);
   const { books: serverHits, writers } = await fetchBooksServerSearch(savedQuery)
     .catch(() => ({ books: [], writers: [] }));
 
-  // Stale-query guard: if user kept typing while we awaited, ignore this run.
+  // Stale-query guard: ignore if user kept typing
   if (activeBookSearchQuery !== savedQuery) return;
 
-  // Merge — local cache wins for known ids (it has annotated objects), server
-  // fills in everything else.
-  const seen = new Set(localHits.map(b => b.id));
-  const filtered = [...localHits];
-  for (const b of serverHits) {
-    if (!seen.has(b.id)) { filtered.push(b); seen.add(b.id); }
-  }
-
-  empty.style.display = 'none';
-  grid.style.display = 'grid';
   grid.innerHTML = '';
 
-  // ── Writer channel cards (YouTube-style, top of book search) ──
+  // ── Writer channel cards (YouTube-style, above the books) ──
   if (writers && writers.length) {
     const header = document.createElement('div');
-    header.className = 'video-creators-header';   // reuse the existing rail styling
+    header.className = 'video-creators-header';
+    header.style.gridColumn = '1 / -1';
     header.textContent = writers.length === 1 ? 'Writer' : 'Writers';
     grid.appendChild(header);
 
     const row = document.createElement('div');
     row.className = 'video-creators-row';
+    row.style.gridColumn = '1 / -1';
     writers.forEach(w => row.appendChild(renderWriterChannelCard(w)));
     grid.appendChild(row);
 
-    if (filtered.length) {
+    if (serverHits.length) {
       const booksHeader = document.createElement('div');
       booksHeader.className = 'video-creators-header';
+      booksHeader.style.gridColumn = '1 / -1';
       booksHeader.textContent = 'Books';
       grid.appendChild(booksHeader);
     }
   }
 
-  if (!filtered.length) {
-    const empty2 = document.createElement('div');
-    empty2.className = 'video-search-empty';
-    empty2.style.gridColumn = '1 / -1';
-    empty2.innerHTML = (writers && writers.length)
+  if (!serverHits.length) {
+    const emptyEl = document.createElement('div');
+    emptyEl.className = 'book-collection-empty';
+    emptyEl.style.gridColumn = '1 / -1';
+    emptyEl.innerHTML = (writers && writers.length)
       ? '<h3>No books found</h3><p>The writers above match — open one of their pages to see their work.</p>'
       : '<h3>No books found</h3><p>Try a different keyword, author, or #tag.</p>';
-    grid.appendChild(empty2);
+    grid.appendChild(emptyEl);
     return;
   }
 
-  filtered.forEach((b, i) => {
+  serverHits.forEach((b, i) => {
     const card = renderBookCard(b);
     card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
     grid.appendChild(card);
@@ -5797,23 +6055,8 @@ function renderWriterChannelCard(writer) {
   return card;
 }
 
-function setupBooksInfiniteScroll() {
-  const sentinel = document.getElementById('bookGridSentinel');
-  if (!sentinel) return;
-  sentinel.style.display = 'block';
-
-  if (_bookScrollObserver) _bookScrollObserver.disconnect();
-  if (!('IntersectionObserver' in window)) return;
-
-  _bookScrollObserver = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting) loadMoreBooks();
-  }, {
-    root: null,
-    rootMargin: '600px 0px',   // pre-fetch a bit before the sentinel reaches the viewport
-    threshold: 0.01,
-  });
-  _bookScrollObserver.observe(sentinel);
-}
+// (setupBooksInfiniteScroll removed — the See-All sub-view uses
+// _setupSeeAllInfiniteScroll instead. Other tabs render fixed-size sections.)
 
 // ── Supabase books ──
 // ────────────────────────────────────────────────────────────────────────
@@ -6066,9 +6309,45 @@ function renderBookRecsRail(books) {
   rail.style.display = 'block';
 }
 
+// ── Book row helpers ──────────────────────────────────────────────────────
+// One source of truth for the columns the UI needs from the books table.
+// Used by every fetcher so adding/removing a column is a one-line change.
+const BOOK_LIST_SELECT = `
+  id, title, description, cover_url, genre, tags, status,
+  views_count, likes_count, chapters_count, word_count,
+  views_last_7d, likes_last_7d, trending_score,
+  is_editors_pick, editors_pick_at, editors_pick_note,
+  lock_from_chapter, published_at, created_at, author_id,
+  profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
+`;
+// Slimmer projection — used by the home-feed dropdown and other places where
+// only cover/title/author are needed.
+const BOOK_CARD_SELECT = `
+  id, title, cover_url, genre, status, views_count, likes_count,
+  chapters_count, lock_from_chapter, published_at, created_at, author_id,
+  profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
+`;
+
+// Normalise a raw row into the shape the rest of the app expects.
+// Filters out banned-author rows; returns null for those (caller filters).
+function _normalizeBookRow(row) {
+  if (!row) return null;
+  if (row.profiles?.is_banned) return null;
+  return {
+    ...row,
+    $id: 'sb_' + row.id,
+    author: row.profiles
+      ? { id: row.profiles.id, username: row.profiles.username, avatar: row.profiles.avatar_url }
+      : null,
+  };
+}
+function _normalizeBookRows(rows) {
+  return (rows || []).map(_normalizeBookRow).filter(Boolean);
+}
+
 // Server-side sort matrix. Each entry returns the chained query so callers
 // can range() it. Keeping the per-sort logic centralised here means
-// loadBooks AND loadMoreBooks always paginate the same axis as page 1.
+// every code path that lists books paginates the same axis as page 1.
 const _BOOK_SORT_PIPELINES = {
   // Trending: precomputed by refresh_book_trending_stats() (indexed).
   trending:      (q) => q.order('trending_score', { ascending: false, nullsFirst: false })
@@ -6086,47 +6365,39 @@ const _BOOK_SORT_PIPELINES = {
   'editors-pick':(q) => q.eq('is_editors_pick', true).order('editors_pick_at', { ascending: false, nullsFirst: false }),
 };
 
-async function fetchSupabaseBooks(offset = 0, limit = 80, sortBy = bookSortBy) {
+// Single fetcher for every browse-style book list. Supports server-side
+// sort (via _BOOK_SORT_PIPELINES) and an optional genre filter that matches
+// against either the genre column or the tags array.
+//
+//   fetchSupabaseBooks(0, 12, 'most-liked')                  → top 12 by likes
+//   fetchSupabaseBooks(0, 12, 'most-liked', { genre: 'sci-fi' }) → top 12 sci-fi
+async function fetchSupabaseBooks(offset = 0, limit = 80, sortBy = bookSortBy, opts = {}) {
   try {
-    let q = supabase
-      .from('books')
-      .select(`
-        id, title, description, cover_url, genre, tags, status,
-        views_count, likes_count, chapters_count, word_count,
-        views_last_7d, likes_last_7d, trending_score,
-        is_editors_pick, editors_pick_at, editors_pick_note,
-        published_at, created_at,
-        author_id,
-        profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
-      `)
-      .eq('is_public', true)
-      .eq('is_hidden', false);
+    let q = supabase.from('books').select(BOOK_LIST_SELECT)
+      .eq('is_public', true).eq('is_hidden', false);
 
     // The Completed and Editor's-Pick pipelines apply their own status filter,
     // so only add the public-status filter for the OTHER sorts (otherwise
-    // .in('status', [...]) overrides .eq('status', 'completed')).
+    // .in('status', [...]) would override .eq('status', 'completed')).
     if (sortBy !== 'completed' && sortBy !== 'editors-pick') {
       q = q.in('status', ['ongoing', 'completed']);
     }
 
-    const pipeline = _BOOK_SORT_PIPELINES[sortBy] || _BOOK_SORT_PIPELINES.trending;
-    q = pipeline(q).range(offset, offset + limit - 1);
+    // Optional genre filter — matches either the dedicated `genre` column or
+    // a tag in the `tags` array. Strip anything but [a-z0-9-] defensively so
+    // a malformed genre slug can't break the .or() clause.
+    if (opts.genre) {
+      const safeG = String(opts.genre).toLowerCase().replace(/[^a-z0-9-]/g, '');
+      if (safeG) q = q.or(`genre.eq.${safeG},tags.cs.{${safeG}}`);
+    }
 
-    const { data, error } = await q;
+    const pipeline = _BOOK_SORT_PIPELINES[sortBy] || _BOOK_SORT_PIPELINES.trending;
+    const { data, error } = await pipeline(q).range(offset, offset + limit - 1);
     if (error) {
       console.error('Supabase books fetch error:', error);
       return [];
     }
-
-    // Filter out books whose author is banned
-    return (data || [])
-      .filter(b => !b.profiles?.is_banned)
-      .map(b => ({
-        ...b,
-        id: b.id,                                    // raw UUID, no prefix needed (FK shape used elsewhere)
-        $id: 'sb_' + b.id,
-        author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
-      }));
+    return _normalizeBookRows(data);
   } catch (err) {
     console.error('fetchSupabaseBooks failed:', err);
     return [];
@@ -6146,23 +6417,15 @@ async function fetchBooksServerSearch(query) {
   try {
     // Two parallel queries: content match + author username match
     const [contentRes, authorRes] = await Promise.all([
-      supabase.from('books')
-        .select(`
-          id, title, description, cover_url, genre, tags,
-          views_count, likes_count, chapters_count, word_count,
-          published_at, created_at, author_id,
-          profiles!books_author_id_fkey ( id, username, avatar_url, bio, is_banned )
-        `)
-        .eq('is_public', true)
-        .eq('is_hidden', false)
+      supabase.from('books').select(BOOK_LIST_SELECT)
+        .eq('is_public', true).eq('is_hidden', false)
         .in('status', ['ongoing', 'completed'])
         .or(`title.ilike.%${q}%,description.ilike.%${q}%`)
         .limit(40),
       // Find matching author profiles (also surfaced as the YouTube-style writers row)
       supabase.from('profiles')
         .select('id, username, avatar_url, bio, is_banned')
-        .ilike('username', `%${q}%`)
-        .eq('is_banned', false)
+        .ilike('username', `%${q}%`).eq('is_banned', false)
         .limit(8)
     ]);
 
@@ -6170,36 +6433,22 @@ async function fetchBooksServerSearch(query) {
     const matchingWriters = authorRes.data || [];
     if (matchingWriters.length) {
       const ids = matchingWriters.map(p => p.id);
-      const { data } = await supabase.from('books')
-        .select(`
-          id, title, description, cover_url, genre, tags,
-          views_count, likes_count, chapters_count, word_count,
-          published_at, created_at, author_id,
-          profiles!books_author_id_fkey ( id, username, avatar_url, bio, is_banned )
-        `)
+      const { data } = await supabase.from('books').select(BOOK_LIST_SELECT)
         .in('author_id', ids)
-        .eq('is_public', true)
-        .eq('is_hidden', false)
+        .eq('is_public', true).eq('is_hidden', false)
         .in('status', ['ongoing', 'completed'])
         .limit(40);
       authorBooks = data || [];
     }
 
-    // Merge + dedupe + filter banned authors + reshape (matches fetchSupabaseBooks)
-    const merged = [...(contentRes.data || []), ...authorBooks];
+    // Merge + dedupe + normalise (drops banned-author rows along the way).
     const seen = new Set();
-    const books = merged
-      .filter(b => {
-        if (b.profiles?.is_banned) return false;
-        if (seen.has(b.id)) return false;
-        seen.add(b.id);
-        return true;
-      })
-      .map(b => ({
-        ...b,
-        $id: 'sb_' + b.id,
-        author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
-      }));
+    const merged = [...(contentRes.data || []), ...authorBooks].filter(b => {
+      if (seen.has(b.id)) return false;
+      seen.add(b.id);
+      return true;
+    });
+    const books = _normalizeBookRows(merged);
 
     // Decorate writers with their book count from the returned set
     const writerStats = new Map();
@@ -6221,26 +6470,9 @@ async function fetchBooksServerSearch(query) {
   }
 }
 
-function renderBooks() {
-  const grid = document.getElementById('bookGrid');
-  const empty = document.getElementById('bookEmpty');
-
-  if (!allBooksCache.length) {
-    grid.style.display = 'none';
-    empty.style.display = 'flex';
-    return;
-  }
-
-  grid.style.display = 'grid';
-  empty.style.display = 'none';
-
-  grid.innerHTML = '';
-  allBooksCache.forEach((b, i) => {
-    const card = renderBookCard(b);
-    card.style.animationDelay = `${i * 0.025}s`;
-    grid.appendChild(card);
-  });
-}
+// (renderBooks removed — the v2 books page renders into per-tab DOM targets:
+// section tracks for For You/Discover/Ranking, dedicated grids for Library and
+// Reading List, and bookSeeAllGrid for the See-All sub-view.)
 
 function renderBookCard(b) {
   const card = document.createElement('button');
@@ -6286,42 +6518,10 @@ function formatCompact(n) {
   return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
 }
 
-// Wire up genre chips + sort
-document.getElementById('bookGenreChips')?.addEventListener('click', (e) => {
-  const chip = e.target.closest('.book-chip');
-  if (!chip) return;
-  // Prevent default focus-scroll-into-view behavior that snaps the page to the chip rail
-  e.preventDefault();
-  chip.blur();
-
-  document.querySelectorAll('#bookGenreChips .book-chip').forEach(c => c.classList.remove('active'));
-  chip.classList.add('active');
-  bookGenreFilter = chip.dataset.genre || '';
-
-  // Preserve scroll position across the re-render (loadBooks resets grid → page collapses → browser jumps)
-  const savedY = window.scrollY;
-  loadBooks().then(() => {
-    // Restore scroll on next tick (after layout settles)
-    requestAnimationFrame(() => window.scrollTo({ top: savedY, behavior: 'instant' }));
-  });
-});
-document.getElementById('bookSortSelect')?.addEventListener('change', (e) => {
-  bookSortBy = e.target.value;
-  // Always re-fetch — the cached `allBooksRaw` was sorted by the PREVIOUS sort
-  // tab, so the truly top-N books for the new sort live on the server (e.g.
-  // the most-liked book of all time may sit beyond the first 80 of "Newest").
-  // The seq guard inside loadBooks handles rapid tab-flicks safely.
-  const savedY = window.scrollY;
-  loadBooks().then(() => {
-    requestAnimationFrame(() => window.scrollTo({ top: savedY, behavior: 'instant' }));
-  });
-});
-
-// (renderBooksFast removed — it was the in-memory re-sort fast path used by
-// the sort tab change handler. That path was incorrect for any all-time sort
-// because allBooksRaw only ever held the loaded pages, not the catalog —
-// so the truly top-N book for "Most Loved" / "Most Read" / etc. would never
-// appear if it lived past the first batch. Sort tab now always re-fetches.)
+// (Old genre-chip + sort-select handlers removed alongside their DOM. The v2
+// books page expresses the same intent through tabs and curated sections —
+// "trending", "recent", "most-liked" etc. live in _SEE_ALL_MAP for the See-All
+// list view.)
 
 // ── Book detail page ──
 // Stale-fetch guard so rapid taps (open A → tap B before A loads) don't
@@ -11213,10 +11413,7 @@ function notificationLabel(n, knownUsername) {
     // ── Direct messages ──
     case 'dm_message': {
       const preview = n.metadata?.preview ? ` <em style="color:var(--text2)">"${escHTML(String(n.metadata.preview).slice(0, 80))}"</em>` : '';
-      // Group chats read differently from 1:1 — the trigger sets
-      // metadata.is_group so we can pick the right verb without another query.
-      const verb = n.metadata?.is_group ? 'sent a message in a group' : 'sent you a message';
-      return `${actorTag} ${verb}${preview}`;
+      return `${actorTag} sent you a message${preview}`;
     }
 
     default:                       return `${actorTag} did something on Selebox`;
@@ -11705,73 +11902,38 @@ async function loadConversationList() {
     `;
   }
 
-  // Fetch in two parallel queries — matches the mobile pattern in
-  // selebox-mobile/lib/messages-supabase.js so both clients agree on
-  // what "my conversations" means.
-  //
-  //   1. 1:1 conversations: read directly from `conversations` filtered
-  //      by `user_a` or `user_b`. The row itself encodes membership; no
-  //      participant rows are required (and after the Phase-2 cleanup
-  //      migration, no 1:1 participant rows EXIST). This eliminates
-  //      the prior dependency on `conversation_participants` carrying
-  //      a row for every 1:1.
-  //   2. Group conversations: join via `conversation_participants` and
-  //      filter the joined row to `is_group=true` so a stale 1:1
-  //      participant row could never accidentally surface here as a
-  //      phantom group.
-  //
-  // We deliberately don't push `.limit(100)` into either query — a user
-  // with 80 active 1:1s and 50 groups should still see the most recent
-  // 100 across both, not 100 of one and miss the other. The slice
-  // after merge handles the cap.
-  const [oneOnOneRes, groupPartsRes] = await Promise.all([
-    supabase
-      .from('conversations')
-      .select('id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
-      .eq('is_group', false)
-      .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`),
-    supabase
-      .from('conversation_participants')
-      .select('conversations!inner(id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b)')
-      .eq('user_id', currentUser.id)
-      .eq('conversations.is_group', true),
-  ]);
+  // Fetch all conversations I'm a participant of (uses participant-based RLS).
+  // Two-step: get my participant rows, then load conversations for those ids.
+  const { data: myParts, error: partErr } = await supabase
+    .from('conversation_participants')
+    .select('conversation_id')
+    .eq('user_id', currentUser.id);
 
-  if (oneOnOneRes.error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(oneOnOneRes.error.message)}</div>`;
+  if (partErr) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(partErr.message)}</div>`;
     return;
   }
-  if (groupPartsRes.error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(groupPartsRes.error.message)}</div>`;
+  const convIds = (myParts || []).map(p => p.conversation_id);
+  if (!convIds.length) {
+    wrap.innerHTML = DM_EMPTY_HTML;
+    dmState.conversations = [];
+    updateUnreadBadge(0);
     return;
   }
 
-  const oneOnOne = oneOnOneRes.data || [];
-  const groupRows = (groupPartsRes.data || []).map(p => p.conversations).filter(Boolean);
+  const { data: convs, error } = await supabase
+    .from('conversations')
+    .select('id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
+    .in('id', convIds)
+    .order('last_message_at', { ascending: false, nullsFirst: false })
+    .limit(100);
 
-  // Defensive merge — dedupe by id and drop any 1:1 row where the
-  // current user isn't actually on user_a or user_b. The dedup guards
-  // against the same conversation appearing in both query results
-  // (shouldn't happen now, but a stray 1:1 cp row pre-Phase-2 could
-  // theoretically slip through). The membership check guards against
-  // a 1:1 row leaking in via any future code change and getting
-  // mis-rendered with the wrong username.
-  const seen = new Set();
-  const convs = [...oneOnOne, ...groupRows]
-    .filter(c => {
-      if (!c?.id || seen.has(c.id)) return false;
-      seen.add(c.id);
-      if (!c.is_group && c.user_a !== currentUser.id && c.user_b !== currentUser.id) return false;
-      return true;
-    })
-    .sort((a, b) => {
-      const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
-      const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
-      return tb - ta;
-    })
-    .slice(0, 100);
+  if (error) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(error.message)}</div>`;
+    return;
+  }
 
-  if (!convs.length) {
+  if (!convs || !convs.length) {
     wrap.innerHTML = DM_EMPTY_HTML;
     dmState.conversations = [];
     updateUnreadBadge(0);
@@ -12086,35 +12248,6 @@ async function openConversation(convId) {
   supabase.rpc('mark_conversation_read', { p_conversation_id: convId })
     .then(_zeroUnread)
     .catch(() => {});  // Already cleared optimistically; ignore RPC errors
-
-  // ── Also clear bell-panel dm_message rows for this conversation ──
-  // The bell panel surfaces a coalesced notification per (recipient,
-  // conversation) via the trg_notify_chat_message trigger. Opening the
-  // thread is the same gesture as "I've seen this," so flip every unread
-  // dm_message bell row for this conversation. Optimistically zero the
-  // local count first so the bell badge updates without waiting for the
-  // round-trip; the realtime UPDATE handler will reconcile.
-  const _clearBellForConv = () => {
-    let cleared = 0;
-    _notifications.forEach(n => {
-      if (n.type === 'dm_message'
-          && n.parent_target_type === 'conversation'
-          && n.parent_target_id === convId
-          && !n.is_read) {
-        n.is_read = true;
-        cleared += 1;
-      }
-    });
-    if (cleared > 0) {
-      _notifUnreadCount = Math.max(0, _notifUnreadCount - cleared);
-      updateNotifBadge();
-      renderNotifications();
-    }
-  };
-  _clearBellForConv();
-  supabase.rpc('mark_chat_notifications_read', { p_conversation_id: convId })
-    .then(() => {})  // Already cleared optimistically
-    .catch(() => {}); // RPC missing or network error — bell will resync on next open
 
   // Subscribe to realtime updates for this conversation
   subscribeToThread(convId);
