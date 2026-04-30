@@ -5684,8 +5684,18 @@ async function openChapterReader(chapterIndex) {
     return;
   }
 
-  // PAYWALL: locked + not unlocked → render the lock CTA instead of content.
-  if (chapterRow.is_locked && !isUnlocked('chapter', resolvedChapterId)) {
+  // PAYWALL: a chapter is effectively locked if EITHER the book has a
+  // book-level lock_from_chapter that includes this chapter's number, OR
+  // the chapter has its own per-row is_locked flag set. The book detail
+  // page already gates the lock badge on this same OR — without the
+  // book-level half here, the Next button (and direct row taps) bypass
+  // the paywall whenever the book uses lock_from_chapter, which is the
+  // normal pattern. Per-row is_locked is mostly a legacy / override path.
+  const lockFromHere = currentBookDetail?.book?.lock_from_chapter ?? null;
+  const isAtOrAfterLockPoint =
+    lockFromHere != null && Number(chapterRow.chapter_number) >= Number(lockFromHere);
+  const effectivelyLocked = (chapterRow.is_locked || isAtOrAfterLockPoint);
+  if (effectivelyLocked && !isUnlocked('chapter', resolvedChapterId)) {
     const coinCost = resolveUnlockCost('chapter', 'coin', chapterRow);
     const starCost = resolveUnlockCost('chapter', 'star', chapterRow);
     content.style.fontSize = '';
