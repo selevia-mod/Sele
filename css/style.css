@@ -10832,40 +10832,90 @@ body:not(.light) .form-input[readonly] {
    tabs + multiple curated sections + horizontal-scroll tracks of v2 book cards
    ════════════════════════════════════════════════════════════════════════════ */
 
-/* ── Tab bar ────────────────────────────────────────────────────────────── */
+/* ── Wider canvas: when bookPage is visible, expand the main column from the
+   home-feed 900px constraint to fill the available viewport so 7 covers fit. */
+body.on-books .main-wrap {
+  max-width: none !important;
+  width: calc(100vw - var(--sidebar-w)) !important;
+  margin-left: var(--sidebar-w) !important;
+  margin-right: 0 !important;
+  /* Tight horizontal padding — the books page is a dense visual surface and
+     the old 1.75rem inset wasted a noticeable strip next to the sidebar. */
+  padding: 0.4rem 0.85rem 2rem !important;
+}
+body.on-books .compose,
+body.on-books #feedTabs,
+body.on-books #feedSentinel { display: none !important; }
+@media (max-width: 700px) {
+  body.on-books .main-wrap {
+    margin-left: 0 !important;
+    width: 100vw !important;
+    padding: 0.4rem 0.9rem 1.5rem !important;
+  }
+}
+
+/* ── Tab bar (minimal underline style — Stripe / Apple inspired) ────────── */
+/* Text-only tabs with an animated purple underline indicator. Smaller and
+   more refined than a pill bar, but the active state's gradient underline
+   keeps the Selebox purple accent front and centre. */
 .book-tabs {
   display: flex;
-  gap: 0.4rem;
   align-items: center;
-  margin: 0.4rem 0 1.4rem;
-  padding-bottom: 0.5rem;
+  gap: 1.75rem;
+  margin: 0.4rem 0 1.5rem;
+  padding: 0 0.25rem;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
 }
 .book-tabs::-webkit-scrollbar { display: none; }
+
 .book-tab {
   flex: 0 0 auto;
-  padding: 0.55rem 1.15rem;
-  border: 1px solid transparent;
-  border-radius: 999px;
+  padding: 0.55rem 0 0.7rem;
   background: transparent;
-  color: var(--text2);
+  border: none;
+  color: var(--text3);
   font: inherit;
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   font-weight: 600;
+  letter-spacing: -0.005em;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  position: relative;
   white-space: nowrap;
+  transition: color 0.18s ease;
 }
-.book-tab:hover { background: var(--bg3); color: var(--text); }
-.book-tab.active {
-  background: var(--purple, #7c3aed);
-  color: #fff;
-  border-color: transparent;
+.book-tab:hover { color: var(--text); }
+
+/* Animated indicator: a thin purple bar that draws in under the active tab.
+   Sits 1px below the tab so it overlaps the row's underline cleanly. */
+.book-tab::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2.5px;
+  background: linear-gradient(90deg, #a78bfa 0%, #7c3aed 60%, #ec4899 100%);
+  border-radius: 2px 2px 0 0;
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
-body.light .book-tab.active { background: #7c3aed; }
+.book-tab.active { color: #7c3aed; }
+.book-tab.active::after { transform: scaleX(1); }
+
+/* Dark mode — lighter purple text for contrast, same gradient indicator. */
+body:not(.light) .book-tab.active { color: #c4b5fd; }
+body:not(.light) .book-tab::after {
+  background: linear-gradient(90deg, #c4b5fd 0%, #a78bfa 60%, #f9a8d4 100%);
+}
+
+@media (max-width: 700px) {
+  .book-tabs { gap: 1.25rem; }
+  .book-tab { font-size: 0.88rem; padding: 0.5rem 0 0.65rem; }
+}
 
 /* ── Tab panel ──────────────────────────────────────────────────────────── */
 .book-tab-panel { display: block; }
@@ -10873,48 +10923,71 @@ body.light .book-tab.active { background: #7c3aed; }
 
 /* ── Section (Weekly Featured / Fresh Reads / etc.) ─────────────────────── */
 .book-section {
-  margin: 0 0 2rem;
+  --cards-per-row: 7;
+  --card-gap: 1rem;
+  margin: 0 0 2.4rem;
 }
 .book-section-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
-  margin: 0 0.25rem 0.85rem;
+  margin: 0 0 1rem;
 }
 .book-section-title {
-  font-size: 1.4rem;
+  font-size: 1.55rem;
   font-weight: 800;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   color: var(--text);
   margin: 0;
+  position: relative;
+}
+.book-section-title::before {
+  content: '';
+  display: inline-block;
+  width: 4px; height: 1.1em;
+  background: linear-gradient(180deg, #8b5cf6, #ec4899);
+  border-radius: 2px;
+  margin-right: 0.6rem;
+  vertical-align: -0.1em;
 }
 .book-section-see-all {
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   color: var(--purple, #7c3aed);
   font: inherit;
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-size: 0.92rem;
+  font-weight: 700;
   cursor: pointer;
-  padding: 0.2rem 0.4rem;
-  border-radius: 6px;
-  transition: background 0.15s ease;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+  letter-spacing: -0.005em;
 }
-.book-section-see-all:hover { background: rgba(124,58,237,0.10); text-decoration: underline; }
+.book-section-see-all:hover {
+  background: rgba(124,58,237,0.08);
+  border-color: rgba(124,58,237,0.20);
+}
+.book-section-see-all:active { transform: scale(0.97); }
 body:not(.light) .book-section-see-all { color: #c4b5fd; }
-body:not(.light) .book-section-see-all:hover { color: #ddd6fe; background: rgba(196,181,253,0.10); }
+body:not(.light) .book-section-see-all:hover {
+  color: #ddd6fe;
+  background: rgba(196,181,253,0.10);
+  border-color: rgba(196,181,253,0.20);
+}
 
-/* ── Horizontal scroll track ────────────────────────────────────────────── */
+/* ── Horizontal scroll track — exactly N cards visible per row ──────────── */
 .book-section-track {
   display: flex;
-  gap: 1rem;
+  gap: var(--card-gap);
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
-  scroll-snap-type: x proximity;
-  padding: 0.25rem 0.25rem 1rem;
+  scroll-snap-type: x mandatory;
+  scroll-padding: 0;
+  padding: 0.25rem 0 1rem;
   scrollbar-width: thin;
+  scroll-behavior: smooth;
 }
 .book-section-track::-webkit-scrollbar { height: 8px; }
 .book-section-track::-webkit-scrollbar-track { background: transparent; }
@@ -10928,12 +11001,17 @@ body:not(.light) .book-section-see-all:hover { color: #ddd6fe; background: rgba(
   flex: 1; min-height: 240px;
   display: flex; align-items: center; justify-content: center;
   color: var(--text3);
-  font-size: 0.9rem;
+  font-size: 0.92rem;
+  font-weight: 500;
 }
 
 /* ── v2 book card (matches mobile look: cover, badge ribbon, stats) ─────── */
 .book-card-v2 {
-  flex: 0 0 200px;
+  /* Width formula: divide the visible track by N, subtract a share of the
+     gaps. With --cards-per-row: 7 (default), exactly 7 covers fit per row;
+     extra cards are reachable via horizontal scroll/snap. */
+  flex: 0 0 calc((100% - (var(--cards-per-row) - 1) * var(--card-gap)) / var(--cards-per-row));
+  min-width: 0;
   scroll-snap-align: start;
   display: flex;
   flex-direction: column;
@@ -11059,22 +11137,266 @@ body:not(.light) .book-card-v2-stat-views {
 }
 
 /* ── Discover tab — genre-grouped rows ──────────────────────────────────── */
+/* Now uses the shared .book-section-head / .book-section-title markup so
+   the layout is identical to For You and Ranking. The old per-Discover
+   classes were removed to drop a duplicate styling source. */
 .book-discover-genres { display: block; }
-.book-discover-genre-head {
-  display: flex; align-items: center; gap: 0.5rem;
-  margin: 0 0.25rem 0.6rem;
+
+/* ── Ranking tab — Top-100 leaderboard with genre filter chips ──────────── */
+/* Mobile-app parity: one vertical ranked list per genre, numbered ribbons
+   on each card (#1 gold, #2 silver, #3 bronze, then purple). */
+
+.rank-genre-chips {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  margin: 0.25rem 0 1.4rem;
+  padding: 0.35rem 0 0.6rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
-.book-discover-genre-name {
-  font-size: 1.3rem;
+.rank-genre-chips::-webkit-scrollbar { display: none; }
+.rank-genre-chip {
+  flex: 0 0 auto;
+  padding: 0.5rem 1.15rem;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg2);
+  color: var(--text2);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease,
+              border-color 0.15s ease, transform 0.1s ease;
+}
+.rank-genre-chip:hover { color: var(--text); border-color: rgba(124,58,237,0.30); }
+.rank-genre-chip.active {
+  background: linear-gradient(135deg, rgba(139,92,246,0.10), rgba(124,58,237,0.06));
+  border-color: rgba(124,58,237,0.45);
+  color: #7c3aed;
+}
+body:not(.light) .rank-genre-chip.active {
+  background: linear-gradient(135deg, rgba(167,139,250,0.16), rgba(196,181,253,0.08));
+  border-color: rgba(167,139,250,0.50);
+  color: #c4b5fd;
+}
+
+.rank-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin: 0 0 2rem;
+}
+.rank-list .loading,
+.rank-list .rank-empty {
+  padding: 2.5rem 1rem;
+  text-align: center;
+  color: var(--text3);
+  font-size: 0.95rem;
+}
+
+/* Single leaderboard row — cover left, info right, ribbon overlay */
+.rank-card {
+  display: flex;
+  gap: 1rem;
+  padding: 0.85rem 1rem 0.85rem 0;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  width: 100%;
+}
+.rank-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(124,58,237,0.30);
+  box-shadow: 0 8px 22px rgba(124,58,237,0.10);
+}
+
+/* Numbered ribbon — banner on the LEFT of the cover */
+.rank-card-ribbon {
+  flex: 0 0 32px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 0.55rem 0 0;
+  font-weight: 800;
+  font-size: 1.05rem;
+  color: #fff;
+  letter-spacing: -0.02em;
+  position: relative;
+  background: linear-gradient(180deg, #a78bfa 0%, #7c3aed 100%);
+  /* Pointed bottom so it looks like a hanging banner */
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 88%, 0 100%);
+  min-height: 56px;
+}
+/* Top three get the podium colours */
+.rank-card[data-rank="1"] .rank-card-ribbon {
+  background: linear-gradient(180deg, #fde68a 0%, #f59e0b 100%);
+  color: #78350f;
+}
+.rank-card[data-rank="2"] .rank-card-ribbon {
+  background: linear-gradient(180deg, #e5e7eb 0%, #9ca3af 100%);
+  color: #1f2937;
+}
+.rank-card[data-rank="3"] .rank-card-ribbon {
+  background: linear-gradient(180deg, #fdba74 0%, #c2410c 100%);
+  color: #fff;
+}
+
+.rank-card-cover {
+  flex: 0 0 100px;
+  aspect-ratio: 2/3;
+  border-radius: 8px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #d6cdf6, #ece8fd);
+  margin: 0.15rem 0;
+}
+.rank-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.rank-card-cover-placeholder {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.6rem; font-weight: 800; color: var(--text3);
+}
+
+.rank-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.1rem 0;
+}
+.rank-card-title {
+  font-size: 1.05rem;
   font-weight: 800;
   letter-spacing: -0.01em;
-  margin: 0;
   color: var(--text);
+  margin: 0;
+  text-transform: uppercase;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rank-card-desc {
+  font-size: 0.86rem;
+  color: var(--text2);
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.45;
+}
+.rank-card-badges {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.rank-card-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  border-radius: 6px;
+  letter-spacing: -0.005em;
+}
+.rank-card-badge-completed {
+  background: rgba(16,185,129,0.14);
+  color: #047857;
+}
+body:not(.light) .rank-card-badge-completed {
+  background: rgba(52,211,153,0.16);
+  color: #6ee7b7;
+}
+.rank-card-badge-ongoing {
+  background: rgba(124,58,237,0.12);
+  color: #6d28d9;
+}
+body:not(.light) .rank-card-badge-ongoing {
+  background: rgba(167,139,250,0.16);
+  color: #c4b5fd;
+}
+.rank-card-badge-paid {
+  background: rgba(244,63,94,0.12);
+  color: #be123c;
+}
+body:not(.light) .rank-card-badge-paid {
+  background: rgba(251,113,133,0.18);
+  color: #fda4af;
+}
+
+/* Stats row — ⭐ 👁 ❤ 📋 with icons */
+.rank-card-stats {
+  display: flex;
+  gap: 1.1rem;
+  align-items: center;
+  margin-top: 0.15rem;
+  color: var(--text3);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+.rank-card-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.rank-card-stat-icon {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.rank-card-stat-rating .rank-card-stat-icon { color: #f59e0b; }
+.rank-card-stat-views   .rank-card-stat-icon { color: #7c3aed; }
+.rank-card-stat-likes   .rank-card-stat-icon { color: #ec4899; }
+
+@media (max-width: 700px) {
+  .rank-card-cover { flex-basis: 84px; }
+  .rank-card-title { font-size: 0.95rem; }
+  .rank-card-desc  { font-size: 0.80rem; -webkit-line-clamp: 2; }
+  .rank-card-stats { gap: 0.75rem; font-size: 0.78rem; }
+  .rank-card-ribbon { flex-basis: 26px; font-size: 0.92rem; }
+}
+
+/* ── Library / Reading List collection grid ─────────────────────────────── */
+/* Multi-column wrap of v2 cards. Mirrors the rail's cards-per-row at every
+   breakpoint so a user's library feels visually identical to a curated rail.
+   v2 cards inside override their flex-basis with 100% so they fill the grid
+   column rather than the calc-based row width they use inside section tracks. */
+.book-collection-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 1.6rem 1rem;
+  margin: 0 0 2rem;
+}
+.book-collection-grid .book-card-v2 {
+  flex: none;
+  width: 100%;
+}
+@media (max-width: 1500px) { .book-collection-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+@media (max-width: 1200px) { .book-collection-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@media (max-width: 900px)  { .book-collection-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 700px)  { .book-collection-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem 0.7rem; } }
+
+.book-collection-grid .loading {
+  grid-column: 1 / -1;
+  padding: 2rem 0;
+  text-align: center;
+  color: var(--text3);
 }
 
 /* ── Library / Reading List collection header ───────────────────────────── */
 .book-collection-head {
-  margin: 0.4rem 0.25rem 1.2rem;
+  margin: 0.4rem 0 1.2rem;
 }
 .book-collection-title {
   font-size: 1.5rem;
@@ -11111,9 +11433,12 @@ body:not(.light) .book-card-v2-stat-views {
   margin: 0.4rem 0.25rem 1.2rem;
 }
 
-/* ── Mobile tweaks ──────────────────────────────────────────────────────── */
+/* ── Responsive cards-per-row ───────────────────────────────────────────── */
+@media (max-width: 1500px) { .book-section { --cards-per-row: 6; } }
+@media (max-width: 1200px) { .book-section { --cards-per-row: 5; } }
+@media (max-width: 900px)  { .book-section { --cards-per-row: 4; } }
 @media (max-width: 700px) {
-  .book-card-v2 { flex-basis: 150px; }
+  .book-section { --cards-per-row: 2.5; --card-gap: 0.75rem; }
   .book-card-v2-title { font-size: 0.92rem; }
   .book-card-v2-author { font-size: 0.74rem; }
   .book-section-title { font-size: 1.15rem; }
