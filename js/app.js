@@ -6873,27 +6873,37 @@ async function openBookDetail(bookId) {
   // All books are now Supabase. Bare UUID or "sb_<uuid>" — strip the prefix if present.
   const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
 
+  // Detect ID shape — Supabase UUIDs are 36 chars with dashes
+  // (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); Appwrite hex IDs are 20 hex
+  // chars with no dashes. Mobile users share Appwrite-shaped IDs via
+  // WhatsApp/SMS because the mobile app still has books on Appwrite.
+  // Web migrated books to Supabase but kept legacy_appwrite_id, so we
+  // query the right column for whichever shape we see.
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(realId);
+  const bookFilterColumn = isUuid ? 'id' : 'legacy_appwrite_id';
+
   let supBook, supChapters;
   try {
-    const [bookRes, chRes] = await Promise.all([
-      supabase.from('books')
-        .select(`
-          id, title, description, cover_url, genre, tags,
-          views_count, likes_count, chapters_count, word_count, status,
-          published_at, created_at, lock_from_chapter, locked_at,
-          author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
-        `)
-        .eq('id', realId)
-        .single(),
-      supabase.from('chapters')
-        .select('id, chapter_number, title, word_count, views_count, is_published, is_locked, unlock_cost_coins, unlock_cost_stars, created_at')
-        .eq('book_id', realId)
-        .eq('is_published', true)
-        .order('chapter_number', { ascending: true })
-    ]);
+    const bookRes = await supabase.from('books')
+      .select(`
+        id, title, description, cover_url, genre, tags,
+        views_count, likes_count, chapters_count, word_count, status,
+        published_at, created_at, lock_from_chapter, locked_at,
+        author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
+      `)
+      .eq(bookFilterColumn, realId)
+      .single();
     if (bookRes.error || !bookRes.data) throw new Error(bookRes.error?.message || 'Book not found');
-    if (chRes.error) console.warn('Failed to load chapters:', chRes.error);
     supBook = bookRes.data;
+
+    // Chapters are always keyed by the book's Supabase UUID, regardless
+    // of which shape we used to find the book.
+    const chRes = await supabase.from('chapters')
+      .select('id, chapter_number, title, word_count, views_count, is_published, is_locked, unlock_cost_coins, unlock_cost_stars, created_at')
+      .eq('book_id', supBook.id)
+      .eq('is_published', true)
+      .order('chapter_number', { ascending: true });
+    if (chRes.error) console.warn('Failed to load chapters:', chRes.error);
     supChapters = chRes.data;
   } catch (err) {
     if (_openBookToken !== token) return; // user already tapped a different book
