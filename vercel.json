@@ -11,5 +11,21 @@
     { "source": "/home/:id", "destination": "/", "statusCode": 302 },
     { "source": "/clips/:id", "destination": "/", "statusCode": 302 },
     { "source": "/privacy", "destination": "/privacy-policy", "statusCode": 301 }
+  ],
+  "headers": [
+    {
+      "source": "/.well-known/apple-app-site-association",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json" },
+        { "key": "Cache-Control", "value": "public, max-age=3600" }
+      ]
+    },
+    {
+      "source": "/.well-known/assetlinks.json",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json" },
+        { "key": "Cache-Control", "value": "public, max-age=3600" }
+      ]
+    }
   ]
 }

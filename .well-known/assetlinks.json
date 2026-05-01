@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.talesofsiren.talesofsiren",
+      "sha256_cert_fingerprints": [
+        "8A:F3:C5:44:8E:0D:48:F2:5C:2F:20:43:C7:A9:1B:E1:EE:BC:F6:10:A4:75:FE:41:B2:86:48:10:E3:97:CF:F4"
+      ]
+    }
+  }
+]
