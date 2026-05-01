@@ -3,5 +3,12 @@
   "trailingSlash": false,
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/:path*" }
+  ],
+  "redirects": [
+    { "source": "/books/:id", "destination": "/#book/:id", "statusCode": 302 },
+    { "source": "/books/:id/chapter/:chapterId", "destination": "/#book/:id/chapter/:chapterId", "statusCode": 302 },
+    { "source": "/profile/:id", "destination": "/#profile/:id", "statusCode": 302 },
+    { "source": "/home/:id", "destination": "/", "statusCode": 302 },
+    { "source": "/clips/:id", "destination": "/", "statusCode": 302 }
   ]
 }
