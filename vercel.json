@@ -9,6 +9,7 @@
     { "source": "/books/:id/chapter/:chapterId", "destination": "/#book/:id/chapter/:chapterId", "statusCode": 302 },
     { "source": "/profile/:id", "destination": "/#profile/:id", "statusCode": 302 },
     { "source": "/home/:id", "destination": "/", "statusCode": 302 },
-    { "source": "/clips/:id", "destination": "/", "statusCode": 302 }
+    { "source": "/clips/:id", "destination": "/", "statusCode": 302 },
+    { "source": "/privacy", "destination": "/privacy-policy", "statusCode": 301 }
   ]
 }
