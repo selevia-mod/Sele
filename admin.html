@@ -50,6 +50,7 @@
       <button class="admin-tab" data-tab="wallet">Wallet</button>
       <button class="admin-tab" data-tab="payouts">Payouts</button>
       <button class="admin-tab" data-tab="activity">Activity</button>
+      <button class="admin-tab" data-tab="settings">Settings</button>
     </nav>
 
     <!-- Tab content -->
@@ -282,6 +283,32 @@
         </div>
         <div id="activityList" class="admin-list">
           <div class="admin-empty">Loading activity…</div>
+        </div>
+      </section>
+
+      <!-- SETTINGS — app_config maintenance -->
+      <!--
+        Edits the public.app_config table that mobile + web read for runtime
+        configuration (paywall thresholds, ad unit IDs, upload size caps, etc.).
+        Admin role required to write — RLS enforces this server-side as well.
+        Settings are grouped by category for navigability; each row inline-edits
+        and persists on save.
+      -->
+      <section class="admin-tab-content" data-tab-content="settings" style="display:none">
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>App settings</h2>
+            <span class="admin-toolbar-sub" id="settingsSubtitle">Loading…</span>
+          </div>
+          <div class="admin-toolbar-right">
+            <input type="search" id="settingsSearch" class="admin-input" placeholder="Search keys…" autocomplete="off"/>
+            <select id="settingsCategoryFilter" class="admin-select">
+              <option value="all">All categories</option>
+            </select>
+          </div>
+        </div>
+        <div id="settingsList" class="admin-list">
+          <div class="admin-empty">Loading settings…</div>
         </div>
       </section>
 

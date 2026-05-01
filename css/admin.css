@@ -1148,6 +1148,115 @@ body.light { background: var(--admin-bg); }
 }
 .admin-config-save { width: 100%; }
 
+/* ─── Settings tab — app_config maintenance ─────────────────────────────── */
+/*
+ * Per-key inline editor. Grouped by category (books, videos, ads, etc.) so
+ * admins can scan related settings together. Keys are mono-styled to make
+ * accidental typos visually obvious; descriptions clarify intent.
+ *
+ * Dirty rows get a subtle purple border so the admin knows what's pending
+ * save. Save button stays enabled when value differs from the server-fetched
+ * original; click rolls back to original via Reset.
+ */
+.settings-section {
+  margin-bottom: 1.5rem;
+}
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-2);
+  font-weight: 700;
+  padding: 0.4rem 0.2rem;
+  border-bottom: 1px solid var(--admin-border);
+  margin-bottom: 0.5rem;
+}
+.settings-section-count {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--admin-text-3);
+  background: var(--admin-bg-soft);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+.settings-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.settings-row {
+  background: var(--admin-card);
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.settings-row.settings-row-dirty {
+  border-color: var(--admin-purple);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.08);
+}
+.settings-row-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.3rem;
+}
+.settings-key {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+  word-break: break-word;
+  flex: 1;
+  min-width: 0;
+}
+.settings-type {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-3);
+  background: var(--admin-bg-soft);
+  border-radius: 4px;
+  padding: 0.1rem 0.45rem;
+  font-weight: 600;
+}
+.settings-desc {
+  font-size: 0.78rem;
+  color: var(--admin-text-2);
+  margin-bottom: 0.5rem;
+  line-height: 1.4;
+}
+.settings-row-edit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: start;
+}
+.settings-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 0.5rem 0.7rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+}
+textarea.settings-input {
+  resize: vertical;
+  min-height: 4rem;
+  line-height: 1.4;
+}
+.settings-input:focus {
+  outline: 2px solid rgba(124, 58, 237, 0.3);
+  border-color: var(--admin-purple);
+}
+.settings-row-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
 /* ─── Mobile ─── */
 @media (max-width: 640px) {
   .admin-header { padding: 0.85rem 1rem; }
@@ -1170,4 +1279,7 @@ body.light { background: var(--admin-bg); }
   .admin-pack-actions { grid-area: actions; justify-content: flex-end; flex-wrap: wrap; }
   .admin-form-row { grid-template-columns: 1fr; }
   .admin-config-row { grid-template-columns: 1fr; }
+  /* Stack settings input + actions on mobile so the input gets full width. */
+  .settings-row-edit { grid-template-columns: 1fr; }
+  .settings-row-actions { justify-content: flex-end; }
 }

@@ -75,6 +75,9 @@ function switchTab(name) {
     lazyInit('payoutsFilter', typeof initPayoutsTab === 'function' ? initPayoutsTab : null, null);
     if (typeof switchPayoutsSubtab === 'function') switchPayoutsSubtab('withdrawals');
   }
+  if (name === 'settings') {
+    lazyInit('settingsSearch', typeof initSettingsTab === 'function' ? initSettingsTab : null, typeof loadSettings === 'function' ? loadSettings : null);
+  }
 }
 
 document.querySelectorAll('.admin-tab').forEach(t => {
@@ -1700,6 +1703,234 @@ async function loadKycList() {
     listEl.appendChild(card);
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// SETTINGS — app_config maintenance
+// ════════════════════════════════════════════════════════════════════════════
+// CRUD over public.app_config. Reads are public (anyone can SELECT) but
+// writes require role = 'admin' on profiles. Search filters across keys +
+// descriptions; category filter narrows by group. Edits happen inline per
+// row and persist with optimistic UI on save.
+//
+// The key list is the canonical source of truth — mobile + web read this
+// same table at session bootstrap. Mobile's lib/global-settings-supabase.js
+// (still to be written, Task #63 follow-up) will hit this same table once
+// the auth flag flips.
+
+let _settingsRows = [];        // cached after first fetch — supports client-side search
+let _settingsDirty = new Map(); // key → { newValue, oldValue } pending save
+
+function initSettingsTab() {
+  const search = document.getElementById('settingsSearch');
+  const filter = document.getElementById('settingsCategoryFilter');
+  if (search) {
+    search.addEventListener('input', () => renderSettings());
+  }
+  if (filter) {
+    filter.addEventListener('change', () => renderSettings());
+  }
+}
+
+async function loadSettings() {
+  const listEl = document.getElementById('settingsList');
+  const subEl  = document.getElementById('settingsSubtitle');
+  listEl.innerHTML = '<div class="admin-empty">Loading settings…</div>';
+  _settingsDirty.clear();
+
+  const { data, error } = await supabase
+    .from('app_config')
+    .select('key, value, value_type, category, description, updated_at')
+    .order('category', { ascending: true })
+    .order('key', { ascending: true });
+
+  if (error) {
+    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
+    if (subEl) subEl.textContent = 'Failed to load';
+    return;
+  }
+
+  _settingsRows = data || [];
+  if (subEl) subEl.textContent = `${_settingsRows.length} keys`;
+
+  // Populate the category filter dropdown — derive distinct values from the
+  // rows so adding a new category in the DB doesn't require a code change.
+  const filter = document.getElementById('settingsCategoryFilter');
+  if (filter) {
+    const cats = Array.from(new Set(_settingsRows.map(r => r.category || 'general'))).sort();
+    const current = filter.value;
+    filter.innerHTML = '<option value="all">All categories</option>' + cats.map(c =>
+      `<option value="${esc(c)}">${esc(c[0].toUpperCase() + c.slice(1))}</option>`
+    ).join('');
+    // Preserve selection if the category still exists.
+    if (cats.includes(current)) filter.value = current;
+  }
+
+  renderSettings();
+}
+
+function renderSettings() {
+  const listEl = document.getElementById('settingsList');
+  const search = (document.getElementById('settingsSearch')?.value || '').trim().toLowerCase();
+  const cat    = document.getElementById('settingsCategoryFilter')?.value || 'all';
+
+  const filtered = _settingsRows.filter(row => {
+    if (cat !== 'all' && (row.category || 'general') !== cat) return false;
+    if (!search) return true;
+    return (
+      (row.key || '').toLowerCase().includes(search) ||
+      (row.description || '').toLowerCase().includes(search)
+    );
+  });
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = `<div class="admin-empty">No settings match.</div>`;
+    return;
+  }
+
+  // Group by category for visual hierarchy. Keep insertion order so the
+  // server-sorted (category, key) ordering carries through.
+  const byCat = new Map();
+  for (const row of filtered) {
+    const c = row.category || 'general';
+    if (!byCat.has(c)) byCat.set(c, []);
+    byCat.get(c).push(row);
+  }
+
+  const html = [];
+  for (const [c, rows] of byCat.entries()) {
+    html.push(`<div class="settings-section">
+      <div class="settings-section-head">${esc(c[0].toUpperCase() + c.slice(1))} <span class="settings-section-count">${rows.length}</span></div>
+      <div class="settings-rows">
+        ${rows.map(rowHtml).join('')}
+      </div>
+    </div>`);
+  }
+  listEl.innerHTML = html.join('');
+
+  // Wire inline edit handlers per row.
+  listEl.querySelectorAll('[data-setting-key]').forEach(rowEl => {
+    const key = rowEl.dataset.settingKey;
+    const input = rowEl.querySelector('.settings-input');
+    const saveBtn = rowEl.querySelector('[data-act="save"]');
+    const resetBtn = rowEl.querySelector('[data-act="reset"]');
+    const original = rowEl.dataset.originalValue;
+
+    const markDirty = () => {
+      const dirty = input.value !== original;
+      rowEl.classList.toggle('settings-row-dirty', dirty);
+      if (dirty) {
+        _settingsDirty.set(key, { newValue: input.value, oldValue: original });
+      } else {
+        _settingsDirty.delete(key);
+      }
+    };
+
+    input.addEventListener('input', markDirty);
+
+    saveBtn?.addEventListener('click', async () => {
+      if (input.value === original) return;
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      const ok = await saveSettingValue(key, input.value);
+      if (ok) {
+        // Reflect persisted value in our cache so re-renders don't undo it.
+        const cached = _settingsRows.find(r => r.key === key);
+        if (cached) cached.value = input.value;
+        rowEl.dataset.originalValue = input.value;
+        rowEl.classList.remove('settings-row-dirty');
+        _settingsDirty.delete(key);
+        toast('Saved.');
+      }
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+    });
+
+    resetBtn?.addEventListener('click', () => {
+      input.value = original;
+      markDirty();
+    });
+  });
+}
+
+function rowHtml(row) {
+  const valueEsc = esc(row.value ?? '');
+  const useTextarea = (row.value_type === 'array' || row.value_type === 'json' || (row.value || '').length > 80);
+  const inputEl = useTextarea
+    ? `<textarea class="admin-input settings-input" rows="3">${valueEsc}</textarea>`
+    : `<input type="text" class="admin-input settings-input" value="${valueEsc}"/>`;
+  return `
+    <div class="settings-row" data-setting-key="${esc(row.key)}" data-original-value="${valueEsc}">
+      <div class="settings-row-head">
+        <code class="settings-key">${esc(row.key)}</code>
+        <span class="settings-type">${esc(row.value_type)}</span>
+      </div>
+      ${row.description ? `<div class="settings-desc">${esc(row.description)}</div>` : ''}
+      <div class="settings-row-edit">
+        ${inputEl}
+        <div class="settings-row-actions">
+          <button class="admin-btn" data-act="reset">Reset</button>
+          <button class="admin-btn admin-btn-primary" data-act="save">Save</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Validate and persist a single setting. Returns true on success, false on
+// failure (and toasts the error). Validation is intentionally permissive —
+// we trust the admin to know what they're typing. The mobile / web clients
+// parse based on value_type, so an invalid value just means clients will
+// fall back to defaults.
+async function saveSettingValue(key, newValue) {
+  const cached = _settingsRows.find(r => r.key === key);
+  if (!cached) {
+    toast('Unknown setting key.');
+    return false;
+  }
+  // Light type validation — catches the obvious typos (e.g., letters in a
+  // number field). Doesn't try to validate JSON / arrays exhaustively.
+  if (cached.value_type === 'number' && newValue !== '' && Number.isNaN(Number(newValue))) {
+    toast('Value must be a number.');
+    return false;
+  }
+  if (cached.value_type === 'boolean' && !['true', 'false'].includes(newValue.trim().toLowerCase())) {
+    toast('Value must be "true" or "false".');
+    return false;
+  }
+  if (cached.value_type === 'array' || cached.value_type === 'json') {
+    try {
+      JSON.parse(newValue);
+    } catch {
+      toast(`Value must be valid JSON ${cached.value_type === 'array' ? 'array' : ''}.`);
+      return false;
+    }
+  }
+
+  const { error } = await supabase
+    .from('app_config')
+    .update({ value: newValue })
+    .eq('key', key);
+  if (error) {
+    toast(`Save failed: ${error.message}`);
+    return false;
+  }
+
+  // Audit log — record the change so /Activity tab shows who changed what.
+  // Best-effort; if the insert fails (e.g., admin_actions schema differs in
+  // your env), the setting save still succeeds.
+  try {
+    await supabase.from('admin_actions').insert({
+      action: 'app_config_update',
+      reason: null,
+      note: `Updated app_config[${key}]`,
+      admin_id: currentMod?.id,
+      metadata: { key, new_value: newValue, value_type: cached.value_type },
+    });
+  } catch (_) { /* swallow — audit log isn't critical */ }
+
+  return true;
+}
+
 
 // ─── boot ────────────────────────────────────────────────────────────────────
 (async () => {
