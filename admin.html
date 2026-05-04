@@ -155,7 +155,6 @@
         <nav class="admin-subtabs">
           <button class="admin-subtab active" data-subtab="packs">Coin packs</button>
           <button class="admin-subtab" data-subtab="userwallets">User wallets</button>
-          <button class="admin-subtab" data-subtab="walletconfig">Defaults</button>
         </nav>
 
         <!-- Packs sub-tab -->
@@ -190,18 +189,9 @@
           <div id="walletEmpty" class="admin-empty">Search for a user to view their wallet.</div>
         </div>
 
-        <!-- Defaults sub-tab -->
-        <div class="admin-subtab-content" data-subtab-content="walletconfig" style="display:none">
-          <div class="admin-toolbar">
-            <div class="admin-toolbar-left">
-              <h2>Defaults</h2>
-              <span class="admin-toolbar-sub">Platform-wide unlock prices and limits. Per-content overrides win.</span>
-            </div>
-          </div>
-          <div id="walletConfigList" class="admin-list">
-            <div class="admin-empty">Loading defaults…</div>
-          </div>
-        </div>
+        <!-- The legacy Defaults sub-tab was removed. All platform-wide
+             unlock prices, limits, and tunables live in the top-level
+             Settings tab now (single source of truth for app_config). -->
       </section>
 
       <!-- PAYOUTS (Phase 7 — author withdrawals + KYC) -->
@@ -301,14 +291,29 @@
             <span class="admin-toolbar-sub" id="settingsSubtitle">Loading…</span>
           </div>
           <div class="admin-toolbar-right">
-            <input type="search" id="settingsSearch" class="admin-input" placeholder="Search keys…" autocomplete="off"/>
-            <select id="settingsCategoryFilter" class="admin-select">
-              <option value="all">All categories</option>
-            </select>
+            <input type="search" id="settingsSearch" class="admin-input" placeholder="Search across all categories…" autocomplete="off"/>
           </div>
         </div>
-        <div id="settingsList" class="admin-list">
-          <div class="admin-empty">Loading settings…</div>
+        <!--
+          Two-column layout: category sidebar + content panel. The sidebar
+          is built dynamically by renderSettingsSidebar() in admin.js from
+          the distinct `category` values present in app_config — ordered
+          per the canonical CATEGORY_ORDER list (General first, then Ads,
+          Books, Videos, Clips, Earnings, …). The active category is
+          highlighted with a purple gradient; clicking another switches
+          the right-hand list. Search overrides category filtering when
+          there's text in the input — matching keys from any category
+          surface together with their category label visible.
+        -->
+        <div class="settings-layout">
+          <aside class="settings-sidebar" id="settingsSidebar">
+            <div class="settings-sidebar-loading">Loading…</div>
+          </aside>
+          <div class="settings-content">
+            <div id="settingsList" class="admin-list">
+              <div class="admin-empty">Loading settings…</div>
+            </div>
+          </div>
         </div>
       </section>
 

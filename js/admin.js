@@ -46,6 +46,10 @@ function switchTab(name) {
   document.querySelectorAll('.admin-tab-content').forEach(s => {
     s.style.display = s.dataset.tabContent === name ? 'block' : 'none';
   });
+  // Tag the body with the active tab so CSS can apply tab-specific layout
+  // tweaks without touching the other tabs. Currently only `is-settings` uses
+  // this — the Settings tab unlocks a wider main column + denser row styling.
+  document.body.classList.toggle('is-settings', name === 'settings');
   // Tabs that just need a single load call
   if (name === 'activity') loadActivity();
   if (name === 'inbox')    loadInbox();
@@ -1026,8 +1030,9 @@ function switchWalletSubtab(name) {
     s.style.display = s.dataset.subtabContent === name ? 'block' : 'none';
   });
   if (name === 'packs')        loadWalletPacks();
-  if (name === 'walletconfig') loadWalletConfig();
-  // userwallets is search-driven; nothing to load by default
+  // userwallets is search-driven; nothing to load by default.
+  // The legacy 'walletconfig' (Defaults) sub-tab was removed in favor of
+  // the top-level Settings tab — see migration_app_config_consolidation.sql.
 }
 
 function initWalletTab() {
@@ -1368,48 +1373,15 @@ function openAdjustModal(user, currency) {
   };
 }
 
-// ─── DEFAULTS (app_config) ─────────────────────────────────────────────────
-async function loadWalletConfig() {
-  const listEl = document.getElementById('walletConfigList');
-  if (!listEl) return;
-  listEl.innerHTML = '<div class="admin-empty">Loading defaults…</div>';
-  const { data: cfg, error } = await supabase
-    .from('app_config')
-    .select('*')
-    .order('key', { ascending: true });
-  if (error) {
-    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
-    return;
-  }
-  if (!cfg?.length) {
-    listEl.innerHTML = '<div class="admin-empty">No config rows yet.</div>';
-    return;
-  }
-  listEl.innerHTML = '';
-  for (const c of cfg) {
-    const row = document.createElement('div');
-    row.className = 'admin-config-row';
-    row.innerHTML = `
-      <div class="admin-config-meta">
-        <div class="admin-config-key">${esc(c.key)}</div>
-        <div class="admin-config-desc">${esc(c.description || '')}</div>
-      </div>
-      <input class="admin-config-input" type="number" value="${c.value_int}" data-key="${esc(c.key)}"/>
-      <button class="admin-btn admin-btn-primary admin-config-save" data-save="${esc(c.key)}">Save</button>
-    `;
-    row.querySelector(`[data-save="${c.key}"]`).onclick = async () => {
-      const v = parseInt(row.querySelector('input').value, 10);
-      if (!Number.isFinite(v) || v < 0) { toast('Value must be a non-negative integer'); return; }
-      const { error: e2 } = await supabase
-        .from('app_config')
-        .update({ value_int: v, updated_at: new Date().toISOString(), updated_by: currentMod.id })
-        .eq('key', c.key);
-      if (e2) { toast(e2.message); return; }
-      toast(`Updated ${c.key} → ${v}`);
-    };
-    listEl.appendChild(row);
-  }
-}
+// ─── DEFAULTS (legacy `loadWalletConfig`) — removed ───────────────────────
+// The Defaults sub-tab and its loader were retired. Platform-wide unlock
+// prices, limits, and tunables are now managed exclusively from the top-level
+// Settings tab (loadSettings / renderSettings / saveSettingValue below),
+// which reads/writes the same `app_config` rows but with proper type
+// awareness, search, and category grouping. See
+// migration_app_config_consolidation.sql for the data backfill that made
+// the previously-hotfix-only lowercase keys (default_chapter_unlock_coins,
+// author_payout_*, max_bio_*, etc.) editable from Settings.
 
 // ════════════════════════════════════════════════════════════════════════════
 // PAYOUTS TAB (Phase 7) — author withdrawal requests + KYC review
@@ -1719,15 +1691,39 @@ async function loadKycList() {
 
 let _settingsRows = [];        // cached after first fetch — supports client-side search
 let _settingsDirty = new Map(); // key → { newValue, oldValue } pending save
+let _settingsActiveCategory = 'general'; // landing tab; updated when user clicks a sidebar item
+
+// Canonical sidebar order (per product spec). Categories not in this list
+// fall through to the end alphabetically. Display labels override the raw
+// data values where the casing should differ from the lowercase DB form.
+const SETTINGS_CATEGORY_ORDER = [
+  'general', 'ads', 'books', 'videos', 'clips', 'earnings',
+  'comments', 'engagement', 'misc', 'permissions', 'posts', 'stories',
+];
+const SETTINGS_CATEGORY_LABELS = {
+  general:     'General',
+  ads:         'Ads',
+  books:       'Books',
+  videos:      'Videos',
+  clips:       'Clips',
+  earnings:    'Earnings',
+  comments:    'Comments',
+  engagement:  'Engagement',
+  misc:        'Misc',
+  permissions: 'Permissions',
+  posts:       'Posts',
+  stories:     'Stories',
+  profile:     'Profile',
+  wallet:      'Wallet',
+};
 
 function initSettingsTab() {
   const search = document.getElementById('settingsSearch');
-  const filter = document.getElementById('settingsCategoryFilter');
   if (search) {
+    // Re-render on every keystroke. When search has text it overrides the
+    // category filter and shows matches across every category; when cleared
+    // we drop back to the active category.
     search.addEventListener('input', () => renderSettings());
-  }
-  if (filter) {
-    filter.addEventListener('change', () => renderSettings());
   }
 }
 
@@ -1752,60 +1748,112 @@ async function loadSettings() {
   _settingsRows = data || [];
   if (subEl) subEl.textContent = `${_settingsRows.length} keys`;
 
-  // Populate the category filter dropdown — derive distinct values from the
-  // rows so adding a new category in the DB doesn't require a code change.
-  const filter = document.getElementById('settingsCategoryFilter');
-  if (filter) {
-    const cats = Array.from(new Set(_settingsRows.map(r => r.category || 'general'))).sort();
-    const current = filter.value;
-    filter.innerHTML = '<option value="all">All categories</option>' + cats.map(c =>
-      `<option value="${esc(c)}">${esc(c[0].toUpperCase() + c.slice(1))}</option>`
-    ).join('');
-    // Preserve selection if the category still exists.
-    if (cats.includes(current)) filter.value = current;
+  // If the previously-active category isn't present in the data, fall back
+  // to the first category in CATEGORY_ORDER that exists. Stops the UI from
+  // landing on an empty panel when categories get renamed or deleted.
+  const presentCats = new Set(_settingsRows.map(r => r.category || 'general'));
+  if (!presentCats.has(_settingsActiveCategory)) {
+    _settingsActiveCategory = SETTINGS_CATEGORY_ORDER.find(c => presentCats.has(c)) || [...presentCats][0] || 'general';
   }
 
+  renderSettingsSidebar();
   renderSettings();
+}
+
+// Build the left-side category sidebar from the distinct categories present
+// in _settingsRows. Order is: SETTINGS_CATEGORY_ORDER first (in spec order),
+// then any extras alphabetically. Each item shows its key count as a small
+// pill; the active one gets the purple gradient treatment.
+function renderSettingsSidebar() {
+  const sidebar = document.getElementById('settingsSidebar');
+  if (!sidebar) return;
+
+  // Count keys per category so the pill matches the actual content.
+  const counts = new Map();
+  for (const row of _settingsRows) {
+    const c = row.category || 'general';
+    counts.set(c, (counts.get(c) || 0) + 1);
+  }
+
+  // Spec order first, then any unlisted categories alphabetically.
+  const ordered = SETTINGS_CATEGORY_ORDER.filter(c => counts.has(c));
+  const extras = [...counts.keys()].filter(c => !SETTINGS_CATEGORY_ORDER.includes(c)).sort();
+  const allCats = [...ordered, ...extras];
+
+  if (allCats.length === 0) {
+    sidebar.innerHTML = '<div class="settings-sidebar-loading">No categories</div>';
+    return;
+  }
+
+  sidebar.innerHTML = allCats.map(c => {
+    const label = SETTINGS_CATEGORY_LABELS[c] || (c.charAt(0).toUpperCase() + c.slice(1));
+    const isActive = c === _settingsActiveCategory ? ' is-active' : '';
+    return `
+      <button class="settings-sidebar-item${isActive}" data-cat="${esc(c)}" type="button">
+        <span class="settings-sidebar-label">${esc(label)}</span>
+        <span class="settings-sidebar-count">${counts.get(c)}</span>
+      </button>
+    `;
+  }).join('');
+
+  sidebar.querySelectorAll('.settings-sidebar-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.cat;
+      if (!next || next === _settingsActiveCategory) return;
+      _settingsActiveCategory = next;
+      // Clear any lingering search text so the user lands cleanly on the
+      // chosen category. Without this, switching categories with stale
+      // search text would still show search results, which is confusing.
+      const searchEl = document.getElementById('settingsSearch');
+      if (searchEl && searchEl.value) searchEl.value = '';
+      renderSettingsSidebar();
+      renderSettings();
+    });
+  });
 }
 
 function renderSettings() {
   const listEl = document.getElementById('settingsList');
   const search = (document.getElementById('settingsSearch')?.value || '').trim().toLowerCase();
-  const cat    = document.getElementById('settingsCategoryFilter')?.value || 'all';
 
+  // Two filtering modes:
+  //   • Search mode (text in input): match across ALL categories, ignoring
+  //     the sidebar selection. Each match renders with a small purple chip
+  //     showing which category it came from.
+  //   • Category mode (no search text): show only rows whose category
+  //     matches the active sidebar item. No category labels rendered (the
+  //     sidebar already shows where you are).
+  const inSearchMode = !!search;
   const filtered = _settingsRows.filter(row => {
-    if (cat !== 'all' && (row.category || 'general') !== cat) return false;
-    if (!search) return true;
-    return (
-      (row.key || '').toLowerCase().includes(search) ||
-      (row.description || '').toLowerCase().includes(search)
-    );
+    const c = row.category || 'general';
+    if (inSearchMode) {
+      return (
+        (row.key || '').toLowerCase().includes(search) ||
+        (row.description || '').toLowerCase().includes(search)
+      );
+    }
+    return c === _settingsActiveCategory;
   });
 
   if (filtered.length === 0) {
-    listEl.innerHTML = `<div class="admin-empty">No settings match.</div>`;
+    listEl.innerHTML = inSearchMode
+      ? `<div class="admin-empty">No settings match "${esc(search)}".</div>`
+      : `<div class="admin-empty">No settings in this category yet.</div>`;
     return;
   }
 
-  // Group by category for visual hierarchy. Keep insertion order so the
-  // server-sorted (category, key) ordering carries through.
-  const byCat = new Map();
-  for (const row of filtered) {
-    const c = row.category || 'general';
-    if (!byCat.has(c)) byCat.set(c, []);
-    byCat.get(c).push(row);
+  // Render. Search mode shows category chips inline; single-category mode
+  // renders rows flat without any section headers.
+  if (inSearchMode) {
+    const html = filtered.map(row => {
+      const c = row.category || 'general';
+      const label = SETTINGS_CATEGORY_LABELS[c] || (c.charAt(0).toUpperCase() + c.slice(1));
+      return rowHtml(row, label);
+    }).join('');
+    listEl.innerHTML = `<div class="settings-rows">${html}</div>`;
+  } else {
+    listEl.innerHTML = `<div class="settings-rows">${filtered.map(row => rowHtml(row)).join('')}</div>`;
   }
-
-  const html = [];
-  for (const [c, rows] of byCat.entries()) {
-    html.push(`<div class="settings-section">
-      <div class="settings-section-head">${esc(c[0].toUpperCase() + c.slice(1))} <span class="settings-section-count">${rows.length}</span></div>
-      <div class="settings-rows">
-        ${rows.map(rowHtml).join('')}
-      </div>
-    </div>`);
-  }
-  listEl.innerHTML = html.join('');
 
   // Wire inline edit handlers per row.
   listEl.querySelectorAll('[data-setting-key]').forEach(rowEl => {
@@ -1852,25 +1900,42 @@ function renderSettings() {
   });
 }
 
-function rowHtml(row) {
+// Ultra-dense single-line layout. Meta = inline {key, type-chip}, input flex-
+// grows in the middle, pinned Reset/Save on the right. The description is no
+// longer printed visibly — it's moved into the row's `title=` so hovering the
+// row surfaces it as a tooltip. That trade buys us a single ~32px line per
+// row instead of the previous two-line stack.
+//
+// Textareas are still used for arrays, JSON, and long values (>80 chars), but
+// their min-height is 1.8rem so the row stays compact on first render and
+// only grows when the admin manually drags the resize handle.
+//
+// `categoryLabel` is optional. When provided (search mode), the row renders
+// a small purple chip after the key so the admin can see which category the
+// match came from. Omit in single-category mode — the sidebar already
+// communicates where they are.
+function rowHtml(row, categoryLabel) {
   const valueEsc = esc(row.value ?? '');
+  const descEsc = esc(row.description || '');
   const useTextarea = (row.value_type === 'array' || row.value_type === 'json' || (row.value || '').length > 80);
   const inputEl = useTextarea
-    ? `<textarea class="admin-input settings-input" rows="3">${valueEsc}</textarea>`
-    : `<input type="text" class="admin-input settings-input" value="${valueEsc}"/>`;
+    ? `<textarea class="settings-input" rows="1">${valueEsc}</textarea>`
+    : `<input type="text" class="settings-input" value="${valueEsc}"/>`;
+  // Tooltip text combines key + description so hovering the row in any spot
+  // surfaces the full context, including the full description that we
+  // intentionally don't render to keep the row compact.
+  const tipEsc = descEsc ? `${esc(row.key)} — ${descEsc}` : esc(row.key);
+  const catChip = categoryLabel ? `<span class="settings-search-cat">${esc(categoryLabel)}</span>` : '';
   return `
-    <div class="settings-row" data-setting-key="${esc(row.key)}" data-original-value="${valueEsc}">
-      <div class="settings-row-head">
+    <div class="settings-row" data-setting-key="${esc(row.key)}" data-original-value="${valueEsc}" title="${tipEsc}">
+      <div class="settings-row-meta">
         <code class="settings-key">${esc(row.key)}</code>
-        <span class="settings-type">${esc(row.value_type)}</span>
+        <span class="settings-type">${esc(row.value_type)}</span>${catChip}
       </div>
-      ${row.description ? `<div class="settings-desc">${esc(row.description)}</div>` : ''}
-      <div class="settings-row-edit">
-        ${inputEl}
-        <div class="settings-row-actions">
-          <button class="admin-btn" data-act="reset">Reset</button>
-          <button class="admin-btn admin-btn-primary" data-act="save">Save</button>
-        </div>
+      ${inputEl}
+      <div class="settings-row-actions">
+        <button class="admin-btn" data-act="reset">Reset</button>
+        <button class="admin-btn admin-btn-primary" data-act="save">Save</button>
       </div>
     </div>
   `;
@@ -1906,9 +1971,32 @@ async function saveSettingValue(key, newValue) {
     }
   }
 
+  // Dual-write: write the canonical text `value` AND the matching typed
+  // column (value_int / value_bool / value_json) so consumers reading either
+  // shape keep working. The hotfix migration added the typed columns
+  // because some legacy callers (lib/wallet-supabase.js, lib/earnings-supabase.js
+  // on mobile, _walletConfigDefaults bootstrap on web) read value_int directly
+  // instead of parsing `value`. Until those callers migrate, the safest behavior
+  // is to keep both columns in sync on every save.
+  const update = { value: newValue };
+  if (cached.value_type === 'number') {
+    const n = Number(newValue);
+    update.value_int = Number.isFinite(n) ? Math.trunc(n) : null;
+  } else if (cached.value_type === 'boolean') {
+    update.value_bool = newValue.trim().toLowerCase() === 'true';
+  } else if (cached.value_type === 'array' || cached.value_type === 'json') {
+    try {
+      update.value_json = JSON.parse(newValue);
+    } catch {
+      // Validation above already toasted; keep value_json untouched on parse error.
+    }
+  } else {
+    update.value_text = newValue;
+  }
+
   const { error } = await supabase
     .from('app_config')
-    .update({ value: newValue })
+    .update(update)
     .eq('key', key);
   if (error) {
     toast(`Save failed: ${error.message}`);

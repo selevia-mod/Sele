@@ -1038,25 +1038,9 @@ body.light { background: var(--admin-bg); }
 }
 .admin-btn-danger-ghost:hover { background: rgba(220,38,38,0.16); }
 
-/* Defaults rows */
-.admin-config-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 110px 90px;
-  align-items: center;
-  gap: 0.9rem;
-  padding: 0.85rem 1rem;
-  background: var(--admin-card);
-  border: 1px solid var(--admin-border);
-  border-radius: 10px;
-  margin-bottom: 0.55rem;
-}
-.admin-config-meta { min-width: 0; }
-.admin-config-key {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 0.85rem;
-  font-weight: 700;
-  word-break: break-word;
-}
+/* The legacy ".admin-config-*" rules used by the deleted Defaults sub-tab
+   were removed alongside the HTML. App config keys are now styled by the
+   ".settings-row" / ".settings-key" rules further down in this file. */
 
 /* Change request diff layout */
 .cr-reason {
@@ -1121,140 +1105,246 @@ body.light { background: var(--admin-bg); }
   .cr-diff { grid-template-columns: 1fr; gap: 0.2rem; }
   .cr-diff-arrow { display: none; }
 }
-.admin-config-desc {
-  font-size: 0.78rem;
-  color: var(--admin-text-2);
-  margin-top: 0.15rem;
-}
-.admin-config-input {
-  /* Self-contained: not piggybacking on .admin-input's 220px min-width */
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--admin-border);
-  border-radius: 8px;
-  background: #fff;
-  color: var(--admin-text);
-  font: inherit;
-  font-size: 0.95rem;
-  font-weight: 600;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.admin-config-input:focus {
-  outline: 2px solid rgba(124,58,237,0.3);
-  border-color: var(--admin-purple);
-}
-.admin-config-save { width: 100%; }
-
 /* ─── Settings tab — app_config maintenance ─────────────────────────────── */
 /*
- * Per-key inline editor. Grouped by category (books, videos, ads, etc.) so
- * admins can scan related settings together. Keys are mono-styled to make
- * accidental typos visually obvious; descriptions clarify intent.
+ * Ultra-dense single-line editor. Each row is one horizontal flex line:
  *
- * Dirty rows get a subtle purple border so the admin knows what's pending
- * save. Save button stays enabled when value differs from the server-fetched
- * original; click rolls back to original via Reset.
+ *   [KEY                          type] [ input value             ] [↺] [Save]
+ *
+ * The full description lives in the row's `title=` so admins can hover the
+ * key to read it — keeping every row to a single ~32px line. Sections group
+ * by category with the slimmest possible header. Dirty rows highlight with
+ * a 1px purple ring instead of an inset shadow.
+ *
+ * Page width: when the body has the .is-settings class (toggled by switchTab
+ * in admin.js), the global 880px .admin-main cap is widened to use most of
+ * the screen — the Settings list benefits hugely from the extra horizontal
+ * space, and other tabs are unaffected.
  */
-.settings-section {
-  margin-bottom: 1.5rem;
+
+body.is-settings .admin-main {
+  max-width: 1480px;
+  padding: 1rem 1.25rem;
 }
-.settings-section-head {
+
+/* ─── Settings two-column layout: sidebar + content ───────────────────── */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+/* Sidebar — sticky so it stays in view while scrolling the right column.
+   Soft purple-tinted gradient bg + subtle border give the premium feel
+   without competing with the content. */
+.settings-sidebar {
+  position: sticky;
+  top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0.5rem;
+  background: linear-gradient(180deg, #faf6ff 0%, #ffffff 100%);
+  border: 1px solid #e9e0fa;
+  border-radius: 12px;
+  box-shadow: 0 2px 14px -8px rgba(124, 58, 237, 0.18);
+  max-height: calc(100vh - 4.5rem);
+  overflow-y: auto;
+}
+.settings-sidebar-loading {
+  padding: 0.6rem 0.75rem;
+  font-size: 0.78rem;
+  color: var(--admin-text-3);
+}
+
+/* Sidebar item — flex row with label + count pill. Hover wash is a soft
+   lavender tint; active state flips to a purple gradient with white text
+   and a soft drop shadow for depth. */
+.settings-sidebar-item {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.5rem;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--admin-text-2);
-  font-weight: 700;
-  padding: 0.4rem 0.2rem;
-  border-bottom: 1px solid var(--admin-border);
-  margin-bottom: 0.5rem;
-}
-.settings-section-count {
-  font-size: 0.75rem;
+  padding: 0.45rem 0.7rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--admin-text);
+  font-family: inherit;
+  font-size: 0.82rem;
   font-weight: 500;
-  color: var(--admin-text-3);
-  background: var(--admin-bg-soft);
-  border-radius: 999px;
-  padding: 0.05rem 0.5rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
 }
+.settings-sidebar-item:hover {
+  background: rgba(124, 58, 237, 0.07);
+  color: var(--admin-purple);
+}
+.settings-sidebar-item:active {
+  transform: scale(0.985);
+}
+.settings-sidebar-item.is-active {
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  color: white;
+  font-weight: 600;
+  box-shadow: 0 4px 14px -4px rgba(124, 58, 237, 0.5);
+}
+.settings-sidebar-item.is-active:hover {
+  /* Keep the active gradient on hover instead of flipping back to lavender */
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  color: white;
+}
+
+/* Count pill — small rounded badge showing how many keys live in each
+   category. Inverts to a translucent white bg on the active item so it
+   stays legible against the purple gradient. */
+.settings-sidebar-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4rem;
+  height: 1.05rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  background: rgba(124, 58, 237, 0.10);
+  color: var(--admin-purple);
+  letter-spacing: 0.02em;
+}
+.settings-sidebar-item:hover .settings-sidebar-count {
+  background: rgba(124, 58, 237, 0.18);
+}
+.settings-sidebar-item.is-active .settings-sidebar-count {
+  background: rgba(255, 255, 255, 0.28);
+  color: white;
+}
+
+/* Right content column. min-width 0 ensures long values don't blow out
+   the grid width. */
+.settings-content {
+  min-width: 0;
+}
+
+/* Search-mode section labels — tiny purple chip showing which category
+   each match came from. Only rendered when the user has typed in the
+   search box (search overrides the active-category filter). */
+.settings-search-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--admin-purple);
+  font-weight: 700;
+  padding: 0.06rem 0.45rem;
+  background: rgba(124, 58, 237, 0.08);
+  border-radius: 4px;
+  margin-left: 0.4rem;
+}
+body.is-settings .admin-toolbar {
+  margin-bottom: 0.55rem;
+}
+body.is-settings .admin-toolbar h2 {
+  font-size: 0.95rem;
+}
+body.is-settings .admin-toolbar-sub {
+  font-size: 0.72rem;
+}
+body.is-settings #settingsSearch {
+  padding: 0.32rem 0.6rem;
+  font-size: 0.82rem;
+  min-width: 220px;
+}
+/* The settingsCategoryFilter dropdown was removed in favor of the sidebar.
+   The .settings-section* rules that used to render per-category section
+   headers were also removed — the sidebar provides category context now. */
+
 .settings-rows {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 1px;             /* near-zero — rows abut for max density */
 }
 .settings-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 22rem) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
   background: var(--admin-card);
   border: 1px solid var(--admin-border);
-  border-radius: 10px;
-  padding: 0.85rem 1rem;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  border-radius: 4px;
+  padding: 0.22rem 0.55rem;
+  min-height: 2rem;
+  transition: border-color 100ms ease;
+}
+.settings-row:hover {
+  border-color: var(--admin-purple-lt);
 }
 .settings-row.settings-row-dirty {
   border-color: var(--admin-purple);
-  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.08);
+  background: rgba(124, 58, 237, 0.025);
 }
-.settings-row-head {
+.settings-row-meta {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  margin-bottom: 0.3rem;
+  gap: 0.4rem;
+  min-width: 0;
 }
 .settings-key {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 0.85rem;
+  font-size: 0.76rem;
   font-weight: 700;
-  word-break: break-word;
   flex: 1;
   min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--admin-text);
 }
 .settings-type {
-  font-size: 0.7rem;
+  font-size: 0.56rem;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   color: var(--admin-text-3);
-  background: var(--admin-bg-soft);
-  border-radius: 4px;
-  padding: 0.1rem 0.45rem;
   font-weight: 600;
-}
-.settings-desc {
-  font-size: 0.78rem;
-  color: var(--admin-text-2);
-  margin-bottom: 0.5rem;
-  line-height: 1.4;
-}
-.settings-row-edit {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.6rem;
-  align-items: start;
+  flex-shrink: 0;
+  opacity: 0.75;
 }
 .settings-input {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  padding: 0.5rem 0.7rem;
+  padding: 0.22rem 0.5rem;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 0.85rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  border: 1px solid var(--admin-border);
+  border-radius: 4px;
+  background: white;
+  color: var(--admin-text);
 }
 textarea.settings-input {
   resize: vertical;
-  min-height: 4rem;
-  line-height: 1.4;
+  min-height: 1.8rem;
+  padding: 0.3rem 0.5rem;
 }
 .settings-input:focus {
-  outline: 2px solid rgba(124, 58, 237, 0.3);
+  outline: 2px solid rgba(124, 58, 237, 0.22);
   border-color: var(--admin-purple);
 }
 .settings-row-actions {
   display: flex;
-  gap: 0.4rem;
+  gap: 0.25rem;
   flex-shrink: 0;
+}
+.settings-row-actions .admin-btn {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  border-radius: 4px;
+  line-height: 1.3;
 }
 
 /* ─── Mobile ─── */
@@ -1278,8 +1368,34 @@ textarea.settings-input {
   .admin-pack-price   { grid-area: price; text-align: right; }
   .admin-pack-actions { grid-area: actions; justify-content: flex-end; flex-wrap: wrap; }
   .admin-form-row { grid-template-columns: 1fr; }
-  .admin-config-row { grid-template-columns: 1fr; }
-  /* Stack settings input + actions on mobile so the input gets full width. */
-  .settings-row-edit { grid-template-columns: 1fr; }
-  .settings-row-actions { justify-content: flex-end; }
+  /* Settings on narrow screens: collapse the sidebar to a horizontal scroll
+     strip above the content (so the user can swipe through categories) and
+     stack each row onto two lines. */
+  body.is-settings .admin-main { padding: 0.7rem; }
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 0.7rem;
+  }
+  .settings-sidebar {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-height: none;
+    padding: 0.4rem;
+    gap: 4px;
+  }
+  .settings-sidebar-item {
+    flex-shrink: 0;
+    padding: 0.4rem 0.7rem;
+  }
+  .settings-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "meta meta" "input actions";
+    row-gap: 0.25rem;
+    padding: 0.3rem 0.5rem;
+  }
+  .settings-row-meta    { grid-area: meta; }
+  .settings-input       { grid-area: input; }
+  .settings-row-actions { grid-area: actions; justify-content: flex-end; }
 }

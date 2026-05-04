@@ -164,6 +164,823 @@ button { font-family: var(--font); cursor: pointer; }
 
 /* ── NOTIFICATION BELL ── */
 .topbar-bell-wrap { position: relative; }
+.topbar-quests-wrap { position: relative; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * Daily Quests — header button + drop-down panel. Premium purple feel.
+ * Brainstorming surface, web-only (mobile comes after we settle the UX).
+ * Mirrors the notifications-panel positioning/animation so visually
+ * the two panels feel like siblings.
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+.topbar-quests {
+  position: relative;
+}
+.topbar-quests-streak {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg, #0d0719);
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+  letter-spacing: -0.02em;
+}
+body.light .topbar-quests-streak { border-color: #fff; }
+
+.quests-panel {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: -8px;
+  width: 400px;
+  max-width: calc(100vw - 24px);
+  max-height: 72vh;
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgba(124, 58, 237, 0.18), transparent 60%),
+    radial-gradient(100% 50% at 100% 100%, rgba(168, 85, 247, 0.10), transparent 50%),
+    linear-gradient(180deg, #1a1138 0%, #0f0824 100%);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  border-radius: 18px;
+  box-shadow:
+    0 30px 70px rgba(15, 8, 36, 0.7),
+    0 0 0 1px rgba(167, 139, 250, 0.12),
+    0 0 40px rgba(124, 58, 237, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  z-index: 600;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: notifPanelIn 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+body.light .quests-panel {
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgba(196, 181, 253, 0.18), transparent 60%),
+    linear-gradient(180deg, #ffffff 0%, #faf5ff 100%);
+  border-color: rgba(124, 58, 237, 0.16);
+  box-shadow:
+    0 24px 60px rgba(76, 29, 149, 0.18),
+    0 0 0 1px rgba(124, 58, 237, 0.08),
+    0 0 40px rgba(167, 139, 250, 0.10);
+}
+.quests-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1.5px;
+  background: linear-gradient(90deg, transparent, rgba(196, 181, 253, 0.7), rgba(167, 139, 250, 0.9), rgba(196, 181, 253, 0.7), transparent);
+  pointer-events: none;
+}
+
+/* Two-row header: title row (h3 + reset button) on top, then a compact
+   meta row (streak chip + countdown) below. Replaces the previous
+   left/right split which crowded everything onto one line and forced
+   "Weekly Quests" + "7-day streak" to wrap awkwardly inside the 400px
+   panel. */
+.quests-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 1rem 1.1rem 0.85rem;
+  border-bottom: 1px solid rgba(167, 139, 250, 0.10);
+  flex-shrink: 0;
+}
+.quests-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.quests-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: nowrap;
+}
+.quests-header h3 {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+  background: linear-gradient(135deg, #ede9fe 0%, #c4b5fd 60%, #a78bfa 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+body.light .quests-header h3 {
+  background: linear-gradient(135deg, #4c1d95, #6d28d9);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.quests-streak-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.22rem 0.55rem;
+  border-radius: 999px;
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, 0.22), rgba(124, 58, 237, 0.12));
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  color: #c4b5fd;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(124, 58, 237, 0.18);
+}
+body.light .quests-streak-pill {
+  background: linear-gradient(135deg, #faf5ff, #ede9fe);
+  color: #6d28d9;
+  border-color: rgba(124, 58, 237, 0.28);
+}
+.quests-reset-demo {
+  background: rgba(167, 139, 250, 0.06);
+  border: 1px solid rgba(167, 139, 250, 0.16);
+  color: var(--text2);
+  font-size: 0.9rem;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.22s ease;
+}
+.quests-reset-demo:hover {
+  color: #c4b5fd;
+  border-color: rgba(167, 139, 250, 0.4);
+  transform: rotate(90deg);
+  background: rgba(167, 139, 250, 0.12);
+}
+
+/* .quests-header-right removed — header restructured into title row +
+   meta row (.quests-header-row + .quests-header-meta defined above). */
+.quests-countdown {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text2);
+  letter-spacing: -0.01em;
+  padding: 0.22rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.06);
+  border: 1px solid rgba(167, 139, 250, 0.12);
+  white-space: nowrap;
+}
+body.light .quests-countdown {
+  background: rgba(243, 232, 255, 0.6);
+  border-color: rgba(124, 58, 237, 0.14);
+  color: #6d28d9;
+}
+
+/* ── Featured "Quest of the Day" treatment ── */
+.quest-item.is-featured {
+  background:
+    linear-gradient(90deg, rgba(251, 191, 36, 0.08) 0%, rgba(167, 139, 250, 0.10) 50%, rgba(251, 146, 60, 0.06) 100%);
+  border-bottom-color: rgba(251, 191, 36, 0.18);
+  position: relative;
+}
+.quest-item.is-featured::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, #c4b5fd 0%, #a78bfa 50%, #7c3aed 100%);
+  box-shadow: 0 0 12px rgba(167, 139, 250, 0.45);
+}
+.quest-item.is-featured .quest-icon {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.30), rgba(124, 58, 237, 0.18));
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #c4b5fd;
+  box-shadow: 0 0 14px rgba(167, 139, 250, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+body.light .quest-item.is-featured .quest-icon {
+  background: linear-gradient(135deg, #ede9fe, #ddd6fe);
+  color: #6d28d9;
+}
+
+.quest-label-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+  flex-wrap: wrap;
+}
+.quest-label-row .quest-label { margin-bottom: 0; }
+.quest-featured-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0.12rem 0.42rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(124, 58, 237, 0.4);
+}
+
+/* ── Floating "+N ⭐" reward animation ── */
+.quest-fly-reward {
+  position: fixed;
+  z-index: 9999;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #fff;
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.95), rgba(124, 58, 237, 0.95));
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  box-shadow:
+    0 6px 20px rgba(124, 58, 237, 0.55),
+    0 0 24px rgba(167, 139, 250, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.30);
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.8);
+  opacity: 0;
+  transition:
+    transform 0.7s cubic-bezier(0.32, 0.72, 0.28, 1),
+    opacity 0.7s ease-out;
+}
+.quest-fly-reward.is-poppin {
+  transform: translate(-50%, -50%) scale(1.15);
+  opacity: 1;
+}
+.quest-fly-reward.is-coin {
+  background: linear-gradient(135deg, rgba(196, 181, 253, 0.95), rgba(91, 33, 182, 0.95));
+  color: #fff;
+  box-shadow:
+    0 6px 20px rgba(91, 33, 182, 0.55),
+    0 0 24px rgba(167, 139, 250, 0.40),
+    inset 0 1px 0 rgba(255, 255, 255, 0.30);
+}
+
+/* Coin-currency reward pill (variant for the in-list reward badge). */
+.quest-item.is-coin-reward .quest-reward-pill {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.22) 0%, rgba(91, 33, 182, 0.10) 100%);
+  border-color: rgba(124, 58, 237, 0.35);
+  color: #c4b5fd;
+}
+body.light .quest-item.is-coin-reward .quest-reward-pill {
+  background: linear-gradient(135deg, #ede9fe, #ddd6fe);
+  color: #5b21b6;
+}
+.quest-item.is-coin-reward .quest-icon {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.20), rgba(124, 58, 237, 0.10));
+  border-color: rgba(167, 139, 250, 0.32);
+  color: #c4b5fd;
+}
+
+/* Topbar pill bumps when reward lands. */
+#topbarStarBalance.is-just-bumped,
+#topbarCoinBalance.is-just-bumped {
+  animation: questsPillBump 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes questsPillBump {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.35); color: #fde68a; }
+  100% { transform: scale(1); }
+}
+
+/* ── Tabs (Daily / Weekly / Monthly) ── */
+.quests-tabs {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.55rem 0.85rem 0;
+  border-bottom: 1px solid rgba(167, 139, 250, 0.08);
+  flex-shrink: 0;
+}
+.quests-tab {
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text2);
+  padding: 0.55rem 0.95rem;
+  border-radius: 10px 10px 0 0;
+  cursor: pointer;
+  position: relative;
+  letter-spacing: -0.01em;
+  transition: color 0.22s ease, background 0.22s ease;
+}
+.quests-tab:hover {
+  color: #c4b5fd;
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.08), transparent);
+}
+body.light .quests-tab:hover { color: #6d28d9; background: linear-gradient(180deg, rgba(167, 139, 250, 0.10), transparent); }
+.quests-tab.active {
+  color: #c4b5fd;
+}
+body.light .quests-tab.active { color: #6d28d9; }
+.quests-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 18%; right: 18%; bottom: -1px;
+  height: 2.5px;
+  background: linear-gradient(90deg, #a78bfa, #7c3aed);
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(167, 139, 250, 0.6);
+}
+
+/* ── Day-progress strip ── */
+.quests-day-strip {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.45rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid rgba(167, 139, 250, 0.08);
+  flex-shrink: 0;
+  background: linear-gradient(180deg, rgba(124, 58, 237, 0.06), transparent);
+}
+/* Weekly + monthly tabs override the grid to flex (variable count). */
+.quests-day-strip.is-flex { display: flex; gap: 0.4rem; overflow-x: auto; scrollbar-width: none; }
+.quests-day-strip.is-flex::-webkit-scrollbar { display: none; }
+.quests-day-strip.is-flex .quest-day-pip { min-width: 56px; flex-shrink: 0; }
+
+.quest-day-pip {
+  height: 52px;
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(167, 139, 250, 0.06), rgba(124, 58, 237, 0.02)),
+    rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(167, 139, 250, 0.12);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-weight: 600;
+  color: var(--text2);
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
+}
+body.light .quest-day-pip {
+  background: linear-gradient(180deg, rgba(245, 243, 255, 1), rgba(237, 233, 254, 0.5));
+  border-color: rgba(124, 58, 237, 0.12);
+}
+.quest-day-pip-label { font-size: 0.55rem; opacity: 0.55; line-height: 1; letter-spacing: 0.05em; text-transform: uppercase; font-weight: 700; }
+.quest-day-pip-num { font-size: 0.92rem; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+.quest-day-pip-mark { font-size: 0.7rem; font-weight: 700; line-height: 1; margin-top: 1px; }
+
+/* Complete: deep purple gradient with checkmark — feels "earned". */
+.quest-day-pip.is-complete {
+  background:
+    linear-gradient(180deg, rgba(124, 58, 237, 0.32), rgba(91, 33, 182, 0.20)),
+    rgba(124, 58, 237, 0.10);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #ddd6fe;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 2px 10px rgba(124, 58, 237, 0.18);
+}
+body.light .quest-day-pip.is-complete {
+  background: linear-gradient(180deg, #ddd6fe, #c4b5fd);
+  border-color: rgba(124, 58, 237, 0.35);
+  color: #4c1d95;
+}
+.quest-day-pip.is-complete .quest-day-pip-mark { color: #c4b5fd; }
+body.light .quest-day-pip.is-complete .quest-day-pip-mark { color: #6d28d9; }
+
+/* Today: signature purple glow — the "you are here" moment. */
+.quest-day-pip.is-today {
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, 0.35) 0%, rgba(124, 58, 237, 0.30) 100%),
+    rgba(124, 58, 237, 0.20);
+  border-color: rgba(167, 139, 250, 0.55);
+  color: #fff;
+  box-shadow:
+    0 0 0 2px rgba(167, 139, 250, 0.18),
+    0 0 20px rgba(167, 139, 250, 0.40),
+    0 4px 16px rgba(124, 58, 237, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  transform: translateY(-1px);
+}
+body.light .quest-day-pip.is-today {
+  background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%);
+  border-color: rgba(124, 58, 237, 0.4);
+  color: #5b21b6;
+  box-shadow:
+    0 0 0 2px rgba(124, 58, 237, 0.12),
+    0 0 18px rgba(167, 139, 250, 0.30),
+    0 4px 14px rgba(124, 58, 237, 0.20);
+}
+.quest-day-pip.is-today.is-complete {
+  /* Today + already-claimed = layered purple emphasis. */
+  background:
+    linear-gradient(135deg, rgba(124, 58, 237, 0.40), rgba(91, 33, 182, 0.30)),
+    rgba(91, 33, 182, 0.20);
+  border-color: rgba(167, 139, 250, 0.6);
+}
+
+.quest-day-pip.is-missed {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.18);
+  color: rgba(239, 68, 68, 0.6);
+  text-decoration: line-through;
+  text-decoration-color: rgba(239, 68, 68, 0.5);
+}
+.quest-day-pip.is-future {
+  opacity: 0.55;
+  background: rgba(167, 139, 250, 0.03);
+  border-style: dashed;
+  border-color: rgba(167, 139, 250, 0.15);
+}
+
+.quests-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.4rem 0 0.5rem;
+}
+.quests-list::-webkit-scrollbar { width: 6px; }
+.quests-list::-webkit-scrollbar-thumb { background: rgba(167, 139, 250, 0.18); border-radius: 3px; }
+.quests-list::-webkit-scrollbar-thumb:hover { background: rgba(167, 139, 250, 0.32); }
+
+.quest-item {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.78rem 1.1rem;
+  border-bottom: 1px solid rgba(167, 139, 250, 0.06);
+  transition: background 0.22s ease, border-color 0.22s ease;
+  position: relative;
+}
+body.light .quest-item { border-bottom-color: rgba(124, 58, 237, 0.06); }
+.quest-item:last-child { border-bottom: none; }
+.quest-item:hover {
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.05), transparent);
+}
+.quest-item.is-claimable {
+  background:
+    linear-gradient(90deg, rgba(167, 139, 250, 0.10) 0%, rgba(124, 58, 237, 0.06) 100%);
+  border-bottom-color: rgba(167, 139, 250, 0.14);
+}
+.quest-item.is-claimable::before {
+  /* Subtle left-edge accent line for ready-to-claim quests. */
+  content: '';
+  position: absolute;
+  left: 0; top: 12%; bottom: 12%;
+  width: 2.5px;
+  background: linear-gradient(180deg, #a78bfa, #7c3aed);
+  border-radius: 0 2px 2px 0;
+  box-shadow: 0 0 8px rgba(167, 139, 250, 0.5);
+}
+.quest-item.is-claimed { opacity: 0.5; }
+
+.quest-icon {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, 0.20), rgba(124, 58, 237, 0.10));
+  border: 1px solid rgba(167, 139, 250, 0.18);
+  color: #c4b5fd;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+body.light .quest-icon {
+  background: linear-gradient(135deg, #ede9fe, #ddd6fe);
+  border-color: rgba(124, 58, 237, 0.18);
+  color: #6d28d9;
+}
+.quest-icon svg { width: 19px; height: 19px; }
+.quest-item.is-claimable .quest-icon {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.30), rgba(124, 58, 237, 0.18));
+  border-color: rgba(167, 139, 250, 0.55);
+  color: #c4b5fd;
+  box-shadow: 0 0 12px rgba(167, 139, 250, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.quest-item.is-claimed .quest-icon {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.20), rgba(124, 58, 237, 0.10));
+  border-color: rgba(34, 197, 94, 0.35);
+  color: #4ade80;
+}
+
+.quest-body {
+  flex: 1;
+  min-width: 0;
+}
+.quest-label {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.01em;
+}
+.quest-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.quest-progress-bar {
+  flex: 1;
+  height: 5px;
+  background: rgba(167, 139, 250, 0.08);
+  border-radius: 99px;
+  overflow: hidden;
+  border: 1px solid rgba(167, 139, 250, 0.06);
+}
+body.light .quest-progress-bar { background: rgba(124, 58, 237, 0.08); }
+.quest-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #a78bfa 0%, #7c3aed 100%);
+  border-radius: 99px;
+  transition: width 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 0 8px rgba(167, 139, 250, 0.45);
+}
+.quest-item.is-claimable .quest-progress-fill,
+.quest-item.is-claimed .quest-progress-fill {
+  background: linear-gradient(90deg, #c4b5fd 0%, #7c3aed 100%);
+  box-shadow: 0 0 10px rgba(124, 58, 237, 0.4);
+}
+.quest-progress-label {
+  font-size: 0.7rem;
+  color: var(--text2);
+  font-weight: 600;
+  min-width: 38px;
+  text-align: right;
+  letter-spacing: -0.01em;
+}
+
+.quest-action {
+  flex-shrink: 0;
+  min-width: 68px;
+  text-align: center;
+}
+.quest-currency-icon {
+  /* Inline currency SVG (replaces ⭐ / 🪙 emoji). Sized to sit
+     visually balanced inside the reward pill, inherits the pill's
+     text color via fill="currentColor". */
+  width: 0.95em;
+  height: 0.95em;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: -2px;
+}
+.quest-streak-icon {
+  /* Lightning-bolt streak indicator inside the streak pill. Same
+     sizing principles as the currency icon — inherits color so it
+     paints purple inside the pill. */
+  width: 0.85em;
+  height: 0.85em;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: -1px;
+  margin-right: 0.15em;
+}
+
+/* ─── Pool reward header (daily tab) ──────────────────────────────────
+   Sits above the quest list. Shows the bundled reward (4⭐ + 1🪙) and
+   the user's progress toward the threshold (X/4 quests). Morphs into
+   a CLAIM button when the threshold is reached. */
+.quest-pool-header {
+  margin: 0.55rem 1.1rem 0.6rem;
+  padding: 0.85rem 1rem;
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, 0.14) 0%, rgba(124, 58, 237, 0.10) 100%);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.10);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+body.light .quest-pool-header {
+  background: linear-gradient(135deg, #faf5ff 0%, #ede9fe 100%);
+  border-color: rgba(124, 58, 237, 0.18);
+}
+.quest-pool-header.is-claimable {
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, 0.28) 0%, rgba(124, 58, 237, 0.18) 100%);
+  border-color: rgba(167, 139, 250, 0.45);
+  box-shadow: 0 6px 22px rgba(124, 58, 237, 0.25);
+}
+.quest-pool-header.is-claimed { opacity: 0.55; }
+.quest-pool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+.quest-pool-meta { min-width: 0; flex: 1; }
+.quest-pool-title {
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin-bottom: 0.15rem;
+}
+.quest-pool-subtitle {
+  font-size: 0.72rem;
+  color: var(--text2);
+  letter-spacing: -0.01em;
+}
+.quest-pool-reward {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.32rem 0.6rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  color: #fff;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  box-shadow: 0 3px 12px rgba(124, 58, 237, 0.35);
+}
+.quest-pool-reward .quest-currency-icon {
+  width: 0.9em;
+  height: 0.9em;
+  vertical-align: -1.5px;
+}
+.quest-pool-action { display: flex; }
+.quest-pool-progress {
+  flex: 1;
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text2);
+  padding: 0.42rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.08);
+  border: 1px solid rgba(167, 139, 250, 0.15);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+body.light .quest-pool-progress {
+  background: rgba(243, 232, 255, 0.7);
+  border-color: rgba(124, 58, 237, 0.18);
+}
+.quest-pool-claim-btn {
+  flex: 1;
+  background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
+  color: #fff;
+  border: none;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 800;
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow:
+    0 4px 14px rgba(124, 58, 237, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.20);
+  transition: transform 0.14s ease, box-shadow 0.22s ease;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.quest-pool-claim-btn:hover {
+  transform: translateY(-1.5px);
+  box-shadow:
+    0 7px 20px rgba(124, 58, 237, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.quest-pool-claim-btn:active { transform: translateY(0); }
+.quest-pool-claimed {
+  flex: 1;
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #4ade80;
+  padding: 0.5rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(74, 222, 128, 0.10);
+  border: 1px solid rgba(74, 222, 128, 0.22);
+  letter-spacing: 0.02em;
+}
+
+/* ─── Per-quest bonus tag (daily, e.g. invite_friend +1🪙) ─────────── */
+.quest-bonus-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 0.12rem 0.42rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #c4b5fd, #a78bfa);
+  color: #fff;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(167, 139, 250, 0.4);
+}
+.quest-bonus-tag .quest-currency-icon {
+  width: 0.85em;
+  height: 0.85em;
+  vertical-align: -1px;
+}
+.quest-reward-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, 0.18) 0%, rgba(124, 58, 237, 0.10) 100%);
+  color: #c4b5fd;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  letter-spacing: -0.01em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+body.light .quest-reward-pill {
+  background: linear-gradient(135deg, #ede9fe, #ddd6fe);
+  color: #5b21b6;
+  border-color: rgba(124, 58, 237, 0.35);
+}
+.quest-claim-btn {
+  background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
+  color: #fff;
+  border: none;
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 800;
+  padding: 0.42rem 0.85rem;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow:
+    0 3px 12px rgba(124, 58, 237, 0.45),
+    0 0 18px rgba(167, 139, 250, 0.20),
+    inset 0 1px 0 rgba(255, 255, 255, 0.20);
+  transition: transform 0.14s ease, box-shadow 0.22s ease;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.quest-claim-btn:hover {
+  transform: translateY(-1.5px);
+  box-shadow:
+    0 6px 18px rgba(124, 58, 237, 0.55),
+    0 0 24px rgba(167, 139, 250, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.quest-claim-btn:active { transform: translateY(0); }
+.quest-claimed-mark {
+  color: #4ade80;
+  font-size: 1.05rem;
+  font-weight: 700;
+  text-shadow: 0 0 8px rgba(74, 222, 128, 0.5);
+}
+
+.quests-footer {
+  border-top: 1px solid rgba(167, 139, 250, 0.12);
+  padding: 0.85rem 1.1rem;
+  flex-shrink: 0;
+  background:
+    linear-gradient(180deg, transparent, rgba(124, 58, 237, 0.08));
+}
+.quests-bonus-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: var(--text2);
+  letter-spacing: -0.01em;
+}
+.quests-bonus-reward {
+  background: linear-gradient(135deg, #fde68a 0%, #fbbf24 50%, #c4b5fd 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+body.light .quests-bonus-reward {
+  background: linear-gradient(135deg, #c2410c, #6d28d9);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.quests-footer.is-bonus-earned {
+  background:
+    linear-gradient(180deg, rgba(34, 197, 94, 0.08), rgba(34, 197, 94, 0.16));
+  animation: questsBonusPulse 1.4s ease;
+}
+@keyframes questsBonusPulse {
+  0%   { background-color: rgba(34, 197, 94, 0.30); }
+  100% { background-color: transparent; }
+}
+.quests-footer.is-bonus-earned .quests-bonus-reward {
+  background: linear-gradient(135deg, #4ade80, #22c55e);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
 .topbar-bell { position: relative; }
 .topbar-bell.has-unread svg {
   animation: bellShake 0.6s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
@@ -1599,6 +2416,27 @@ body.light .author-book-row { border-bottom-color: #e5e7eb; }
   justify-content: space-between;
   margin-bottom: 1rem;
 }
+/* Inline TOC pane in the author book editor.
+   Mirrors the mobile book-editor inner ScrollView: shows ~10 rows at
+   most, then scrolls vertically while the rest of the page stays put.
+   Each row is roughly 60px tall (padding + content + gap), so 600px
+   ≈ 10 rows. Books with fewer chapters never trigger the inner scroll
+   because the natural height stays under the cap. */
+#bookEditorChapters {
+  max-height: 600px;
+  overflow-y: auto;
+  padding-right: 0.25rem; /* leaves room for the scrollbar without clipping rows */
+}
+
+/* Subtle scrollbar styling so the inner scroll doesn't visually
+   compete with the page-level scroll. */
+#bookEditorChapters::-webkit-scrollbar { width: 6px; }
+#bookEditorChapters::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.35);
+  border-radius: 3px;
+}
+#bookEditorChapters::-webkit-scrollbar-track { background: transparent; }
+
 .author-chapter-row {
   display: flex;
   align-items: center;
@@ -1611,6 +2449,19 @@ body.light .author-book-row { border-bottom-color: #e5e7eb; }
   cursor: pointer;
   transition: all 0.15s;
 }
+
+/* Lock glyph rendered before the chapter title when the chapter is
+   behind the book's paywall. Brand-purple to match the rest of the
+   monetization affordances (Lock toggle, picker, banner). */
+.author-chapter-lock {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 0.45rem;
+  color: #a78bfa;
+  vertical-align: -0.12em;
+}
+body.light .author-chapter-lock { color: #7c3aed; }
 body.light .author-chapter-row { background: #ffffff; border-color: #e5e7eb; }
 .author-chapter-row:hover {
   background: rgba(139, 92, 246, 0.08);
@@ -1632,6 +2483,65 @@ body.light .author-chapter-row { background: #ffffff; border-color: #e5e7eb; }
 .author-chapter-pub-draft     { background: rgba(156, 163, 175, 0.12); color: var(--text2); border: 1px solid rgba(156,163,175,0.3); }
 .author-chapter-pub-scheduled { background: rgba(124, 58, 237, 0.12); color: #c4b5fd; border: 1px solid rgba(124, 58, 237, 0.30); white-space: nowrap; }
 .author-chapter-actions { display: flex; gap: 0.3rem; }
+
+/* Published / Drafts tab bar in the author book editor — parallel to
+   the mobile BookChaptersModal tabs so authors get the same triage
+   surface across platforms. Active tab has a purple underline + bolder
+   label, counts use a pill that flips inverted (purple bg / white text)
+   when active. */
+.author-chapter-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0.6rem 0 0.85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+body.light .author-chapter-tabs { border-bottom-color: rgba(0, 0, 0, 0.08); }
+
+.author-chapter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0.65rem 1.1rem;
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text2);
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+.author-chapter-tab:hover { color: var(--text); }
+.author-chapter-tab.is-active {
+  color: #a78bfa;
+  font-weight: 700;
+  border-bottom-color: #a78bfa;
+}
+
+.author-chapter-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.45rem;
+  height: 1.25rem;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+body.light .author-chapter-tab-count {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.06);
+}
+.author-chapter-tab.is-active .author-chapter-tab-count {
+  background: #8b5cf6;
+  color: #ffffff;
+  border-color: transparent;
+}
 
 /* ── CHAPTER EDITOR (Quill) ── */
 .chapter-editor-bar {
@@ -2185,6 +3095,47 @@ body.light .reaction-picker {
 
 /* ── COMMENTS ── */
 .comments-section { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+
+/* Facebook-style "View N previous comments" / "View N replies" toggles.
+   Plain transparent button styled as a quiet secondary link — meant to
+   recede so the actual comment content carries the visual weight.
+   Bold so the count reads as the primary signal (mirrors FB's chevron-
+   prefixed "View previous comments" affordance). */
+.comment-view-more,
+.comment-view-replies {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0;
+  color: var(--text2, #555);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 120ms;
+}
+.comment-view-more::before,
+.comment-view-replies::before {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.4;
+}
+.comment-view-more:hover,
+.comment-view-replies:hover {
+  background: var(--surface-muted, rgba(124,58,237,0.06));
+  color: var(--text, #111);
+}
+.comment-view-more:disabled,
+.comment-view-replies:disabled { opacity: 0.5; cursor: default; }
+/* Replies sit indented under their parent — make the toggle align with
+   the same rail so the visual hierarchy reads as "this belongs to that". */
+.replies .comment-view-replies { margin-left: 0; }
 .comment-item { display: flex; gap: 0.6rem; margin-bottom: 0.85rem; position: relative; }
 .comment-body { flex: 1; min-width: 0; }
 /* Ensure the reaction picker isn't clipped by parent comment containers.
@@ -3678,6 +4629,101 @@ body.light .vu-field select {
   border-color: #7c3aed;
   background: rgba(124, 58, 237, 0.05);
   box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+}
+
+/* ─── Tag chip input (YouTube-style) ───────────────────────────────────
+   Wraps a hidden <input> whose .value is kept in sync with the chip
+   array. Visually a wrapper that looks identical to .vu-field inputs:
+   chips render inline left-to-right, with a flex-grow editor at the end.
+   See attachTagChips() in js/app.js. */
+.tag-chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1.5px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  font-family: inherit;
+  transition: all 0.15s;
+  box-sizing: border-box;
+  min-height: 44px;
+  cursor: text;
+}
+
+body.light .tag-chip-wrap {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+}
+
+.tag-chip-wrap:focus-within {
+  outline: none;
+  border-color: #7c3aed;
+  background: rgba(124, 58, 237, 0.05);
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+}
+
+.tag-chip-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 4px 12px;
+  background: linear-gradient(135deg, #7c3aed, #6d28d9);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  letter-spacing: 0.1px;
+  box-shadow: 0 2px 4px rgba(124, 58, 237, 0.18);
+  user-select: none;
+}
+
+.tag-chip-text { line-height: 1; }
+
+.tag-chip-remove {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s;
+}
+
+.tag-chip-remove:hover {
+  background: rgba(255, 255, 255, 0.36);
+}
+
+.tag-chip-editor {
+  flex: 1 1 80px;
+  min-width: 80px;
+  padding: 4px 6px;
+  background: transparent !important;
+  border: none !important;
+  outline: none;
+  color: var(--text, #e5e7eb);
+  font-family: inherit;
+  font-size: 0.92rem;
+  box-shadow: none !important;
+}
+
+body.light .tag-chip-editor {
+  color: #1f2937;
+}
+
+.tag-chip-editor:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Progress */
@@ -6170,7 +7216,11 @@ body:not(.light) .mutual-more {
   font-weight: 700;
   font-size: 0.95rem;
 }
-.dm-conv-avatar img { width: 100%; height: 100%; object-fit: cover; }
+/* Clip the image into a circle directly on the <img> element. This is
+   independent of the parent's overflow setting, so when the Secret-badge
+   variant relaxes overflow to `visible` (so the badge can extend past
+   the circle), the photo itself still renders as a circle. */
+.dm-conv-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 .dm-conv-meta { flex: 1; min-width: 0; }
 .dm-conv-row {
   display: flex;
@@ -10091,6 +11141,68 @@ body:not(.light) .payout-account-card {
 }
 body:not(.light) .payout-account-method { color: #c4b5fd; }
 
+/* Pioneer perk banner — only renders when the current user is a Pioneer
+   within their exemption window. Solid purple gradient + white text reads
+   as a celebratory perk, not a secondary notice. */
+.payout-pioneer-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 0 0.95rem;
+  padding: 0.7rem 0.85rem;
+  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+  border-radius: 10px;
+  box-shadow: 0 4px 14px -4px rgba(124, 58, 237, 0.4);
+  color: #ffffff;
+}
+.payout-pioneer-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.payout-pioneer-text { min-width: 0; line-height: 1.3; }
+.payout-pioneer-title { font-size: 0.86rem; font-weight: 700; }
+.payout-pioneer-sub   { font-size: 0.74rem; opacity: 0.88; margin-top: 0.1rem; }
+
+/* Receipt-style fee preview. Slim rows under the amount input; updates
+   live as the user types. Pioneer-exempt sessions render the fee values
+   as "Waived" in green. */
+.payout-fee-preview {
+  margin: 0.85rem 0 0.55rem;
+  padding: 0.7rem 0.85rem;
+  background: rgba(124, 58, 237, 0.04);
+  border: 1px solid rgba(124, 58, 237, 0.12);
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+.payout-fee-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.18rem 0;
+}
+.payout-fee-label  { color: var(--text2); }
+.payout-fee-value  { color: var(--text); font-variant-numeric: tabular-nums; }
+.payout-fee-row.payout-fee-total {
+  margin-top: 0.35rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid rgba(124, 58, 237, 0.18);
+  font-weight: 700;
+}
+.payout-fee-row.payout-fee-total .payout-fee-label,
+.payout-fee-row.payout-fee-total .payout-fee-value { color: #7c3aed; font-size: 0.95rem; }
+.payout-fee-value.is-waived { color: #16a34a; font-weight: 700; }
+body:not(.light) .payout-fee-preview { background: rgba(167, 139, 250, 0.06); border-color: rgba(167, 139, 250, 0.18); }
+body:not(.light) .payout-fee-row.payout-fee-total .payout-fee-label,
+body:not(.light) .payout-fee-row.payout-fee-total .payout-fee-value { color: #c4b5fd; }
+
 /* Min-payout popup */
 .min-payout-body {
   text-align: center;
@@ -11445,3 +12557,455 @@ body:not(.light) .rank-card-badge-paid {
   .book-collection-title { font-size: 1.25rem; }
   .book-card-v2-badge { width: 76px; font-size: 0.65rem; transform: rotate(45deg) translate(20px, -7px); }
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Chat parity v2 — Secret tab, group settings modal, 3-tab pill.
+ * Mirrors the mobile UX (group manage, Secret tab, biometric lock UI).
+ * Added in the web parity pass.
+ * ───────────────────────────────────────────────────────────────────── */
+
+/* Three-tab pill above the conversations list. */
+.dm-tab-pill {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.dm-tab {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+.dm-tab:hover { background: var(--surface-muted, rgba(124,58,237,0.08)); }
+.dm-tab.is-active {
+  background: var(--accent-purple, #8b5cf6);
+  color: #fff;
+  border-color: var(--accent-purple, #8b5cf6);
+}
+
+/* Side-by-side new-chat buttons (regular + Secret) in the sidebar header.
+   Both render as plain icon-only `.dm-new-btn` circles — the Secret one
+   used to be a purple pill (`.dm-new-btn-secret` + `.dm-new-btn-label`)
+   but we simplified to icon-only to match the chat-bubble button next to
+   it. Discoverability comes from the lock glyph + the tooltip on hover. */
+.dm-sidebar-actions { display: flex; gap: 6px; align-items: center; }
+
+/* Secret-tab empty state CTA. */
+.dm-empty-list {
+  text-align: center;
+  padding: 32px 18px 28px;
+  color: var(--text2);
+}
+.dm-empty-icon { font-size: 2.2rem; margin-bottom: 10px; }
+.dm-empty-title { font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.dm-empty-sub { font-size: 0.85rem; line-height: 1.4; max-width: 280px; margin: 0 auto 14px; }
+.dm-cta-btn {
+  background: var(--accent-purple, #8b5cf6);
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.dm-cta-btn:hover { filter: brightness(1.05); }
+
+/* Lock badge on Secret conversation row avatars. SVG (not emoji) so the
+   lock always sits dead-center and renders identically across browsers
+   and OS. Positioned to sit clearly OUTSIDE the avatar's bottom-right —
+   roughly halfway-out — so it's visually obvious that the chat is
+   Secret without competing with the avatar photo. White border doubles
+   as a clean break against any avatar color. */
+.dm-conv-avatar-secret { position: relative; overflow: visible; }
+.dm-conv-avatar-secret::after {
+  content: '';
+  position: absolute;
+  bottom: -6px;
+  right: -6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background-color: var(--accent-purple, #8b5cf6);
+  border: 2.5px solid var(--bg, #fff);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='11' width='14' height='9' rx='2' ry='2'/><path d='M8 11V7a4 4 0 0 1 8 0v4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 13px 13px;
+  box-shadow: 0 2px 6px rgba(139, 92, 246, 0.35);
+  z-index: 1;
+}
+
+/* "↑ N new posts" pill — appears at the top-center of the feed when
+   the background poller has discovered new content. Tap → applies the
+   buffered posts to the top of the feed without a fresh DB call. The
+   pill is fixed-position so scroll doesn't move it. */
+.feed-new-pill {
+  position: fixed;
+  top: 76px;            /* clear of the sticky header */
+  left: 50%;
+  transform: translateX(-50%) translateY(-12px);
+  padding: 8px 18px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primaryContrast, #fff);
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(121, 117, 212, 0.35), 0 1px 3px rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1500;
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+.feed-new-pill.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+.feed-new-pill:hover {
+  filter: brightness(1.05);
+}
+.feed-new-pill:active {
+  transform: translateX(-50%) translateY(1px);
+}
+
+/* Suggested mutuals row in the New Secret chat modal. Renders the first
+   five mutual followers as avatar chips so the user can start a Secret
+   chat in one click without typing a search. */
+.dm-secret-suggested {
+  margin: 4px 0 14px;
+}
+.dm-secret-suggested-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.dm-secret-suggested-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dm-secret-suggested-chip {
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  overflow: hidden;
+  padding: 0;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+.dm-secret-suggested-chip:hover {
+  transform: scale(1.06);
+  border-color: var(--primary);
+}
+.dm-secret-suggested-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.dm-secret-suggested-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.dm-secret-suggested-initials {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text2);
+  background: var(--surfaceMuted, var(--surface));
+}
+.dm-secret-suggested-more {
+  font-size: 12px;
+  color: var(--text2);
+  margin-top: 8px;
+}
+
+/* PIN gate for the locked Secret tab. */
+.dm-secret-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 36px 22px;
+  text-align: center;
+  color: var(--text2);
+}
+.dm-secret-gate-icon {
+  font-size: 1.8rem;
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  background: rgba(139,92,246,0.16);
+  border: 1px solid var(--accent-purple, #8b5cf6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+.dm-secret-title { font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.dm-secret-subtitle { font-size: 0.85rem; max-width: 280px; line-height: 1.4; margin-bottom: 18px; }
+.dm-secret-input {
+  width: 180px;
+  text-align: center;
+  font-size: 1.4rem;
+  letter-spacing: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--input-bg, var(--surface));
+  color: var(--text);
+  outline: none;
+}
+.dm-secret-input:focus { border-color: var(--accent-purple, #8b5cf6); }
+.dm-secret-error { color: #ef4444; font-size: 0.78rem; margin-top: 8px; min-height: 1em; }
+.dm-secret-submit {
+  margin-top: 14px;
+  padding: 8px 18px;
+  border-radius: 999px;
+  background: var(--accent-purple, #8b5cf6);
+  color: #fff;
+  border: none;
+  font-weight: 700;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+.dm-secret-submit:hover { filter: brightness(1.05); }
+
+/* Group settings modal — shared bones with follow-list-modal. */
+.group-info-modal { max-width: 460px; }
+.group-info-identity { text-align: center; padding: 18px 8px 10px; }
+.group-info-avatar-wrap {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 10px;
+}
+.group-info-avatar {
+  width: 88px;
+  height: 88px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-muted, rgba(124,58,237,0.08));
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.group-info-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.group-info-avatar-edit {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--accent-purple, #8b5cf6);
+  color: #fff;
+  border: 2px solid var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.group-info-avatar-edit:hover { filter: brightness(1.05); }
+.group-info-name-row { display: flex; justify-content: center; }
+.group-info-name {
+  font-size: 1.2rem;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+.group-info-pencil { font-size: 0.7rem; color: var(--text-muted, #888); }
+.group-info-add-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--surface-muted, rgba(124,58,237,0.08));
+  border: none;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+  text-align: left;
+}
+.group-info-add-row:hover { background: rgba(139,92,246,0.12); }
+.group-info-add-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: rgba(139,92,246,0.16);
+  border: 1px solid var(--accent-purple, #8b5cf6);
+  color: var(--accent-purple, #8b5cf6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+.group-info-members-body { max-height: 320px; overflow-y: auto; }
+.group-info-creator-badge {
+  font-size: 0.68rem;
+  color: var(--accent-purple, #8b5cf6);
+  font-weight: 600;
+}
+.group-info-kick {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-muted, rgba(124,58,237,0.08));
+  color: var(--text);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+}
+.group-info-kick:hover { background: rgba(239,68,68,0.16); border-color: #ef4444; color: #ef4444; }
+
+/* Generic danger button — used by the Leave group action. */
+.btn-danger {
+  background: rgba(239,68,68,0.12);
+  border: 1px solid #ef4444;
+  color: #ef4444;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-danger:hover { background: rgba(239,68,68,0.22); }
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Lock prompt banner — soft notice surfaced to authors on the
+ * dashboard / book editor when a book is currently Free but they
+ * already monetize at least one other book. Mirrors the mobile
+ * BookLockPromptBanner one-tap-lock affordance: a small purple-accented
+ * card with a 5–10 segmented picker and a Dismiss link.
+ * ───────────────────────────────────────────────────────────────────── */
+.lock-prompt-banner {
+  display: flex;
+  background: var(--bg2, rgba(255,255,255,0.02));
+  border: 1px solid var(--border, rgba(124,58,237,0.20));
+  border-radius: 14px;
+  margin: 0 0 0.9rem;
+  overflow: hidden;
+  position: relative;
+}
+.lock-prompt-banner::before {
+  /* Brand-purple accent stripe down the left edge — same affordance
+     as the mobile banner so the cross-platform UX feels intentional. */
+  content: '';
+  flex: 0 0 4px;
+  background: linear-gradient(180deg, #a78bfa 0%, #7c3aed 100%);
+}
+.lock-prompt-banner-body {
+  flex: 1;
+  padding: 0.95rem 1.1rem;
+  min-width: 0;
+}
+.lock-prompt-banner-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.lock-prompt-banner-sub {
+  font-size: 0.82rem;
+  color: var(--text2);
+  margin: 0.3rem 0 0.7rem;
+  line-height: 1.45;
+}
+/* Inline 5–10 segmented buttons — visually consistent with the
+   reaction emoji picker / genre chip family. */
+.lock-prompt-banner-picker {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+.lock-prompt-banner-pick {
+  min-width: 38px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border, rgba(255,255,255,0.10));
+  background: var(--bg, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.lock-prompt-banner-pick:hover:not(:disabled) {
+  background: rgba(139,92,246,0.10);
+  border-color: rgba(124,58,237,0.40);
+  color: #7c3aed;
+}
+body:not(.light) .lock-prompt-banner-pick:hover:not(:disabled) {
+  background: rgba(167,139,250,0.16);
+  border-color: rgba(167,139,250,0.50);
+  color: #c4b5fd;
+}
+.lock-prompt-banner-pick:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Dismiss link sits below the picker. Underlined, subdued — secondary
+   action, never competes with the primary Lock buttons. */
+.lock-prompt-banner-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0.7rem;
+  min-height: 18px;
+}
+.lock-prompt-banner-dismiss {
+  font-size: 0.78rem;
+  color: var(--text3, var(--text-muted, #888));
+  text-decoration: underline;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.lock-prompt-banner-dismiss:hover { color: var(--text); }
+.lock-prompt-banner-dismiss:disabled { opacity: 0.5; cursor: default; }
+/* Small loading dot during async writes — shown next to the dismiss
+   link while either lock or dismiss RPCs are in flight. */
+.lock-prompt-banner-spin {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(124,58,237,0.25);
+  border-top-color: #7c3aed;
+  animation: lock-prompt-spin 0.7s linear infinite;
+}
+@keyframes lock-prompt-spin { to { transform: rotate(360deg); } }
+/* Compact variant for the author book list — tighter padding so each
+   row's banner doesn't dominate the card next to it. */
+.lock-prompt-banner-compact .lock-prompt-banner-body { padding: 0.75rem 0.95rem; }
+.lock-prompt-banner-compact .lock-prompt-banner-sub { margin-bottom: 0.55rem; }

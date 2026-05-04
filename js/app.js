@@ -2,7 +2,83 @@ import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supa
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
-const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, created_at';
+const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, pioneer_at, created_at';
+
+// ─── Role-verified seal badge (Facebook-style) ──────────────────────────────────
+// Renders a 12-bump scalloped seal SVG with per-role colors (outer circle, inner
+// circle fill, white checkmark). Matches mobile RoleVerifiedBadge design.
+
+const ROLE_VERIFIED_PALETTE = {
+  Creator:  { outer: '#D4A017', inner: '#F5C84B' },
+  Writer:   { outer: '#1d4ed8', inner: '#60a5fa' },
+  Pioneer:  { outer: '#7c3aed', inner: '#a78bfa' },
+  Moderator: { outer: '#9f1239', inner: '#e11d48' },
+  Auditor:  { outer: '#0369a1', inner: '#38bdf8' },
+  User:     { outer: '#475569', inner: '#94a3b8' },
+};
+
+// One-time module-scope path: 12 bumps, peak radius 48, valley radius 39, center (50,50).
+// Identical for every render — only fill colors change. Quadratic Beziers produce smooth
+// scalloped silhouette.
+const SCALLOPED_OUTLINE_D = (() => {
+  const cx = 50, cy = 50, rOuter = 48, rInner = 39, bumps = 12;
+  const segments = [];
+  for (let i = 0; i < bumps; i++) {
+    const aStart = (i / bumps) * Math.PI * 2 - Math.PI / 2;
+    const aEnd = ((i + 1) / bumps) * Math.PI * 2 - Math.PI / 2;
+    const aPeak = ((i + 0.5) / bumps) * Math.PI * 2 - Math.PI / 2;
+
+    const sx = (cx + rInner * Math.cos(aStart)).toFixed(2);
+    const sy = (cy + rInner * Math.sin(aStart)).toFixed(2);
+    const ex = (cx + rInner * Math.cos(aEnd)).toFixed(2);
+    const ey = (cy + rInner * Math.sin(aEnd)).toFixed(2);
+    const px = (cx + rOuter * Math.cos(aPeak)).toFixed(2);
+    const py = (cy + rOuter * Math.sin(aPeak)).toFixed(2);
+
+    if (i === 0) segments.push(`M${sx},${sy}`);
+    segments.push(`Q${px},${py} ${ex},${ey}`);
+  }
+  segments.push('Z');
+  return segments.join(' ');
+})();
+
+// renderRoleSeal(profile, sizePx) → HTML string (inline SVG or '')
+//
+// Reads roles from EITHER profile.role (legacy single string column) OR
+// profile.roles (newer text[] column). Both are stored lowercase
+// ("creator","writer","pioneer","moderator","auditor"); we normalize
+// to the capitalized palette keys here so the seal colors match
+// regardless of which storage form a given profile has.
+//
+// Role priority when a user has multiple: Pioneer > Moderator > Creator
+// > Writer > Auditor. Returns '' when no role applies — safe to drop
+// inline anywhere without a wrapper check.
+function renderRoleSeal(profile, sizePx = 16) {
+  if (!profile) return '';
+
+  const rolesArray = Array.isArray(profile.roles) ? profile.roles : [];
+  const roleString = typeof profile.role === 'string' ? profile.role : '';
+  const has = (key) => rolesArray.includes(key) || roleString === key;
+
+  // Priority order (high → low): moderator > pioneer > creator >
+  // writer > auditor. One badge per user — first match wins. Matches
+  // backfill-roles.js resolveRole() and mobile UserRoleBadgeIcons so
+  // the same user shows the same seal everywhere.
+  let role = null;
+  if (has('moderator')) role = 'Moderator';
+  else if (has('pioneer')) role = 'Pioneer';
+  else if (has('creator')) role = 'Creator';
+  else if (has('writer')) role = 'Writer';
+  else if (has('auditor')) role = 'Auditor';
+  if (!role) return '';
+
+  const colors = ROLE_VERIFIED_PALETTE[role];
+  return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 100 100" style="vertical-align:-3px;margin-left:4px" aria-label="${role}"><title>${role}</title>
+    <path d="${SCALLOPED_OUTLINE_D}" fill="${colors.outer}"/>
+    <circle cx="50" cy="50" r="30" fill="${colors.inner}"/>
+    <path d="M35.5 51.5 L45.5 61.5 L65 41" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </svg>`;
+}
 
 // Set footer copyright year dynamically — never goes stale across new years
 {
@@ -160,6 +236,35 @@ async function onSignedIn(user) {
 
   // Notifications — fetch initial batch + start realtime subscription
   initNotifications();
+
+  // Path-based book deep links. Two acceptable inbound shapes:
+  //   /books/<id>               → book detail
+  //   /books/<id>/chapter/<n>   → book + chapter open
+  // openBookDetail handles both UUID and legacy Appwrite hex ids
+  // (resolves via the `legacy_appwrite_id` column when not a UUID), so a
+  // single match works for both new and old shareable URLs. Mobile's
+  // Universal Links / App Links also key off `/books/<id>` paths, which
+  // is why we standardize the URL bar on path-based — hash fragments
+  // (#book/<id>) are stripped by iOS / Android before deep-link match
+  // and can never open the app.
+  const path = window.location.pathname || '';
+  const bookChapterPath = path.match(/^\/books?\/([^\/?#]+)\/chapter\/([^\/?#]+)/);
+  const bookOnlyPath = !bookChapterPath ? path.match(/^\/books?\/([^\/?#]+)$/) : null;
+  if (bookChapterPath || bookOnlyPath) {
+    // We render via the SPA's existing entry points instead of redirecting
+    // to a hash form. This keeps the URL bar clean and shareable.
+    setSidebarActive('btnBook');
+    const bookId = (bookChapterPath || bookOnlyPath)[1];
+    // openBookDetail will canonicalize the URL via replaceState so it
+    // matches whatever path shape it loaded under.
+    openBookDetail(bookId);
+    if (bookChapterPath) {
+      // Chapter restoration is best-effort — _openChapterFromUrl reads
+      // the path again once the book's chapter list has loaded.
+      _pendingChapterFromUrl = bookChapterPath[2];
+    }
+    // Fall through still loads the home shell (sidebar / header / etc.).
+  }
 
   // Check URL hash for routing
   const hash = window.location.hash;
@@ -1181,7 +1286,17 @@ document.getElementById('btnPost').addEventListener('click', async () => {
   }
 
   btn.textContent = 'Posting...';
-  const { error } = await supabase.from('posts').insert({ user_id: currentUser.id, body: body || '', image_url: imageUrl });
+  // Facebook-pattern: ask for the inserted row WITH joins so we can
+  // prepend it locally instead of re-running loadFeed (which would
+  // call feed_for_you, and that RPC excludes the viewer's own posts —
+  // the new post would vanish from the feed immediately even though
+  // it landed in the DB). Returning the row also gives us the canonical
+  // id + created_at for the local prepend.
+  const { data: created, error } = await supabase
+    .from('posts')
+    .insert({ user_id: currentUser.id, body: body || '', image_url: imageUrl })
+    .select(FEED_SELECT)
+    .single();
   btn.disabled = false;
   btn.textContent = 'Post';
 
@@ -1192,7 +1307,29 @@ document.getElementById('btnPost').addEventListener('click', async () => {
   composeImageInput.value = '';
   charCount.textContent = '0 / 5000';
   toast('Posted!', 'success');
-  loadFeed();
+
+  // Prepend the new post locally so the user sees it at the top of the
+  // feed immediately (Facebook-style "you posted!" affordance). On the
+  // next manual refresh, feed_for_you will correctly exclude it from
+  // the For You ranking — by design — and it'll vanish from this list,
+  // but it lives forever on the user's profile/timeline.
+  if (created) {
+    posts = [created, ...posts];
+    const feedEl = document.getElementById('feed');
+    if (feedEl) {
+      const el = renderPost(created);
+      el.style.animationDelay = '0s';
+      feedEl.insertBefore(el, feedEl.firstChild);
+      _wireUpNewPosts(feedEl);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    _bumpFeedLastSeenAt([created]);
+  } else {
+    // Safety net — if the SELECT returned nothing for some reason
+    // (RLS / shape), fall back to the legacy behavior so the user's
+    // post isn't completely invisible.
+    loadFeed();
+  }
 });
 
 // ── Stories row (users) ──
@@ -1234,7 +1371,7 @@ let _feedScrollObserver = null;
 let _feedVideoObserver = null;
 let _feedPostObserver = null;
 
-const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, is_banned), videos(id, video_url, thumbnail_url, title, duration))`;
+const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration))`;
 
 // Feed mode — 'foryou' (default), 'following', or 'discover'
 let _feedMode = 'foryou';
@@ -1255,17 +1392,231 @@ let _cachedFollowIds = null;
 // every dependency is initialized.
 let _realtimeRefreshTimer = null;
 
+// Facebook-pattern feed delta. `_feedLastSeenAt` is the newest
+// created_at across the rendered feed. refreshFeedAdditive() fetches
+// only posts created after this timestamp and prepends them to the
+// top, instead of re-running the expensive feed_for_you ranker on
+// every refresh. Set by loadFeed/loadMoreFeed when fresh rows arrive,
+// updated again on each successful additive refresh.
+let _feedLastSeenAt = null;
+
+// Buffer of posts found by the background poller but not yet applied
+// to the feed. Tapping the "↑ N new posts" pill flushes this into the
+// top of the feed without a fresh DB call. Polled every 60s while the
+// tab is foregrounded; pauses when hidden.
+let _newPostsBuffer = [];          // hydrated post objects
+let _newPostsBufferIds = new Set(); // dedup against live + repeat polls
+let _feedPollTimer = null;
+
+// Update _feedLastSeenAt to the max created_at across an array of posts.
+// Idempotent — only moves forward, never backward (so a stale page
+// from a slow tab can't overwrite a fresher value).
+function _bumpFeedLastSeenAt(rows) {
+  if (!rows?.length) return;
+  let newest = _feedLastSeenAt;
+  for (const p of rows) {
+    const t = p?.created_at;
+    if (t && (!newest || t > newest)) newest = t;
+  }
+  if (newest && newest !== _feedLastSeenAt) _feedLastSeenAt = newest;
+}
+
+// Prepend a list of hydrated posts to the feed (state + DOM). Shared
+// between the background-poll buffer apply and the additive refresh
+// below. Returns the number of rows actually inserted (after dedup).
+function _prependFreshPosts(fresh) {
+  if (!fresh?.length) return 0;
+  const existing = new Set(posts.map(p => p?.id).filter(Boolean));
+  const toInsert = fresh.filter(p => p?.id && !existing.has(p.id));
+  if (!toInsert.length) return 0;
+  posts = [...toInsert, ...posts];
+  const feedEl = document.getElementById('feed');
+  if (feedEl) {
+    const frag = document.createDocumentFragment();
+    toInsert.forEach((post, i) => {
+      const el = renderPost(post);
+      el.style.animationDelay = `${(i * 0.04).toFixed(3)}s`;
+      frag.appendChild(el);
+    });
+    feedEl.insertBefore(frag, feedEl.firstChild);
+    _wireUpNewPosts(feedEl);
+  }
+  _bumpFeedLastSeenAt(toInsert);
+  return toInsert.length;
+}
+
+// Apply the background-polled buffer to the feed. Used by both the pill
+// tap and pull-to-refresh-style gestures — same effect, no DB call.
+function _applyNewPostsBuffer() {
+  if (!_newPostsBuffer.length) return 0;
+  const inserted = _prependFreshPosts(_newPostsBuffer);
+  _newPostsBuffer = [];
+  _newPostsBufferIds = new Set();
+  _renderNewPostsPill();
+  if (inserted > 0) {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  return inserted;
+}
+
+// Render / update / hide the "↑ N new posts" pill. Idempotent — safe to
+// call after every buffer change. The pill is created lazily once and
+// then just toggled visible.
+function _renderNewPostsPill() {
+  let pill = document.getElementById('feedNewPill');
+  if (!_newPostsBuffer.length) {
+    if (pill) pill.classList.remove('is-visible');
+    return;
+  }
+  if (!pill) {
+    pill = document.createElement('button');
+    pill.id = 'feedNewPill';
+    pill.className = 'feed-new-pill';
+    pill.type = 'button';
+    pill.onclick = () => _applyNewPostsBuffer();
+    document.body.appendChild(pill);
+  }
+  const n = _newPostsBuffer.length;
+  pill.textContent = n === 1 ? '↑ 1 new post' : `↑ ${n} new posts`;
+  pill.classList.add('is-visible');
+}
+
+// Background poller — every 60s while the tab is visible, calls
+// feed_new_since to discover posts created after _feedLastSeenAt.
+// New posts are stashed in _newPostsBuffer; the pill renders/updates
+// based on the buffer size. NO mutation of the live feed until the
+// user taps the pill (or pull-to-refresh applies the buffer).
+async function _pollForNewPosts() {
+  if (document.hidden) return;
+  if (!currentUser?.id) return;
+  if (_feedMode !== 'foryou' || !_feedLastSeenAt) return;
+  try {
+    const { data, error } = await supabase.rpc('feed_new_since', {
+      p_user_id: currentUser.id,
+      p_since: _feedLastSeenAt,
+      p_limit: 30,
+    });
+    if (error) throw error;
+    const ids = (data || []).map(r => r.id).filter(Boolean);
+    if (!ids.length) return;
+    // Skip ids already in the buffer or in the live feed.
+    const liveIds = new Set(posts.map(p => p?.id).filter(Boolean));
+    const newIds = ids.filter(id => !_newPostsBufferIds.has(id) && !liveIds.has(id));
+    if (!newIds.length) return;
+    // Hydrate the new ones through FEED_SELECT.
+    const { data: hydrated, error: hydErr } = await supabase
+      .from('posts').select(FEED_SELECT).in('id', newIds);
+    if (hydErr) throw hydErr;
+    const byId = new Map((hydrated || []).map(p => [p.id, p]));
+    const ordered = newIds.map(id => byId.get(id)).filter(Boolean);
+    const filtered = ordered.filter(p => !shouldHidePost(p));
+    if (!filtered.length) return;
+    // Buffer (newest first to match feed ordering).
+    _newPostsBuffer = [...filtered, ..._newPostsBuffer];
+    for (const p of filtered) _newPostsBufferIds.add(p.id);
+    _renderNewPostsPill();
+  } catch (err) {
+    // Polling errors are non-fatal — the next tick will retry.
+    console.warn('[feed] poll error:', err?.message);
+  }
+}
+
+// Start / restart the polling timer. Safe to call many times — clears
+// any existing timer before scheduling. Pauses when the tab hides
+// (visibilitychange handler below restarts it on reshow).
+function _startFeedPolling() {
+  if (_feedPollTimer) clearInterval(_feedPollTimer);
+  _feedPollTimer = setInterval(_pollForNewPosts, 60_000);
+}
+function _stopFeedPolling() {
+  if (_feedPollTimer) { clearInterval(_feedPollTimer); _feedPollTimer = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    _stopFeedPolling();
+  } else {
+    _startFeedPolling();
+    // Recount immediately on tab return — gives instant feedback if
+    // the user comes back after a while.
+    _pollForNewPosts();
+  }
+});
+
+// Additive refresh — when buffer already has buffered posts (from
+// background poll), apply them WITHOUT another DB call. Otherwise
+// trigger a fresh delta fetch + apply. Falls back to a full
+// loadFeed() when:
+//   • we don't have a baseline timestamp yet (first session)
+//   • we're not on the For You tab (Following / Discover are already
+//     cheap enough that a full reload is fine)
+//   • the delta query itself errors
+//
+// Web equivalent of mobile's onRefresh logic in app/(tabs)/home.jsx.
+async function refreshFeedAdditive() {
+  if (!currentUser?.id) return;
+  if (_feedMode !== 'foryou' || !_feedLastSeenAt) {
+    return loadFeed();
+  }
+  // Fast path — buffer has new posts from the poller, just apply them.
+  if (_newPostsBuffer.length > 0) {
+    _applyNewPostsBuffer();
+    return;
+  }
+  try {
+    const { data, error } = await supabase.rpc('feed_new_since', {
+      p_user_id: currentUser.id,
+      p_since: _feedLastSeenAt,
+      p_limit: 30,
+    });
+    if (error) throw error;
+    const newIds = (data || []).map(r => r.id).filter(Boolean);
+    if (!newIds.length) return; // up to date
+    const { data: hydrated, error: hydErr } = await supabase
+      .from('posts').select(FEED_SELECT).in('id', newIds);
+    if (hydErr) throw hydErr;
+    const byId = new Map((hydrated || []).map(p => [p.id, p]));
+    const ordered = newIds.map(id => byId.get(id)).filter(Boolean);
+    const filtered = ordered.filter(p => !shouldHidePost(p));
+    const inserted = _prependFreshPosts(filtered);
+    if (inserted > 0) window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (err) {
+    console.warn('[feed] additive refresh failed, falling back to full reload:', err?.message);
+    return loadFeed();
+  }
+}
+window.refreshFeedAdditive = refreshFeedAdditive;
+
 // One reusable query+score+filter pipeline so loadFeed and loadMoreFeed produce
 // the SAME shape of results — no more "Following tab silently shows everyone
 // after page 1" or "For You loses velocity scoring on scroll".
+// Over-fetch multiplier. When the user has any client-side filters
+// (hidden posts / snoozed users / blocked users), shouldHidePost can
+// drop a meaningful chunk of each page. Without compensating, the user
+// sees a feed that looks half-empty — which was the "I only see 4
+// posts" complaint. We over-fetch 1.5× when filters exist so the
+// trimmed result is still close to the page size. Mirrors the same
+// trick mobile uses in lib/posts-supabase.js → _filterPageSize.
+function _feedFetchLimitWithFilters(logicalLimit) {
+  const hasFilters =
+    userContentFilters.hiddenPostIds.size > 0 ||
+    userContentFilters.snoozedUserIds.size > 0 ||
+    userContentFilters.blockedUserIds.size > 0;
+  return hasFilters ? Math.ceil(logicalLimit * 1.5) : logicalLimit;
+}
+
 async function _buildAndExecFeedQuery({ offset }) {
   if (!currentUser?.id) return { data: [], scoreClientSide: false, followIds: null };
 
-  let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
-  let scoreClientSide = false;
-
-  // Always need the follow set for foryou (boost) / following (filter) / discover (exclude).
-  // Cached for the duration of one loadFeed run.
+  // For You + Discover now go through the same Postgres RPCs mobile
+  // uses (feed_for_you / feed_discover). The server-side algorithm:
+  //   • Reads the viewer's interest profile (likes, comments, follows)
+  //   • Excludes posts in the viewer's post_views (last 24h) — the
+  //     "always fresh" feed UX shipped May 2
+  //   • Returns rows in score order
+  // Client-side scoring is preserved as a fallback path in case the
+  // RPC is missing (early dev DBs without migration_feed_v2_rpcs.sql)
+  // — set RPC_FAIL = true at the bottom of the catch to verify.
+  // Cached follow set still drives the Following tab filter.
   if (_cachedFollowIds === null) {
     const { data: f } = await supabase.from('follows')
       .select('following_id').eq('follower_id', currentUser.id);
@@ -1275,31 +1626,62 @@ async function _buildAndExecFeedQuery({ offset }) {
 
   if (_feedMode === 'following') {
     if (!followIds.length) return { data: [], scoreClientSide: false, followIds, emptyReason: 'no-follows' };
+    const fetchLimit = _feedFetchLimitWithFilters(FEED_PAGE_SIZE);
+    let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
     q = q.in('user_id', followIds).order('created_at', { ascending: false });
-  } else if (_feedMode === 'discover') {
-    const exclude = [...followIds, currentUser.id];
-    if (exclude.length) {
-      q = q.not('user_id', 'in', `(${exclude.map(id => `"${id}"`).join(',')})`);
+    const { data, error } = await q.range(offset, offset + fetchLimit - 1);
+    if (error) throw error;
+    return { data: data || [], scoreClientSide: false, followIds, fetchLimit };
+  }
+
+  // foryou / discover: RPC path
+  const rpcName = _feedMode === 'discover' ? 'feed_discover' : 'feed_for_you';
+  try {
+    const fetchLimit = _feedFetchLimitWithFilters(FEED_PAGE_SIZE);
+    const { data: ranked, error: rpcErr } = await supabase.rpc(rpcName, {
+      p_user_id: currentUser.id,
+      p_limit: fetchLimit,
+      p_offset: offset,
+    });
+    if (rpcErr) throw rpcErr;
+    const orderedIds = (ranked || []).map(r => r.id).filter(Boolean);
+    if (!orderedIds.length) return { data: [], scoreClientSide: false, followIds, fetchLimit };
+    // Hydrate through FEED_SELECT to get profiles/videos/original join.
+    const { data: hydrated, error: hydErr } = await supabase
+      .from('posts')
+      .select(FEED_SELECT)
+      .in('id', orderedIds);
+    if (hydErr) throw hydErr;
+    // Re-establish RPC ordering — IN-clause query returns arbitrary order.
+    const byId = new Map((hydrated || []).map(p => [p.id, p]));
+    const ordered = orderedIds.map(id => byId.get(id)).filter(Boolean);
+    return { data: ordered, scoreClientSide: false, followIds, fetchLimit };
+  } catch (err) {
+    // Fallback path — only kicks in if the RPC itself is missing/broken.
+    // Logs once and switches the tab to client-side scoring (same code
+    // we used before the migration). Future cleanup: drop the fallback
+    // once we trust the RPCs in production.
+    console.warn('[feed] RPC failed, falling back to client-side scoring:', err?.message);
+    let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
+    if (_feedMode === 'discover') {
+      const exclude = [...followIds, currentUser.id];
+      if (exclude.length) {
+        q = q.not('user_id', 'in', `(${exclude.map(id => `"${id}"`).join(',')})`);
+      }
     }
     q = q.gt('created_at', new Date(Date.now() - 14 * 86400_000).toISOString())
          .order('created_at', { ascending: false });
-    scoreClientSide = true;
-  } else { // foryou
-    q = q.gt('created_at', new Date(Date.now() - 14 * 86400_000).toISOString())
-         .order('created_at', { ascending: false });
-    scoreClientSide = true;
+    const fetchLimit = FEED_PAGE_SIZE * 3;
+    const { data, error } = await q.range(offset, offset + fetchLimit - 1);
+    if (error) throw error;
+    return { data: data || [], scoreClientSide: true, followIds, fetchLimit };
   }
-
-  // Pull a wider page so client-side scoring has material to work with.
-  const fetchLimit = scoreClientSide ? FEED_PAGE_SIZE * 3 : FEED_PAGE_SIZE;
-  const { data, error } = await q.range(offset, offset + fetchLimit - 1);
-  if (error) throw error;
-  return { data: data || [], scoreClientSide, followIds, fetchLimit };
 }
 
 // Apply hide-list filter, scoring (For You / Discover), and diversity penalty.
-// Returns the page-sized result PLUS the count of raw rows fetched so callers
-// can advance pagination correctly.
+// Returns the page-sized result. Always slices to FEED_PAGE_SIZE at the end
+// because callers may have over-fetched (1.5× when filters exist) so the
+// hide pass leaves enough rows to still fill the page.
 function _processFeedRows({ data, scoreClientSide, followIds }) {
   let result = data.filter(p => !shouldHidePost(p));
   if (scoreClientSide) {
@@ -1309,9 +1691,8 @@ function _processFeedRows({ data, scoreClientSide, followIds }) {
     });
     result.sort((a, b) => (b._score || 0) - (a._score || 0));
     result = _feedDiversify(result);
-    result = result.slice(0, FEED_PAGE_SIZE);
   }
-  return result;
+  return result.slice(0, FEED_PAGE_SIZE);
 }
 
 // Friendly user-facing message instead of leaking raw Postgres errors.
@@ -1445,15 +1826,134 @@ window.loadFeed = async function() {
     feed.appendChild(el);
   });
 
+  // Facebook-pattern feed: track the newest created_at across this initial
+  // page so refreshFeedAdditive / the background poller can fetch only
+  // posts since then. Reset to null first so an old session's lastSeenAt
+  // doesn't bleed into a different user's session. Also drop the "↑ N
+  // new posts" buffer + hide the pill — a full reload absorbs them.
+  _feedLastSeenAt = null;
+  _bumpFeedLastSeenAt(posts);
+  _newPostsBuffer = [];
+  _newPostsBufferIds = new Set();
+  _renderNewPostsPill();
+
   _wireUpNewPosts(feed);
   if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
+
+  // Kick off the background poller for the For You tab. Other tabs
+  // don't need it — they're chronological and the user pulls to refresh.
+  if (_feedMode === 'foryou') _startFeedPolling();
+  else _stopFeedPolling();
 };
+
+// ── Post-view tracking — feeds Supabase `post_views` so feed_for_you
+//    can dedupe seen posts on next refresh. Mirrors mobile's
+//    trackPostViews + onViewableItemsChanged debounce. Without this,
+//    web users would see the same posts repeatedly and the algorithm
+//    on the server side would have less signal.
+//
+// Pattern: IntersectionObserver per post-card. When ≥ 50% visible
+// for ≥ 800ms, the post is marked "seen" and its id is queued. Every
+// 1.5s, the queue is flushed in one RPC call. Tab-leave flushes the
+// remainder so we don't lose ids on navigation.
+const _viewTrackingState = {
+  observer: null,
+  pendingIds: new Set(),
+  recordedIds: new Set(),       // already flushed — don't re-send
+  // postId → setTimeout handle. The handle is created when the post
+  // first becomes visible above the threshold, fires after
+  // VIEW_MIN_VISIBLE_MS, and is cleared if the post leaves view before
+  // then. This replaces an earlier `visibleSince` Map that only worked
+  // when the user scrolled across the threshold repeatedly — the
+  // IntersectionObserver fires on threshold transitions, not on a
+  // continuous "still visible" basis, so the time-based gating must be
+  // implemented with timers.
+  pendingTimers: new Map(),
+  flushTimer: null,
+};
+const VIEW_FLUSH_DEBOUNCE_MS = 1500;
+const VIEW_MIN_VISIBLE_MS = 800;
+const VIEW_VISIBLE_THRESHOLD = 0.5;
+
+function _flushPendingViews() {
+  _viewTrackingState.flushTimer = null;
+  if (!currentUser?.id || _viewTrackingState.pendingIds.size === 0) return;
+  const ids = [...(_viewTrackingState.pendingIds)];
+  _viewTrackingState.pendingIds.clear();
+  ids.forEach(id => _viewTrackingState.recordedIds.add(id));
+  // Fire-and-forget — view tracking is best-effort. Failures don't
+  // block the user; logging is enough for debugging if the RPC ever
+  // regresses.
+  supabase.rpc('track_post_views', {
+    p_user_id: currentUser.id,
+    p_post_ids: ids,
+  }).then(({ error }) => {
+    if (error) console.warn('[feed] track_post_views failed:', error.message);
+  });
+}
+
+function _scheduleViewFlush() {
+  if (_viewTrackingState.flushTimer) return;
+  _viewTrackingState.flushTimer = setTimeout(_flushPendingViews, VIEW_FLUSH_DEBOUNCE_MS);
+}
+
+// Set up the observer once. Re-used by every _wireUpNewPosts call —
+// observe is idempotent on the same element.
+function _ensureViewObserver() {
+  if (_viewTrackingState.observer) return _viewTrackingState.observer;
+  if (typeof IntersectionObserver === 'undefined') return null;
+  _viewTrackingState.observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const id = entry.target?.dataset?.postid;
+      if (!id || _viewTrackingState.recordedIds.has(id)) continue;
+      const isVisibleEnough = entry.isIntersecting && entry.intersectionRatio >= VIEW_VISIBLE_THRESHOLD;
+      if (isVisibleEnough) {
+        // Already counting down for this post — leave the existing timer.
+        if (_viewTrackingState.pendingTimers.has(id)) continue;
+        // Schedule the queue insertion after VIEW_MIN_VISIBLE_MS. If the
+        // post leaves view first, the else branch below clears it.
+        const handle = setTimeout(() => {
+          _viewTrackingState.pendingTimers.delete(id);
+          if (_viewTrackingState.recordedIds.has(id)) return;
+          _viewTrackingState.pendingIds.add(id);
+          _scheduleViewFlush();
+        }, VIEW_MIN_VISIBLE_MS);
+        _viewTrackingState.pendingTimers.set(id, handle);
+      } else {
+        // Post left the visible window before the timer fired — cancel.
+        const existing = _viewTrackingState.pendingTimers.get(id);
+        if (existing) {
+          clearTimeout(existing);
+          _viewTrackingState.pendingTimers.delete(id);
+        }
+      }
+    }
+  }, { threshold: [0, VIEW_VISIBLE_THRESHOLD] });
+  return _viewTrackingState.observer;
+}
+
+// Flush remaining views when the user leaves the tab — sendBeacon would
+// be fancier, but the RPC is light and the typical exit path gives us
+// enough time for fetch.
+window.addEventListener('beforeunload', () => {
+  _flushPendingViews();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) _flushPendingViews();
+});
 
 // Fold the post-render setup into one helper. Two callers (initial load and
 // load-more) used to call these as separate steps — easy to forget one.
 function _wireUpNewPosts(container) {
   setupFeedLazyLoaders(container);
   setupCollapsibleBodies(container);
+  // Register every freshly-rendered post-card with the view tracker so
+  // when the user scrolls past it (≥50% visible for ≥800ms), the id
+  // gets queued for the debounced track_post_views RPC flush.
+  const observer = _ensureViewObserver();
+  if (observer) {
+    container.querySelectorAll('.post-card[data-postid]').forEach(el => observer.observe(el));
+  }
 }
 
 // ── Collapsible post bodies (Facebook-style "See more / less") ──
@@ -1553,6 +2053,14 @@ document.querySelectorAll('#feedTabs .feed-tab').forEach(tab => {
 
 async function loadMoreFeed() {
   if (_isLoadingMoreFeed || !_hasMoreFeedPosts) return;
+  // Guard: only run when the feed is the current page. Without this, an
+  // IntersectionObserver fire during navigation (or any leftover scroll
+  // observer between page changes) re-shows the sentinel and re-fetches
+  // posts even when the user is on /profile, /videos, /books, etc. The
+  // visible symptom is a "Loading more posts…" pill stuck on top of an
+  // unrelated page.
+  const feedIsVisible = feedEl && feedEl.style.display !== 'none' && feedEl.offsetParent !== null;
+  if (!feedIsVisible) return;
   _isLoadingMoreFeed = true;
 
   // Capture the seq at the START. If a tab switch (or fresh loadFeed) bumps
@@ -1765,7 +2273,7 @@ function renderPost(post) {
       <div class="avatar profile-link" data-user-id="${post.user_id}" title="View profile">${avatarHTML}</div>
       <div style="flex:1">
         <div style="display:flex;align-items:center">
-          <span class="post-author profile-link" data-user-id="${post.user_id}" title="View profile">${escHTML(name)}</span>
+          <span class="post-author profile-link" data-user-id="${post.user_id}" title="View profile">${escHTML(name)}${renderRoleSeal(post.profiles)}</span>
           ${isGuest ? '<span class="post-guest">Guest</span>' : ''}
         </div>
         <div class="post-time">${timeAgo(post.created_at)}</div>
@@ -1806,7 +2314,7 @@ function renderPost(post) {
         <div class="post-header">
           <div class="avatar profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${post.original.profiles?.avatar_url ? `<img src="${post.original.profiles.avatar_url}"/>` : initials(post.original.profiles?.username || 'U')}</div>
           <div>
-            <span class="post-author profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${escHTML(post.original.profiles?.username || 'Unknown')}</span>
+            <span class="post-author profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${escHTML(post.original.profiles?.username || 'Unknown')}${renderRoleSeal(post.original.profiles)}</span>
             <div class="post-time">${timeAgo(post.original.created_at)}</div>
           </div>
         </div>
@@ -2839,6 +3347,8 @@ async function handleReaction(targetId, targetType, emojiKey) {
     });
   } catch {}
 
+  // Read existing reaction to decide add vs change vs remove. SELECT is
+  // RLS-permitted (true), so this works under any session state.
   const { data: existing, error: lookupErr } = await supabase
     .from('reactions')
     .select('id, emoji')
@@ -2849,39 +3359,49 @@ async function handleReaction(targetId, targetType, emojiKey) {
 
   if (lookupErr) {
     toast('Reaction failed: ' + lookupErr.message, 'error');
-    loadReactions(targetId, targetType);   // resync UI to server truth
+    loadReactions(targetId, targetType);
     return;
   }
 
+  // Route through SECURITY DEFINER RPCs — same path mobile uses. Direct
+  // `.insert/.update/.delete` was rejected by RLS whenever auth.uid()
+  // was null (stale session / not yet bootstrapped), which made likes
+  // silently never land in the database. The RPC validates the actor
+  // parameter against profiles and bypasses RLS internally.
   let mutErr = null;
-  if (existing) {
-    if (existing.emoji === emojiKey) {
-      const { error } = await supabase.from('reactions').delete().eq('id', existing.id);
-      mutErr = error;
-    } else {
-      const { error } = await supabase.from('reactions').update({ emoji: emojiKey }).eq('id', existing.id);
-      mutErr = error;
-    }
+  if (existing && existing.emoji === emojiKey) {
+    // Toggle off — remove the reaction.
+    const { error } = await supabase.rpc('submit_unreaction', {
+      p_actor_id: currentUser.id,
+      p_target_type: targetType,
+      p_target_id: String(targetId),
+    });
+    mutErr = error;
   } else {
-    const { error } = await supabase.from('reactions').insert({
-      user_id: currentUser.id,
-      target_id: targetId,
-      target_type: targetType,
-      emoji: emojiKey,
+    // Add or change emoji — submit_reaction handles both atomically.
+    const { error } = await supabase.rpc('submit_reaction', {
+      p_actor_id: currentUser.id,
+      p_target_type: targetType,
+      p_target_id: String(targetId),
+      p_emoji: emojiKey,
     });
     mutErr = error;
   }
 
   if (mutErr) {
-    // Surface the real reason so we can debug RLS / schema / FK issues.
-    // Without this, reactions just silently fail and look broken.
     toast('Reaction failed: ' + mutErr.message, 'error');
   }
-  // Always resync — pulls server truth + updates counts everywhere
   loadReactions(targetId, targetType);
 }
 
 // ── Comments ──
+// Facebook-style truncation. Showing every parent comment expanded made
+// long threads (200+ comments on a popular post) unscrollable — the
+// reactions row at the bottom of the post effectively never reached
+// the viewport. Now we show only the most recent N parents plus a
+// "View N previous comments" link that expands the older ones.
+const INITIAL_PARENTS_VISIBLE = 2;
+
 async function loadComments(postId, videoId = null) {
   const containerId = videoId ? 'videoComments' : `comments-${postId}`;
   const section = document.getElementById(containerId);
@@ -2909,13 +3429,28 @@ async function loadComments(postId, videoId = null) {
     }
   });
   section.innerHTML = '';
-  for (const c of parents) section.appendChild(await renderComment(c, postId, false, null, videoId, repliesByParent));
 
+  // UX fix: comment input lives at the TOP of the section so users don't
+  // have to scroll past every comment to reply. Earlier layout appended
+  // the input after the parents list, which made replying on long threads
+  // genuinely painful — especially on the video player where the comments
+  // section can run hundreds of rows. Build the input first, append it,
+  // then add the comments below.
   const previewKey = videoId ? `cimgpreview-v-${videoId}` : `cimgpreview-${postId}`;
   const inputWrap = document.createElement('div');
   inputWrap.className = 'comment-input-wrap';
   inputWrap.style.flexDirection = 'column';
   inputWrap.style.gap = '0.5rem';
+  // Sticky position so the input stays in view while the user scrolls
+  // through long comment threads. `--bg-card` matches the surrounding
+  // card so it doesn't appear to float.
+  inputWrap.style.position = 'sticky';
+  inputWrap.style.top = '0';
+  inputWrap.style.zIndex = '5';
+  inputWrap.style.background = 'var(--bg-card, #fff)';
+  inputWrap.style.paddingBottom = '0.5rem';
+  inputWrap.style.borderBottom = '1px solid var(--border, #eee)';
+  inputWrap.style.marginBottom = '0.75rem';
   inputWrap.innerHTML = `
     <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
       <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
@@ -2933,11 +3468,120 @@ async function loadComments(postId, videoId = null) {
   `;
   section.appendChild(inputWrap);
 
+  // Facebook-style truncation. Order is oldest→newest already (matches the
+  // query above), so the "tail" of the array is the most recent N parents.
+  // Show only those by default; expose a "View N previous comments" link
+  // that fills in the rest.
+  const visibleParents = parents.length > INITIAL_PARENTS_VISIBLE
+    ? parents.slice(parents.length - INITIAL_PARENTS_VISIBLE)
+    : parents;
+  const hiddenParents = parents.length > INITIAL_PARENTS_VISIBLE
+    ? parents.slice(0, parents.length - INITIAL_PARENTS_VISIBLE)
+    : [];
+
+  if (hiddenParents.length > 0) {
+    const viewMoreBtn = document.createElement('button');
+    viewMoreBtn.className = 'comment-view-more';
+    viewMoreBtn.type = 'button';
+    viewMoreBtn.textContent = `View ${hiddenParents.length} previous comment${hiddenParents.length === 1 ? '' : 's'}`;
+    viewMoreBtn.addEventListener('click', async () => {
+      viewMoreBtn.disabled = true;
+      // Insert hidden parents in their original (oldest-first) order
+      // BEFORE the first currently-visible comment. We have to capture
+      // the anchor node first because appendChild on the button itself
+      // would push them out of order.
+      const anchor = viewMoreBtn.nextSibling;
+      for (const c of hiddenParents) {
+        const el = await renderComment(c, postId, false, null, videoId, repliesByParent);
+        section.insertBefore(el, anchor);
+      }
+      viewMoreBtn.remove();
+    });
+    section.appendChild(viewMoreBtn);
+  }
+
+  for (const c of visibleParents) {
+    section.appendChild(await renderComment(c, postId, false, null, videoId, repliesByParent));
+  }
+
   const ta = inputWrap.querySelector('textarea');
   ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
   ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, null, ta, previewKey, videoId); }});
   inputWrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, null, ta, previewKey, videoId));
   inputWrap.querySelector('.cimg-input').addEventListener('change', (e) => handleCommentImageSelect(e.target, previewKey));
+
+  // Realtime — subscribe to comments INSERT / UPDATE / DELETE for this
+  // post or video so the section updates live when someone else
+  // (mobile or web) comments. The subscribe is idempotent — calling
+  // ensureCommentsRealtime for an already-subscribed container is a
+  // no-op, so the loadComments → channel-event → loadComments cycle
+  // doesn't tear down and re-create channels (which would open a
+  // small window where new events go unheard).
+  ensureCommentsRealtime({ postId, videoId, section });
+}
+
+// Persistent comment-realtime subscriber. One channel per container,
+// kept alive until something removes the listener entry. The earlier
+// version recreated the channel on every loadComments() call, which:
+//   1. Wasted bandwidth subscribing+unsubscribing
+//   2. Opened a ~100ms window where events were lost during the
+//      tear-down → resubscribe handoff
+// Now: idempotent. Same containerId → reuse the existing channel.
+//
+// Refresh trigger is debounced (250ms) so a burst of comments doesn't
+// fire N round-trips of loadComments for the same data.
+let __commentsChannelSeq = 0;
+const _commentsChannelByContainer = new Map();   // containerId → { channel, postId, videoId, refreshTimer }
+
+function ensureCommentsRealtime({ postId, videoId, section }) {
+  if (!section) return;
+  const containerId = section.id;
+  const filterCol = videoId ? 'video_id' : 'post_id';
+  const filterId = videoId || postId;
+
+  const existing = _commentsChannelByContainer.get(containerId);
+  if (existing && existing.postId === postId && existing.videoId === videoId) {
+    // Already subscribed for the same target — nothing to do.
+    return;
+  }
+  if (existing) {
+    // Container was repurposed for a different post/video. Tear down.
+    try { supabase.removeChannel(existing.channel); } catch (_) { /* swallow */ }
+    if (existing.refreshTimer) clearTimeout(existing.refreshTimer);
+    _commentsChannelByContainer.delete(containerId);
+  }
+
+  const state = { postId, videoId, channel: null, refreshTimer: null };
+  const scheduleRefresh = () => {
+    if (state.refreshTimer) return; // a refresh is already pending
+    state.refreshTimer = setTimeout(() => {
+      state.refreshTimer = null;
+      // Only refresh if the section is still in the DOM. The original
+      // section reference may be stale (innerHTML replacement keeps
+      // the same node, but a removal would orphan it).
+      if (document.getElementById(containerId)) loadComments(postId, videoId);
+    }, 250);
+  };
+
+  const channelName = `comments-${filterCol}:${filterId}:${++__commentsChannelSeq}`;
+  const channel = supabase
+    .channel(channelName)
+    .on('postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'comments', filter: `${filterCol}=eq.${filterId}` },
+      scheduleRefresh,
+    )
+    .on('postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'comments', filter: `${filterCol}=eq.${filterId}` },
+      scheduleRefresh,
+    )
+    .on('postgres_changes',
+      { event: 'DELETE', schema: 'public', table: 'comments', filter: `${filterCol}=eq.${filterId}` },
+      scheduleRefresh,
+    )
+    .subscribe();
+
+  state.channel = channel;
+  _commentsChannelByContainer.set(containerId, state);
 }
 
 async function renderComment(comment, postId, isReply = false, topLevelId = null, videoId = null, repliesByParent = null) {
@@ -2955,7 +3599,7 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
     <div class="avatar sm">${avatarHTML}</div>
     <div class="comment-body">
       <div class="comment-meta">
-        <span class="comment-author">${escHTML(name)}</span>
+        <span class="comment-author">${escHTML(name)}${renderRoleSeal(profile)}</span>
         <span class="comment-time">${timeAgo(comment.created_at)}</span>
         ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
       </div>
@@ -3001,7 +3645,38 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
     }
     if (replies.length) {
       const container = div.querySelector(`#replies-${comment.id}`);
-      for (const r of replies) container.appendChild(await renderComment(r, postId, true, comment.id, videoId, repliesByParent));
+      // Facebook-style: replies hidden by default behind a "View N replies"
+      // toggle. Big threads on web were rendering hundreds of nested
+      // reply rows on every parent — visually overwhelming and slow.
+      // Click to expand, click again on the rendered toggle (now "Hide
+      // replies") to collapse. New replies you post yourself auto-expand
+      // on the next loadComments cycle (realtime triggers a refresh).
+      const viewBtn = document.createElement('button');
+      viewBtn.className = 'comment-view-replies';
+      viewBtn.type = 'button';
+      viewBtn.textContent = `View ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`;
+      let expanded = false;
+      const renderedReplies = [];
+      viewBtn.addEventListener('click', async () => {
+        if (expanded) {
+          // Collapse — remove the rendered reply nodes.
+          renderedReplies.forEach((node) => node.remove());
+          renderedReplies.length = 0;
+          viewBtn.textContent = `View ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`;
+          expanded = false;
+          return;
+        }
+        viewBtn.disabled = true;
+        for (const r of replies) {
+          const el = await renderComment(r, postId, true, comment.id, videoId, repliesByParent);
+          container.appendChild(el);
+          renderedReplies.push(el);
+        }
+        viewBtn.disabled = false;
+        viewBtn.textContent = 'Hide replies';
+        expanded = true;
+      });
+      container.appendChild(viewBtn);
     }
   }
   return div;
@@ -3134,8 +3809,29 @@ document.addEventListener('click', (e) => {
   if (ct) {
     const postId = ct.dataset.postid;
     const section = document.getElementById(`comments-${postId}`);
-    if (section.style.display === 'none') { section.style.display = 'block'; loadComments(postId); }
-    else section.style.display = 'none';
+    // Defensive: if the section element is missing (post recently
+    // re-rendered, dataset typo, etc.), bail loudly instead of
+    // throwing on `section.style` and silently dropping the click.
+    if (!section) {
+      console.warn('[comment-toggle] comments section not found for post', postId);
+      return;
+    }
+    if (section.style.display === 'none' || section.style.display === '') {
+      section.style.display = 'block';
+      // Scroll the comment input into view after the layout settles.
+      // Without this, the section opens BELOW the post and the user
+      // doesn't see the input — looks like "nothing happened".
+      loadComments(postId).then(() => {
+        const inputEl = section.querySelector('.comment-input');
+        if (inputEl && typeof inputEl.scrollIntoView === 'function') {
+          inputEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }).catch((err) => {
+        console.error('[comment-toggle] loadComments failed', err);
+      });
+    } else {
+      section.style.display = 'none';
+    }
     return;
   }
   const replyBtn = e.target.closest('.reply-btn');
@@ -3179,7 +3875,7 @@ window.repostPost = (postId) => {
   document.getElementById('repostPreview').innerHTML = `
     <div class="post-header">
       <div class="avatar">${avatarHTML}</div>
-      <div><span class="post-author">${escHTML(name)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
+      <div><span class="post-author">${escHTML(name)}${renderRoleSeal(profile)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
     </div>
     ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id || post.$id || ''}">${linkify(post.body)}</div>` : ''}
     ${post.body ? renderLinkPreview(post.body) : ''}
@@ -3200,12 +3896,28 @@ document.getElementById('repostCancel').addEventListener('click', closeRepostMod
 document.getElementById('repostModal').addEventListener('click', (e) => { if (e.target.id === 'repostModal') closeRepostModal(); });
 document.getElementById('repostSubmit').addEventListener('click', async () => {
   if (!repostTargetId) return;
+  if (!currentUser?.id) { toast('Sign in to repost', 'error'); return; }
   const caption = document.getElementById('repostCaption').value.trim();
   const btn = document.getElementById('repostSubmit');
   btn.disabled = true; btn.textContent = 'Posting...';
-  const { error } = await supabase.from('posts').insert({ user_id: currentUser.id, body: caption, reposted_from: repostTargetId });
+  // Route through submit_post RPC so the path matches mobile + survives
+  // intermittent auth.uid() nulls (e.g., session expired but currentUser
+  // still cached). The RPC validates the actor parameter against the
+  // profiles table internally — same security guarantee, fewer auth
+  // race conditions. The earlier direct insert failed under the same
+  // RLS check that bites mobile.
+  const { data, error } = await supabase.rpc('submit_post', {
+    p_actor_id: currentUser.id,
+    p_body: caption || null,
+    p_image_url: null,
+    p_video_id: null,
+    p_book_id: null,
+    p_reposted_from: repostTargetId,
+    p_legacy_appwrite_id: null,
+  });
   btn.disabled = false; btn.textContent = 'Repost';
   if (error) { toast(error.message, 'error'); return; }
+  if (!data?.ok) { toast(data?.error || 'Repost failed', 'error'); return; }
   closeRepostModal();
   toast('Reposted!', 'success');
   loadFeed();
@@ -3391,7 +4103,7 @@ async function openProfile(userId) {
   avatarBig.innerHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(profile.username);
 
   // Name / badge / bio
-  document.getElementById('profileName').textContent = profile.username;
+  document.getElementById('profileName').innerHTML = `${escHTML(profile.username)}${renderRoleSeal(profile, 20)}`;
   renderProfileBadges(profile, badges);
   document.getElementById('profileBio').textContent = profile.bio || '';
 
@@ -3784,7 +4496,7 @@ async function loadProfilePosts(userId) {
   // column doesn't exist yet (works pre-migration, just won't have pinning).
   const { data } = await supabase
     .from('posts')
-    .select(`*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest), videos(id, video_url, thumbnail_url, title, duration))`)
+    .select(`*, profiles!user_id(id, username, avatar_url, is_guest, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, role), videos(id, video_url, thumbnail_url, title, duration))`)
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(40);
@@ -3972,12 +4684,36 @@ async function loadProfileBooks(userId) {
 }
 
 async function toggleFollow(userId, currentlyFollowing) {
-  if (currentlyFollowing) {
-    await supabase.from('follows').delete().eq('follower_id', currentUser.id).eq('following_id', userId);
-    toast('Unfollowed', 'success');
-  } else {
-    await supabase.from('follows').insert({ follower_id: currentUser.id, following_id: userId });
-    toast('Following!', 'success');
+  // Earlier draft fired the supabase call without checking the result, so
+  // RLS rejections / dupe-key errors silently produced "nothing happens"
+  // even though the toast claimed success. Capture + surface the error.
+  if (!currentUser?.id) {
+    toast('Sign in first', 'error');
+    return;
+  }
+  if (userId === currentUser.id) {
+    toast("You can't follow yourself", 'error');
+    return;
+  }
+  try {
+    if (currentlyFollowing) {
+      const { error } = await supabase.from('follows')
+        .delete()
+        .eq('follower_id', currentUser.id)
+        .eq('following_id', userId);
+      if (error) throw error;
+      toast('Unfollowed', 'success');
+    } else {
+      const { error } = await supabase.from('follows')
+        .insert({ follower_id: currentUser.id, following_id: userId });
+      // 23505 = unique_violation. Treat as already-following → no-op success.
+      if (error && error.code !== '23505') throw error;
+      toast('Following!', 'success');
+    }
+  } catch (err) {
+    console.error('[toggleFollow]', err);
+    toast(err?.message || 'Could not update follow', 'error');
+    return;
   }
   openProfile(userId);
 }
@@ -4485,6 +5221,100 @@ const searchResultsEl = document.getElementById('searchResults');
 const topbarSearchClear = document.getElementById('topbarSearchClear');
 let searchDebounce = null;
 
+// ── Recent searches (web parity with mobile lib/recent-searches.js) ──
+// Local-only history of recent search queries. Capped at 10 entries.
+// Persists in localStorage across sessions; wiped only when the user
+// taps Clear all in the dropdown. Per-user keying so signing in/out
+// doesn't show another user's history.
+const RECENT_SEARCHES_LIMIT = 10;
+const recentSearchesKey = () => {
+  const uid = currentUser?.id || 'anon';
+  return `selebox.recentSearches.${uid}`;
+};
+function getRecentSearches() {
+  try {
+    const raw = localStorage.getItem(recentSearchesKey());
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((q) => typeof q === 'string' && q.trim()) : [];
+  } catch (_) {
+    return [];
+  }
+}
+function addRecentSearch(q) {
+  const trimmed = (q || '').trim();
+  if (!trimmed) return;
+  const existing = getRecentSearches();
+  // Move-to-front semantics: drop any existing match (case-insensitive)
+  // then prepend, so the same term searched twice doesn't duplicate.
+  const filtered = existing.filter((x) => x.toLowerCase() !== trimmed.toLowerCase());
+  const next = [trimmed, ...filtered].slice(0, RECENT_SEARCHES_LIMIT);
+  try { localStorage.setItem(recentSearchesKey(), JSON.stringify(next)); } catch (_) { /* swallow */ }
+}
+function removeRecentSearch(q) {
+  const trimmed = (q || '').trim();
+  if (!trimmed) return;
+  const existing = getRecentSearches();
+  const next = existing.filter((x) => x.toLowerCase() !== trimmed.toLowerCase());
+  try { localStorage.setItem(recentSearchesKey(), JSON.stringify(next)); } catch (_) { /* swallow */ }
+}
+function clearRecentSearches() {
+  try { localStorage.removeItem(recentSearchesKey()); } catch (_) { /* swallow */ }
+}
+
+// Render the recent-searches dropdown when the input is focused with
+// empty value. Tapping a recent re-runs the search; tapping the X
+// removes that entry.
+function renderRecentSearchesPanel() {
+  const recents = getRecentSearches();
+  if (!recents.length) {
+    searchResultsEl.classList.remove('open');
+    return;
+  }
+  const html = `
+    <div class="search-result-section" style="display:flex;align-items:center;justify-content:space-between">
+      <span>Recent searches</span>
+      <button class="search-recent-clear" type="button" style="font-size:0.75rem;background:none;border:none;color:var(--text3);cursor:pointer">Clear all</button>
+    </div>
+    ${recents.map((q) => `
+      <div class="search-result-item search-recent-item" data-recent="${escHTML(q)}">
+        <div class="search-result-info" style="display:flex;align-items:center;gap:8px;flex:1">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text3);flex-shrink:0">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+          <div class="search-result-title" style="flex:1">${escHTML(q)}</div>
+        </div>
+        <button class="search-recent-remove" data-remove="${escHTML(q)}" type="button" aria-label="Remove" style="background:none;border:none;color:var(--text3);cursor:pointer;padding:4px">×</button>
+      </div>
+    `).join('')}
+  `;
+  searchResultsEl.innerHTML = html;
+  searchResultsEl.classList.add('open');
+
+  searchResultsEl.querySelector('.search-recent-clear')?.addEventListener('click', () => {
+    clearRecentSearches();
+    searchResultsEl.classList.remove('open');
+  });
+  searchResultsEl.querySelectorAll('.search-recent-item').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      // X button propagates here too — ignore if the click target is
+      // the remove control, since its own handler runs first.
+      if (ev.target.closest('.search-recent-remove')) return;
+      const q = el.dataset.recent;
+      if (!q) return;
+      searchInput.value = q;
+      if (topbarSearchClear) topbarSearchClear.style.display = 'flex';
+      runFeedSearch(q);
+    });
+  });
+  searchResultsEl.querySelectorAll('.search-recent-remove').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      removeRecentSearch(btn.dataset.remove);
+      renderRecentSearchesPanel();
+    });
+  });
+}
+
 // Search context decides which renderer the topbar search input feeds.
 //   'videos' → renders into the videos page grid
 //   'books'  → renders into the books page See-All view
@@ -4544,10 +5374,31 @@ searchInput.addEventListener('input', (e) => {
   // Feed (default): show dropdown of matching people + posts
   clearTimeout(searchDebounce);
   if (!value.trim()) {
-    searchResultsEl.classList.remove('open');
+    // Empty value while focused → show recent-searches dropdown so the
+    // user can re-run a previous query without retyping.
+    if (document.activeElement === searchInput) {
+      renderRecentSearchesPanel();
+    } else {
+      searchResultsEl.classList.remove('open');
+    }
     return;
   }
   searchDebounce = setTimeout(() => runFeedSearch(value), 250);
+});
+
+// On focus with empty input, surface recent searches.
+searchInput.addEventListener('focus', () => {
+  if (!searchInput.value.trim() && getSearchContext() === 'feed') {
+    renderRecentSearchesPanel();
+  }
+});
+
+// On Enter, persist the term as a recent search. Same trigger on
+// clicking a result handled below.
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const v = searchInput.value.trim();
+  if (v) addRecentSearch(v);
 });
 
 if (topbarSearchClear) {
@@ -4611,24 +5462,25 @@ async function runFeedSearch(query) {
   // "LIGAYA_ba1f" too — explicit username ordering for predictability.
   const [profilesRes, postsRes, videosRes, booksRes] = await Promise.all([
     supabase.from('profiles')
-      .select('id, username, avatar_url, bio, is_guest, is_banned')
+      .select('id, username, avatar_url, bio, is_guest, is_banned, role')
       .ilike('username', term)
       .eq('is_banned', false)
       .order('username', { ascending: true })
       .limit(20),
     supabase.from('posts')
-      .select('*, profiles!user_id(username, avatar_url, is_guest, is_banned)')
+      .select('*, profiles!user_id(username, avatar_url, is_guest, is_banned, role)')
+      .eq('is_hidden', false)
       .ilike('body', term)
       .order('created_at', { ascending: false })
       .limit(6),
     supabase.from('videos')
-      .select('id, title, thumbnail_url, uploader_id, profiles!videos_uploader_id_fkey(username, avatar_url, is_banned)')
+      .select('id, title, thumbnail_url, uploader_id, profiles!videos_uploader_id_fkey(username, avatar_url, is_banned, role)')
       .eq('status', 'ready').eq('is_hidden', false)
       .or(`title.ilike.${term},description.ilike.${term}`)
       .order('created_at', { ascending: false })
       .limit(5),
     supabase.from('books')
-      .select('id, title, cover_url, author_id, profiles!books_author_id_fkey(username, avatar_url, is_banned)')
+      .select('id, title, cover_url, author_id, profiles!books_author_id_fkey(username, avatar_url, is_banned, role)')
       .eq('is_public', true).eq('is_hidden', false).in('status', ['ongoing', 'completed'])
       .or(`title.ilike.${term},description.ilike.${term}`)
       .limit(5),
@@ -4651,7 +5503,7 @@ async function runFeedSearch(query) {
         <div class="search-result-item" data-type="profile" data-id="${p.id}">
           <div class="avatar">${avatar}</div>
           <div class="search-result-info">
-            <div class="search-result-title">${escHTML(p.username)}</div>
+            <div class="search-result-title">${escHTML(p.username)}${renderRoleSeal(p)}</div>
             <div class="search-result-meta">${p.is_guest ? 'Guest' : 'Member'}</div>
           </div>
         </div>`;
@@ -4668,7 +5520,7 @@ async function runFeedSearch(query) {
           <div class="search-result-thumb">${thumb}</div>
           <div class="search-result-info">
             <div class="search-result-title">${escHTML(v.title || 'Untitled')}</div>
-            <div class="search-result-meta">by ${escHTML(v.profiles?.username || 'Unknown')}</div>
+            <div class="search-result-meta">by ${escHTML(v.profiles?.username || 'Unknown')}${renderRoleSeal(v.profiles)}</div>
           </div>
         </div>`;
     });
@@ -4684,7 +5536,7 @@ async function runFeedSearch(query) {
           <div class="search-result-thumb search-result-thumb-book">${cover}</div>
           <div class="search-result-info">
             <div class="search-result-title">${escHTML(b.title || 'Untitled')}</div>
-            <div class="search-result-meta">by ${escHTML(b.profiles?.username || 'Unknown')}</div>
+            <div class="search-result-meta">by ${escHTML(b.profiles?.username || 'Unknown')}${renderRoleSeal(b.profiles)}</div>
           </div>
         </div>`;
     });
@@ -4700,7 +5552,7 @@ async function runFeedSearch(query) {
           <div class="avatar">${avatar}</div>
           <div class="search-result-info">
             <div class="search-result-title">${escHTML(snippet)}${p.body && p.body.length > 80 ? '...' : ''}</div>
-            <div class="search-result-meta">by ${escHTML(author.username || 'Unknown')}</div>
+            <div class="search-result-meta">by ${escHTML(author.username || 'Unknown')}${renderRoleSeal(author)}</div>
           </div>
         </div>`;
     });
@@ -4713,6 +5565,12 @@ async function runFeedSearch(query) {
     item.onclick = () => {
       const type = item.dataset.type;
       const id = item.dataset.id;
+      // Persist the term that produced this result. Successful clicks
+      // (the user found what they wanted) are the strongest signal
+      // for "remember this query."
+      const termAtClick = (searchInput.value || '').trim();
+      if (termAtClick) addRecentSearch(termAtClick);
+
       searchResultsEl.classList.remove('open');
       searchInput.value = '';
       if (topbarSearchClear) topbarSearchClear.style.display = 'none';
@@ -4926,7 +5784,6 @@ function resetVideoUploadModal() {
   document.getElementById('videoUploadTitle').value = '';
   document.getElementById('videoUploadDescription').value = '';
   document.getElementById('videoUploadTags').value = '';
-  document.getElementById('videoUploadCategory').value = 'general';
   document.getElementById('titleCharCount').textContent = '0';
   document.getElementById('descCharCount').textContent = '0';
   document.getElementById('videoUploadFill').style.width = '0%';
@@ -5063,7 +5920,9 @@ async function vuStartUpload() {
   const description = document.getElementById('videoUploadDescription').value.trim();
   const tagsRaw     = document.getElementById('videoUploadTags').value.trim();
   const tags        = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const category    = document.getElementById('videoUploadCategory').value;
+  // Category dropdown removed (May 2026) — superseded by tags. The
+  // `category` column on `videos` is still present in the DB for
+  // legacy data + future use; new uploads omit it (defaults / null).
   // Visibility
   const visibility = document.querySelector('input[name="vuVisibility"]:checked')?.value || 'now';
   let scheduledPublishAt = null;
@@ -5125,7 +5984,7 @@ async function vuStartUpload() {
       bunny_library_id: uploadInfo.libraryId,
       video_url: uploadInfo.videoUrl,
       thumbnail_url: uploadInfo.thumbnailUrl,
-      title, description, tags, category,
+      title, description, tags,
       uploader_id: currentUser.id,
       status: 'processing',
       scheduled_publish_at: scheduledPublishAt,
@@ -6855,11 +7714,28 @@ function formatCompact(n) {
 // render whichever happens to resolve last. Captures the bookId in a token
 // and only renders if it still matches when the queries return.
 let _openBookToken = null;
+// Set by the boot-time router when the inbound URL was
+// /books/<id>/chapter/<n>. Read once the chapter list has loaded so the
+// chapter is auto-opened. Cleared after use.
+let _pendingChapterFromUrl = null;
 async function openBookDetail(bookId) {
   hideAllMainPages();
   bookDetailPage.style.display = 'block';
 
-  history.pushState(null, '', `#book/${bookId}`);
+  // Path-based, shareable, deep-link-friendly URL. Use replaceState when
+  // the URL bar already shows the same book (e.g. boot-time inbound) so
+  // we don't add a duplicate history entry; pushState otherwise. Either
+  // way the result is `/books/<id>`, which mobile's Universal Links /
+  // App Links pick up correctly. The legacy hash form (#book/<id>) only
+  // appears as an inbound rewrite from old links — once we hit
+  // openBookDetail we always upgrade to the canonical path form.
+  const targetPath = `/books/${bookId}`;
+  const samePath = (location.pathname || '') === targetPath;
+  if (samePath) {
+    history.replaceState(null, '', targetPath);
+  } else {
+    history.pushState(null, '', targetPath);
+  }
 
   const content = document.getElementById('bookDetailContent');
   content.innerHTML = '<div class="loading">Loading book...</div>';
@@ -6940,24 +7816,33 @@ function renderBookDetail() {
     `<button class="book-chip" data-tag="${escHTML(t)}" type="button">${escHTML(t)}</button>`
   ).join('');
 
-  // A chapter is locked if EITHER the book has a book-level lock that includes
-  // its chapter_number, OR it has the per-chapter is_locked flag (legacy /
-  // power-user override). Already-unlocked chapters skip the badge.
+  // Single-source lock-detection helper. Used by both the per-row lock badge
+  // AND the bulk-unlock CTA cost calculation, so the row icons and the
+  // "Unlock all N chapters" count CANNOT diverge by construction. Two-signal
+  // logic mirrors mobile's BookUnlocksService.isChapterLockedForDisplay:
+  //
+  //   • Book-level threshold: book.lock_from_chapter is set AND
+  //     chapter.chapter_number >= lock_from_chapter
+  //   • Per-chapter override:  chapter.is_locked === true
+  //
+  // …minus already-unlocked chapters (the user has already paid for them, no
+  // lock should display). No owner-bypass here — author + reader both see
+  // locks, matching what mobile now does too.
   const lockFrom = book.lock_from_chapter || null;
-  const lockedChapterCount = chapters.filter(c => {
+  const isChapterLockedForReader = (c) => {
     if (!lockFrom && !c.is_locked) return false;
     const isAtOrAfterLockPoint = lockFrom != null && c.chapter_number >= lockFrom;
     if (!isAtOrAfterLockPoint && !c.is_locked) return false;
     const realId = c.id.startsWith('sb_') ? c.id.slice(3) : c.id;
     return !isUnlocked('chapter', realId);
-  }).length;
+  };
+
+  const stillLockedChapters = chapters.filter(isChapterLockedForReader);
+  const lockedChapterCount = stillLockedChapters.length;
 
   const chaptersHtml = chapters.length
     ? chapters.map(c => {
-        const realId = c.id.startsWith('sb_') ? c.id.slice(3) : c.id;
-        const isAtOrAfterLockPoint = lockFrom != null && c.chapter_number >= lockFrom;
-        const isLockedDef = isAtOrAfterLockPoint || c.is_locked;
-        const locked = isLockedDef && !isUnlocked('chapter', realId);
+        const locked = isChapterLockedForReader(c);
         const lockBadge = locked
           ? `<span class="chapter-row-lock" title="Locked — tap to unlock">
                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
@@ -6974,14 +7859,25 @@ function renderBookDetail() {
       }).join('')
     : '<div style="color:var(--text2);padding:1rem 0">No chapters published yet.</div>';
 
-  // Bulk unlock CTA — shown only when at least 1 chapter is currently locked
+  // Bulk unlock CTA — shown only when at least 1 chapter is currently locked.
+  //
+  // Cost is the SUM of each still-locked chapter's resolved price (per-chapter
+  // override OR global default), then the bulk discount applied. This mirrors
+  // what mobile does in BookChaptersUnlockModal.jsx (sumLockedChaptersCost).
+  // The previous implementation multiplied the global default by lockedChapterCount,
+  // which ignored the per-chapter overrides entirely — an author who set
+  // 3 coins per chapter saw a bulk price computed off the 25-coin global default.
   const bulkDiscount = _walletConfigDefaults.book_bulk_unlock_discount_pct ?? 15;
-  const perChapterCoin = _walletConfigDefaults.default_chapter_unlock_coins ?? 3;
-  const perChapterStar = _walletConfigDefaults.default_chapter_unlock_stars ?? 3;
-  const bulkBefore = perChapterCoin * lockedChapterCount;
-  const bulkCoin   = Math.max(1, bulkBefore - Math.floor((bulkBefore * bulkDiscount) / 100));
-  const bulkStarBefore = perChapterStar * lockedChapterCount;
-  const bulkStar   = Math.max(1, bulkStarBefore - Math.floor((bulkStarBefore * bulkDiscount) / 100));
+  const bulkBefore = stillLockedChapters.reduce(
+    (sum, c) => sum + (resolveUnlockCost('chapter', 'coin', c) || 0),
+    0,
+  );
+  const bulkStarBefore = stillLockedChapters.reduce(
+    (sum, c) => sum + (resolveUnlockCost('chapter', 'star', c) || 0),
+    0,
+  );
+  const bulkCoin = Math.max(1, bulkBefore - Math.floor((bulkBefore * bulkDiscount) / 100));
+  const bulkStar = Math.max(1, bulkStarBefore - Math.floor((bulkStarBefore * bulkDiscount) / 100));
   const bulkUnlockCard = lockedChapterCount > 0 ? `
     <div class="book-bulk-unlock">
       <div class="book-bulk-unlock-icon">📚</div>
@@ -7044,6 +7940,25 @@ function renderBookDetail() {
       </div>
     </div>
   `;
+
+  // Sanity check: the count of `.chapter-row.is-locked` DOM nodes must
+  // equal `lockedChapterCount` (the number used by the bulk-unlock CTA).
+  // If the two ever disagree, the bulk button will charge for a different
+  // set of chapters than the user can see locked — exactly the kind of
+  // bug we just fixed (and want a guard against re-introducing).
+  //
+  // We log a console warning rather than throwing so a divergence in
+  // production surfaces in dev tools without breaking the user's flow.
+  // The `_walletConfigDefaults` and lock detection both live in this
+  // function, so any future logic change touching either will be caught
+  // here on the next render.
+  const renderedLockCount = content.querySelectorAll('.chapter-row.is-locked').length;
+  if (renderedLockCount !== lockedChapterCount) {
+    console.warn(
+      `[lock-count-mismatch] book ${book.id}: rendered ${renderedLockCount} lock icons but bulk CTA says ${lockedChapterCount}. ` +
+      `Lock detection has diverged between row render and stillLockedChapters filter — check isChapterLockedForReader callers.`
+    );
+  }
 
   // Wire chapter rows
   content.querySelectorAll('.chapter-row').forEach((row, i) => {
@@ -7233,7 +8148,9 @@ async function openChapterReader(chapterIndex) {
   document.getElementById('btnReaderPrev').disabled = chapterIndex <= 0;
   document.getElementById('btnReaderNext').disabled = chapterIndex >= currentBookDetail.chapters.length - 1;
 
-  history.pushState(null, '', `#book/${currentBookDetail.book.id}/chapter/${chapter.chapter_number}`);
+  // Path-based deep-link-friendly chapter URL — keeps mobile Universal
+  // Links / App Links able to pick this URL up if shared.
+  history.pushState(null, '', `/books/${currentBookDetail.book.id}/chapter/${chapter.chapter_number}`);
 
   const content = document.getElementById('readerContent');
   content.innerHTML = '<div class="loading">Loading chapter...</div>';
@@ -7266,7 +8183,21 @@ async function openChapterReader(chapterIndex) {
   }
 
   // PAYWALL: locked + not unlocked → render the lock CTA instead of content.
-  if (chapterRow.is_locked && !isUnlocked('chapter', resolvedChapterId)) {
+  //
+  // Two-signal lock check, matching the row-rendering logic above and mobile's
+  // isAuthorChapterLocked / isChapterLocked helpers. A chapter is locked when:
+  //   • chapter.is_locked === true (per-chapter explicit override), OR
+  //   • book.lock_from_chapter is set AND chapter_number >= lock_from_chapter
+  //     (book-level paywall threshold cascade).
+  //
+  // The previous version only honored chapter.is_locked, so any chapter that
+  // was only locked via the book-level threshold (the common case for writers
+  // using the picker) silently rendered for free even though the TOC row
+  // showed a lock badge — a real revenue-leak bug.
+  const bookLockFrom = currentBookDetail?.book?.lock_from_chapter;
+  const isThresholdLocked = bookLockFrom != null && Number(chapterRow.chapter_number) >= Number(bookLockFrom);
+  const chapterIsLocked = !!chapterRow.is_locked || isThresholdLocked;
+  if (chapterIsLocked && !isUnlocked('chapter', resolvedChapterId)) {
     const coinCost = resolveUnlockCost('chapter', 'coin', chapterRow);
     const starCost = resolveUnlockCost('chapter', 'star', chapterRow);
     content.style.fontSize = '';
@@ -7808,6 +8739,16 @@ const authorBookEditor      = document.getElementById('authorBookEditor');
 const authorChapterEditor   = document.getElementById('authorChapterEditor');
 
 let authorBooksCache = [];
+// Module-level qualifier for the lock-prompt banner. True when the
+// signed-in author has at least one book with lock_from_chapter set.
+// Recomputed in loadAuthorDashboard from the cached book set; reused
+// by both the dashboard list and the per-book editor's banner.
+let _authorHasPaidBooks = false;
+// In-session optimistic dismissal Set — keyed by book id. Mirrors the
+// mobile dismissedBookIds state; lets the banner disappear instantly
+// when the author taps Lock or Dismiss without waiting for the next
+// dashboard refetch to drop the row's dismissed_at column read.
+const _authorBookLockPromptDismissed = new Set();
 let editingBookId = null;        // null = new book in editor
 let editingChapterId = null;     // null = new chapter
 let chapterQuill = null;
@@ -7922,9 +8863,14 @@ async function loadAuthorDashboard() {
 
   // (Phase 7 earnings now lives in its own #earnings page — sidebar entry.)
 
+  // lock_prompt_dismissed_at is the per-book "this author told us they
+  // meant for it to be free" sentinel. When set, the lock-prompt
+  // banner stays hidden for that book even if it's still Free. The
+  // server-side trigger (see migration_book_lock_prompt_dismissal.sql)
+  // auto-clears it on lock, so a future unlock re-arms the prompt.
   const { data, error } = await supabase
     .from('books')
-    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, lock_from_chapter, locked_at, created_at, updated_at, published_at')
+    .select('id, title, description, cover_url, genre, status, is_public, views_count, likes_count, chapters_count, word_count, lock_from_chapter, locked_at, lock_prompt_dismissed_at, created_at, updated_at, published_at')
     .eq('author_id', user.id)
     .order('updated_at', { ascending: false });
 
@@ -7934,6 +8880,13 @@ async function loadAuthorDashboard() {
   }
 
   authorBooksCache = data || [];
+
+  // Qualifier flag for the lock-prompt banner — does this author
+  // already monetize at least one book? We avoid an extra RPC by
+  // deriving from the book set we just fetched. The mobile app uses
+  // has_paid_books_for_author RPC for the same answer; both paths
+  // feed the same banner-visibility gate downstream.
+  _authorHasPaidBooks = authorBooksCache.some(b => (b.lock_from_chapter || 0) > 0);
 
   // Stats
   document.getElementById('statMyBooks').textContent = authorBooksCache.length.toLocaleString();
@@ -7954,11 +8907,19 @@ async function loadAuthorDashboard() {
     return;
   }
 
+  // Render each row with an optional lock-prompt banner above it.
+  // Banner is its own sibling block inside .author-books-table so the
+  // existing grid layout for .author-book-row stays untouched. The
+  // banner only emits HTML for books that pass shouldShowLockPromptBanner;
+  // free-content authors (no other paid books) never see it.
   content.innerHTML = `
     <div class="author-books-table">
-      ${authorBooksCache.map(b => renderAuthorBookRow(b)).join('')}
+      ${authorBooksCache
+        .map((b) => renderLockPromptBanner(b, { compact: true }) + renderAuthorBookRow(b))
+        .join('')}
     </div>
   `;
+  ensureLockPromptHandler();
 
   content.querySelectorAll('[data-author-action]').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -8020,6 +8981,171 @@ async function deleteAuthorBook(bookId) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Lock prompt banner — soft notice for legacy Free books.
+//
+// When the old "Lock Book" toggle on mobile silently dropped the
+// author's lock setting (the broken updateBook path before the
+// picker-and-RPC fix landed), every affected book stayed Free in
+// the database with no signal that it was ever supposed to be paid.
+// Authors with at least one OTHER paid book are the highest-likelihood
+// recovery candidates — same writer, same monetization habit, only
+// difference is the row never got the threshold written.
+//
+// We surface a soft prompt on those Free books:
+//   • Inside the book editor (above the form)
+//   • On the dashboard book list (above each qualifying row)
+// Tapping a number 5–10 locks the book at that threshold via the
+// existing submit_book_update RPC; tapping Dismiss writes
+// books.lock_prompt_dismissed_at so the banner stays hidden for that
+// book until the author re-unlocks it.
+//
+// Visibility gate (must all be true):
+//   1. Book is currently Free                  (lock_from_chapter IS NULL)
+//   2. Banner not previously dismissed         (lock_prompt_dismissed_at IS NULL)
+//   3. Author has at least one other paid book (_authorHasPaidBooks)
+//   4. Not optimistically dismissed this session
+// ════════════════════════════════════════════════════════════════════════════
+function shouldShowLockPromptBanner(book) {
+  if (!book) return false;
+  if (!_authorHasPaidBooks) return false;
+  if (book.lock_from_chapter) return false;
+  if (book.lock_prompt_dismissed_at) return false;
+  if (_authorBookLockPromptDismissed.has(book.id)) return false;
+  return true;
+}
+
+function renderLockPromptBanner(book, opts = {}) {
+  if (!shouldShowLockPromptBanner(book)) return '';
+  const compact = opts.compact ? ' lock-prompt-banner-compact' : '';
+  const titleSafe = escHTML(book.title || 'this book');
+  const bookId = escHTML(book.id);
+  // The picker buttons emit data-lock-pick + data-id so a single
+  // delegated handler in wireLockPromptBanners() can claim both
+  // surfaces (dashboard + editor) without per-banner listeners.
+  const buttons = [5, 6, 7, 8, 9, 10]
+    .map((n) => `<button type="button" class="lock-prompt-banner-pick" data-lock-pick="${n}" data-id="${bookId}">${n}</button>`)
+    .join('');
+  return `
+    <div class="lock-prompt-banner${compact}" data-lock-banner-id="${bookId}">
+      <div class="lock-prompt-banner-body">
+        <p class="lock-prompt-banner-title">"${titleSafe}" is currently free</p>
+        <p class="lock-prompt-banner-sub">
+          You have other books with a paywall set. If you meant to lock this one too, pick where the
+          paywall starts — chapters before that stay free as a teaser.
+        </p>
+        <div class="lock-prompt-banner-picker">${buttons}</div>
+        <div class="lock-prompt-banner-foot">
+          <button type="button" class="lock-prompt-banner-dismiss" data-lock-dismiss="${bookId}">
+            Already free on purpose? Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function lockBookFromPrompt(bookId, threshold) {
+  const n = Number(threshold);
+  if (!Number.isFinite(n) || n < 5 || n > 10) return;
+  const banner = document.querySelector(`[data-lock-banner-id="${bookId}"]`);
+  if (banner) {
+    banner.querySelectorAll('.lock-prompt-banner-pick').forEach((b) => (b.disabled = true));
+    banner.querySelector('.lock-prompt-banner-dismiss')?.setAttribute('disabled', 'true');
+    const foot = banner.querySelector('.lock-prompt-banner-foot');
+    if (foot && !foot.querySelector('.lock-prompt-banner-spin')) {
+      const spin = document.createElement('span');
+      spin.className = 'lock-prompt-banner-spin';
+      foot.prepend(spin);
+    }
+  }
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('Sign in required');
+    const { data, error } = await supabase.rpc('submit_book_update', {
+      p_actor_id: user.id,
+      p_book_id: bookId,
+      p_lock_from_chapter: n,
+    });
+    if (error) throw error;
+    if (!data?.ok) throw new Error(data?.error || 'lock failed');
+
+    _authorBookLockPromptDismissed.add(bookId);
+    if (banner) banner.remove();
+    toast(`Locked from chapter ${n}`, 'success');
+
+    // Refresh the dashboard so the row's PRO tag appears and the
+    // editor (if open for the same book) sees the new lock state.
+    if (typeof loadAuthorDashboard === 'function') loadAuthorDashboard();
+    if (editingBookId === bookId && typeof setBookLockUI === 'function') {
+      setBookLockUI(n, new Date().toISOString());
+    }
+  } catch (err) {
+    toast('Could not lock: ' + (err?.message || 'try again'), 'error');
+    if (banner) {
+      banner.querySelectorAll('.lock-prompt-banner-pick').forEach((b) => (b.disabled = false));
+      banner.querySelector('.lock-prompt-banner-dismiss')?.removeAttribute('disabled');
+      banner.querySelector('.lock-prompt-banner-spin')?.remove();
+    }
+  }
+}
+
+async function dismissBookLockPrompt(bookId) {
+  const ok = await confirmDialog({
+    title: 'Keep this book free?',
+    body: "We won't show this prompt again for this book. You can still lock it later from the book editor.",
+    confirmLabel: 'Yes, keep free',
+  });
+  if (!ok) return;
+
+  const banner = document.querySelector(`[data-lock-banner-id="${bookId}"]`);
+  if (banner) {
+    banner.querySelectorAll('.lock-prompt-banner-pick').forEach((b) => (b.disabled = true));
+    banner.querySelector('.lock-prompt-banner-dismiss')?.setAttribute('disabled', 'true');
+  }
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('Sign in required');
+    const { data, error } = await supabase.rpc('submit_book_lock_prompt_dismiss', {
+      p_actor_id: user.id,
+      p_book_id: bookId,
+    });
+    if (error) throw error;
+    if (!data?.ok) throw new Error(data?.error || 'dismiss failed');
+
+    _authorBookLockPromptDismissed.add(bookId);
+    if (banner) banner.remove();
+  } catch (err) {
+    toast('Could not save: ' + (err?.message || 'try again'), 'error');
+    if (banner) {
+      banner.querySelectorAll('.lock-prompt-banner-pick').forEach((b) => (b.disabled = false));
+      banner.querySelector('.lock-prompt-banner-dismiss')?.removeAttribute('disabled');
+    }
+  }
+}
+
+// Single delegated click handler — installs once on the document so
+// every banner (current + future, dashboard + editor) is wired without
+// per-element addEventListener calls.
+function ensureLockPromptHandler() {
+  if (window.__lockPromptHandlerInstalled) return;
+  window.__lockPromptHandlerInstalled = true;
+  document.addEventListener('click', (e) => {
+    const pickBtn = e.target.closest('.lock-prompt-banner-pick');
+    if (pickBtn) {
+      const id = pickBtn.dataset.id;
+      const n = pickBtn.dataset.lockPick;
+      if (id && n) lockBookFromPrompt(id, n);
+      return;
+    }
+    const dismissBtn = e.target.closest('.lock-prompt-banner-dismiss');
+    if (dismissBtn) {
+      const id = dismissBtn.dataset.lockDismiss;
+      if (id) dismissBookLockPrompt(id);
+    }
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // PHASE 7 — Author Earnings, KYC, Withdrawals
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -8036,7 +9162,7 @@ async function loadAuthorEarnings() {
   const [balanceRes, earningsRes, withdrawalsRes, kycRes] = await Promise.all([
     supabase.rpc('author_balance_for', { p_author_id: currentUser.id }),
     supabase.from('author_earnings')
-      .select('id, source_type, source_id, gross_coins, share_pct, net_coins, net_php_minor, status, available_at, created_at')
+      .select('id, source_type, source_id, gross_coins, share_pct, net_coins, net_php_minor, currency_used, status, available_at, created_at')
       .eq('author_id', currentUser.id)
       .order('created_at', { ascending: false })
       .limit(500),
@@ -8119,17 +9245,24 @@ function renderAuthorEarningsList(rows) {
     el.innerHTML = '<div class="page-empty-soft">No earnings yet. Once readers unlock your work with coins, you\'ll see entries here.</div>';
     return;
   }
-  el.innerHTML = rows.map(r => `
+  // currency_used was added with the May 2026 stars-earn-for-authors
+  // overhaul. Older rows pre-migration default to 'coin' (the column has
+  // a server-side default), so the fallback below is just defensive
+  // against a row that somehow comes back with currency_used=null.
+  el.innerHTML = rows.map(r => {
+    const cur   = (r.currency_used || 'coin').toLowerCase();
+    const label = cur === 'star' ? 'star' : 'coin';
+    return `
     <div class="earnings-row">
       <div class="earnings-row-meta">
         <div class="earnings-row-type">${escHTML(r.source_type.replace('_', ' '))}</div>
-        <div class="earnings-row-sub">${timeAgo(r.created_at)} · ${r.share_pct}% share of ${r.gross_coins} coin${r.gross_coins === 1 ? '' : 's'}</div>
+        <div class="earnings-row-sub">${timeAgo(r.created_at)} · ${r.share_pct}% share of ${r.gross_coins} ${label}${r.gross_coins === 1 ? '' : 's'}</div>
       </div>
-      <div class="earnings-row-amount">+${r.net_coins} <small>coin${r.net_coins === 1 ? '' : 's'}</small></div>
+      <div class="earnings-row-amount">+${r.net_coins} <small>${label}${r.net_coins === 1 ? '' : 's'}</small></div>
       <div class="earnings-row-php">${formatPhpFromMinor(r.net_php_minor)}</div>
       <div class="earnings-row-status earnings-row-status-${r.status}">${earningsStatusLabel(r)}</div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function earningsStatusLabel(r) {
@@ -8670,6 +9803,11 @@ document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
   document.getElementById('withdrawalAccountMethod').textContent = methodLabel;
   document.getElementById('withdrawalAccountName').textContent   = _authorKyc.full_name || '(no name on file)';
 
+  // Programmatic value sets don't fire `input`, so seed the fee preview +
+  // Pioneer banner manually on modal open. After this, the listeners
+  // wired further down handle live updates as the user edits.
+  if (typeof _renderWithdrawalFeePreview === 'function') _renderWithdrawalFeePreview();
+
   m.style.display = 'flex';
 });
 
@@ -8694,6 +9832,90 @@ document.getElementById('minPayoutModal')?.addEventListener('click', (e) => {
 
 document.getElementById('withdrawalClose')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
 document.getElementById('withdrawalCancel')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
+
+// ── Pioneer-exemption + fee-preview helpers ──────────────────────────
+// Mirror of mobile lib/utils/calculateWithdrawal.js. Kept in sync so the
+// preview a Pioneer sees in the web modal matches what mobile would show
+// AND what the server's request_author_withdrawal RPC will charge.
+//
+// Reads PLATFORM_COST and TRANSFER_FEE from _walletConfigDefaults
+// (loaded from app_config). Both are stored as fractions (0.2, 0.02).
+// pioneer_exemption_days defaults to 365 if the config key isn't set.
+
+function _isPioneerExempt(profile, exemptionDays) {
+  if (!profile) return false;
+  if (profile.role !== 'pioneer') return false;
+  if (!profile.pioneer_at) return false;
+  const grantedAt = new Date(profile.pioneer_at).getTime();
+  if (!Number.isFinite(grantedAt)) return false;
+  const days = exemptionDays || 365;
+  const expiresAt = grantedAt + days * 24 * 60 * 60 * 1000;
+  return Date.now() <= expiresAt;
+}
+
+function _pioneerDaysRemaining(profile, exemptionDays) {
+  if (!profile?.pioneer_at || profile.role !== 'pioneer') return 0;
+  const grantedAt = new Date(profile.pioneer_at).getTime();
+  if (!Number.isFinite(grantedAt)) return 0;
+  const days = exemptionDays || 365;
+  const expiresAt = grantedAt + days * 24 * 60 * 60 * 1000;
+  const ms = expiresAt - Date.now();
+  return ms <= 0 ? 0 : Math.floor(ms / (24 * 60 * 60 * 1000));
+}
+
+// Render the fee preview rows live as the user types in the amount input.
+// Wired via input listener at the bottom of this block.
+function _renderWithdrawalFeePreview() {
+  const amountPhp   = parseFloat(document.getElementById('withdrawalAmount')?.value || '0') || 0;
+  const exemptDays  = _walletConfigDefaults.pioneer_exemption_days || 365;
+  const exempt      = _isPioneerExempt(currentProfile, exemptDays);
+  const daysLeft    = _pioneerDaysRemaining(currentProfile, exemptDays);
+
+  // Pioneer banner visibility + days-left copy
+  const banner = document.getElementById('withdrawalPioneerBanner');
+  const daysEl = document.getElementById('withdrawalPioneerDays');
+  if (banner) banner.style.display = exempt ? 'flex' : 'none';
+  if (daysEl) {
+    daysEl.textContent = daysLeft > 0
+      ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} of free withdrawals remaining`
+      : 'Exemption window ending soon';
+  }
+
+  const platformFraction = Number(_walletConfigDefaults.PLATFORM_COST ?? 0.2) || 0;
+  const transferFraction = Number(_walletConfigDefaults.TRANSFER_FEE  ?? 0.02) || 0;
+  const platformPct = (platformFraction <= 1 ? platformFraction : platformFraction / 100);
+  const transferPct = (transferFraction <= 1 ? transferFraction : transferFraction / 100);
+
+  const platformCost = exempt ? 0 : amountPhp * platformPct;
+  const transferFee  = exempt ? 0 : amountPhp * transferPct;
+  const net          = Math.max(0, amountPhp - platformCost - transferFee);
+
+  const fmt = (n) => '₱' + n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  const setClass = (id, cls, on) => { const el = document.getElementById(id); if (el) el.classList.toggle(cls, on); };
+
+  setText('withdrawalFeeGross',    fmt(amountPhp));
+  setText('withdrawalFeePlatform', exempt ? 'Waived' : fmt(platformCost));
+  setText('withdrawalFeeTransfer', exempt ? 'Waived' : fmt(transferFee));
+  setText('withdrawalFeeNet',      fmt(net));
+  setClass('withdrawalFeePlatform', 'is-waived', exempt);
+  setClass('withdrawalFeeTransfer', 'is-waived', exempt);
+
+  // Update label percentages so they reflect the current config rates.
+  const pctTxt = (frac) => {
+    const p = (frac <= 1 ? frac * 100 : frac);
+    return `${(Math.round(p * 10) / 10)}%`;
+  };
+  setText('withdrawalFeePlatformLabel', `Platform cost (${pctTxt(platformFraction)})`);
+  setText('withdrawalFeeTransferLabel', `Transfer fee (${pctTxt(transferFraction)})`);
+}
+
+// Re-run the preview every keystroke; also once when the modal opens
+// (the existing modal-open code sets the input value, which doesn't fire
+// `input`, so we hook the open click separately further down).
+document.getElementById('withdrawalAmount')?.addEventListener('input', _renderWithdrawalFeePreview);
+document.getElementById('withdrawalAmount')?.addEventListener('change', _renderWithdrawalFeePreview);
+
 document.getElementById('withdrawalSubmit')?.addEventListener('click', async () => {
   const amountPhp   = parseFloat(document.getElementById('withdrawalAmount').value);
   const minPhpMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
@@ -8708,10 +9930,23 @@ document.getElementById('withdrawalSubmit')?.addEventListener('click', async () 
   const btn = document.getElementById('withdrawalSubmit');
   btn.disabled = true; btn.textContent = 'Submitting…';
 
-  // Strict: server pulls payment_method + account details from author_kyc.
-  // Client only provides the amount.
-  const { data, error } = await supabase.rpc('request_author_withdrawal_php', {
+  // Switched (May 2026 earnings overhaul) from request_author_withdrawal_php
+  // to the unified request_author_withdrawal — the new RPC computes
+  // Pioneer-aware fees server-side and earmarks across both coin and
+  // star earnings FIFO. Payout method + account details still come from
+  // author_kyc (the saved Payments Info row); we forward them through
+  // p_payout_method + p_payout_details so the new RPC's signature is
+  // satisfied without losing the strict-saved-account guarantee.
+  const payoutMethod  = _authorKyc?.payment_method || '';
+  const payoutDetails = {
+    full_name:      _authorKyc?.full_name      || null,
+    account_number: _authorKyc?.account_number || null,
+    account_name:   _authorKyc?.account_name   || null,
+  };
+  const { data, error } = await supabase.rpc('request_author_withdrawal', {
     p_amount_php_minor: amountMinor,
+    p_payout_method:    payoutMethod,
+    p_payout_details:   payoutDetails,
   });
 
   btn.disabled = false; btn.textContent = 'Submit request';
@@ -8791,6 +10026,11 @@ newBookModal?.addEventListener('click', (e) => { if (e.target === newBookModal) 
 // ── Book editor (metadata + chapter list) ──
 async function openAuthorBookEditor(bookId) {
   editingBookId = bookId;
+  // Reset the chapter tab on each book open so the entry state is
+  // predictable. Keeping the tab sticky across DIFFERENT books would
+  // surprise authors switching from a draft-heavy book to a published
+  // one and finding themselves on an empty Drafts tab.
+  _authorChaptersTab = 'published';
   hideAllMainPages();
   authorPage.style.display = 'block';
   setAuthorView('book');
@@ -8817,6 +10057,30 @@ async function loadBookEditor(bookId) {
   // Book-level lock state
   setBookLockUI(book.lock_from_chapter, book.locked_at);
 
+  // Render the lock-prompt banner above the editor form when the
+  // book qualifies (Free, not dismissed, author monetizes elsewhere).
+  // Empty string when it doesn't — the mount stays in the DOM but
+  // renders no banner. We re-derive _authorHasPaidBooks here in case
+  // the editor was opened directly via deep link without first
+  // loading the dashboard (the dashboard pass is the canonical
+  // setter, but the editor needs a fallback).
+  const lockPromptMount = document.getElementById('bookEditorLockPrompt');
+  if (lockPromptMount) {
+    if (!_authorHasPaidBooks) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const { data: hp } = await supabase.rpc('has_paid_books_for_author', { p_actor_id: user.id });
+          _authorHasPaidBooks = Boolean(hp);
+        }
+      } catch (_) {
+        // Non-fatal — banner just stays hidden.
+      }
+    }
+    lockPromptMount.innerHTML = renderLockPromptBanner(book);
+    ensureLockPromptHandler();
+  }
+
   // Build / refresh genre picker. Seed from book.tags first (where curated genres live),
   // fall back to book.genre (single legacy slug). Unknown freeform tags go to the Custom tags input.
   const allTags = Array.isArray(book.tags) ? book.tags : [];
@@ -8840,32 +10104,130 @@ async function loadBookEditor(bookId) {
     ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
     : `<div class="book-cover-placeholder">${initialLetter}</div>`;
 
-  // Load chapters
+  // Load chapters. Includes is_locked + created_at so the row can
+  // render a lock indicator and we can sort by upload time.
+  // Sort: created_at DESC — author surface shows latest-uploaded first
+  // so a writer's most recent work is at the top of the inline TOC,
+  // mirroring the mobile book editor.
   const { data: chapters, error: chErr } = await supabase
     .from('chapters')
-    .select('id, chapter_number, title, word_count, is_published, scheduled_publish_at, updated_at')
+    .select('id, chapter_number, title, word_count, is_published, is_locked, scheduled_publish_at, created_at, updated_at')
     .eq('book_id', bookId)
-    .order('chapter_number', { ascending: true });
+    .order('created_at', { ascending: false });
 
   const chList = document.getElementById('bookEditorChapters');
   if (chErr) {
     chList.innerHTML = `<div class="loading">Couldn't load chapters: ${escHTML(chErr.message)}</div>`;
     return;
   }
-  if (!chapters?.length) {
+
+  // Pass the book's lock_from_chapter through so the row template can
+  // show the lock glyph using the same two-signal logic as mobile
+  // (chapter.is_locked OR chapter_number >= lock_from_chapter).
+  renderAuthorChapterList(chapters || [], bookId, book.lock_from_chapter);
+}
+
+// Module-level state for the Published / Drafts tab in the author book
+// editor. Reset to "published" on each book open so the entry view is
+// predictable; preserved across re-renders within the same book so the
+// user can save a chapter and stay on the tab they were filtering on.
+let _authorChaptersTab = 'published';
+
+// Determines which tab a chapter belongs to. Mirrors mobile's
+// getChapterTabBucket — anything that's not is_published=true is a draft,
+// including future-scheduled chapters that have is_published=true but a
+// scheduled_publish_at in the future (those count as Published from the
+// author's "I've finished writing this" perspective).
+function authorChapterBucket(c) {
+  return c?.is_published ? 'published' : 'draft';
+}
+
+// Renders the chapter rows under whichever tab is active, plus the
+// per-tab counts. Centralized so both the initial loadBookEditor pass
+// and the tab-click handler can call the same function with the same
+// chapters array.
+//
+// `lockFromChapter` is the book-level paywall threshold (NULL or a
+// number 5-10). When non-null, any chapter whose chapter_number is
+// >= this value renders with a lock icon, matching the reader's view.
+// A per-chapter `is_locked=true` flag also forces the lock icon
+// regardless of where the chapter sits relative to the threshold.
+function renderAuthorChapterList(chapters, bookId, lockFromChapter) {
+  const chList = document.getElementById('bookEditorChapters');
+  if (!chList) return;
+  // Cache the threshold on the element so subsequent tab-switch
+  // re-renders (which call back through this function) don't lose it.
+  // The first call from loadBookEditor seeds it; later calls can omit.
+  if (lockFromChapter !== undefined) {
+    chList.dataset.lockFromChapter = lockFromChapter == null ? '' : String(lockFromChapter);
+  }
+  const lockStart = chList.dataset.lockFromChapter ? Number(chList.dataset.lockFromChapter) : 0;
+
+  // Update tab counts up front — counts reflect ALL chapters, regardless
+  // of which tab is currently active.
+  let publishedCount = 0;
+  let draftCount = 0;
+  for (const c of chapters) {
+    if (authorChapterBucket(c) === 'draft') draftCount += 1;
+    else publishedCount += 1;
+  }
+  const pubCountEl = document.getElementById('bookEditorTabCountPublished');
+  const draftCountEl = document.getElementById('bookEditorTabCountDrafts');
+  if (pubCountEl) pubCountEl.textContent = publishedCount > 99 ? '99+' : String(publishedCount);
+  if (draftCountEl) draftCountEl.textContent = draftCount > 99 ? '99+' : String(draftCount);
+
+  // Sync the active-tab class to whatever _authorChaptersTab is set to,
+  // and (critically) re-attach tab click handlers BEFORE the early-return
+  // cases below. If the user is on a tab with no visible chapters (e.g.
+  // Published with 0 published, only drafts exist), the function would
+  // previously bail out via `!visible.length` BEFORE the click handlers
+  // were wired — leaving the tabs frozen and the user stuck on an empty
+  // bucket. Wiring them up here means tabs are always clickable.
+  document.querySelectorAll('#bookEditorChapterTabs .author-chapter-tab').forEach((btn) => {
+    const isActive = btn.dataset.authorTab === _authorChaptersTab;
+    btn.classList.toggle('is-active', isActive);
+    btn.onclick = () => {
+      const next = btn.dataset.authorTab;
+      if (!next || next === _authorChaptersTab) return;
+      _authorChaptersTab = next;
+      // Don't re-pass lockFromChapter on tab switches — it's already
+      // cached on the element's dataset from the initial render.
+      renderAuthorChapterList(chapters, bookId);
+    };
+  });
+
+  if (!chapters.length) {
     chList.innerHTML = '<div style="color:var(--text2);padding:1rem 0">No chapters yet. Click <strong>Add chapter</strong> to write the first one.</div>';
     return;
   }
-  chList.innerHTML = chapters.map(c => {
+
+  // Filter by the active tab. Empty-state copy is bucket-aware so the
+  // Drafts tab feels intentional rather than broken when there are zero.
+  const visible = chapters.filter((c) => authorChapterBucket(c) === (_authorChaptersTab === 'drafts' ? 'draft' : 'published'));
+  if (!visible.length) {
+    chList.innerHTML = _authorChaptersTab === 'drafts'
+      ? '<div style="color:var(--text2);padding:1rem 0">No drafts yet — every chapter you save as draft will land here.</div>'
+      : '<div style="color:var(--text2);padding:1rem 0">No published chapters yet.</div>';
+    return;
+  }
+
+  chList.innerHTML = visible.map(c => {
     const isFutureSch = c.is_published && c.scheduled_publish_at && new Date(c.scheduled_publish_at) > new Date();
     let pillClass, pillLabel;
     if (isFutureSch)        { pillClass = 'author-chapter-pub-scheduled'; pillLabel = 'Scheduled · ' + formatScheduleShort(c.scheduled_publish_at); }
     else if (c.is_published) { pillClass = 'author-chapter-pub-published'; pillLabel = 'Published'; }
     else                     { pillClass = 'author-chapter-pub-draft';     pillLabel = 'Draft'; }
+    // Two-signal lock check, same logic as mobile's isAuthorChapterLocked:
+    //   • chapter.is_locked === true  (per-chapter override), OR
+    //   • lockStart > 0 AND chapter_number >= lockStart  (book-level cascade)
+    const isLocked = !!c.is_locked || (lockStart > 0 && Number(c.chapter_number) >= lockStart);
+    const lockIcon = isLocked
+      ? `<span class="author-chapter-lock" title="Locked"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>`
+      : '';
     return `
     <div class="author-chapter-row" data-chapter-id="${c.id}">
       <span class="author-chapter-num">Ch ${c.chapter_number}</span>
-      <span class="author-chapter-title">${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
+      <span class="author-chapter-title">${lockIcon}${escHTML(c.title || `Chapter ${c.chapter_number}`)}</span>
       <span class="author-chapter-meta">${(c.word_count || 0).toLocaleString()} words</span>
       <span class="author-chapter-pub-pill ${pillClass}">${escHTML(pillLabel)}</span>
       <div class="author-chapter-actions">
@@ -8892,6 +10254,9 @@ async function loadBookEditor(bookId) {
   chList.querySelectorAll('.author-chapter-row').forEach(row => {
     row.addEventListener('click', () => openAuthorChapterEditor(bookId, row.dataset.chapterId));
   });
+
+  // Tab click handlers were attached above — before the early returns —
+  // so they always work regardless of which bucket is currently empty.
 }
 
 async function saveBookMetadata() {
@@ -8915,8 +10280,23 @@ async function saveBookMetadata() {
   // Browse filter still uses single `genre` field — slug of first selected curated genre
   const genre = curated.length ? genreSlug(curated[0]) : null;
   const description = document.getElementById('bookEditorDescription').value.trim();
-  const status = document.getElementById('bookEditorBookStatus').value;
+  // The Status dropdown and the Public checkbox are independent fields
+  // in the editor UI, but checking "Public" with status='draft' is a
+  // common UX trap: web's own list query AND mobile's
+  // fetchPublishedBooks both filter status IN ('ongoing','completed'),
+  // so a book with is_public=true + status='draft' is invisible
+  // everywhere despite the user thinking they hit Publish.
+  // Auto-promote draft → ongoing whenever the user saves with the
+  // Public box checked. They can still flip to 'completed' later via
+  // the dropdown. This matches user intent ("publish my book") without
+  // forcing them to remember to change two fields in lockstep.
+  let status = document.getElementById('bookEditorBookStatus').value;
   const isPublic = document.getElementById('bookEditorPublic').checked;
+  if (isPublic && status === 'draft') {
+    status = 'ongoing';
+    // Sync the dropdown UI so the user sees the auto-promotion happen.
+    document.getElementById('bookEditorBookStatus').value = 'ongoing';
+  }
 
   // Lock-from-chapter (book-level). Must be in {5..10}; server has matching
   // CHECK constraint plus a 90-day-no-removal trigger.
@@ -9601,7 +10981,9 @@ async function showChapterPublishSuccess(bookId, chapterId, isScheduled, schedul
 
   // Wire actions (use the public reader URL — works for both states; scheduled
   // chapters will 404 for non-authors via RLS, which is the desired UX).
-  const shareUrl = `${location.origin}${location.pathname}#book/${bookId}/chapter/${chapterId}`;
+  // Path-based URL so mobile Universal Links / App Links pick this up
+  // when shared.
+  const shareUrl = `${location.origin}/books/${bookId}/chapter/${chapterId}`;
   shareBtn.onclick = async () => {
     try {
       if (navigator.share) {
@@ -9664,6 +11046,199 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', wireChapterPublishUI);
 } else {
   wireChapterPublishUI();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Tag chip input — YouTube-style chips around an existing <input>
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Wraps a hidden `<input>` whose `.value` is kept in sync with the chip
+// array (joined by ", "). Existing form-handling code that reads
+// `document.getElementById('videoUploadTags').value` continues to work
+// unchanged, and code that writes `el.value = "a, b, c"` (e.g. when
+// populating the studio edit modal) re-renders the chips because we
+// override the `value` accessor to fire a sync.
+//
+// Behaviors:
+//   • Type + comma → chip commits (mid-type recognition)
+//   • Enter → chip commits
+//   • Blur → any pending text commits
+//   • Backspace on empty editor → drops last chip
+//   • × on a chip → removes that chip
+//   • De-dupe is case-insensitive, first-seen casing wins
+//   • maxTags caps how many can be added; editor disables when full
+function attachTagChips(inputEl, { maxTags = 15 } = {}) {
+  if (!inputEl || inputEl._tagChipsAttached) return;
+  inputEl._tagChipsAttached = true;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tag-chip-wrap';
+
+  const editor = document.createElement('input');
+  editor.type = 'text';
+  editor.className = 'tag-chip-editor';
+  editor.placeholder = inputEl.placeholder || 'Add a tag…';
+  editor.autocomplete = 'off';
+  editor.autocapitalize = 'off';
+  editor.spellcheck = false;
+
+  // Hide the original but keep it in the DOM so existing form code's
+  // `.value` reads/writes still hit a real input.
+  inputEl.style.display = 'none';
+  inputEl.parentNode.insertBefore(wrapper, inputEl.nextSibling);
+
+  // Tags list lives on the wrapper element; chips render inside it,
+  // editor is appended last so it sits visually after the chips.
+  let tags = [];
+
+  const splitInput = (text) =>
+    String(text || '')
+      .split(/[,\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  const writeOriginal = () => {
+    // Skip our overridden setter to avoid re-entrancy; write through
+    // the prototype descriptor so the underlying value updates and
+    // any plain-DOM listeners still fire.
+    nativeValueSetter.call(inputEl, tags.join(', '));
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  const render = () => {
+    // Clear and rebuild — small lists, simple is fine.
+    Array.from(wrapper.children).forEach((c) => c.remove());
+    tags.forEach((tag, i) => {
+      const chip = document.createElement('span');
+      chip.className = 'tag-chip-pill';
+      const txt = document.createElement('span');
+      txt.className = 'tag-chip-text';
+      txt.textContent = tag;
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'tag-chip-remove';
+      close.setAttribute('aria-label', `Remove ${tag}`);
+      close.textContent = '×';
+      close.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        tags.splice(i, 1);
+        writeOriginal();
+        render();
+        editor.focus();
+      });
+      chip.appendChild(txt);
+      chip.appendChild(close);
+      wrapper.appendChild(chip);
+    });
+    wrapper.appendChild(editor);
+    editor.disabled = tags.length >= maxTags;
+    editor.placeholder = tags.length === 0 ? (inputEl.placeholder || 'Add a tag…') : '';
+  };
+
+  const addCandidates = (rawText) => {
+    const candidates = splitInput(rawText);
+    if (candidates.length === 0) return false;
+    const lower = new Set(tags.map((t) => t.toLowerCase()));
+    let added = false;
+    for (const c of candidates) {
+      const lc = c.toLowerCase();
+      if (lower.has(lc)) continue;
+      if (tags.length >= maxTags) break;
+      lower.add(lc);
+      tags.push(c);
+      added = true;
+    }
+    return added;
+  };
+
+  const commitFromEditor = (rawText) => {
+    const text = String(rawText ?? editor.value);
+    if (!text.trim()) {
+      editor.value = '';
+      return;
+    }
+    const added = addCandidates(text);
+    editor.value = '';
+    if (added) {
+      writeOriginal();
+      render();
+    }
+  };
+
+  editor.addEventListener('input', () => {
+    if (editor.value.endsWith(',')) commitFromEditor(editor.value.slice(0, -1));
+  });
+  editor.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitFromEditor();
+    } else if (e.key === 'Backspace' && editor.value === '' && tags.length > 0) {
+      tags.pop();
+      writeOriginal();
+      render();
+    }
+  });
+  editor.addEventListener('blur', () => {
+    if (editor.value.trim()) commitFromEditor();
+  });
+
+  // Tap anywhere in the wrapper to focus the editor — matches the
+  // single-line-input feel.
+  wrapper.addEventListener('click', (e) => {
+    if (e.target === wrapper) editor.focus();
+  });
+
+  // Override the original input's `.value` accessor so that:
+  //   - Reads return the comma-joined chip list (already the case via
+  //     writeOriginal, but we want this to be the source of truth even
+  //     before any chip is added).
+  //   - Writes (e.g. populating the edit modal) re-render the chips.
+  const proto = Object.getPrototypeOf(inputEl);
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value') ||
+               Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  const nativeValueGetter = desc.get;
+  const nativeValueSetter = desc.set;
+
+  Object.defineProperty(inputEl, 'value', {
+    get() { return nativeValueGetter.call(this); },
+    set(v) {
+      nativeValueSetter.call(this, v);
+      tags = splitInput(v);
+      // Cap on initial population too.
+      if (tags.length > maxTags) tags = tags.slice(0, maxTags);
+      render();
+    },
+    configurable: true,
+  });
+
+  // Initial sync from any value already on the input (e.g. server-
+  // populated edit modal).
+  tags = splitInput(inputEl.value);
+  if (tags.length > maxTags) tags = tags.slice(0, maxTags);
+  render();
+}
+
+function initVideoTagChips() {
+  const TAGS_LIMIT = (() => {
+    // Read from app_config cache if available, fall back to 15.
+    try {
+      if (typeof window.appConfigCache === 'object' && window.appConfigCache?.TAGS_LIMIT_MAX) {
+        return Number(window.appConfigCache.TAGS_LIMIT_MAX) || 15;
+      }
+    } catch {}
+    return 15;
+  })();
+  const upload = document.getElementById('videoUploadTags');
+  const edit = document.getElementById('studioEditTags');
+  if (upload) attachTagChips(upload, { maxTags: TAGS_LIMIT });
+  if (edit) attachTagChips(edit, { maxTags: TAGS_LIMIT });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initVideoTagChips);
+} else {
+  initVideoTagChips();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -10071,7 +11646,7 @@ function openStudioEditModal(videoId) {
   document.getElementById('studioEditTitle').value = v.title || '';
   document.getElementById('studioEditDescription').value = v.description || '';
   document.getElementById('studioEditTags').value = (v.tags || []).join(', ');
-  document.getElementById('studioEditCategory').value = v.category || 'general';
+  // Category dropdown removed — see videoUploadCategory comment above.
 
   const preview = document.getElementById('studioEditPreview');
   const thumb = document.getElementById('studioEditThumb');
@@ -10169,7 +11744,7 @@ async function saveStudioEdit() {
   const title = document.getElementById('studioEditTitle').value.trim();
   const description = document.getElementById('studioEditDescription').value.trim();
   const tagsRaw = document.getElementById('studioEditTags').value;
-  const category = document.getElementById('studioEditCategory').value;
+  // Category dropdown removed — see videoUploadCategory comment.
 
   if (!title) {
     toast('Title is required', 'error');
@@ -10186,7 +11761,7 @@ async function saveStudioEdit() {
   const { error } = await supabase
     .from('videos')
     .update({
-      title, description, tags, category,
+      title, description, tags,
       is_monetized: isMonetized,
       updated_at: new Date().toISOString(),
     })
@@ -11613,7 +13188,30 @@ async function loadNotifications() {
     console.warn('Notifications fetch error:', error);
     return;
   }
-  _notifications = data || [];
+  let raw = data || [];
+
+  // Suppress dm_message notifications whose conversation is Secret. The
+  // user discovers Secret messages by opening the Secret tab; they never
+  // appear in the bell. We collect all dm_message conversation IDs and
+  // bulk-fetch the is_secret flag in one query, then drop the matching
+  // notifications.
+  const dmConvIds = Array.from(new Set(
+    raw
+      .filter(n => n.type === 'dm_message' && n.parent_target_type === 'conversation' && n.parent_target_id)
+      .map(n => n.parent_target_id),
+  ));
+  if (dmConvIds.length) {
+    const { data: convs } = await supabase
+      .from('conversations')
+      .select('id, is_secret')
+      .in('id', dmConvIds);
+    const secretSet = new Set((convs || []).filter(c => c.is_secret).map(c => c.id));
+    if (secretSet.size > 0) {
+      raw = raw.filter(n => !(n.type === 'dm_message' && secretSet.has(n.parent_target_id)));
+    }
+  }
+
+  _notifications = raw;
   await hydrateActorProfiles(_notifications);
 
   _notifUnreadCount = _notifications.filter(n => !n.is_read).length;
@@ -11678,16 +13276,29 @@ function renderNotifications() {
 
   list.innerHTML = visible.map(n => {
     const actor = _notifActorCache[n.actor_id] || {};
-    const avatar = actor.avatar_url
-      ? `<img src="${escHTML(actor.avatar_url)}"/>`
-      : (actor.username ? initials(actor.username) : '?');
-    const text = notificationLabel(n, actor.username);
-    const snippet = n.metadata?.snippet || n.metadata?.caption || '';
+    // Privacy treatment (lock avatar, "Someone sent you a private
+    // message", no preview) is reserved for SECRET-CHAT DMs only. The
+    // is_secret flag is written by the chat-bell trigger
+    // (migration_notifications_dm_secret_flag.sql) and backfilled for
+    // existing rows. Regular DMs render with the real sender, real
+    // avatar, and the normal "X sent you a message" label so the bell
+    // doesn't lie about who's chatting with you.
+    const isPrivateDm = n.type === 'dm_message' && n.metadata?.is_secret === true;
+    const avatar = isPrivateDm
+      ? '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
+      : (actor.avatar_url
+          ? `<img src="${escHTML(actor.avatar_url)}"/>`
+          : (actor.username ? initials(actor.username) : '?'));
+    const text = isPrivateDm
+      ? 'Someone sent you a private message'
+      : notificationLabel(n, actor.username);
+    // Snippets reveal context — also hidden for Secret DMs.
+    const snippet = isPrivateDm ? '' : (n.metadata?.snippet || n.metadata?.caption || '');
     const snippetHTML = snippet
       ? `<div class="notification-snippet">"${escHTML(snippet)}"</div>`
       : '';
     return `
-      <div class="notification-item ${n.is_read ? '' : 'unread'}" data-id="${n.id}">
+      <div class="notification-item ${n.is_read ? '' : 'unread'}${isPrivateDm ? ' notification-private' : ''}" data-id="${n.id}">
         <div class="notification-avatar">${avatar}</div>
         <div class="notification-body">
           <div class="notification-text">${text}</div>
@@ -11727,15 +13338,45 @@ function notificationLabel(n, knownUsername) {
   const titleHint = n.metadata?.title ? ` <em style="color:var(--text2)">"${escHTML(n.metadata.title)}"</em>` : '';
   switch (n.type) {
     // ── You: engagement on your stuff ──
-    case 'like_post':              return `${actorTag} reacted to your post`;
-    case 'like_comment':           return `${actorTag} reacted to your comment`;
-    case 'like_book':              return `${actorTag} liked your book${titleHint}`;
-    case 'comment_post':           return `${actorTag} commented on your post`;
-    case 'comment_video':          return `${actorTag} commented on your video`;
-    case 'reply_comment':          return `${actorTag} replied to your comment`;
-    case 'comment_chapter':        return `${actorTag} commented on your chapter`;
-    case 'reply_chapter_comment':  return `${actorTag} replied to your chapter comment`;
-    case 'repost_post':            return `${actorTag} reposted your post`;
+    case 'like_post':
+    case 'post_like':              // legacy noun_verb, pre-rename migration
+      return `${actorTag} reacted to your post`;
+    case 'like_video':
+    case 'video_like':             // legacy
+      return `${actorTag} reacted to your video`;
+    case 'like_comment':
+    case 'post_comment_like':      // legacy
+    case 'video_comment_like':     // legacy
+      return `${actorTag} reacted to your comment`;
+    case 'like_book':
+    case 'book_like':              // legacy
+      return `${actorTag} liked your book${titleHint}`;
+    case 'comment_post':
+    case 'post_comment':           // legacy
+      return `${actorTag} commented on your post`;
+    case 'comment_video':
+    case 'video_comment':          // legacy
+      return `${actorTag} commented on your video`;
+    case 'reply_comment':
+    case 'post_comment_reply':     // legacy
+    case 'video_comment_reply':    // legacy
+      return `${actorTag} replied to your comment`;
+    case 'comment_chapter':
+    case 'chapter_comment':        // legacy
+      return `${actorTag} commented on your chapter`;
+    case 'reply_chapter_comment':
+    case 'chapter_comment_reply':  // legacy
+      return `${actorTag} replied to your chapter comment`;
+    case 'repost_post':
+    case 'post_repost':            // legacy
+      return `${actorTag} reposted your post`;
+    // ── Follows ──
+    // The notify_on_follow trigger fires this on every new row in
+    // public.follows. Earlier we keyed off 'follow_new_post' /
+    // 'follow_new_video' / 'follow_new_book' for the more specialized
+    // "person you follow just published X" notifications, but the
+    // raw "X started following you" event gets the bare 'follow' type.
+    case 'follow':                 return `${actorTag} started following you`;
 
     // ── Following: people you follow doing things ──
     case 'follow_new_post':        return `${actorTag} posted something new`;
@@ -11773,35 +13414,68 @@ async function onNotificationClick(notifId) {
 
   closeNotifPanel();
 
-  // Navigate to a sensible target
+  // ── DM short-circuit ──────────────────────────────────────────────────
+  // Always land in the inbox/thread for chat notifications, even if the
+  // legacy row predates the parent_target_type backfill and would
+  // otherwise miss the dispatch table below.
   if (n.type === 'dm_message' || n.target_type === 'message' || n.parent_target_type === 'conversation') {
     const convId = n.parent_target_type === 'conversation' ? n.parent_target_id : null;
-    if (convId) {
-      showMessages();
-      setTimeout(() => openConversation(convId), 50);
-    } else {
-      showMessages();
-    }
+    if (convId) { showMessages(); setTimeout(() => openConversation(convId), 50); }
+    else        { showMessages(); }
     return;
   }
-  if (n.target_type === 'book' || n.parent_target_type === 'book') {
-    const bookId = (n.target_type === 'book') ? n.target_id : n.parent_target_id;
-    if (bookId) openBookDetail(bookId);
-  } else if (n.target_type === 'chapter' || n.parent_target_type === 'chapter') {
-    const bookId = n.parent_target_type === 'book' ? n.parent_target_id : null;
-    if (bookId) openBookDetail(bookId);
-  } else if (n.target_type === 'video' || n.parent_target_type === 'video') {
-    // target_id / parent_target_id is a video UUID → prefix "sb_" for playVideo.
-    const supabaseUuid = n.target_type === 'video' ? n.target_id : n.parent_target_id;
-    if (supabaseUuid) playVideo('sb_' + supabaseUuid);
-  } else if (n.parent_target_type === 'post' || n.target_type === 'post') {
-    // We don't have post-detail pages yet — drop them on Home so they can find it
-    setSidebarActive('btnHome');
-    showFeed();
-  } else {
-    setSidebarActive('btnHome');
-    showFeed();
+
+  // ── Data-driven dispatch ──────────────────────────────────────────────
+  // Bell notifications carry a (kind, id) routing pair. Prefer the parent
+  // (the openable surface — post / video / book / profile) over the
+  // immediate target (which for a comment is the comment row itself,
+  // never directly openable). Falls back to target_type when the parent
+  // wasn't populated by the trigger (true for some legacy rows and for
+  // the repost / follow_new_post fanout triggers whose source isn't
+  // versioned in this repo).
+  //
+  // The kind→opener table is the single place to add a new notification
+  // surface. New notification types just need their write-side trigger
+  // to set parent_target_type / parent_target_id correctly — no edits
+  // needed here.
+  //
+  // See migration_notifications_parent_target_type.sql for the matching
+  // server-side change and historical-row backfill.
+  let kind = n.parent_target_type || n.target_type || null;
+  let id   = n.parent_target_id   || n.target_id   || null;
+
+  // 'follow' notifications carry target_type='profile' but target_id IS
+  // NULL (the row's actor_id is the followed-from user). Route to that
+  // profile directly.
+  if (n.type === 'follow') {
+    kind = 'profile';
+    id = n.actor_id || id;
   }
+
+  // A bare 'comment' kind can survive on legacy reply rows where the
+  // parent comment had no post/video link at backfill time. Land the
+  // user on Home rather than open a non-openable target.
+  if (kind === 'comment') {
+    kind = null;
+  }
+
+  const ROUTES = {
+    post:    (postId)    => openPostFromSearch(postId),
+    video:   (videoUuid) => playVideo('sb_' + videoUuid),
+    book:    (bookId)    => openBookDetail(bookId),
+    chapter: (bookId)    => openBookDetail(bookId),
+    profile: (userId)    => openProfile(userId),
+  };
+
+  const opener = kind ? ROUTES[kind] : null;
+  if (opener && id) {
+    opener(id);
+    return;
+  }
+
+  // ── Final fallback ──
+  setSidebarActive('btnHome');
+  showFeed();
 }
 
 async function markAllNotificationsRead() {
@@ -11856,6 +13530,864 @@ document.addEventListener('click', (e) => {
   if (!_notifPanelOpen) return;
   if (e.target.closest('#notificationsPanel') || e.target.closest('#btnNotifications')) return;
   closeNotifPanel();
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// DAILY QUESTS — brainstorming surface (web-only, hardcoded data)
+// ════════════════════════════════════════════════════════════════════════════
+// Goal: ship a clickable UI we can iterate on for daily-quest UX +
+// economics WITHOUT writing schema or backend yet. The hardcoded
+// `_dailyQuestsState` below is the single source of truth — change it
+// to mock different progress states and reload.
+//
+// Once the design feels right, we replace _dailyQuestsState with a
+// fetch from `daily_quests` (quest definitions) + `user_quest_progress`
+// (per-user-per-day completion) on Supabase, and port the same UI to
+// mobile via NotificationCard's pattern.
+//
+// Quests are organized to drive the behaviors we actually want: open
+// the app, read chapters (the core engagement metric), watch videos,
+// engage socially. Rewards are tuned so the heaviest task pays the
+// most per minute of effort, and the meta-bonus for completing all
+// makes the streak emotionally sticky.
+
+// Quest definitions for each cadence (Daily / Weekly / Monthly).
+// `progress` and `claimed` are mutable state and would come from
+// user_quest_progress in production. `target` and `reward` come from
+// the quest definition.
+//
+// Reward design philosophy:
+//   • Daily quests pay out small (3–20 stars) — quick wins, cheap to
+//     repeat, drive DAU.
+//   • Weekly quests pay 30–80 stars — meaningful but require a streak
+//     of engagement, drive 7-day return rate.
+//   • Monthly quests pay 150–500 stars + cosmetic badges — epic goals
+//     for power users, drive long-term retention + a sense of mastery.
+const _dailyQuestsState = {
+  // Streak: consecutive days the user has completed the daily set.
+  // Same number powers the topbar badge + the "Day N" pip strip.
+  streak: 7,
+  bonusClaimed: false,
+  activeTab: 'daily', // 'daily' | 'weekly' | 'monthly'
+
+  // Featured "Quest of the Day" — pinned at the top of the daily tab
+  // with a bigger reward. Rotates daily based on day-of-year so users
+  // get a fresh focal point each session. Pool of 4 below; pick by
+  // (dayOfYear % pool.length).
+  featuredPool: [
+    { id: 'feat_genre',    icon: 'compass', label: 'Try a book in a new genre',  target: 1, reward: 30, unit: '' },
+    { id: 'feat_creator',  icon: 'compass', label: 'Discover a new creator',     target: 1, reward: 30, unit: '' },
+    { id: 'feat_finish',   icon: 'compass', label: 'Finish a chapter today',     target: 1, reward: 30, unit: '' },
+    { id: 'feat_share',    icon: 'compass', label: 'Share a post or book',       target: 1, reward: 30, unit: '' },
+  ],
+
+  // Daily quest list — Charles's spec (v6).
+  //
+  // ECONOMY: 1⭐ = ₱0.05, 1🪙 = ₱0.20.
+  // Max daily payout per user (all quests cleared): 28⭐ + 7🪙 = ₱2.80.
+  //
+  // ⚠️ ABUSE-GUARD NOTES (must enforce server-side before production):
+  //
+  // • follow_creator (10⭐): "Follow 1 Creator/Writer (should always
+  //   new)". Server-side rule: counts ONLY follows of creators the user
+  //   has never followed before (or hasn't followed in 30+ days). Daily
+  //   cap: 1. Without this, a user can follow → unfollow → follow next
+  //   and farm 10⭐ on every cycle.
+  //
+  // • invite_friend (5🪙): SUCCESSFUL invites only. The 5-coin (₱1.00)
+  //   reward is the highest single-quest payout, so it's the highest
+  //   abuse target. Required server-side guards:
+  //     1. Invitee signs up via the inviter's unique referral link/code
+  //        (links the new account to the inviter at signup time).
+  //     2. Invitee verifies their email.
+  //     3. Invitee opens the app on a DIFFERENT calendar day from
+  //        signup (cheap proof-of-human; bots typically create + abandon
+  //        in one session).
+  //     4. ONLY THEN does the inviter's 5🪙 settle and the quest tick.
+  //     5. Daily cap: 1 invite toward this quest (additional invites
+  //        can pay a smaller reward separately, e.g. 1🪙, capped at 5/day).
+  //   Optional anti-self-invite: invitee's IP / device ID / payment
+  //   method must differ from inviter's. Optional 50/50 split: pay
+  //   2.5🪙 on signup, 2.5🪙 after 7-day invitee activity — doubles
+  //   the fraud cost.
+  //
+  // • watch_ads (2🪙): hard-cap at exactly 20 ads/day toward this
+  //   quest — past 20 the counter doesn't tick. Use the rewarded-ad
+  //   SDK so impressions count toward AdMob fill (otherwise the user
+  //   sees ads but you don't get paid). Net economics: 20 ads ≈ +₱4.50
+  //   AdMob revenue vs −₱0.40 reward = +₱4.10/user/day. Revenue-positive.
+  //
+  // • read5 + read10 are "tiered": completing Read 10 also implies
+  //   Read 5. The UI shows both for transparency, but the underlying
+  //   reward should NOT double-pay. Final implementation should either
+  //   merge into one quest with a milestone marker or auto-claim the
+  //   smaller tier when the larger lands. Same for watch30 + watch60.
+  // ─── DAILY QUESTS — POOL REWARD MODEL ─────────────────────────────────
+  // 6 quests on offer; user clears any 4 of them to claim the daily
+  // pool reward = 4⭐ + 1🪙. Per-quest payouts are GONE — only the pool
+  // pays out, which keeps the daily payout envelope strictly bounded
+  // (max ₱0.40 in stars + ₱0.20 in coins = ₱0.60/user/day for the pool).
+  //
+  // Exception: `invite_friend` carries an additional +1🪙 BONUS that
+  // settles on top of the pool reward. The bonus is its own ledger
+  // entry — successful-invite specific (signup + email-verify +
+  // different-day session per the abuse-guard notes elsewhere). Worth
+  // ₱0.20 server-cost; treat as referral-acquisition spend, not engagement.
+  //
+  // Per-quest `reward` and `currency` fields removed — there's no
+  // individual payout to render in the reward pill anymore. The pill
+  // is replaced by a progress-only display ("0/3", "5/10 mins").
+  daily: [
+    // Log-in check anchors the list — auto-clears the moment the user
+    // opens the app and an authenticated session is detected. Cheapest
+    // possible quest by design (free progress toward the pool of 4),
+    // but gated server-side on a real session so guests / signed-out
+    // visitors don't tick it.
+    { id: 'login',         icon: 'door',     label: 'Log in today',            progress: 0, target: 1,  unit: '' },
+    { id: 'read_chapters', icon: 'book',     label: 'Read 3 chapters',         progress: 0, target: 3,  unit: '' },
+    { id: 'watch_video',   icon: 'video',    label: 'Watch 10 mins of video',  progress: 0, target: 10, unit: 'min' },
+    { id: 'like_comment',  icon: 'heart',    label: 'Like & comment 3 posts',  progress: 0, target: 3,  unit: '' },
+    { id: 'follow_user',   icon: 'userplus', label: 'Follow 1 new user',       progress: 0, target: 1,  unit: '' },
+    { id: 'watch_ads',     icon: 'ad',       label: 'Watch 3 ads',             progress: 0, target: 3,  unit: '' },
+    { id: 'invite_friend', icon: 'gift',     label: 'Invite 1 friend',         progress: 0, target: 1,  unit: '', bonus: { stars: 0, coins: 1 } },
+  ],
+
+  // Pool config — drives the reward header + claim button.
+  //
+  // Tight-budget tuning: daily threshold raised to 5 of 7 (was 4) so
+  // the pool earn is gated on real engagement breadth, not just a
+  // couple of cheap clears. Weekly threshold raised to 6 of 9, and
+  // the weekly reward shrunk hard from 20⭐+5🪙 to 8⭐+2🪙 — payout
+  // envelope dropped from ₱2.00 to ₱0.80/user/week. Bonus settlements
+  // (invite_friend / purchase_coin) sit on top but route to acquisition
+  // / margin-positive lines, so they don't pressure the engagement
+  // payout budget.
+  dailyPool: {
+    questsRequired: 5,
+    reward: { stars: 4, coins: 1 },
+    claimed: false,
+  },
+  weeklyPool: {
+    questsRequired: 6,
+    reward: { stars: 8, coins: 2 },
+    claimed: false,
+  },
+  // Monthly pool: 9-of-10 threshold (90% — power-user gate). Reward
+  // 1000🪙 — large aspirational payout that only the heaviest-engaged
+  // power users will clear (90% completion bar across a full month
+  // including 30-day stay-active and IAP/invite quests). Per-user
+  // expected cost is bounded by the % of users who actually hit the
+  // 9-of-10 gate, not the headline 1000🪙 number itself.
+  // Bonus settlements (purchase_coin +5🪙, invite_friend +5🪙) sit on
+  // top via separate margin/acquisition lines.
+  monthlyPool: {
+    questsRequired: 9,
+    reward: { stars: 0, coins: 1000 },
+    claimed: false,
+  },
+
+  // ─── WEEKLY QUESTS — POOL REWARD MODEL ────────────────────────────────
+  // 9 quests on offer; user clears any 5 to claim the weekly pool reward
+  // = 20⭐ + 5🪙. Two quests carry their own +3🪙 bonus settlement on
+  // top of the pool: invite_friend (5 successful invites) and
+  // purchase_coin (1 IAP this week — incentivizes the conversion).
+  // Same per-quest fields as daily (no individual reward / currency).
+  weekly: [
+    { id: 'w_read_chapters', icon: 'book',     label: 'Read 20 chapters',           progress: 0, target: 20, unit: '' },
+    { id: 'w_watch_video',   icon: 'video',    label: 'Watch 60 mins of video',     progress: 0, target: 60, unit: 'min' },
+    { id: 'w_like_comment',  icon: 'heart',    label: 'Like & comment 20 times',    progress: 0, target: 20, unit: '' },
+    { id: 'w_follow_users',  icon: 'userplus', label: 'Follow 5 users',             progress: 0, target: 5,  unit: '' },
+    { id: 'w_share',         icon: 'compass',  label: 'Share 5 books or videos',    progress: 0, target: 5,  unit: '' },
+    { id: 'w_unlock',        icon: 'gift',     label: 'Unlock 3 books or videos',   progress: 0, target: 3,  unit: '' },
+    { id: 'w_watch_ads',     icon: 'ad',       label: 'Watch 10 ads',               progress: 0, target: 10, unit: '' },
+    { id: 'w_invite_friend', icon: 'userplus', label: 'Invite 5 friends',           progress: 0, target: 5,  unit: '', bonus: { stars: 0, coins: 3 } },
+    { id: 'w_purchase_coin', icon: 'gift',     label: 'Purchase coins',             progress: 0, target: 1,  unit: '', bonus: { stars: 0, coins: 3 } },
+  ],
+
+  // ─── MONTHLY QUESTS — POOL REWARD MODEL ───────────────────────────────
+  // 10 quests on offer; user clears any 9 to claim the monthly pool
+  // reward = 20⭐ + 5🪙. Two quests carry their own +5🪙 bonus
+  // settlement on top of the pool (purchase_coin → margin-positive,
+  // invite_friend → acquisition spend).
+  monthly: [
+    { id: 'm_read_chapters', icon: 'book',     label: 'Read 100 chapters',         progress: 0, target: 100, unit: '' },
+    { id: 'm_watch_video',   icon: 'video',    label: 'Watch 300 mins of video',   progress: 0, target: 300, unit: 'min' },
+    { id: 'm_like_comment',  icon: 'heart',    label: 'Like & comment 100 times',  progress: 0, target: 100, unit: '' },
+    { id: 'm_follow_users',  icon: 'userplus', label: 'Follow 20 users',           progress: 0, target: 20,  unit: '' },
+    { id: 'm_share',         icon: 'compass',  label: 'Share 20 books or videos',  progress: 0, target: 20,  unit: '' },
+    { id: 'm_unlock',        icon: 'gift',     label: 'Unlock 30 books or videos', progress: 0, target: 30,  unit: '' },
+    { id: 'm_watch_ads',     icon: 'ad',       label: 'Watch 100 ads',             progress: 0, target: 100, unit: '' },
+    { id: 'm_active30',      icon: 'door',     label: 'Stay active 30 days',       progress: 0, target: 30,  unit: ' days' },
+    { id: 'm_purchase_coin', icon: 'gift',     label: 'Purchase coins 4 times',    progress: 0, target: 4,   unit: '', bonus: { stars: 0, coins: 5 } },
+    { id: 'm_invite_friend', icon: 'userplus', label: 'Invite 10 friends',         progress: 0, target: 10,  unit: '', bonus: { stars: 0, coins: 5 } },
+  ],
+
+  // Per-day completion log for the day-strip rendering. Each entry
+  // is an offset from today (negative = past). Status: 'complete'
+  // means "all daily quests claimed that day". Pre-seeded with the
+  // 7-day streak so the strip looks lived-in on first paint.
+  dayHistory: [
+    { offset: -6, status: 'complete' },
+    { offset: -5, status: 'complete' },
+    { offset: -4, status: 'complete' },
+    { offset: -3, status: 'complete' },
+    { offset: -2, status: 'complete' },
+    { offset: -1, status: 'complete' },
+    { offset:  0, status: 'today'    },
+    { offset:  1, status: 'future'   },
+    { offset:  2, status: 'future'   },
+  ],
+
+  // Persist to localStorage so demo state survives page reloads.
+  _persistKey: 'daily_quests_demo_state_v2',
+};
+
+// Per-tab display config. Lets us drive title text + day-strip cadence
+// + footer label off a single source. Daily strip is fixed at 7 pips
+// (one per day of the current week — Day 1 to Day 7); weekly is a
+// 5-week rolling window; monthly is the last 6 months.
+// User-facing rebrand: "Quests" → "Goals" so the system reads cleaner
+// and matches the mobile app's [Goals][Store] tab. Internal ID/class
+// names (questsXyz, _dailyQuestsState) intentionally NOT renamed —
+// touching them would ripple across hundreds of CSS rules and JS
+// selectors. Only the visible labels change.
+const QUEST_TAB_META = {
+  daily:   { title: 'Daily Goals',   stripCadence: 'day',   stripCount: 7 },
+  weekly:  { title: 'Weekly Goals',  stripCadence: 'week',  stripCount: 5 },
+  monthly: { title: 'Monthly Goals', stripCadence: 'month', stripCount: 6 },
+};
+
+const QUEST_ICONS = {
+  door:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v18"/><line x1="2" y1="22" x2="22" y2="22"/><line x1="14" y1="12" x2="14" y2="13"/></svg>',
+  book:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>',
+  video:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
+  heart:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+  comment: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  compass: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>',
+  star:    '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  userplus:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>',
+  gift:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>',
+  ad:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2" ry="2"/><polygon points="10 8 16 11 10 14 10 8" fill="currentColor"/><line x1="6" y1="22" x2="18" y2="22"/><line x1="12" y1="18" x2="12" y2="22"/></svg>',
+};
+
+// Pick today's featured quest deterministically from the day-of-year so
+// every user sees the SAME quest on a given day (creates a shared "daily
+// thing" to talk about) but rotates through the pool over time.
+function _featuredQuestForToday() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), 0, 0);
+  const diff = now - start;
+  const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const pool = _dailyQuestsState.featuredPool || [];
+  if (pool.length === 0) return null;
+  const def = pool[dayOfYear % pool.length];
+  // Pull mutable progress/claimed state from the persisted overlay if any.
+  const overlay = (_dailyQuestsState.featuredState && _dailyQuestsState.featuredState[def.id]) || {};
+  return {
+    ...def,
+    isFeatured: true,
+    progress: typeof overlay.progress === 'number' ? overlay.progress : 0,
+    claimed: !!overlay.claimed,
+  };
+}
+
+function _loadDailyQuestsFromStorage() {
+  try {
+    const raw = localStorage.getItem(_dailyQuestsState._persistKey);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (saved.day !== new Date().toISOString().slice(0, 10)) return; // new day → reset
+    if (typeof saved.streak === 'number') _dailyQuestsState.streak = saved.streak;
+    if (typeof saved.bonusClaimed === 'boolean') _dailyQuestsState.bonusClaimed = saved.bonusClaimed;
+    if (typeof saved.activeTab === 'string') _dailyQuestsState.activeTab = saved.activeTab;
+    if (saved.featuredState && typeof saved.featuredState === 'object') {
+      _dailyQuestsState.featuredState = saved.featuredState;
+    }
+    for (const tab of ['daily', 'weekly', 'monthly']) {
+      if (Array.isArray(saved[tab])) {
+        for (const q of _dailyQuestsState[tab]) {
+          const found = saved[tab].find(s => s.id === q.id);
+          if (found) {
+            if (typeof found.progress === 'number') q.progress = found.progress;
+            if (typeof found.claimed === 'boolean') q.claimed = found.claimed;
+          }
+        }
+      }
+    }
+  } catch (e) { /* corrupt cache, fall back to defaults */ }
+}
+
+function _saveDailyQuestsToStorage() {
+  try {
+    const snap = (list) => list.map(q => ({ id: q.id, progress: q.progress, claimed: !!q.claimed }));
+    localStorage.setItem(_dailyQuestsState._persistKey, JSON.stringify({
+      day: new Date().toISOString().slice(0, 10),
+      streak: _dailyQuestsState.streak,
+      bonusClaimed: _dailyQuestsState.bonusClaimed,
+      activeTab: _dailyQuestsState.activeTab,
+      daily: snap(_dailyQuestsState.daily),
+      weekly: snap(_dailyQuestsState.weekly),
+      monthly: snap(_dailyQuestsState.monthly),
+      featuredState: _dailyQuestsState.featuredState || {},
+    }));
+  } catch (e) { /* localStorage full or disabled — non-fatal for a demo surface */ }
+}
+
+// ─── Supabase-backed goals (cross-device alignment) ───────────────────
+// Migration: Selebox/migration_goals_progress.sql. The same Dear Jen
+// account → identical state on phone + laptop. localStorage stays as
+// a write-through cache so the panel renders instantly on open;
+// authoritative state is read from / written to Supabase.
+
+const _periodKeyDaily   = (now = new Date()) =>
+  `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+const _periodKeyWeekly  = (now = new Date()) => {
+  // ISO week — same algorithm mobile uses, so both platforms compute
+  // the SAME period_key for the same calendar week.
+  const tmp = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const dayNum = (tmp.getUTCDay() + 6) % 7;
+  tmp.setUTCDate(tmp.getUTCDate() - dayNum + 3);
+  const firstThursday = tmp.valueOf();
+  tmp.setUTCMonth(0, 1);
+  if (tmp.getUTCDay() !== 4) tmp.setUTCMonth(0, 1 + ((4 - tmp.getUTCDay()) + 7) % 7);
+  const weekNum = 1 + Math.round((firstThursday - tmp) / 604800000);
+  return `${now.getFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+};
+const _periodKeyMonthly = (now = new Date()) =>
+  `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+const _PERIOD_KEY_FN = { daily: _periodKeyDaily, weekly: _periodKeyWeekly, monthly: _periodKeyMonthly };
+
+// Pull current-period progress + claim state from Supabase, fold the
+// counters into _dailyQuestsState quest rows. Called on panel open
+// (so the user sees server state, not stale localStorage).
+async function _fetchGoalsFromSupabase() {
+  if (!currentUser?.id) return;
+  try {
+    // Build the (period, period_key) tuples we care about so the
+    // query fires once per period bucket rather than three round-trips.
+    const periods = ['daily', 'weekly', 'monthly'];
+    const periodKeys = periods.map(p => _PERIOD_KEY_FN[p]());
+
+    const [progressRes, claimsRes] = await Promise.all([
+      supabase
+        .from('user_goal_progress')
+        .select('period, period_key, counters')
+        .eq('user_id', currentUser.id)
+        .in('period', periods),
+      supabase
+        .from('user_goal_claims')
+        .select('period, period_key')
+        .eq('user_id', currentUser.id)
+        .in('period', periods),
+    ]);
+
+    if (progressRes.error) {
+      console.warn('[goals] fetch progress', progressRes.error.message);
+    } else {
+      const byPeriod = {};
+      for (const row of progressRes.data || []) {
+        if (row.period_key === _PERIOD_KEY_FN[row.period]()) {
+          byPeriod[row.period] = row.counters || {};
+        }
+      }
+      // Fold server counters onto our local quest definitions.
+      for (const tab of periods) {
+        const counters = byPeriod[tab] || {};
+        for (const q of _dailyQuestsState[tab]) {
+          if (typeof counters[q.id] === 'number') q.progress = counters[q.id];
+        }
+      }
+    }
+
+    if (claimsRes.error) {
+      console.warn('[goals] fetch claims', claimsRes.error.message);
+    } else {
+      for (const row of claimsRes.data || []) {
+        if (row.period_key !== _PERIOD_KEY_FN[row.period]()) continue;
+        const poolKey = row.period === 'daily' ? 'dailyPool' : row.period === 'weekly' ? 'weeklyPool' : 'monthlyPool';
+        if (_dailyQuestsState[poolKey]) _dailyQuestsState[poolKey].claimed = true;
+      }
+    }
+  } catch (e) {
+    console.warn('[goals] fetch fatal', e);
+  }
+}
+
+// Fire the tick_user_goal RPC for a given (period, deltas) pair.
+// Fire-and-forget — local optimistic write already happened via the
+// caller, so a failed RPC just logs.
+async function _fireTickGoalRpc(period, deltas) {
+  if (!currentUser?.id) return;
+  if (!deltas || Object.keys(deltas).length === 0) return;
+  const { error } = await supabase.rpc('tick_user_goal', {
+    p_actor_id: currentUser.id,
+    p_period: period,
+    p_period_key: _PERIOD_KEY_FN[period](),
+    p_deltas: deltas,
+  });
+  if (error) console.warn('[goals] tick rpc', period, error.message);
+}
+
+// Atomic claim. Returns { ok, alreadyClaimed }.
+async function _fireClaimGoalPoolRpc(period, reward = { stars: 0, coins: 0 }) {
+  if (!currentUser?.id) return { ok: true };
+  const { data, error } = await supabase.rpc('claim_user_goal_pool', {
+    p_actor_id: currentUser.id,
+    p_period: period,
+    p_period_key: _PERIOD_KEY_FN[period](),
+    p_stars_to_credit: reward.stars || 0,
+    p_coins_to_credit: reward.coins || 0,
+  });
+  if (error) {
+    console.warn('[goals] claim rpc', period, error.message);
+    return { ok: false };
+  }
+  return { ok: !!data?.ok, alreadyClaimed: !!data?.already_claimed };
+}
+
+let _dailyQuestsPanelOpen = false;
+
+// Render the day-strip pips. Cadence comes from QUEST_TAB_META so each
+// tab gets a different timeline view:
+//   • daily   → recent days as "Day N" pips around the current streak
+//   • weekly  → recent 5 weeks as "W1..W5"
+//   • monthly → recent 6 months as "Jan..Jun"
+// Today/this-week/this-month pip is highlighted; past complete pips are
+// green, missed pips are red strikethrough, future pips are dim.
+function _renderQuestsDayStrip() {
+  const strip = document.getElementById('questsDayStrip');
+  if (!strip) return;
+  const meta = QUEST_TAB_META[_dailyQuestsState.activeTab] || QUEST_TAB_META.daily;
+
+  let pips = [];
+  if (meta.stripCadence === 'day') {
+    // Always show Day 1 through Day 7 — represents the current 7-day
+    // cycle. Status mapping based on streak:
+    //   • streak === 0 → Day 1 is today, rest future
+    //   • 0 < streak < 7 → Days 1..(streak-1) complete, Day streak is today
+    //   • streak >= 7 → all 7 complete; Day 7 is "today" (the day they
+    //     just completed). Higher streaks roll over to a new week (we
+    //     show the same Day 1-7 grid, fully filled).
+    const streak = Math.max(_dailyQuestsState.streak, 0);
+    const cappedStreak = streak === 0 ? 0 : ((streak - 1) % 7) + 1; // 1..7
+    const showFullWeek = streak >= 7;
+    for (let i = 1; i <= 7; i++) {
+      let status;
+      if (showFullWeek) {
+        status = i < cappedStreak ? 'complete' : (i === cappedStreak ? 'today' : 'complete');
+      } else if (streak === 0) {
+        status = i === 1 ? 'today' : 'future';
+      } else {
+        if (i < cappedStreak) status = 'complete';
+        else if (i === cappedStreak) status = 'today';
+        else status = 'future';
+      }
+      pips.push({ label: 'Day', num: i, status });
+    }
+  } else if (meta.stripCadence === 'week') {
+    // Last 5 weeks — current week is highlighted.
+    for (let i = 0; i < meta.stripCount; i++) {
+      const offset = i - (meta.stripCount - 1);
+      pips.push({
+        label: 'Wk',
+        num: meta.stripCount + offset,
+        status: offset === 0 ? 'today' : (offset < 0 ? 'complete' : 'future'),
+      });
+    }
+  } else if (meta.stripCadence === 'month') {
+    const now = new Date();
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    for (let i = 0; i < meta.stripCount; i++) {
+      const offset = i - (meta.stripCount - 1);
+      const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+      pips.push({
+        label: months[d.getMonth()],
+        num: '',
+        status: offset === 0 ? 'today' : (offset < 0 ? 'complete' : 'future'),
+      });
+    }
+  }
+
+  // Daily uses the 7-column grid (exact week view); weekly + monthly use
+  // a horizontal scroll because the count varies / can grow over time.
+  strip.classList.toggle('is-flex', meta.stripCadence !== 'day');
+
+  strip.innerHTML = pips.map(p => {
+    const klass = ['quest-day-pip', `is-${p.status}`].join(' ');
+    const mark = p.status === 'complete' ? '<span class="quest-day-pip-mark">✓</span>' : '';
+    const num = p.num !== '' ? `<span class="quest-day-pip-num">${p.num}</span>` : '';
+    return `<div class="${klass}"><span class="quest-day-pip-label">${p.label}</span>${num}${mark}</div>`;
+  }).join('');
+}
+
+function renderDailyQuests() {
+  const list = document.getElementById('questsList');
+  const streakCount = document.getElementById('questsStreakCount');
+  const streakBadge = document.getElementById('questsStreakBadge');
+  const titleEl = document.getElementById('questsTitle');
+  // questsFooter / questsBonusReward intentionally not queried — the
+  // "Complete all quests for +25 ⭐ bonus" footer was removed from the
+  // DOM (budget envelope didn't allow the meta-payout).
+  if (!list) return;
+
+  const tab = _dailyQuestsState.activeTab;
+  const meta = QUEST_TAB_META[tab] || QUEST_TAB_META.daily;
+  // For the daily tab, prepend today's featured quest. Featured quests
+  // sit above the regular quests with a distinguishing visual treatment
+  // (gradient background + "FEATURED" pill). Featured quest doesn't
+  // participate in the "complete all" meta-bonus calc — it's pure
+  // upside, not gating the streak.
+  const baseQuests = _dailyQuestsState[tab] || [];
+  // Featured "Quest of the Day" disabled — the +30 ⭐ daily payout
+  // sits outside the budget envelope. Quest definitions are still in
+  // _dailyQuestsState.featuredPool for when budget allows reactivating
+  // it; just flip back to the prepend logic from git history.
+  let quests = baseQuests;
+
+  if (titleEl) titleEl.textContent = meta.title;
+  // bonusReward write removed — that DOM node and meta.bonus are gone.
+
+  if (streakCount) streakCount.textContent = _dailyQuestsState.streak;
+  if (streakBadge) {
+    streakBadge.textContent = _dailyQuestsState.streak;
+    streakBadge.style.display = _dailyQuestsState.streak > 0 ? 'flex' : 'none';
+  }
+
+  // Tab-active state in the tab bar.
+  document.querySelectorAll('.quests-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.questsTab === tab);
+  });
+
+  // Day strip — depends on which tab is active.
+  _renderQuestsDayStrip();
+
+  // Premium monochrome currency SVGs — used in the pool reward header
+  // and (for invite-friend) the per-quest bonus tag. fill="currentColor"
+  // so the same shape works for light + dark mode.
+  const STAR_SVG = '<svg class="quest-currency-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="12,2 14.6,9 22,9.5 16.2,14 17.9,21.5 12,17.5 6.1,21.5 7.8,14 2,9.5 9.4,9"/></svg>';
+  const COIN_SVG = '<svg class="quest-currency-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><circle cx="12" cy="12" r="6.5" fill="rgba(255,255,255,0.35)"/><circle cx="12" cy="12" r="3.5"/></svg>';
+
+  // ─── Pool reward header (daily + weekly + monthly) ──────────────────
+  // Pool model: complete N quests of M → claim a single bundled reward.
+  // Lives at the top of the list, replaces individual reward pills.
+  // All three tiers (daily / weekly / monthly) now use the same pool
+  // shape; per-quest claim flow is fully retired.
+  let poolHeader = '';
+  const POOL_KEY_BY_TAB = { daily: 'dailyPool', weekly: 'weeklyPool', monthly: 'monthlyPool' };
+  const POOL_TITLE_BY_TAB = { daily: 'Daily Reward', weekly: 'Weekly Reward', monthly: 'Monthly Reward' };
+  const POOL_BTN_ID_BY_TAB = { daily: 'dailyPoolClaimBtn', weekly: 'weeklyPoolClaimBtn', monthly: 'monthlyPoolClaimBtn' };
+  if (POOL_KEY_BY_TAB[tab]) {
+    const pool = _dailyQuestsState[POOL_KEY_BY_TAB[tab]] || { questsRequired: 4, reward: { stars: 0, coins: 0 }, claimed: false };
+    const completedCount = quests.filter(q => q.progress >= q.target).length;
+    const required = pool.questsRequired || 4;
+    const reachedThreshold = completedCount >= required;
+    const isClaimed = !!pool.claimed;
+    const stars = pool.reward?.stars || 0;
+    const coins = pool.reward?.coins || 0;
+    // Reward label includes the word "Star(s)" / "Coin(s)" alongside
+    // the icon — without it the pill reads as bare numbers + abstract
+    // shapes, leaving new users guessing what they'd actually earn.
+    // Singular "Star" / "Coin" when the value is exactly 1.
+    const starWord = stars === 1 ? 'Star' : 'Stars';
+    const coinWord = coins === 1 ? 'Coin' : 'Coins';
+    const rewardLabel = [
+      stars > 0 ? `${stars} ${STAR_SVG} ${starWord}` : '',
+      coins > 0 ? `${coins} ${COIN_SVG} ${coinWord}` : '',
+    ].filter(Boolean).join(' &nbsp;·&nbsp; ');
+    const action = isClaimed
+      ? '<span class="quest-pool-claimed">✓ Claimed</span>'
+      : (reachedThreshold
+          ? `<button class="quest-pool-claim-btn" id="${POOL_BTN_ID_BY_TAB[tab]}">Claim Reward</button>`
+          : '<span class="quest-pool-progress">' + completedCount + '/' + required + ' quests</span>');
+    poolHeader = `
+      <div class="quest-pool-header ${reachedThreshold && !isClaimed ? 'is-claimable' : ''} ${isClaimed ? 'is-claimed' : ''}">
+        <div class="quest-pool-row">
+          <div class="quest-pool-meta">
+            <div class="quest-pool-title">${POOL_TITLE_BY_TAB[tab]}</div>
+            <div class="quest-pool-subtitle">Finish ${required} quests to earn</div>
+          </div>
+          <div class="quest-pool-reward">${rewardLabel}</div>
+        </div>
+        <div class="quest-pool-action">${action}</div>
+      </div>`;
+  }
+
+  // ─── Per-quest rows ──────────────────────────────────────────────────
+  // All three tabs (daily / weekly / monthly) use the pool model — no
+  // individual payouts, rewards bundled in poolHeader at the top.
+  // Bonus-tagged quests carry an EXTRA payout on top of the pool —
+  // surfaced via the small purple BONUS pill on the right side of the
+  // label row.
+  const isPoolTab = !!POOL_KEY_BY_TAB[tab];
+  const questRows = quests.map(q => {
+    const pct = Math.min(100, Math.round((q.progress / q.target) * 100));
+    const isComplete = q.progress >= q.target;
+    const isClaimed = !!q.claimed;
+    const klass = [
+      isClaimed ? 'is-claimed' : (isComplete ? 'is-claimable' : ''),
+    ].filter(Boolean).join(' ');
+
+    let actionHtml = '';
+    let labelExtras = '';
+    if (isPoolTab) {
+      labelExtras = q.bonus
+        ? `<span class="quest-bonus-tag">+${q.bonus.coins || 0} ${COIN_SVG} BONUS</span>`
+        : '';
+      // No per-quest action in pool mode.
+    } else {
+      const currency = q.currency === 'coin' ? 'coin' : 'star';
+      const glyph = currency === 'coin' ? COIN_SVG : STAR_SVG;
+      actionHtml = isClaimed
+        ? '<span class="quest-claimed-mark">✓</span>'
+        : (isComplete
+            ? `<button class="quest-claim-btn" data-quest="${q.id}">Claim</button>`
+            : `<span class="quest-reward-pill">+${q.reward} ${glyph}</span>`);
+    }
+
+    return `
+      <div class="quest-item ${klass}" data-quest-id="${q.id}">
+        <div class="quest-icon">${QUEST_ICONS[q.icon] || ''}</div>
+        <div class="quest-body">
+          <div class="quest-label-row">
+            <div class="quest-label">${q.label}</div>
+            ${labelExtras}
+          </div>
+          <div class="quest-progress">
+            <div class="quest-progress-bar"><div class="quest-progress-fill" style="width:${pct}%"></div></div>
+            <div class="quest-progress-label">${q.progress}${q.unit}/${q.target}${q.unit}</div>
+          </div>
+        </div>
+        ${actionHtml ? `<div class="quest-action">${actionHtml}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  list.innerHTML = poolHeader + questRows;
+
+  // Wire up the pool claim button — works for both daily + weekly
+  // (only one is on screen at a time, depending on active tab).
+  // Period name lookup so the claim RPC knows which bucket we're
+  // settling — pool key (`dailyPool`) → period (`daily`).
+  const POOL_PERIOD_BY_KEY = { dailyPool: 'daily', weeklyPool: 'weekly', monthlyPool: 'monthly' };
+
+  const wirePoolClaim = (btnId, poolKey) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const pool = _dailyQuestsState[poolKey];
+      if (!pool || pool.claimed) return;
+      // Optimistic flip first so the UI reflects the claim immediately,
+      // then settle server-side. UNIQUE on user_goal_claims rejects a
+      // concurrent claim from another device — the second attempt
+      // returns already_claimed=true (still ok=true), no error.
+      pool.claimed = true;
+      const stars = pool.reward?.stars || 0;
+      const coins = pool.reward?.coins || 0;
+      if (stars > 0) _flyRewardToBalance(btn, stars, 'star');
+      if (coins > 0) setTimeout(() => _flyRewardToBalance(btn, coins, 'coin'), 180);
+      _saveDailyQuestsToStorage();
+      renderDailyQuests();
+      // Fire-and-forget the server claim. If it fails (offline /
+      // network blip), the local cache still shows ✓ Claimed; the
+      // next refresh from server will reconcile if needed.
+      _fireClaimGoalPoolRpc(POOL_PERIOD_BY_KEY[poolKey] || 'daily', pool.reward || {});
+    });
+  };
+  wirePoolClaim('dailyPoolClaimBtn', 'dailyPool');
+  wirePoolClaim('weeklyPoolClaimBtn', 'weeklyPool');
+  wirePoolClaim('monthlyPoolClaimBtn', 'monthlyPool');
+
+  // Per-quest .quest-claim-btn wiring removed — all three tabs use the
+  // pool model now. Per-quest payouts are dead. Bonus-tagged quests
+  // (invite_friend, purchase_coin) settle their bonus through a
+  // server-side ledger when the underlying action succeeds; the UI
+  // doesn't need a click handler for them.
+
+  // Streak tick — bump the streak counter when all REGULAR daily quests
+  // are claimed (featured quest is excluded; it's pure upside, not
+  // gating the streak). The +25 ⭐ "complete all" bonus is intentionally
+  // GONE — the budget envelope can't absorb a second payout layer on
+  // top of the per-quest stars. Footer DOM was removed in index.html;
+  // we keep this hook so the streak +1 still fires once per day.
+  const regularQuests = quests.filter(q => !q.isFeatured);
+  const allClaimed = regularQuests.length > 0 && regularQuests.every(q => q.claimed);
+  if (allClaimed && !_dailyQuestsState.bonusClaimed && tab === 'daily') {
+    _dailyQuestsState.bonusClaimed = true;
+    _dailyQuestsState.streak = (_dailyQuestsState.streak || 0) + 1;
+    _saveDailyQuestsToStorage();
+    setTimeout(renderDailyQuests, 50);
+  }
+}
+
+// ── Reset countdown timer ────────────────────────────────────────────────
+// Renders "Resets in Xh Ym" inline next to the streak pill. Updates every
+// minute via _scheduleQuestsCountdown. Daily resets at midnight local time;
+// weekly resets Monday midnight; monthly resets first of next month.
+function _msUntilDailyReset() {
+  const now = new Date();
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  return tomorrow - now;
+}
+function _msUntilWeeklyReset() {
+  const now = new Date();
+  const day = now.getDay(); // 0 = Sunday
+  const daysToMonday = (8 - (day === 0 ? 7 : day)) % 7 || 7;
+  const nextMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToMonday, 0, 0, 0, 0);
+  return nextMonday - now;
+}
+function _msUntilMonthlyReset() {
+  const now = new Date();
+  const firstNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0);
+  return firstNextMonth - now;
+}
+function _formatCountdown(ms) {
+  if (ms <= 0) return '0m';
+  const totalMin = Math.floor(ms / 60000);
+  const days = Math.floor(totalMin / (60 * 24));
+  const hours = Math.floor((totalMin % (60 * 24)) / 60);
+  const mins = totalMin % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+function _renderQuestsCountdown() {
+  const el = document.getElementById('questsCountdown');
+  if (!el) return;
+  const tab = _dailyQuestsState.activeTab;
+  const ms = tab === 'monthly' ? _msUntilMonthlyReset() : (tab === 'weekly' ? _msUntilWeeklyReset() : _msUntilDailyReset());
+  el.textContent = `Resets in ${_formatCountdown(ms)}`;
+}
+let _questsCountdownInterval = null;
+function _scheduleQuestsCountdown() {
+  _renderQuestsCountdown();
+  if (_questsCountdownInterval) clearInterval(_questsCountdownInterval);
+  _questsCountdownInterval = setInterval(_renderQuestsCountdown, 60 * 1000);
+}
+
+// ── Floating "+N ⭐" / "+N 🪙" reward animation ──────────────────────────
+// Spawns a transient absolute-positioned pill at the claim button's
+// location, then transitions it toward the matching topbar wallet pill.
+// Coin rewards target #topbarCoinBalance, star rewards target
+// #topbarStarBalance. After the animation, the element removes itself.
+function _flyRewardToBalance(originEl, amount, currency) {
+  const isCoin = currency === 'coin';
+  const balElId = isCoin ? 'topbarCoinBalance' : 'topbarStarBalance';
+  const balEl = document.getElementById(balElId) || document.getElementById('topbarCoinPill');
+  const glyph = isCoin ? '🪙' : '⭐';
+  if (!originEl) return;
+  const originRect = originEl.getBoundingClientRect();
+  const targetRect = balEl ? balEl.getBoundingClientRect() : { left: window.innerWidth - 60, top: 20, width: 0, height: 0 };
+  const fly = document.createElement('div');
+  fly.className = `quest-fly-reward ${isCoin ? 'is-coin' : ''}`;
+  fly.textContent = `+${amount} ${glyph}`;
+  fly.style.left = `${originRect.left + originRect.width / 2}px`;
+  fly.style.top  = `${originRect.top  + originRect.height / 2}px`;
+  document.body.appendChild(fly);
+  requestAnimationFrame(() => {
+    fly.classList.add('is-poppin');
+    requestAnimationFrame(() => {
+      const dx = (targetRect.left + targetRect.width / 2) - (originRect.left + originRect.width / 2);
+      const dy = (targetRect.top  + targetRect.height / 2) - (originRect.top  + originRect.height / 2);
+      fly.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.55)`;
+      fly.style.opacity = '0';
+    });
+  });
+  setTimeout(() => fly.remove(), 950);
+  setTimeout(() => {
+    if (balEl) {
+      const cur = parseInt(balEl.textContent || '0', 10) || 0;
+      balEl.textContent = String(cur + amount);
+      balEl.classList.add('is-just-bumped');
+      setTimeout(() => balEl.classList.remove('is-just-bumped'), 600);
+    }
+  }, 700);
+}
+
+function toggleDailyQuestsPanel() {
+  const panel = document.getElementById('dailyQuestsPanel');
+  if (!panel) return;
+  if (_dailyQuestsPanelOpen) {
+    panel.style.display = 'none';
+    _dailyQuestsPanelOpen = false;
+    if (_questsCountdownInterval) {
+      clearInterval(_questsCountdownInterval);
+      _questsCountdownInterval = null;
+    }
+  } else {
+    panel.style.display = 'flex';
+    _dailyQuestsPanelOpen = true;
+    // Render once with the local-cache state for an instant open,
+    // then fire the server fetch and re-render with authoritative
+    // counters. If the server fetch fails (offline) the local cache
+    // remains visible — graceful degradation.
+    renderDailyQuests();
+    _fetchGoalsFromSupabase().then(() => {
+      if (_dailyQuestsPanelOpen) renderDailyQuests();
+    });
+    _scheduleQuestsCountdown();
+  }
+}
+
+// Demo reset — clears localStorage state so we can start fresh during
+// brainstorming. Held back behind the panel header's circular "↻"
+// button so it doesn't show up to real users when this ships.
+function _resetDailyQuestsDemo() {
+  localStorage.removeItem(_dailyQuestsState._persistKey);
+  _dailyQuestsState.streak = 7;
+  _dailyQuestsState.bonusClaimed = false;
+  _dailyQuestsState.featuredState = {};
+  const dailyDefaults = {
+    login: 1, read5: 2, read10: 2, watch30: 12, watch60: 12,
+    like3: 0, comment3: 0, follow_creator: 0, watch_ads: 0, invite_friend: 0,
+  };
+  const weeklyDefaults = {
+    w_read25: 11, w_finish1: 0, w_watch3hr: 47, w_comment10: 2, w_streak7: 7,
+  };
+  const monthlyDefaults = {
+    m_read100: 38, m_finish3: 1, m_streak30: 7, m_engage: 24,
+  };
+  const apply = (list, defaults) => {
+    for (const q of list) {
+      if (q.id in defaults) q.progress = defaults[q.id];
+      q.claimed = false;
+    }
+  };
+  apply(_dailyQuestsState.daily, dailyDefaults);
+  apply(_dailyQuestsState.weekly, weeklyDefaults);
+  apply(_dailyQuestsState.monthly, monthlyDefaults);
+  renderDailyQuests();
+  _renderQuestsCountdown();
+}
+
+// Boot — load any persisted state then paint the streak badge.
+_loadDailyQuestsFromStorage();
+renderDailyQuests();
+
+document.getElementById('btnDailyQuests')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleDailyQuestsPanel();
+});
+document.getElementById('questsResetDemo')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  _resetDailyQuestsDemo();
+});
+// Tab-bar clicks switch which quest list is rendered.
+document.querySelectorAll('.quests-tab').forEach(tab => {
+  tab.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _dailyQuestsState.activeTab = tab.dataset.questsTab || 'daily';
+    _saveDailyQuestsToStorage();
+    renderDailyQuests();
+  });
+});
+// Click outside → close
+document.addEventListener('click', (e) => {
+  if (!_dailyQuestsPanelOpen) return;
+  if (e.target.closest('#dailyQuestsPanel') || e.target.closest('#btnDailyQuests')) return;
+  const panel = document.getElementById('dailyQuestsPanel');
+  if (panel) panel.style.display = 'none';
+  _dailyQuestsPanelOpen = false;
 });
 
 // ════════════════════════════════════════
@@ -12159,7 +14691,7 @@ async function openReactorListModal(targetId, targetType = 'post') {
 // ════════════════════════════════════════════════════════════════════════════
 
 let dmState = {
-  conversations: [],            // [{ id, isGroup, name, otherUser?, members?, lastMessageAt, lastMessagePreview, unread }]
+  conversations: [],            // [{ id, isGroup, isSecret, archived, name, otherUser?, members?, lastMessageAt, lastMessagePreview, unread }]
   activeConvId: null,           // currently-open conversation id
   activeConv: null,             // full active conversation object (incl. is_group, name, members)
   activeOther: null,            // for 1:1: the other user; for groups: null
@@ -12181,7 +14713,191 @@ let dmState = {
   editingMessageId: null,       // bubble being inline-edited
   replyingTo: null,             // { id, body, sender_id, sender_name } when composing a reply
   globalSearchResults: null,    // { conversations: [], messages: [] } when global search is active
+  viewMode: 'active',           // 'active' | 'archived' | 'secret' — which tab pill is selected
 };
+
+// ─────────────────────────────────────────────────────────────────────────
+// Secret-tab lock — web parity for the mobile lib/secret-lock.js module.
+//
+// PIN persists across browser restarts in localStorage (hashed + salted).
+// "Unlocked for this session" is held in sessionStorage so closing the
+// tab forgets the unlock — a closed tab in a coffee-shop browser stays
+// locked until re-authenticated. Visibility change (tab background)
+// triggers a re-lock after RELOCK_AFTER_BG_MS for an extra layer.
+//
+// Threat model: same as mobile — the PIN raises friction for a casual
+// snooper. Anyone with full access to the user's browser data can still
+// recover the salt + hash. For real privacy we'd put the hash on a
+// server profile column with per-device unlock; deferred.
+// ─────────────────────────────────────────────────────────────────────────
+
+const SECRET_LOCK = (() => {
+  const KEY_HASH = 'selebox.secretLock.pinHash.v1';
+  const KEY_SALT = 'selebox.secretLock.pinSalt.v1';
+  const SESSION_UNLOCKED = 'selebox.secretLock.unlocked';
+  const RELOCK_AFTER_BG_MS = 60 * 1000;
+
+  let backgroundedAt = null;
+
+  // djb2 with salt — fast non-crypto digest. Detail in mobile module's
+  // header comment.
+  const djb2 = (s) => {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
+    return (h >>> 0).toString(36);
+  };
+  const genSalt = () => {
+    let s = '';
+    for (let i = 0; i < 16; i++) s += Math.floor(Math.random() * 36).toString(36);
+    return s;
+  };
+  const hashPin = (pin, salt) => djb2(`${salt}:${pin}:${salt}`);
+
+  return {
+    hasPin: () => !!localStorage.getItem(KEY_HASH),
+    setPin: (pin) => {
+      if (!pin || String(pin).length < 4) throw new Error('PIN must be at least 4 digits');
+      const salt = genSalt();
+      localStorage.setItem(KEY_SALT, salt);
+      localStorage.setItem(KEY_HASH, hashPin(String(pin), salt));
+      sessionStorage.setItem(SESSION_UNLOCKED, '1');
+      backgroundedAt = null;
+    },
+    verifyPin: (pin) => {
+      const hash = localStorage.getItem(KEY_HASH);
+      const salt = localStorage.getItem(KEY_SALT);
+      if (!hash || !salt) return false;
+      return hashPin(String(pin), salt) === hash;
+    },
+    unlock: () => {
+      sessionStorage.setItem(SESSION_UNLOCKED, '1');
+      backgroundedAt = null;
+    },
+    lock: () => {
+      sessionStorage.removeItem(SESSION_UNLOCKED);
+      backgroundedAt = null;
+    },
+    isUnlocked: () => sessionStorage.getItem(SESSION_UNLOCKED) === '1',
+    onVisibilityChange: () => {
+      if (document.hidden) {
+        backgroundedAt = Date.now();
+      } else if (backgroundedAt && Date.now() - backgroundedAt > RELOCK_AFTER_BG_MS) {
+        sessionStorage.removeItem(SESSION_UNLOCKED);
+        backgroundedAt = null;
+        // Re-render the conversations list so the lock gate appears if
+        // the user is on the Secret tab.
+        if (typeof renderConversationList === 'function') renderConversationList();
+      }
+    },
+    clearPin: () => {
+      localStorage.removeItem(KEY_HASH);
+      localStorage.removeItem(KEY_SALT);
+      sessionStorage.removeItem(SESSION_UNLOCKED);
+      backgroundedAt = null;
+    },
+  };
+})();
+
+const secretLockIsUnlocked = () => SECRET_LOCK.isUnlocked();
+
+// Wire visibility changes once at module load — covers tab switch,
+// minimize, lock screen on macOS, etc.
+document.addEventListener('visibilitychange', () => SECRET_LOCK.onVisibilityChange());
+
+// Wire the Secret-tab UI handlers — empty-state CTA, lock gate inputs,
+// PIN flow. Called from renderConversationList after the HTML is set.
+function wireSecretTabHandlers(wrap) {
+  // Empty-state CTA: "Start a Secret chat"
+  const startBtn = wrap.querySelector('#dmStartSecretBtn');
+  if (startBtn) startBtn.onclick = () => openSecretChatPicker();
+
+  // Lock gate
+  const gate = wrap.querySelector('.dm-secret-gate');
+  if (!gate) return;
+  const input = gate.querySelector('.dm-secret-input');
+  const submit = gate.querySelector('.dm-secret-submit');
+  const errorEl = gate.querySelector('.dm-secret-error');
+  let pendingPin = null; // first half of the create flow
+
+  const phase = SECRET_LOCK.hasPin() ? 'verify' : 'createNew';
+  let currentPhase = phase;
+
+  const reflect = (txt) => {
+    if (errorEl) errorEl.textContent = txt || '';
+  };
+
+  const onSubmit = () => {
+    const pin = (input?.value || '').replace(/[^0-9]/g, '').slice(0, 6);
+    if (pin.length < 4) { reflect('Use at least 4 digits.'); return; }
+    if (currentPhase === 'createNew') {
+      pendingPin = pin;
+      input.value = '';
+      reflect('');
+      currentPhase = 'createConfirm';
+      const titleEl = gate.querySelector('.dm-secret-title');
+      const subtitleEl = gate.querySelector('.dm-secret-subtitle');
+      if (titleEl) titleEl.textContent = 'Confirm your PIN';
+      if (subtitleEl) subtitleEl.textContent = 'Enter the same digits once more.';
+      input.focus();
+      return;
+    }
+    if (currentPhase === 'createConfirm') {
+      if (pin !== pendingPin) {
+        reflect("PINs don't match. Try again.");
+        pendingPin = null;
+        currentPhase = 'createNew';
+        input.value = '';
+        return;
+      }
+      try {
+        SECRET_LOCK.setPin(pin);
+        renderConversationList();
+      } catch (e) {
+        reflect(e?.message || 'Could not set PIN.');
+      }
+      return;
+    }
+    if (SECRET_LOCK.verifyPin(pin)) {
+      SECRET_LOCK.unlock();
+      renderConversationList();
+    } else {
+      reflect('Wrong PIN.');
+      input.value = '';
+    }
+  };
+
+  if (submit) submit.onclick = onSubmit;
+  if (input) {
+    input.oninput = () => {
+      input.value = input.value.replace(/[^0-9]/g, '').slice(0, 6);
+      reflect('');
+    };
+    input.onkeydown = (e) => { if (e.key === 'Enter') onSubmit(); };
+    setTimeout(() => input.focus(), 0);
+  }
+}
+
+// HTML for the PIN gate. Three phases: createNew, createConfirm, verify.
+// Phase logic lives in wireSecretTabHandlers; this just paints the
+// initial state based on whether a PIN exists.
+function renderSecretLockGateHtml() {
+  const has = SECRET_LOCK.hasPin();
+  const title = has ? 'Enter your Secret PIN' : 'Set a Secret PIN';
+  const subtitle = has
+    ? 'Enter your PIN to view Secret chats.'
+    : 'This PIN locks your Secret tab. Pick at least 4 digits.';
+  const buttonLabel = has ? 'Unlock' : 'Continue';
+  return `
+    <div class="dm-secret-gate">
+      <div class="dm-secret-gate-icon">🔒</div>
+      <div class="dm-secret-title">${title}</div>
+      <div class="dm-secret-subtitle">${subtitle}</div>
+      <input class="dm-secret-input" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••" />
+      <div class="dm-secret-error"></div>
+      <button class="dm-secret-submit" type="button">${buttonLabel}</button>
+    </div>
+  `;
+}
 
 // Quick-reaction emojis (FB-style — these match the existing post REACTIONS set)
 const DM_QUICK_REACTIONS = ['❤️','😂','😮','😢','😡','👍'];
@@ -12239,18 +14955,42 @@ async function loadConversationList() {
     `;
   }
 
-  // Fetch all conversations I'm a participant of (uses participant-based RLS).
-  // Two-step: get my participant rows, then load conversations for those ids.
-  const { data: myParts, error: partErr } = await supabase
-    .from('conversation_participants')
-    .select('conversation_id')
-    .eq('user_id', currentUser.id);
-
-  if (partErr) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(partErr.message)}</div>`;
+  // Fetch the conversation ids the viewer can see. Two parallel sources,
+  // unioned client-side:
+  //   (1) conversation_participants — covers groups + most 1:1s.
+  //   (2) conversations.user_a / user_b — covers 1:1s where the participants
+  //       row was never written. Secret 1:1 conversations created via the
+  //       getOrCreateSecretConversation flow only insert into `conversations`
+  //       and don't always seed `conversation_participants` (depends on the
+  //       trigger pipeline). Without (2), Secret chats are invisible to web
+  //       even though they're correctly stored.
+  // Mobile already does this via direct user_a / user_b query in
+  // lib/messages-supabase.js → loadConversations; this matches that
+  // behavior for cross-platform parity.
+  const [partsRes, oneOnOneRes] = await Promise.all([
+    supabase
+      .from('conversation_participants')
+      .select('conversation_id')
+      .eq('user_id', currentUser.id),
+    supabase
+      .from('conversations')
+      .select('id')
+      .eq('is_group', false)
+      .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`),
+  ]);
+  if (partsRes.error) {
+    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(partsRes.error.message)}</div>`;
     return;
   }
-  const convIds = (myParts || []).map(p => p.conversation_id);
+  if (oneOnOneRes.error) {
+    // Non-fatal — fall back to participants-only. Logged so we notice if
+    // it starts failing universally.
+    console.warn('[dm] 1:1 fetch failed, falling back to participants-only:', oneOnOneRes.error?.message);
+  }
+  const idSet = new Set();
+  for (const p of partsRes.data || []) if (p.conversation_id) idSet.add(p.conversation_id);
+  for (const c of oneOnOneRes.data || []) if (c.id) idSet.add(c.id);
+  const convIds = [...idSet];
   if (!convIds.length) {
     wrap.innerHTML = DM_EMPTY_HTML;
     dmState.conversations = [];
@@ -12260,7 +15000,7 @@ async function loadConversationList() {
 
   const { data: convs, error } = await supabase
     .from('conversations')
-    .select('id, user_a, user_b, is_group, name, avatar_url, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
+    .select('id, user_a, user_b, is_group, is_secret, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
     .in('id', convIds)
     .order('last_message_at', { ascending: false, nullsFirst: false })
     .limit(100);
@@ -12277,13 +15017,11 @@ async function loadConversationList() {
     return;
   }
 
-  // Filter out archived (per-side) conversations
-  const visibleConvs = convs.filter(c => {
-    if (c.is_group) return true; // group archive is per-side too once we add admin UI
-    const archivedByMe = (c.user_a === currentUser.id && c.archived_by_a) ||
-                         (c.user_b === currentUser.id && c.archived_by_b);
-    return !archivedByMe;
-  });
+  // We no longer filter at fetch time. The 3-tab pill (Active / Archived /
+  // Secret) lives in renderConversationList and decides which bucket
+  // each conversation belongs to. This means the user can switch tabs
+  // without re-fetching from the network.
+  const visibleConvs = convs;
 
   // Pull all participants for groups so we can render stacked avatars
   const groupConvIds = visibleConvs.filter(c => c.is_group).map(c => c.id);
@@ -12317,11 +15055,20 @@ async function loadConversationList() {
   ]);
 
   const profileMap = new Map((profiles || []).map(p => [p.id, p]));
+  // totalUnread excludes:
+  //   - Archived (per-side flag)
+  //   - Muted
+  //   - Secret (stealth design — never count toward the global badge)
   let totalUnread = 0;
   dmState.conversations = visibleConvs.map(c => {
     const unread = unreadByConv[c.id] || 0;
     const isMutedNow = isConvMutedForMe(c);
-    if (!isMutedNow) totalUnread += unread;
+    const archivedByMe = c.is_group
+      ? false  // groups don't expose per-side archive yet
+      : ((c.user_a === currentUser.id && c.archived_by_a) ||
+         (c.user_b === currentUser.id && c.archived_by_b));
+    const isSecret = !!c.is_secret;
+    if (!isMutedNow && !archivedByMe && !isSecret) totalUnread += unread;
 
     if (c.is_group) {
       const memberIds = (groupMembersByConv[c.id] || []).filter(id => id !== currentUser.id);
@@ -12332,6 +15079,9 @@ async function loadConversationList() {
       return {
         id: c.id,
         isGroup: true,
+        isSecret,
+        archived: archivedByMe,
+        createdBy: c.created_by,
         name: autoName,
         members: allMembers,
         memberCount: allMembers.length,
@@ -12348,6 +15098,9 @@ async function loadConversationList() {
     return {
       id: c.id,
       isGroup: false,
+      isSecret,
+      archived: archivedByMe,
+      createdBy: c.created_by,
       otherUser: profileMap.get(otherId) || { id: otherId, username: 'Unknown', avatar_url: null },
       lastMessageAt: c.last_message_at,
       lastMessagePreview: c.last_message_preview || '',
@@ -12395,29 +15148,133 @@ function renderConversationList() {
   const wrap = document.getElementById('dmConvList');
   if (!wrap) return;
 
-  if (!dmState.conversations.length) {
-    wrap.innerHTML = DM_EMPTY_HTML;
-    return;
+  // ── Bucket conversations into Active / Archived / Secret ─────────────
+  // Secret wins over Archived — a Secret conversation that's somehow
+  // archived still shows under Secret only, never leaks back to
+  // Archived. This matches the mobile invariant.
+  const buckets = { active: [], archived: [], secret: [] };
+  for (const c of dmState.conversations) {
+    if (c.isSecret) buckets.secret.push(c);
+    else if (c.archived) buckets.archived.push(c);
+    else buckets.active.push(c);
   }
 
-  wrap.innerHTML = dmState.conversations.map(c => renderConvItemHtml(c)).join('');
-  // Wire clicks
+  const mode = dmState.viewMode || 'active';
+  const visible = buckets[mode] || [];
+
+  // ── 3-tab pill ───────────────────────────────────────────────────────
+  // Always show Active. Show Archived only when there's at least one
+  // archived chat OR the user is currently viewing it. Always show
+  // Secret so the lock affordance is discoverable.
+  const showArchivedTab = buckets.archived.length > 0 || mode === 'archived';
+  const pillHtml = `
+    <div class="dm-tab-pill">
+      <button class="dm-tab ${mode === 'active' ? 'is-active' : ''}" data-tab="active" type="button">
+        Active${mode !== 'active' ? ` (${buckets.active.length})` : ''}
+      </button>
+      ${showArchivedTab ? `
+        <button class="dm-tab ${mode === 'archived' ? 'is-active' : ''}" data-tab="archived" type="button">
+          Archived (${buckets.archived.length})
+        </button>` : ''}
+      <button class="dm-tab ${mode === 'secret' ? 'is-active' : ''}" data-tab="secret" type="button">
+        Secret
+      </button>
+    </div>
+  `;
+
+  // ── Body ─────────────────────────────────────────────────────────────
+  // Secret tab is gated by the lock module; if not unlocked, render the
+  // PIN gate instead of the list.
+  let bodyHtml;
+  if (mode === 'secret' && !secretLockIsUnlocked()) {
+    bodyHtml = renderSecretLockGateHtml();
+  } else if (visible.length === 0) {
+    bodyHtml = renderConvEmptyStateHtml(mode);
+  } else {
+    bodyHtml = visible.map(c => renderConvItemHtml(c)).join('');
+  }
+
+  wrap.innerHTML = pillHtml + bodyHtml;
+
+  // Wire pill clicks
+  wrap.querySelectorAll('.dm-tab').forEach(el => {
+    el.onclick = () => {
+      dmState.viewMode = el.dataset.tab;
+      renderConversationList();
+    };
+  });
+
+  // Wire conversation row clicks (only when not on the locked Secret gate)
   wrap.querySelectorAll('.dm-conv-item').forEach(el => {
     el.onclick = () => openConversation(el.dataset.convId);
   });
+
+  // Wire Secret-tab CTA + lock-gate handlers (when present)
+  wireSecretTabHandlers(wrap);
+}
+
+// Empty-state HTML per tab. Secret gets a CTA inviting the user to
+// start one — others get the existing "no chats" copy.
+function renderConvEmptyStateHtml(mode) {
+  if (mode === 'secret') {
+    return `
+      <div class="dm-empty-list">
+        <div class="dm-empty-icon">🔒</div>
+        <div class="dm-empty-title">No Secret chats yet</div>
+        <div class="dm-empty-sub">
+          Secret chats are silent — no notifications, hidden from the unread badge,
+          and only available with mutual followers.
+        </div>
+        <button class="dm-cta-btn" id="dmStartSecretBtn" type="button">🔒 Start a Secret chat</button>
+      </div>
+    `;
+  }
+  if (mode === 'archived') {
+    return `
+      <div class="dm-empty-list">
+        <div class="dm-empty-icon">📥</div>
+        <div class="dm-empty-title">No archived chats.</div>
+      </div>
+    `;
+  }
+  return DM_EMPTY_HTML;
 }
 
 function renderConvItemHtml(c) {
   let safeName, avatarHtml;
   if (c.isGroup) {
     safeName = escHTML(c.name || 'Group chat');
-    avatarHtml = renderGroupAvatarHtml(c.members, 'list');
+    // If the creator has set an explicit group photo (avatar_url), prefer
+    // it. Falls back to the stacked-member avatars when no photo set.
+    // Without this branch, the group-photo edit feature was invisible
+    // anywhere outside the group settings modal — same root cause as
+    // the mobile bug we just fixed.
+    avatarHtml = c.avatarUrl
+      ? `<div class="dm-conv-avatar"><img src="${escHTML(c.avatarUrl)}" alt=""/></div>`
+      : renderGroupAvatarHtml(c.members, 'list');
   } else {
     const u = c.otherUser;
     safeName = escHTML(u.username || 'Unknown');
     avatarHtml = `<div class="dm-conv-avatar">${u.avatar_url
       ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
       : `<span class="dm-avatar-initials">${initials(u.username)}</span>`}</div>`;
+  }
+  // Secret rows get a small lock badge on the avatar so it's clear
+  // at a glance which conversations are stealth.
+  //
+  // We need to add the dm-conv-avatar-secret class to whatever the
+  // outer wrapper turned out to be — but the wrapper varies by branch:
+  //   1:1 with photo:        class="dm-conv-avatar"
+  //   1:1 initials:          class="dm-conv-avatar"
+  //   group with photo:      class="dm-conv-avatar"
+  //   group stacked avatars: class="dm-conv-avatar dm-group-avatar"
+  //   group empty (no others): class="dm-conv-avatar"
+  // A literal-string replace covered three of those but missed the
+  // stacked-group case (no badge for Secret groups). Use a regex that
+  // appends the modifier class regardless of what other classes are
+  // already on the wrapper.
+  if (c.isSecret) {
+    avatarHtml = avatarHtml.replace(/class="dm-conv-avatar([^"]*)"/, 'class="dm-conv-avatar$1 dm-conv-avatar-secret"');
   }
   const isMine = c.lastMessageSender === currentUser.id;
   const senderPrefix = c.isGroup && c.lastMessageSender && !isMine
@@ -12498,7 +15355,7 @@ async function openConversation(convId) {
     // the participants query speculatively so groups don't pay an extra hop.
     const [{ data, error: fetchErr }, { data: parts }] = await Promise.all([
       supabase.from('conversations')
-        .select('id, user_a, user_b, is_group, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, archived_by_a, archived_by_b, muted_until_a, muted_until_b, created_at')
+        .select('id, user_a, user_b, is_group, is_secret, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, archived_by_a, archived_by_b, muted_until_a, muted_until_b, created_at')
         .eq('id', convId)
         .single(),
       supabase.from('conversation_participants').select('user_id').eq('conversation_id', convId),
@@ -12511,7 +15368,7 @@ async function openConversation(convId) {
         : { data: [] };
       const members = (profs || []);
       conv = {
-        id: data.id, isGroup: true,
+        id: data.id, isGroup: true, isSecret: !!data.is_secret, createdBy: data.created_by,
         name: data.name || members.filter(m => m.id !== currentUser.id).slice(0,3).map(m => m.username).join(', '),
         members, memberCount: members.length, avatarUrl: data.avatar_url,
         lastMessageAt: data.last_message_at, lastMessagePreview: data.last_message_preview || '',
@@ -12521,13 +15378,21 @@ async function openConversation(convId) {
       const otherId = data.user_a === currentUser.id ? data.user_b : data.user_a;
       const { data: prof } = await supabase.from('profiles').select('id, username, avatar_url, is_guest').eq('id', otherId).single();
       conv = {
-        id: data.id, isGroup: false,
+        id: data.id, isGroup: false, isSecret: !!data.is_secret, createdBy: data.created_by,
         otherUser: prof || { id: otherId, username: 'Unknown', avatar_url: null },
         lastMessageAt: data.last_message_at,
         lastMessagePreview: data.last_message_preview || '',
         unread: 0, muted: isConvMutedForMe(data), raw: data,
       };
     }
+  }
+  // Carry the raw flags onto the activeConv for any downstream code that
+  // checks them by snake_case (the send-time mutuals gate, etc.).
+  if (conv && conv.raw) {
+    conv.is_secret = !!conv.raw.is_secret;
+    conv.is_group = !!conv.raw.is_group;
+    conv.user_a = conv.raw.user_a;
+    conv.user_b = conv.raw.user_b;
   }
   dmState.activeConv = conv;
   dmState.activeOther = conv.isGroup ? null : conv.otherUser;
@@ -12541,10 +15406,18 @@ async function openConversation(convId) {
   const nameBtn = document.getElementById('dmThreadName');
   const statusEl = document.getElementById('dmThreadStatus');
   if (conv.isGroup) {
-    av.innerHTML = renderGroupAvatarHtml(conv.members, 'list')
-      .replace('class="dm-conv-avatar dm-group-avatar"', 'class="dm-group-avatar dm-group-avatar-header"');
+    // Prefer the explicitly-set group photo (creator-uploaded). Falls
+    // back to the stacked-member rendering when no photo is set. Same
+    // resolution rule as the conversation list — keeps the surfaces in
+    // sync with the group settings modal's avatar editor.
+    if (conv.avatarUrl) {
+      av.innerHTML = `<img src="${escHTML(conv.avatarUrl)}" alt=""/>`;
+    } else {
+      av.innerHTML = renderGroupAvatarHtml(conv.members, 'list')
+        .replace('class="dm-conv-avatar dm-group-avatar"', 'class="dm-group-avatar dm-group-avatar-header"');
+    }
     av.onclick = () => openConvActionsMenu(); // tap header avatar → menu (View members)
-    nameBtn.textContent = conv.name;
+    nameBtn.textContent = (conv.isSecret ? '🔒 ' : '') + conv.name;
     nameBtn.onclick = () => openConvActionsMenu();
     statusEl.textContent = `${conv.memberCount} members`;
   } else {
@@ -12554,7 +15427,7 @@ async function openConversation(convId) {
       : `<span class="dm-avatar-initials">${initials(u.username)}</span>`) +
       `<span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>`;
     av.onclick = () => openProfile(u.id);
-    nameBtn.textContent = u.username || 'Unknown';
+    nameBtn.textContent = (conv.isSecret ? '🔒 ' : '') + (u.username || 'Unknown');
     nameBtn.onclick = () => openProfile(u.id);
     statusEl.textContent = '';
   }
@@ -12936,6 +15809,25 @@ async function sendDmMessage() {
   const replyToId = dmState.replyingTo?.id || null;
   dmState.replyingTo = null;
   if (typeof hideReplyPreview === 'function') hideReplyPreview();
+
+  // Secret-conversation send-time mutuals re-check. Mirrors mobile's
+  // sendMessage gate. The conversation row's is_secret never changes,
+  // so we trust dmState.activeConv (already loaded). For Secret 1:1's
+  // we re-verify the mutual-follow invariant — if either side has
+  // unfollowed since the conversation was created, the message is
+  // refused with a friendly toast. The conversation row stays visible
+  // (frozen) so the user can see the shared history.
+  const ac = dmState.activeConv;
+  if (ac && ac.is_secret && !ac.is_group) {
+    const otherId = ac.user_a === currentUser.id ? ac.user_b : ac.user_a;
+    if (otherId) {
+      const stillMutual = await dmIsMutualFollow(currentUser.id, otherId);
+      if (!stillMutual) {
+        toast('You and this person are no longer mutuals. Secret chat is frozen.', 'error');
+        return;
+      }
+    }
+  }
 
   // Optimistic render
   const tempId = 'temp-' + Date.now();
@@ -13449,9 +16341,18 @@ document.addEventListener('click', (e) => {
 });
 
 // Inbox-wide subscription so the unread badge updates even when DMs page is closed
+// Per-conversation cache of { user_a, user_b, is_secret } — the inbox
+// subscription would otherwise SELECT the same row on every message,
+// burning a round-trip per inbound message. The fields cached here
+// don't change for a conversation's lifetime.
+const __convInboxCache = new Map();
+
 function subscribeToInbox() {
   if (!currentUser) return;
   if (dmState.inboxChannel) supabase.removeChannel(dmState.inboxChannel);
+  // Drop the cache when re-subscribing — different user could be signed
+  // in, different conversations.
+  __convInboxCache.clear();
   dmState.inboxChannel = supabase
     .channel(`dm-inbox-${currentUser.id}`)
     .on('postgres_changes', {
@@ -13461,14 +16362,25 @@ function subscribeToInbox() {
     }, async (payload) => {
       const m = payload.new;
       if (m.sender_id === currentUser.id) return; // my own message
-      // Quick lookup: is this one of MY conversations?
-      const { data: c } = await supabase
-        .from('conversations')
-        .select('user_a, user_b')
-        .eq('id', m.conversation_id)
-        .single();
-      if (!c) return;
-      if (c.user_a !== currentUser.id && c.user_b !== currentUser.id) return;
+
+      let meta = __convInboxCache.get(m.conversation_id);
+      if (!meta) {
+        const { data: c } = await supabase
+          .from('conversations')
+          .select('user_a, user_b, is_secret')
+          .eq('id', m.conversation_id)
+          .single();
+        if (!c) return;
+        meta = { user_a: c.user_a, user_b: c.user_b, is_secret: !!c.is_secret };
+        __convInboxCache.set(m.conversation_id, meta);
+      }
+
+      if (meta.user_a !== currentUser.id && meta.user_b !== currentUser.id) return;
+      // Secret conversations are stealth — never bump the global badge,
+      // never surface a notification. The user discovers them only by
+      // opening the Secret tab. Mirrors mobile's useTotalUnreadCount
+      // suppression and chat-push.js Secret skip.
+      if (meta.is_secret) return;
       // If we're already viewing this thread, the thread channel will mark it read.
       if (dmState.activeConvId === m.conversation_id && messagesPage?.style.display === 'block') return;
       // Otherwise bump unread
@@ -13542,12 +16454,16 @@ document.getElementById('dmSearchInput')?.addEventListener('input', (e) => {
 // Initial badge load + inbox subscription on app boot
 async function bootstrapDmBadge() {
   if (!currentUser) return;
+  // Pull is_secret too so we can exclude Secret conversations from the
+  // global unread total.
   const { data: convs } = await supabase
     .from('conversations')
-    .select('id')
+    .select('id, is_secret')
     .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`);
   if (!convs?.length) { updateUnreadBadge(0); return; }
-  const counts = await fetchUnreadCounts(convs.map(c => c.id));
+  const eligibleIds = convs.filter(c => !c.is_secret).map(c => c.id);
+  if (!eligibleIds.length) { updateUnreadBadge(0); return; }
+  const counts = await fetchUnreadCounts(eligibleIds);
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   updateUnreadBadge(total);
   subscribeToInbox();
@@ -13563,6 +16479,42 @@ window.addEventListener('hashchange', () => {
 if (window.location.hash === '#messages') {
   setTimeout(() => showMessages(), 600);
 }
+
+// Path routing (popstate). Hash routes have hashchange handlers above;
+// path routes need popstate because no hash transitions when going
+// between path-based URLs. Currently only book detail + chapter routes
+// are path-based; everything else still uses hash.
+//
+// On back/forward:
+//   • /books/<id>/chapter/<n>  → re-render book detail, chapter restore
+//   • /books/<id>              → re-render book detail
+//   • anything else (including a hash route)  → no-op; hashchange
+//     handlers cover those paths.
+window.addEventListener('popstate', () => {
+  const path = window.location.pathname || '';
+  const chapterMatch = path.match(/^\/books?\/([^\/?#]+)\/chapter\/([^\/?#]+)/);
+  const bookMatch = !chapterMatch ? path.match(/^\/books?\/([^\/?#]+)$/) : null;
+  if (chapterMatch) {
+    _pendingChapterFromUrl = chapterMatch[2];
+    setSidebarActive('btnBook');
+    openBookDetail(chapterMatch[1]);
+    return;
+  }
+  if (bookMatch) {
+    _pendingChapterFromUrl = null;
+    setSidebarActive('btnBook');
+    openBookDetail(bookMatch[1]);
+    return;
+  }
+  // Path doesn't match a book route — back-button likely went to root
+  // or to a hash route. If there's no hash either, render the home
+  // feed (mirrors the boot router's default branch).
+  if (!window.location.hash && path === '/') {
+    bookDetailPage.style.display = 'none';
+    if (typeof loadStories === 'function') loadStories();
+    if (typeof loadFeed === 'function') loadFeed();
+  }
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 // DMs Phase 3 — reply, conv menu, group creation, search
@@ -13737,47 +16689,598 @@ async function confirmLeaveGroup() {
   renderConversationList();
 }
 
+// Group settings modal — full parity with mobile's group-info screen.
+// Creator-only manage affordances (rename, photo, add, kick); everyone
+// can view + leave. Reuses follow-list-modal styles for the body since
+// the row layout matches.
 function showGroupMembersDialog() {
   const c = dmState.activeConv;
   if (!c?.isGroup) return;
+  const isCreator = c.createdBy === currentUser.id || c.raw?.created_by === currentUser.id;
   closeAllModals('.modal-backdrop[data-modal="group-members"]');
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
   modal.dataset.modal = 'group-members';
+
+  // Sort members: creator first, then alphabetical by username.
+  const creatorId = c.createdBy || c.raw?.created_by;
+  const sortedMembers = [...c.members].sort((a, b) => {
+    if (a.id === creatorId && b.id !== creatorId) return -1;
+    if (b.id === creatorId && a.id !== creatorId) return 1;
+    return (a.username || '').toLowerCase().localeCompare((b.username || '').toLowerCase());
+  });
+
+  const headerAvatar = c.avatarUrl
+    ? `<img src="${escHTML(c.avatarUrl)}" alt=""/>`
+    : `<span class="dm-avatar-initials">${initials(c.name || '?')}</span>`;
+
   modal.innerHTML = `
-    <div class="modal-card follow-list-modal">
-      <div class="follow-list-header">
-        <h2>Members</h2>
-        <p class="modal-sub">${escHTML(c.name)} · ${c.memberCount} members</p>
-      </div>
-      <div class="follow-list-body">
-        ${c.members.map(m => `
-          <div class="follow-list-row">
-            <button class="follow-list-avatar" data-uid="${m.id}">
-              ${m.avatar_url ? `<img src="${escHTML(m.avatar_url)}"/>` : initials(m.username)}
+    <div class="modal-card group-info-modal">
+      <div class="group-info-identity">
+        <div class="group-info-avatar-wrap">
+          <div class="group-info-avatar">${headerAvatar}</div>
+          ${isCreator ? `
+            <button class="group-info-avatar-edit" data-action="edit-avatar" title="Change group photo">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
             </button>
-            <div class="follow-list-info">
-              <button class="follow-list-name" data-uid="${m.id}">@${escHTML(m.username || '')}</button>
-            </div>
-            ${m.id === currentUser.id ? '<span class="follow-list-you">You</span>' : ''}
-          </div>
-        `).join('')}
+            <input type="file" accept="image/*" id="groupInfoFile" style="display:none"/>
+          ` : ''}
+        </div>
+        <div class="group-info-name-row">
+          <h2 class="group-info-name" data-action="${isCreator ? 'edit-name' : ''}">
+            ${escHTML(c.name || 'Group chat')}
+            ${isCreator ? '<span class="group-info-pencil">✎</span>' : ''}
+          </h2>
+        </div>
+        <p class="modal-sub">${c.memberCount} ${c.memberCount === 1 ? 'member' : 'members'}</p>
       </div>
+
+      ${isCreator ? `
+        <button class="group-info-add-row" data-action="add-members" type="button">
+          <span class="group-info-add-icon">+</span>
+          <span>Add members</span>
+        </button>
+      ` : ''}
+
+      <div class="follow-list-body group-info-members-body">
+        ${sortedMembers.map(m => {
+          const isCreatorRow = m.id === creatorId;
+          const isYou = m.id === currentUser.id;
+          const showKick = isCreator && !isCreatorRow;
+          return `
+            <div class="follow-list-row">
+              <button class="follow-list-avatar" data-uid="${m.id}">
+                ${m.avatar_url ? `<img src="${escHTML(m.avatar_url)}"/>` : initials(m.username)}
+              </button>
+              <div class="follow-list-info">
+                <button class="follow-list-name" data-uid="${m.id}">@${escHTML(m.username || '')}${isYou ? ' (You)' : ''}</button>
+                ${isCreatorRow ? '<span class="group-info-creator-badge">Creator</span>' : ''}
+              </div>
+              ${showKick ? `<button class="group-info-kick" data-kick="${m.id}" title="Remove from group">×</button>` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+
       <div class="modal-actions">
+        <button class="btn-danger" data-action="leave">Leave group</button>
         <button class="btn-ghost" data-action="cancel">Close</button>
       </div>
     </div>
   `;
   document.body.appendChild(modal);
-  modal.querySelector('[data-action="cancel"]').onclick = () => modal.remove();
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.remove(); });
-  modal.querySelectorAll('[data-uid]').forEach(el => {
-    el.onclick = () => { modal.remove(); openProfile(el.dataset.uid); };
+
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+
+  // Member row → open profile.
+  modal.querySelectorAll('.follow-list-avatar[data-uid], .follow-list-name[data-uid]').forEach(el => {
+    el.onclick = () => { close(); openProfile(el.dataset.uid); };
   });
+
+  // Inline rename — creator only.
+  if (isCreator) {
+    const nameEl = modal.querySelector('[data-action="edit-name"]');
+    if (nameEl) {
+      nameEl.style.cursor = 'pointer';
+      nameEl.onclick = () => promptRenameGroup(c, modal);
+    }
+    const addBtn = modal.querySelector('[data-action="add-members"]');
+    if (addBtn) addBtn.onclick = () => { close(); openAddMembersModal(c); };
+    const editAvatarBtn = modal.querySelector('[data-action="edit-avatar"]');
+    const fileInput = modal.querySelector('#groupInfoFile');
+    if (editAvatarBtn && fileInput) {
+      editAvatarBtn.onclick = () => fileInput.click();
+      fileInput.onchange = (ev) => handleGroupAvatarPicked(ev, c, modal);
+    }
+    modal.querySelectorAll('.group-info-kick').forEach(btn => {
+      btn.onclick = () => kickGroupMember(c, btn.dataset.kick, btn);
+    });
+  }
+
+  modal.querySelector('[data-action="leave"]').onclick = () => { close(); confirmLeaveGroup(); };
+}
+
+// Inline rename — replaces the heading with an input + save button.
+function promptRenameGroup(c, modal) {
+  const newName = window.prompt('New group name', c.name || '');
+  if (newName == null) return; // cancelled
+  const trimmed = newName.trim().slice(0, 60);
+  if (!trimmed) { toast('Name cannot be empty', 'error'); return; }
+  if (trimmed === c.name) return;
+  supabase.from('conversations').update({ name: trimmed }).eq('id', c.id)
+    .then(({ error }) => {
+      if (error) { toast(error.message || 'Could not rename', 'error'); return; }
+      c.name = trimmed;
+      if (c.raw) c.raw.name = trimmed;
+      toast('Group renamed', 'success');
+      modal.remove();
+      // Reflect in list + thread header.
+      const cached = dmState.conversations.find(x => x.id === c.id);
+      if (cached) cached.name = trimmed;
+      renderConversationList();
+      const nameBtn = document.getElementById('dmThreadName');
+      if (nameBtn) nameBtn.textContent = trimmed;
+    });
+}
+
+// Avatar picker — uploads the picked file to Supabase Storage under
+// group-avatars/<convId>/, then patches conversations.avatar_url.
+async function handleGroupAvatarPicked(ev, c, modal) {
+  const file = ev.target.files?.[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    toast('Please pick an image', 'error');
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    toast('Image too large (max 10MB)', 'error');
+    return;
+  }
+  toast('Uploading…', '');
+  try {
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+    const path = `group-avatars/${c.id}/${currentUser.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { error: upErr } = await supabase.storage.from('images').upload(path, file, {
+      contentType: file.type || `image/${ext}`,
+      cacheControl: '3600',
+      upsert: false,
+    });
+    if (upErr) throw upErr;
+    const { data } = supabase.storage.from('images').getPublicUrl(path);
+    const url = data?.publicUrl;
+    if (!url) throw new Error('Could not resolve uploaded URL');
+    const { error: updErr } = await supabase.from('conversations').update({ avatar_url: url }).eq('id', c.id);
+    if (updErr) throw updErr;
+
+    // Reflect everywhere
+    c.avatarUrl = url;
+    if (c.raw) c.raw.avatar_url = url;
+    const cached = dmState.conversations.find(x => x.id === c.id);
+    if (cached) cached.avatarUrl = url;
+    renderConversationList();
+    const headerAv = document.getElementById('dmThreadAvatar');
+    if (headerAv) headerAv.innerHTML = `<img src="${escHTML(url)}" alt=""/>`;
+    toast('Group photo updated', 'success');
+    modal.remove();
+  } catch (err) {
+    console.error('[dm] group avatar upload failed', err);
+    toast(err?.message || 'Could not update photo', 'error');
+  }
+}
+
+// Add members modal — search profiles excluding existing members, multi-
+// select, on submit insert into conversation_participants.
+function openAddMembersModal(c) {
+  if (!c?.isGroup) return;
+  const existingIds = new Set(c.members.map(m => m.id));
+  closeAllModals('.modal-backdrop[data-modal="group-add"]');
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'group-add';
+  modal.innerHTML = `
+    <div class="modal-card dm-new-modal">
+      <h2>Add members</h2>
+      <p class="modal-sub">People already in the group are hidden from results.</p>
+      <input type="text" class="dm-new-search" id="groupAddSearch" placeholder="Search by username…" autocomplete="off"/>
+      <div class="dm-new-selected" id="groupAddSelected"></div>
+      <div class="dm-new-results" id="groupAddResults">
+        <div class="dm-new-hint">Start typing a username…</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" data-action="cancel">Cancel</button>
+        <button class="btn-primary" data-action="add" disabled>Add</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+
+  const selected = []; // [{id, username, avatar_url}]
+  const search = modal.querySelector('#groupAddSearch');
+  const selectedWrap = modal.querySelector('#groupAddSelected');
+  const results = modal.querySelector('#groupAddResults');
+  const addBtn = modal.querySelector('[data-action="add"]');
+
+  const refreshSelected = () => {
+    selectedWrap.innerHTML = selected.map(u => `
+      <span class="dm-new-chip" data-uid="${u.id}">
+        ${u.avatar_url ? `<img src="${escHTML(u.avatar_url)}"/>` : `<span class="dm-new-chip-init">${initials(u.username)}</span>`}
+        <span>@${escHTML(u.username)}</span>
+        <button class="dm-new-chip-x" aria-label="Remove">×</button>
+      </span>
+    `).join('');
+    selectedWrap.querySelectorAll('.dm-new-chip-x').forEach((btn, i) => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        selected.splice(i, 1);
+        refreshSelected();
+        addBtn.disabled = selected.length === 0;
+      };
+    });
+  };
+
+  let timer = null;
+  search.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = search.value.trim();
+    if (!q) { results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>'; return; }
+    timer = setTimeout(async () => {
+      const excludeIds = [...existingIds, ...selected.map(s => s.id)];
+      let qb = supabase.from('profiles').select('id, username, avatar_url, is_guest').ilike('username', `%${q}%`).limit(20);
+      if (excludeIds.length) qb = qb.not('id', 'in', `(${excludeIds.join(',')})`);
+      const { data } = await qb;
+      if (!data?.length) { results.innerHTML = '<div class="dm-new-hint">No matches.</div>'; return; }
+      results.innerHTML = data.map(p => `
+        <button class="dm-new-result" data-uid="${p.id}" type="button">
+          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
+          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
+        </button>
+      `).join('');
+      results.querySelectorAll('[data-uid]').forEach(btn => {
+        btn.onclick = () => {
+          const profile = data.find(p => p.id === btn.dataset.uid);
+          if (!profile) return;
+          if (selected.some(s => s.id === profile.id)) return;
+          selected.push(profile);
+          search.value = '';
+          results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
+          refreshSelected();
+          addBtn.disabled = selected.length === 0;
+        };
+      });
+    }, 200);
+  });
+  search.focus();
+
+  addBtn.onclick = async () => {
+    if (selected.length === 0) return;
+    addBtn.disabled = true;
+    addBtn.textContent = 'Adding…';
+    try {
+      const rows = selected.map(s => ({ conversation_id: c.id, user_id: s.id }));
+      const { error } = await supabase
+        .from('conversation_participants')
+        .upsert(rows, { onConflict: 'conversation_id,user_id', ignoreDuplicates: true });
+      if (error) throw error;
+      toast(`Added ${selected.length}`, 'success');
+      close();
+      // Refresh the active conv's members list + the conversations list.
+      await refreshActiveConvMembers(c.id);
+      renderConversationList();
+    } catch (err) {
+      console.error('[dm] add members failed', err);
+      toast(err.message || 'Could not add members', 'error');
+      addBtn.disabled = false;
+      addBtn.textContent = 'Add';
+    }
+  };
+}
+
+// Remove a member from a group. Creator-only — UI hides the X for
+// non-creator viewers; this is the second line of defense in case the
+// markup is tampered with.
+async function kickGroupMember(c, userId, btnEl) {
+  if (!c?.isGroup) return;
+  if (c.createdBy && c.createdBy !== currentUser.id) {
+    toast('Only the group creator can remove members', 'error');
+    return;
+  }
+  if (userId === currentUser.id) {
+    toast('Use Leave group to leave', 'error');
+    return;
+  }
+  if (userId === c.createdBy) {
+    toast('Cannot remove the group creator', 'error');
+    return;
+  }
+  if (!window.confirm('Remove this member from the group?')) return;
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '…'; }
+  const { error } = await supabase
+    .from('conversation_participants')
+    .delete()
+    .eq('conversation_id', c.id)
+    .eq('user_id', userId);
+  if (error) {
+    toast(error.message || 'Could not remove', 'error');
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '×'; }
+    return;
+  }
+  toast('Removed', 'success');
+  // Patch local state and re-render the modal.
+  c.members = c.members.filter(m => m.id !== userId);
+  c.memberCount = c.members.length;
+  document.querySelector('.modal-backdrop[data-modal="group-members"]')?.remove();
+  showGroupMembersDialog();
+  renderConversationList();
+}
+
+// Re-fetch the active group's members after a mutation (add). Local
+// state has the old list; we want the canonical server view.
+async function refreshActiveConvMembers(convId) {
+  const c = dmState.activeConv;
+  if (!c || c.id !== convId) return;
+  const { data: parts } = await supabase
+    .from('conversation_participants')
+    .select('user_id')
+    .eq('conversation_id', convId);
+  const memberIds = (parts || []).map(p => p.user_id);
+  if (!memberIds.length) return;
+  const { data: profs } = await supabase
+    .from('profiles')
+    .select('id, username, avatar_url, is_guest')
+    .in('id', memberIds);
+  c.members = profs || [];
+  c.memberCount = c.members.length;
+  // Update the cached row in the conversations list too.
+  const cached = dmState.conversations.find(x => x.id === convId);
+  if (cached) {
+    cached.members = c.members;
+    cached.memberCount = c.memberCount;
+  }
+  // Refresh the open settings modal if the user's still looking at it.
+  const openModal = document.querySelector('.modal-backdrop[data-modal="group-members"]');
+  if (openModal) {
+    openModal.remove();
+    showGroupMembersDialog();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Mutuals helper — both directions of public.follows must exist.
+// Mirrors lib/messages-supabase.js's isMutualFollow on mobile. One round-
+// trip via the OR-of-AND postgrest filter; checks the result client-side
+// for both edges.
+// ─────────────────────────────────────────────────────────────────────────
+async function dmIsMutualFollow(uuidA, uuidB) {
+  if (!uuidA || !uuidB || uuidA === uuidB) return false;
+  const { data, error } = await supabase
+    .from('follows')
+    .select('follower_id, following_id')
+    .or(`and(follower_id.eq.${uuidA},following_id.eq.${uuidB}),and(follower_id.eq.${uuidB},following_id.eq.${uuidA})`);
+  if (error) {
+    console.warn('[dm] isMutualFollow failed:', error.message);
+    return false;
+  }
+  const ab = (data || []).some(r => r.follower_id === uuidA && r.following_id === uuidB);
+  const ba = (data || []).some(r => r.follower_id === uuidB && r.following_id === uuidA);
+  return ab && ba;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Get-or-create Secret 1:1. Direct DB calls on web (no parallel RPC yet).
+// Parity with mobile's getOrCreateSecretConversation:
+//   - Mutuals-only floor (throws if not mutual)
+//   - Self-conversation rejected
+//   - Canonical (smaller, larger) ordering for the unique-pair index
+//   - Fully separate from non-Secret 1:1's (creating a Secret with someone
+//     you already DM does NOT touch the existing thread)
+// ─────────────────────────────────────────────────────────────────────────
+async function dmGetOrCreateSecretConv(otherUserId) {
+  if (!currentUser) throw new Error('Please sign in');
+  if (!otherUserId || otherUserId === currentUser.id) {
+    throw new Error('Cannot start a conversation with yourself');
+  }
+  const mutual = await dmIsMutualFollow(currentUser.id, otherUserId);
+  if (!mutual) throw new Error('Both of you must follow each other to start a Secret chat');
+
+  const [a, b] = currentUser.id < otherUserId
+    ? [currentUser.id, otherUserId]
+    : [otherUserId, currentUser.id];
+
+  const lookup = async () => {
+    const { data } = await supabase
+      .from('conversations')
+      .select('*')
+      .eq('is_group', false)
+      .eq('is_secret', true)
+      .eq('user_a', a)
+      .eq('user_b', b)
+      .maybeSingle();
+    return data;
+  };
+
+  const existing = await lookup();
+  if (existing) return existing.id;
+
+  const { data: created, error } = await supabase
+    .from('conversations')
+    .insert({
+      user_a: a,
+      user_b: b,
+      is_group: false,
+      is_secret: true,
+      created_by: currentUser.id,
+      last_message_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+  if (!error) return created.id;
+  if (error.code === '23505') {
+    // Race — another tab inserted first. Re-fetch.
+    const winner = await lookup();
+    if (winner) return winner.id;
+  }
+  throw error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Secret-chat picker modal — mutuals-only search. Reuses the structure of
+// openNewConvModal but pre-filters profiles to your mutual followers.
+// ─────────────────────────────────────────────────────────────────────────
+async function openSecretChatPicker() {
+  if (!currentUser) { toast('Please sign in', 'error'); return; }
+  closeAllModals('.modal-backdrop[data-modal="dm-new-secret"]');
+
+  // Pre-fetch mutual UUIDs once. Same trick as mobile's SupabaseNewChat.
+  let mutualIds = null;
+  try {
+    const [iFollow, followsMe] = await Promise.all([
+      supabase.from('follows').select('following_id').eq('follower_id', currentUser.id),
+      supabase.from('follows').select('follower_id').eq('following_id', currentUser.id),
+    ]);
+    const aSet = new Set((iFollow.data || []).map(r => r.following_id));
+    const bSet = new Set((followsMe.data || []).map(r => r.follower_id));
+    mutualIds = [];
+    for (const id of aSet) if (bSet.has(id)) mutualIds.push(id);
+  } catch (e) {
+    toast('Could not load mutuals', 'error');
+    return;
+  }
+
+  // Pre-load up to 5 mutual profiles to render as a "Suggested" row of
+  // avatar chips above the search input. Reduces friction for the common
+  // case where you want to start a Secret chat with a frequent contact —
+  // tapping an avatar skips the search entirely.
+  let suggestedMutuals = [];
+  if (mutualIds.length > 0) {
+    try {
+      const { data } = await supabase
+        .from('profiles')
+        .select('id, username, avatar_url, is_guest')
+        .in('id', mutualIds.slice(0, 50)) // upper bound for the IN list
+        .order('username', { ascending: true })
+        .limit(5);
+      suggestedMutuals = data || [];
+    } catch (e) {
+      // Non-fatal — search still works.
+      console.warn('[secret] suggested mutuals load failed', e?.message);
+    }
+  }
+  const moreThanShown = mutualIds.length > suggestedMutuals.length;
+
+  const suggestedHtml = suggestedMutuals.length > 0 ? `
+    <div class="dm-secret-suggested">
+      <div class="dm-secret-suggested-label">Suggested mutuals</div>
+      <div class="dm-secret-suggested-row">
+        ${suggestedMutuals.map(p => `
+          <button class="dm-secret-suggested-chip" data-uid="${p.id}" data-username="${escHTML(p.username || '')}" type="button" title="@${escHTML(p.username || '')}">
+            ${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}" alt=""/>` : `<span class="dm-secret-suggested-initials">${initials(p.username)}</span>`}
+          </button>
+        `).join('')}
+      </div>
+      ${moreThanShown ? '<div class="dm-secret-suggested-more">Search below to find more mutuals.</div>' : ''}
+    </div>` : '';
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.dataset.modal = 'dm-new-secret';
+  modal.innerHTML = `
+    <div class="modal-card dm-new-modal">
+      <h2>🔒 New Secret chat</h2>
+      <p class="modal-sub">
+        ${mutualIds.length === 0
+          ? "You don't have any mutual followers yet. Both people must follow each other to start a Secret chat."
+          : 'Pick a mutual follower. The chat is silent — no notifications.'}
+      </p>
+      ${mutualIds.length > 0 ? `
+        ${suggestedHtml}
+        <input type="text" class="dm-new-search" id="dmSecretSearch" placeholder="Search mutuals by username…" autocomplete="off"/>
+        <div class="dm-new-results" id="dmSecretResults">
+          <div class="dm-new-hint">Start typing a username…</div>
+        </div>` : ''}
+      <div class="modal-actions">
+        <button class="btn-ghost" data-action="cancel">${mutualIds.length === 0 ? 'Close' : 'Cancel'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector('[data-action="cancel"]').onclick = close;
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
+  if (mutualIds.length === 0) return;
+
+  // Shared handler — used by both the suggested-mutuals chips and the
+  // search-result rows. Both call dmGetOrCreateSecretConv and then jump
+  // into the new conversation.
+  const startSecretWith = async (uid, btnEl) => {
+    if (!uid) return;
+    if (btnEl) btnEl.disabled = true;
+    try {
+      const convId = await dmGetOrCreateSecretConv(uid);
+      close();
+      dmState.viewMode = 'secret';
+      await loadConversationList();
+      await openConversation(convId);
+    } catch (err) {
+      console.error('[dm] secret create failed', err);
+      toast(err.message || 'Failed to start Secret chat', 'error');
+      if (btnEl) btnEl.disabled = false;
+    }
+  };
+
+  // Wire the suggested-mutuals chips
+  modal.querySelectorAll('.dm-secret-suggested-chip').forEach((chip) => {
+    chip.onclick = () => startSecretWith(chip.dataset.uid, chip);
+  });
+
+  const search = modal.querySelector('#dmSecretSearch');
+  const results = modal.querySelector('#dmSecretResults');
+  let timer = null;
+  search.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = search.value.trim();
+    if (!q) {
+      results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
+      return;
+    }
+    timer = setTimeout(async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('id, username, avatar_url, is_guest')
+        .ilike('username', `%${q}%`)
+        .in('id', mutualIds)
+        .neq('id', currentUser.id)
+        .limit(20);
+      if (!data?.length) {
+        results.innerHTML = '<div class="dm-new-hint">No matching mutuals.</div>';
+        return;
+      }
+      results.innerHTML = data.map(p => `
+        <button class="dm-new-result" data-uid="${p.id}" type="button">
+          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
+          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
+          <span class="dm-new-result-arrow">→</span>
+        </button>
+      `).join('');
+      results.querySelectorAll('[data-uid]').forEach(btn => {
+        btn.onclick = () => startSecretWith(btn.dataset.uid, btn);
+      });
+    }, 200);
+  });
+  search.focus();
 }
 
 // ── New conversation modal (1:1 OR group) ────────────────────────────────
 document.getElementById('dmNewBtn')?.addEventListener('click', () => openNewConvModal());
+
+// "+ Secret" header button — exposed if the page has a #dmNewSecretBtn
+// element. The empty-Secret-tab CTA also reaches this via the wired
+// button in renderConvEmptyStateHtml.
+document.getElementById('dmNewSecretBtn')?.addEventListener('click', () => openSecretChatPicker());
 
 function openNewConvModal() {
   if (!currentUser) { toast('Please sign in', 'error'); return; }
