@@ -49,6 +49,9 @@
       <button class="admin-tab" data-tab="bans">Bans</button>
       <button class="admin-tab" data-tab="wallet">Wallet</button>
       <button class="admin-tab" data-tab="payouts">Payouts</button>
+      <button class="admin-tab" data-tab="recovery">
+        Recovery <span class="admin-tab-count" id="recoveryCount">0</span>
+      </button>
       <button class="admin-tab" data-tab="activity">Activity</button>
       <button class="admin-tab" data-tab="settings">Settings</button>
     </nav>
@@ -262,6 +265,36 @@
           <div id="changeRequestsList" class="admin-list">
             <div class="admin-empty">Loading…</div>
           </div>
+        </div>
+      </section>
+
+      <!-- RECOVERY (balance_recovery_requests) -->
+      <section class="admin-tab-content" data-tab-content="recovery" style="display:none">
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>Balance recovery</h2>
+            <span class="admin-toolbar-sub" id="recoverySub">Reports of missing coins, stars, earnings, or account access</span>
+          </div>
+          <div class="admin-toolbar-right">
+            <select id="recoveryFilter" class="admin-select">
+              <option value="open">Pending + needs info</option>
+              <option value="pending">Pending only</option>
+              <option value="needs_info">Needs info</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="all">All</option>
+            </select>
+            <select id="recoveryKind" class="admin-select">
+              <option value="all">All kinds</option>
+              <option value="coin">Coins</option>
+              <option value="star">Stars</option>
+              <option value="earnings">Earnings</option>
+              <option value="account">Account</option>
+            </select>
+          </div>
+        </div>
+        <div id="recoveryList" class="admin-list">
+          <div class="admin-empty">Loading…</div>
         </div>
       </section>
 
