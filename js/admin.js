@@ -79,6 +79,9 @@ function switchTab(name) {
     lazyInit('payoutsFilter', typeof initPayoutsTab === 'function' ? initPayoutsTab : null, null);
     if (typeof switchPayoutsSubtab === 'function') switchPayoutsSubtab('withdrawals');
   }
+  if (name === 'recovery') {
+    lazyInit('recoveryFilter', typeof initRecoveryTab === 'function' ? initRecoveryTab : null, typeof loadRecovery === 'function' ? loadRecovery : null);
+  }
   if (name === 'settings') {
     lazyInit('settingsSearch', typeof initSettingsTab === 'function' ? initSettingsTab : null, typeof loadSettings === 'function' ? loadSettings : null);
   }
@@ -1587,6 +1590,181 @@ async function loadPayouts() {
       if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
       toast('Marked as paid.');
       loadPayouts();
+    });
+    listEl.appendChild(card);
+  }
+}
+
+// ─── Balance recovery (Recovery tab) ───────────────────────────────────
+//
+// Where mobile-app reports of missing coins / stars / earnings / account
+// access land. Mobile submits via submit_balance_recovery_request; this
+// queue lets a moderator review each one, see the user's screenshot
+// (when attached), and either approve (writing a coin/star restore tx
+// for kind=coin/star, or stamping a manual approval for kind=earnings/
+// account) or reject with a reason. Both actions go through admin-only
+// RPCs that enforce role check + idempotency server-side.
+function initRecoveryTab() {
+  document.getElementById('recoveryFilter')?.addEventListener('change', loadRecovery);
+  document.getElementById('recoveryKind')?.addEventListener('change', loadRecovery);
+}
+
+const RECOVERY_KIND_LABEL = {
+  coin: 'Missing coins',
+  star: 'Missing stars',
+  earnings: 'Missing earnings',
+  account: 'Account recovery',
+};
+const RECOVERY_KIND_ICON = {
+  coin: '🪙',
+  star: '⭐',
+  earnings: '₱',
+  account: '👤',
+};
+
+async function loadRecovery() {
+  const listEl = document.getElementById('recoveryList');
+  const subEl  = document.getElementById('recoverySub');
+  const countBadge = document.getElementById('recoveryCount');
+  const filter = document.getElementById('recoveryFilter')?.value || 'open';
+  const kindFilter = document.getElementById('recoveryKind')?.value || 'all';
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  let q = supabase
+    .from('balance_recovery_requests')
+    .select('id, user_id, kind, reported_amount, approved_amount, status, reason, context, admin_notes, reviewed_by, reviewed_at, created_at')
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (filter === 'open')        q = q.in('status', ['pending', 'needs_info']);
+  else if (filter !== 'all')    q = q.eq('status', filter);
+  if (kindFilter !== 'all')     q = q.eq('kind', kindFilter);
+
+  const { data: rows, error } = await q;
+  if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
+
+  // Always update the tab-nav badge with the count of OPEN requests
+  // (pending + needs_info) regardless of the current filter — that's
+  // the actionable backlog the moderator cares about at a glance.
+  try {
+    const { count } = await supabase
+      .from('balance_recovery_requests')
+      .select('id', { head: true, count: 'exact' })
+      .in('status', ['pending', 'needs_info']);
+    if (countBadge) countBadge.textContent = String(count ?? 0);
+  } catch (_) { /* badge is best-effort */ }
+
+  if (!rows?.length) {
+    listEl.innerHTML = `<div class="admin-empty">No ${filter === 'all' ? '' : filter + ' '}requests${kindFilter === 'all' ? '' : ' for ' + RECOVERY_KIND_LABEL[kindFilter]}.</div>`;
+    if (subEl) subEl.textContent = '0 reports';
+    return;
+  }
+
+  // Hydrate requester + reviewer profiles in two batches.
+  const userIds = [...new Set(rows.map(r => r.user_id))];
+  const reviewerIds = [...new Set(rows.map(r => r.reviewed_by).filter(Boolean))];
+  const allIds = [...new Set([...userIds, ...reviewerIds])];
+  const { data: profiles } = await supabase.from('profiles')
+    .select('id, username, email, avatar_url, role')
+    .in('id', allIds);
+  const pMap = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+
+  if (subEl) subEl.textContent = `${rows.length} ${filter === 'open' ? 'open' : filter} report${rows.length === 1 ? '' : 's'}${kindFilter === 'all' ? '' : ' · ' + RECOVERY_KIND_LABEL[kindFilter]}`;
+  listEl.innerHTML = '';
+
+  for (const r of rows) {
+    const u = pMap[r.user_id];
+    const reviewer = r.reviewed_by ? pMap[r.reviewed_by] : null;
+    const ctx = r.context || {};
+    const screenshot = ctx.screenshot_url || null;
+    const amountLabel = r.kind === 'account'
+      ? '—'
+      : r.kind === 'earnings'
+        ? `₱${Number(r.reported_amount).toLocaleString('en-PH')}`
+        : `${Number(r.reported_amount).toLocaleString()} ${r.kind === 'coin' ? 'coins' : 'stars'}`;
+    const approvedLabel = r.approved_amount && r.kind !== 'account'
+      ? (r.kind === 'earnings'
+          ? `₱${Number(r.approved_amount).toLocaleString('en-PH')}`
+          : `${Number(r.approved_amount).toLocaleString()} ${r.kind === 'coin' ? 'coins' : 'stars'}`)
+      : null;
+
+    const card = document.createElement('div');
+    card.className = `payout-card payout-status-${r.status}`;
+    card.innerHTML = `
+      <div class="payout-card-head">
+        <div class="payout-author">
+          <div class="user-row-avatar">${u?.avatar_url ? `<img src="${esc(u.avatar_url)}"/>` : esc(initials(u?.username || 'U'))}</div>
+          <div>
+            <div class="payout-author-name">${esc(u?.username || '(unknown)')}</div>
+            <div class="payout-author-email">${esc(u?.email || '')}</div>
+          </div>
+        </div>
+        <div class="payout-amount">
+          <div class="payout-amount-coins">${esc(RECOVERY_KIND_ICON[r.kind] || '•')} ${esc(RECOVERY_KIND_LABEL[r.kind] || r.kind)}</div>
+          <div class="payout-amount-php">Reported: ${esc(amountLabel)}</div>
+        </div>
+        <span class="payout-status-badge payout-status-badge-${r.status}">${esc(r.status)}</span>
+      </div>
+      <div class="payout-details">
+        ${r.reason ? `<div><strong>Reason:</strong> ${esc(r.reason)}</div>` : ''}
+        <div><strong>Submitted:</strong> ${timeAgo(r.created_at)}</div>
+        ${r.reviewed_at ? `<div><strong>Reviewed:</strong> ${timeAgo(r.reviewed_at)}${reviewer ? ' by ' + esc(reviewer.username || reviewer.email) : ''}</div>` : ''}
+        ${approvedLabel ? `<div><strong>Approved amount:</strong> ${esc(approvedLabel)}</div>` : ''}
+        ${r.admin_notes ? `<div><strong>Admin note:</strong> ${esc(r.admin_notes)}</div>` : ''}
+        ${screenshot ? `<div style="margin-top:8px"><a href="${esc(screenshot)}" target="_blank" rel="noopener"><img src="${esc(screenshot)}" alt="Screenshot" style="max-width:240px;max-height:320px;border-radius:8px;border:1px solid rgba(0,0,0,0.08)"/></a></div>` : ''}
+      </div>
+      <div class="payout-actions">
+        ${(r.status === 'pending' || r.status === 'needs_info')
+          ? `<button class="admin-btn admin-btn-primary" data-act="approve">Approve</button>
+             <button class="admin-btn admin-btn-danger-ghost" data-act="reject">Reject</button>`
+          : ''}
+      </div>
+    `;
+    card.querySelector('[data-act="approve"]')?.addEventListener('click', async () => {
+      // For coin/star/earnings kinds, ask the admin to confirm the
+      // amount they're approving — defaults to whatever the user
+      // reported. For account recovery the amount is just a stamp
+      // (the actual restore happens via support channel) so we use 1.
+      let approvedAmount = 1;
+      if (r.kind !== 'account') {
+        const promptDefault = String(r.reported_amount ?? '');
+        const promptLabel = r.kind === 'earnings'
+          ? `Approved amount in PHP (user reported ₱${promptDefault}):`
+          : `Approved ${r.kind === 'coin' ? 'coins' : 'stars'} (user reported ${promptDefault}):`;
+        const raw = prompt(promptLabel, promptDefault);
+        if (raw === null) return; // cancelled
+        const n = parseInt(String(raw).trim(), 10);
+        if (!Number.isFinite(n) || n <= 0) { toast('Amount must be a positive integer.'); return; }
+        approvedAmount = n;
+      }
+      const note = prompt('Optional admin note (visible to user):') || null;
+      const confirmMsg = r.kind === 'account'
+        ? `Approve account recovery for ${u?.username || 'this user'}? (You'll resolve the actual access via support channel.)`
+        : r.kind === 'earnings'
+          ? `Approve ₱${approvedAmount} earnings for ${u?.username || 'this user'}? (Manual ledger entry still required.)`
+          : `Credit ${approvedAmount} ${r.kind === 'coin' ? 'coins' : 'stars'} to ${u?.username || 'this user'}? This writes a ledger row and bumps their wallet immediately.`;
+      if (!confirm(confirmMsg)) return;
+
+      const { data, error } = await supabase.rpc('approve_balance_recovery_request', {
+        p_request_id: r.id,
+        p_approved_amount: approvedAmount,
+        p_admin_notes: note,
+      });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast(data?.note || 'Approved.');
+      loadRecovery();
+    });
+    card.querySelector('[data-act="reject"]')?.addEventListener('click', async () => {
+      const reason = prompt('Reject reason (visible to user — they\'ll see this in the app):');
+      if (!reason || !reason.trim()) return;
+      const { data, error } = await supabase.rpc('reject_balance_recovery_request', {
+        p_request_id: r.id,
+        p_reason: reason.trim(),
+      });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast('Rejected.');
+      loadRecovery();
     });
     listEl.appendChild(card);
   }
