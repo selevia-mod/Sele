@@ -154,12 +154,20 @@
     <div class="updated" id="updatedAt">&nbsp;</div>
 
     <div class="checks">
+      <!-- Website row.
+           In maintenance through the same window as the Mobile App row
+           below — we're shipping incremental fixes and want both rows
+           to surface the same honest sub-copy. Badge is amber so the
+           "we're actively touching this" signal reads at a glance. The
+           site is still reachable and usable; we just don't want to
+           show a clean green check while work is in flight. Revert to
+           plain "Operational" once the window closes. -->
       <div class="check">
         <div class="check-name">
           Website
-          <small>The page you're reading right now</small>
+          <small>still working on some issues — maintenance</small>
         </div>
-        <span class="check-status is-ok"><span class="check-dot"></span> Operational</span>
+        <span class="check-status is-degraded"><span class="check-dot"></span> Operational · maintenance</span>
       </div>
       <div class="check">
         <div class="check-name">
@@ -174,6 +182,21 @@
           <small>Lock states from the mobile app, every 15 minutes</small>
         </div>
         <span class="check-status is-loading" id="syncStatus"><span class="check-dot"></span> Checking…</span>
+      </div>
+      <!-- Mobile App row.
+           Hardcoded for now — the app is shipping fixes through May 2026
+           and we want users landing on /health to see the same message
+           the in-app banner shows. Badge is amber so the maintenance
+           signal reads at a glance, while the "Operational" prefix
+           keeps it clear the app is still usable today. Promote the
+           badge back to plain "Operational" (is-ok) once the
+           maintenance window closes. -->
+      <div class="check">
+        <div class="check-name">
+          Mobile App
+          <small>iOS &amp; Android · still working on some issues — maintenance</small>
+        </div>
+        <span class="check-status is-degraded"><span class="check-dot"></span> Operational · maintenance</span>
       </div>
     </div>
 
