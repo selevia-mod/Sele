@@ -266,7 +266,24 @@
       else                   set('syncStatus', 'is-down',     'Not running');
 
       // Overall
-      if (dbOk && syncOk) {
+      // While the Website + Mobile App rows are hardcoded as
+      // `is-degraded · maintenance`, the top banner needs to reflect
+      // that — a green "all systems operational" header above two
+      // amber rows reads as a contradiction. We force `is-degraded`
+      // here even when db_ok && sync_ok, with copy that still
+      // communicates "your data is safe and the site works" so users
+      // aren't alarmed. Flip the OPERATIONAL_BANNER constant below
+      // back to true (or just delete this maintenance branch) once
+      // the maintenance window closes and the per-row badges go
+      // back to plain green.
+      const MAINTENANCE_MODE = true;
+      if (MAINTENANCE_MODE && dbOk && syncOk) {
+        setOverall(
+          'is-degraded',
+          'All systems operational · maintenance',
+          "Everything's running, but we're shipping fixes — expect small hiccups on the website and mobile app.",
+        );
+      } else if (dbOk && syncOk) {
         setOverall('is-ok', 'All systems operational', 'Everything is running smoothly.');
       } else if (dbOk) {
         setOverall('is-degraded', 'Partial outage', 'Database is up, but mobile-to-web sync is delayed. Recent mobile changes may take longer to appear on the web.');
