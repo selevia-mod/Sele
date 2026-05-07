@@ -1153,7 +1153,13 @@
               <span class="author-earnings-label">Pending (hold period)</span>
             </div>
             <div class="author-earnings-amount-php" id="earningsPendingPhp">₱0.00</div>
-            <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 1–3 days after they're earned.</div>
+            <!-- Pre-render placeholder. renderAuthorEarningsBalance()
+                 overwrites this on signin with the actual hold period
+                 from app_config.author_earnings_hold_days (currently
+                 7 days). Kept generic so the static copy doesn't
+                 contradict the dynamic value during the brief paint
+                 between mount and first render. -->
+            <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available after a short hold period.</div>
           </div>
         </div>
 
