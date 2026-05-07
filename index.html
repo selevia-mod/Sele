@@ -1408,7 +1408,8 @@
               </button>
             </div>
 
-            <input type="file" id="dmFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none"/>
+            <!-- multiple lets the user pick up to 10 photos in one gesture; the change handler caps + processes them. -->
+            <input type="file" id="dmFileInput" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none"/>
 
             <form class="dm-composer" id="dmComposer" onsubmit="return false">
               <button type="button" class="dm-composer-btn" id="dmAttachBtn" title="Attach photo or GIF" aria-label="Attach">
