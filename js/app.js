@@ -140,6 +140,12 @@ let _walletConfigDefaults = {     // mirrors app_config; loaded once on signin
   video_recurring_unlock_seconds:  600,  // Phase 6 — 10 min star window
   min_chapter_words:               100,  // chapter publish floor
   max_chapter_words:               10000, // chapter publish ceiling
+  // Earnings hold knob — read by the Author Earnings card so the
+  // "available in N days" copy stays in sync with whatever the SQL
+  // app_config.author_earnings_hold_days is set to. Default 7 matches
+  // the current production value (down from 14 on May 2026). Update
+  // SQL → both web + mobile picks it up; no client deploy needed.
+  author_earnings_hold_days:       7,
 };
 let _walletChannel = null;
 
@@ -9220,9 +9226,18 @@ function renderAuthorEarningsBalance() {
   document.getElementById('earningsAvailablePhp').textContent = formatPhpFromMinor(availMinor);
   document.getElementById('earningsPendingPhp').textContent   = formatPhpFromMinor(pendMinor);
 
-  // Hold copy — kept as "1–3 days" range regardless of underlying config
+  // Hold copy — driven by app_config.author_earnings_hold_days so web
+  // and mobile stay aligned whenever the SQL knob changes (was 14d,
+  // dropped to 7d May 2026). The previous hardcoded "1–3 days" went
+  // stale the moment the SQL was flipped; now the only update needed
+  // is the SQL row + page reload.
+  const holdDays = Number(_walletConfigDefaults.author_earnings_hold_days) || 7;
   const foot = document.getElementById('earningsHoldFootnote');
-  if (foot) foot.textContent = "Earnings become available 1–3 days after they're earned.";
+  if (foot) {
+    foot.textContent = holdDays === 1
+      ? "Earnings become available 1 day after they're earned."
+      : `Earnings become available ${holdDays} days after they're earned.`;
+  }
 
   // Minimum payout hint — show admin-configured floor, or ₱100 by default
   const minPayoutMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
