@@ -10917,6 +10917,50 @@ body:not(.light) .video-monet-option-mode { background: rgba(255,255,255,0.10); 
   color: var(--text2);
   margin: 1.5rem 0 0.6rem;
 }
+/* Withdrawals-under-maintenance banner — sits above the Available /
+   Pending balance cards on the Earnings tab so writers see the
+   reassurance copy before scanning their numbers. Same intent as the
+   mobile banner in earnings.jsx (and same purple-soft chassis as
+   BalanceRecoveryBanner). Soft purple wash + purple-tinted border so
+   it reads informational, not alarming. */
+.author-earnings-maintenance-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin: 0 0 1rem;
+  border-radius: 14px;
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.28);
+}
+.author-earnings-maintenance-icon {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(139, 92, 246, 0.16);
+  color: #7c3aed;
+}
+.author-earnings-maintenance-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.author-earnings-maintenance-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.01em;
+  margin-bottom: 4px;
+}
+.author-earnings-maintenance-body {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text2);
+}
+
 .author-earnings-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -10983,6 +11027,24 @@ body:not(.light) .video-monet-option-mode { background: rgba(255,255,255,0.10); 
 .author-earnings-payout-btn {
   align-self: flex-start;
   margin-top: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Disabled state — used while withdrawals are under maintenance.
+   Same purple base so the button still reads as the primary action,
+   but at ~45% opacity with a not-allowed cursor so users see it's
+   intentionally inactive (not just slow to respond). The lock icon
+   reinforces the meaning. */
+.author-earnings-payout-btn:disabled,
+.author-earnings-payout-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.author-earnings-payout-btn-icon {
+  display: inline-flex;
+  align-items: center;
 }
 .author-earnings-foot {
   font-size: 0.74rem;
@@ -11420,6 +11482,149 @@ body:not(.light) .earnings-breakdown-icon { background: rgba(167,139,250,0.12); 
 }
 .payout-amount-coins { font-weight: 700; font-size: 1rem; color: #92400e; }
 .payout-amount-php { font-size: 0.84rem; color: var(--admin-text-2, #6b7280); margin-top: 0.1rem; }
+/* Highlighted peso amount — used in the new admin payout cards where
+   "0 coins" was removed and the peso figure is the primary number a
+   moderator scans for. Larger, bolder, brand purple. */
+.payout-amount-php-lg {
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: #7c3aed;
+  letter-spacing: -0.02em;
+  margin-top: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status tabs (Pending / Approved / Paid / Rejected / All). Replaced
+   the legacy <select> dropdown so a moderator can flip between
+   buckets at a glance. Pill-shaped tabs with a count badge per
+   status; active tab gets the brand purple. */
+.payouts-status-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0.75rem 0 1rem;
+  padding: 4px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  border-radius: 999px;
+  width: fit-content;
+}
+.payouts-status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--admin-text-2, #6b7280);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.payouts-status-tab:hover { background: rgba(139, 92, 246, 0.08); color: #7c3aed; }
+.payouts-status-tab.active {
+  background: #7c3aed;
+  color: #ffffff;
+  font-weight: 800;
+}
+.payouts-status-tab.active .payouts-status-count { color: rgba(255, 255, 255, 0.8); }
+.payouts-status-count {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Verification grid + media previews — what the moderator scans
+   before approving / paying out. KYC-fed account name, the user-
+   provided email + home address, plus thumbnail previews of the
+   GCash QR and signature so a moderator can match against the
+   destination account at a glance. Click any image to open the
+   full-size signed URL in a new tab. */
+.payout-verify {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 1.25rem;
+  padding: 1rem 1.1rem;
+  border-top: 1px solid rgba(139, 92, 246, 0.12);
+  background: rgba(139, 92, 246, 0.03);
+}
+.payout-verify-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 18px;
+  align-content: start;
+}
+.payout-verify-row {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.payout-verify-row-wide { grid-column: span 2; }
+.payout-verify-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-2, #6b7280);
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.payout-verify-val {
+  font-size: 0.86rem;
+  color: var(--admin-text, #111827);
+  font-weight: 500;
+  word-break: break-word;
+}
+.payout-verify-media {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.payout-verify-media-card {
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.payout-verify-media-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-2, #6b7280);
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-align: center;
+}
+.payout-verify-img {
+  width: 100%;
+  height: 140px;
+  object-fit: contain;
+  background: #f7f5ff;
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+.payout-verify-media-empty {
+  font-size: 0.78rem;
+  color: var(--admin-text-2, #6b7280);
+  text-align: center;
+  padding: 32px 8px;
+  background: #f7f5ff;
+  border-radius: 6px;
+  font-style: italic;
+}
+
+/* Stack the verification grid + media on narrow viewports so the
+   thumbnails don't squeeze the data column. */
+@media (max-width: 760px) {
+  .payout-verify { grid-template-columns: 1fr; }
+  .payout-verify-grid { grid-template-columns: 1fr; }
+  .payout-verify-row-wide { grid-column: auto; }
+}
 .payout-status-badge {
   font-size: 0.7rem; font-weight: 800;
   letter-spacing: 0.04em; text-transform: uppercase;
