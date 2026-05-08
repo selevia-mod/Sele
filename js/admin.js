@@ -1750,8 +1750,60 @@ async function loadPayouts() {
 // account) or reject with a reason. Both actions go through admin-only
 // RPCs that enforce role check + idempotency server-side.
 function initRecoveryTab() {
+  // Hidden status select still drives loadRecovery — listen for both
+  // direct change events (no-op now since the select is hidden but
+  // kept for forward compat) and clicks on the new status tabs.
   document.getElementById('recoveryFilter')?.addEventListener('change', loadRecovery);
   document.getElementById('recoveryKind')?.addEventListener('change', loadRecovery);
+  // Wire the 4-stage tabs (For Review / Approved / Resolved /
+  // Rejected / All). Each tab pushes its data-filter value into the
+  // hidden select and triggers a fresh load. Mirrors the Withdrawals
+  // status-tab pattern.
+  document
+    .querySelectorAll('[data-tab-content="recovery"] .payouts-status-tab')
+    .forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const filter = tab.dataset.filter || 'pending';
+        document
+          .querySelectorAll('[data-tab-content="recovery"] .payouts-status-tab')
+          .forEach((t) => {
+            const isActive = t === tab;
+            t.classList.toggle('active', isActive);
+            t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+          });
+        const sel = document.getElementById('recoveryFilter');
+        if (sel) sel.value = filter;
+        loadRecovery();
+      });
+    });
+}
+
+// Refresh the count badges on the recovery tabs so a moderator can
+// see at a glance how many requests are in each state.
+async function _refreshRecoveryStatusCounts() {
+  const counts = { pending: 0, approved: 0, resolved: 0, rejected: 0 };
+  try {
+    const { data } = await supabase
+      .from('balance_recovery_requests')
+      .select('status')
+      .in('status', ['pending', 'needs_info', 'approved', 'resolved', 'rejected']);
+    for (const row of data || []) {
+      // Bucket needs_info under pending so the For Review tab shows
+      // both pending AND needs-info as one combined queue.
+      const bucket = row.status === 'needs_info' ? 'pending' : row.status;
+      if (counts.hasOwnProperty(bucket)) counts[bucket] += 1;
+    }
+  } catch {
+    /* badges fall back to "·" */
+  }
+  const setTxt = (id, n) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = n > 0 ? String(n) : '·';
+  };
+  setTxt('recoveryCountPending',  counts.pending);
+  setTxt('recoveryCountApproved', counts.approved);
+  setTxt('recoveryCountResolved', counts.resolved);
+  setTxt('recoveryCountRejected', counts.rejected);
 }
 
 const RECOVERY_KIND_LABEL = {
@@ -1771,10 +1823,14 @@ async function loadRecovery() {
   const listEl = document.getElementById('recoveryList');
   const subEl  = document.getElementById('recoverySub');
   const countBadge = document.getElementById('recoveryCount');
-  const filter = document.getElementById('recoveryFilter')?.value || 'open';
+  const filter = document.getElementById('recoveryFilter')?.value || 'pending';
   const kindFilter = document.getElementById('recoveryKind')?.value || 'all';
   if (!listEl) return;
   listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  // Refresh the per-status tab count badges in parallel — best-effort,
+  // not on the critical render path so failures don't block the list.
+  _refreshRecoveryStatusCounts().catch(() => {});
 
   let q = supabase
     .from('balance_recovery_requests')
@@ -1782,9 +1838,11 @@ async function loadRecovery() {
     .order('created_at', { ascending: false })
     .limit(200);
 
-  if (filter === 'open')        q = q.in('status', ['pending', 'needs_info']);
-  else if (filter !== 'all')    q = q.eq('status', filter);
-  if (kindFilter !== 'all')     q = q.eq('kind', kindFilter);
+  // "pending" tab actually means For Review = pending + needs_info,
+  // since needs_info is a sub-state of "still being reviewed."
+  if (filter === 'pending')      q = q.in('status', ['pending', 'needs_info']);
+  else if (filter !== 'all')     q = q.eq('status', filter);
+  if (kindFilter !== 'all')      q = q.eq('kind', kindFilter);
 
   const { data: rows, error } = await q;
   if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
@@ -1863,7 +1921,10 @@ async function loadRecovery() {
         ${(r.status === 'pending' || r.status === 'needs_info')
           ? `<button class="admin-btn admin-btn-primary" data-act="approve">Approve</button>
              <button class="admin-btn admin-btn-danger-ghost" data-act="reject">Reject</button>`
-          : ''}
+          : r.status === 'approved'
+            ? `<button class="admin-btn admin-btn-primary" data-act="mark-resolved">Mark as Resolved</button>
+               <button class="admin-btn admin-btn-danger-ghost" data-act="reject">Reject (revert)</button>`
+            : ''}
       </div>
     `;
     card.querySelector('[data-act="approve"]')?.addEventListener('click', async () => {
@@ -1884,11 +1945,16 @@ async function loadRecovery() {
         approvedAmount = n;
       }
       const note = prompt('Optional admin note (visible to user):') || null;
-      const confirmMsg = r.kind === 'account'
-        ? `Approve account recovery for ${u?.username || 'this user'}? (You'll resolve the actual access via support channel.)`
+      // All kinds now follow the same flow: Approve flips status to
+      // 'approved'; the actual credit is done manually by the admin
+      // (SQL insert into author_earnings / coin_transactions /
+      // star_transactions). Once credited, click "Mark as Resolved".
+      const valueLabel = r.kind === 'account'
+        ? 'account recovery'
         : r.kind === 'earnings'
-          ? `Approve ₱${approvedAmount} earnings for ${u?.username || 'this user'}? (Manual ledger entry still required.)`
-          : `Credit ${approvedAmount} ${r.kind === 'coin' ? 'coins' : 'stars'} to ${u?.username || 'this user'}? This writes a ledger row and bumps their wallet immediately.`;
+          ? `₱${approvedAmount}`
+          : `${approvedAmount} ${r.kind === 'coin' ? 'coins' : 'stars'}`;
+      const confirmMsg = `Approve ${valueLabel} for ${u?.username || 'this user'}?\n\nNo wallet/ledger changes happen yet — credit them manually, then come back and click "Mark as Resolved".`;
       if (!confirm(confirmMsg)) return;
 
       const { data, error } = await supabase.rpc('approve_balance_recovery_request', {
@@ -1897,7 +1963,22 @@ async function loadRecovery() {
         p_admin_notes: note,
       });
       if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
-      toast(data?.note || 'Approved.');
+      toast(data?.note || 'Approved. Credit manually then mark resolved.');
+      loadRecovery();
+    });
+    card.querySelector('[data-act="mark-resolved"]')?.addEventListener('click', async () => {
+      const note = prompt(
+        'Optional resolution note (e.g. "Credited via author_earnings row id <uuid>"):',
+        '',
+      );
+      if (note === null) return; // user cancelled the prompt
+      if (!confirm(`Mark this ${r.kind} recovery as Resolved for ${u?.username || 'this user'}?\n\nThis records that the credit has actually landed in their account.`)) return;
+      const { data, error } = await supabase.rpc('resolve_balance_recovery_request', {
+        p_request_id: r.id,
+        p_admin_notes: note && note.trim() ? note.trim() : null,
+      });
+      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
+      toast('Resolved.');
       loadRecovery();
     });
     card.querySelector('[data-act="reject"]')?.addEventListener('click', async () => {
