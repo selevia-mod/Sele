@@ -1394,7 +1394,28 @@ function initPayoutsTab() {
   document.querySelectorAll('[data-tab-content="payouts"] .admin-subtab').forEach(t => {
     t.addEventListener('click', () => switchPayoutsSubtab(t.dataset.subtab));
   });
+  // Hidden legacy <select> still drives loadPayouts — listen for
+  // both direct change events (no-op now since the select is hidden,
+  // but kept for forward compat) and clicks on the new status tabs.
   document.getElementById('payoutsFilter')?.addEventListener('change', loadPayouts);
+  document.querySelectorAll('.payouts-status-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const filter = tab.dataset.filter || 'pending';
+      // Update the visual active state.
+      document.querySelectorAll('.payouts-status-tab').forEach((t) => {
+        const isActive = t === tab;
+        t.classList.toggle('active', isActive);
+        t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      });
+      // Push the value into the hidden select that loadPayouts reads
+      // and call it directly. (The select's `change` event doesn't
+      // fire on programmatic .value writes, so we trigger the load
+      // ourselves.)
+      const sel = document.getElementById('payoutsFilter');
+      if (sel) sel.value = filter;
+      loadPayouts();
+    });
+  });
   document.getElementById('kycFilter')?.addEventListener('change', loadKycList);
   document.getElementById('changeRequestsFilter')?.addEventListener('change', loadChangeRequests);
 }
@@ -1489,12 +1510,67 @@ async function loadChangeRequests() {
 }
 
 // ─── Withdrawals ───────────────────────────────────────────────────────
+//
+// Sign a Supabase Storage path so admin previews work for KYC images
+// (qr code + signature). Author KYC files live in a private bucket;
+// without a signed URL the <img> 403s. 1-hour signed URLs are plenty
+// for a single moderator session — they expire well before a payout
+// queue review takes long enough to matter.
+async function _signKycUrl(rawUrl) {
+  if (!rawUrl) return null;
+  // Already an https URL (e.g. legacy Appwrite asset) — pass through.
+  if (/^https?:\/\//i.test(rawUrl)) return rawUrl;
+  // Otherwise treat it as a path inside the user_documents bucket.
+  // The bucket name matches what mobile uploads to in user-documents.js.
+  try {
+    const { data, error } = await supabase
+      .storage
+      .from('user_documents')
+      .createSignedUrl(rawUrl, 60 * 60);
+    if (error) return null;
+    return data?.signedUrl || null;
+  } catch {
+    return null;
+  }
+}
+
+// Refresh the count badges on the status tabs so a moderator can see
+// at a glance how many pending / approved / paid / rejected requests
+// are in the queue without flipping between tabs.
+async function _refreshPayoutStatusCounts() {
+  const counts = { pending: 0, approved: 0, paid: 0, rejected: 0 };
+  try {
+    const { data } = await supabase
+      .from('author_withdrawals')
+      .select('status', { count: 'exact', head: false })
+      .in('status', ['pending', 'approved', 'paid', 'rejected']);
+    for (const row of data || []) {
+      if (counts.hasOwnProperty(row.status)) counts[row.status] += 1;
+    }
+  } catch {
+    /* swallow — badges fall back to "·" */
+  }
+  const setTxt = (id, n) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = n > 0 ? String(n) : '·';
+  };
+  setTxt('payoutsCountPending',  counts.pending);
+  setTxt('payoutsCountApproved', counts.approved);
+  setTxt('payoutsCountPaid',     counts.paid);
+  setTxt('payoutsCountRejected', counts.rejected);
+}
+
 async function loadPayouts() {
   const listEl = document.getElementById('payoutsList');
   const subEl  = document.getElementById('payoutsSub');
-  const filter = document.getElementById('payoutsFilter')?.value || 'open';
+  const filter = document.getElementById('payoutsFilter')?.value || 'pending';
   if (!listEl) return;
   listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  // Refresh the tab count badges in parallel — purely informational,
+  // not on the critical render path so failures here don't block the
+  // list from rendering.
+  _refreshPayoutStatusCounts().catch(() => {});
 
   let q = supabase
     .from('author_withdrawals')
@@ -1502,8 +1578,7 @@ async function loadPayouts() {
     .order('requested_at', { ascending: false })
     .limit(200);
 
-  if (filter === 'open')          q = q.in('status', ['pending', 'approved']);
-  else if (filter !== 'all')      q = q.eq('status', filter);
+  if (filter !== 'all') q = q.eq('status', filter);
 
   const { data: rows, error } = await q;
   if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
@@ -1513,20 +1588,63 @@ async function loadPayouts() {
     return;
   }
 
-  // Hydrate author info
+  // Hydrate author info AND author_kyc in one shot per author. KYC
+  // carries the verification details a moderator needs to confirm
+  // before sending money — full name, address, the user's own
+  // contact email (separate from auth email), payment_qr_url, and
+  // signature_url. Without this, the admin had no way to verify
+  // who they were paying without flipping to a different tab.
   const authorIds = [...new Set(rows.map(r => r.author_id))];
-  const { data: authors } = await supabase.from('profiles')
-    .select('id, username, email, avatar_url, role')
-    .in('id', authorIds);
+  const [{ data: authors }, { data: kycRows }] = await Promise.all([
+    supabase.from('profiles')
+      .select('id, username, email, avatar_url, role')
+      .in('id', authorIds),
+    supabase.from('author_kyc')
+      .select('user_id, full_name, address, email, phone, payment_method, payment_qr_url, signature_url, id_document_url, status, submitted_at')
+      .in('user_id', authorIds),
+  ]);
   const aMap = Object.fromEntries((authors || []).map(a => [a.id, a]));
+  const kMap = Object.fromEntries((kycRows || []).map(k => [k.user_id, k]));
 
-  if (subEl) subEl.textContent = `${rows.length} ${filter === 'open' ? 'open' : filter} request${rows.length === 1 ? '' : 's'}`;
+  // Pre-sign the storage paths for the QR + signature in parallel so
+  // the cards render with usable <img src> attrs in one paint, not as
+  // a flicker after each card mounts.
+  const signTasks = [];
+  for (const k of (kycRows || [])) {
+    if (k.payment_qr_url && !/^https?:\/\//i.test(k.payment_qr_url)) {
+      signTasks.push(
+        _signKycUrl(k.payment_qr_url).then((u) => { k.payment_qr_signed = u; }),
+      );
+    } else {
+      k.payment_qr_signed = k.payment_qr_url || null;
+    }
+    if (k.signature_url && !/^https?:\/\//i.test(k.signature_url)) {
+      signTasks.push(
+        _signKycUrl(k.signature_url).then((u) => { k.signature_signed = u; }),
+      );
+    } else {
+      k.signature_signed = k.signature_url || null;
+    }
+  }
+  await Promise.all(signTasks);
+
+  if (subEl) subEl.textContent = `${rows.length} ${filter} request${rows.length === 1 ? '' : 's'}`;
   listEl.innerHTML = '';
 
   for (const w of rows) {
     const a = aMap[w.author_id];
+    const k = kMap[w.author_id] || {};
     const detailsObj = w.payout_details || {};
     const phpFmt = '₱' + (w.amount_php_minor / 100).toLocaleString('en-PH', { minimumFractionDigits: 2 });
+    // Source-of-truth resolution for the verification fields. The
+    // user-entered email + address from KYC win over the auth email
+    // (which the user can't change). Account name falls back from
+    // payout_details to KYC full_name. Account number lives only on
+    // payout_details.
+    const accountName  = detailsObj.account_name || k.full_name || '';
+    const accountNumber = detailsObj.account_number || '';
+    const homeAddress  = k.address || '';
+    const userEmail    = k.email || a?.email || '';
     const card = document.createElement('div');
     card.className = `payout-card payout-status-${w.status}`;
     card.innerHTML = `
@@ -1538,22 +1656,49 @@ async function loadPayouts() {
             <div class="payout-author-email">${esc(a?.email || '')}</div>
           </div>
         </div>
+        <!-- Removed the "0 coins" line — withdrawals are denominated
+             in pesos for the moderator's purposes; coin units add
+             noise. The peso amount is now the prominent figure. -->
         <div class="payout-amount">
-          <div class="payout-amount-coins">${w.amount_coins.toLocaleString()} coins</div>
-          <div class="payout-amount-php">${phpFmt}</div>
+          <div class="payout-amount-php payout-amount-php-lg">${phpFmt}</div>
         </div>
         <span class="payout-status-badge payout-status-badge-${w.status}">${esc(w.status)}</span>
       </div>
-      <div class="payout-details">
-        <div><strong>Method:</strong> ${esc(w.payout_method)}</div>
-        <div><strong>Account name:</strong> ${esc(detailsObj.account_name || '—')}</div>
-        <div><strong>Account #:</strong> ${esc(detailsObj.account_number || '—')}</div>
-        ${detailsObj.bank_name ? `<div><strong>Bank:</strong> ${esc(detailsObj.bank_name)}</div>` : ''}
-        <div><strong>Requested:</strong> ${timeAgo(w.requested_at)}</div>
-        ${w.approved_at ? `<div><strong>Approved:</strong> ${timeAgo(w.approved_at)}</div>` : ''}
-        ${w.paid_at ? `<div><strong>Paid:</strong> ${timeAgo(w.paid_at)}${w.hitpay_payout_ref ? ' · ref ' + esc(w.hitpay_payout_ref) : ''}</div>` : ''}
-        ${w.rejection_reason ? `<div><strong>Rejection reason:</strong> ${esc(w.rejection_reason)}</div>` : ''}
+
+      <!-- Verification grid — what the moderator must check before
+           pressing Approve / Mark as paid. Account name + #, the
+           user-entered email + home address, and visual previews of
+           the GCash QR code and signature so the moderator can match
+           against the destination account. -->
+      <div class="payout-verify">
+        <div class="payout-verify-grid">
+          <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(w.payout_method || k.payment_method || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Account name</span><span class="payout-verify-val">${esc(accountName || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Account #</span><span class="payout-verify-val">${esc(accountNumber || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Email (user)</span><span class="payout-verify-val">${esc(userEmail || '—')}</span></div>
+          <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(homeAddress || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Requested</span><span class="payout-verify-val">${timeAgo(w.requested_at)}</span></div>
+          ${w.approved_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Approved</span><span class="payout-verify-val">${timeAgo(w.approved_at)}</span></div>` : ''}
+          ${w.paid_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Paid</span><span class="payout-verify-val">${timeAgo(w.paid_at)}${w.hitpay_payout_ref ? ' · ref ' + esc(w.hitpay_payout_ref) : ''}</span></div>` : ''}
+          ${w.rejection_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Rejection reason</span><span class="payout-verify-val">${esc(w.rejection_reason)}</span></div>` : ''}
+        </div>
+
+        <div class="payout-verify-media">
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">GCash QR</div>
+            ${k.payment_qr_signed
+              ? `<a href="${esc(k.payment_qr_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(k.payment_qr_signed)}" alt="GCash QR" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">Signature</div>
+            ${k.signature_signed
+              ? `<a href="${esc(k.signature_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(k.signature_signed)}" alt="Signature" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+        </div>
       </div>
+
       <div class="payout-actions">
         ${w.status === 'pending'
           ? `<button class="admin-btn admin-btn-primary" data-act="approve">Approve</button>
