@@ -209,19 +209,41 @@
           <div class="admin-toolbar">
             <div class="admin-toolbar-left">
               <h2>Author withdrawals</h2>
-              <span class="admin-toolbar-sub" id="payoutsSub">Pending and approved requests at the top</span>
-            </div>
-            <div class="admin-toolbar-right">
-              <select id="payoutsFilter" class="admin-select">
-                <option value="open">Pending + approved</option>
-                <option value="pending">Pending only</option>
-                <option value="approved">Approved only</option>
-                <option value="paid">Paid</option>
-                <option value="rejected">Rejected</option>
-                <option value="all">All</option>
-              </select>
+              <span class="admin-toolbar-sub" id="payoutsSub">Verify KYC details before approving payouts</span>
             </div>
           </div>
+          <!-- Status tabs — replaced the legacy `<select id="payoutsFilter">`
+               so a moderator can flip between Pending / Approved / Paid /
+               Rejected without hunting for a dropdown. The data-filter
+               attr is what loadPayouts reads to scope the SELECT. -->
+          <div class="payouts-status-tabs" role="tablist" aria-label="Withdrawal status">
+            <button class="payouts-status-tab active" data-filter="pending" role="tab" aria-selected="true">
+              Pending <span class="payouts-status-count" id="payoutsCountPending">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="approved" role="tab" aria-selected="false">
+              Approved <span class="payouts-status-count" id="payoutsCountApproved">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="paid" role="tab" aria-selected="false">
+              Paid <span class="payouts-status-count" id="payoutsCountPaid">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="rejected" role="tab" aria-selected="false">
+              Rejected <span class="payouts-status-count" id="payoutsCountRejected">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="all" role="tab" aria-selected="false">
+              All
+            </button>
+          </div>
+          <!-- Hidden legacy filter element kept as the source of truth
+               for loadPayouts; tab clicks update its value then call
+               loadPayouts(). Lets the existing JS keep working without
+               a refactor. -->
+          <select id="payoutsFilter" class="admin-select" hidden>
+            <option value="pending" selected>Pending</option>
+            <option value="approved">Approved</option>
+            <option value="paid">Paid</option>
+            <option value="rejected">Rejected</option>
+            <option value="all">All</option>
+          </select>
           <div id="payoutsList" class="admin-list">
             <div class="admin-empty">Loading…</div>
           </div>
