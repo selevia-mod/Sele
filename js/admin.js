@@ -12,6 +12,29 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[c]));
 
+// ─── birthdate formatter ─────────────────────────────────────────────────────
+// Used by the Payouts verification grid to surface the user's date of
+// birth in the same readable form the mobile Payment Info screen shows
+// it ("January 1, 2000"), instead of the raw ISO date PostgreSQL returns
+// ("2000-01-01"). Returns the empty string for null/undefined/invalid
+// inputs so the caller can chain `... || '—'` without nesting checks.
+const _formatBirthdate = (raw) => {
+  if (!raw) return '';
+  // Postgres date columns serialize as 'YYYY-MM-DD' (no time component);
+  // splitting + rebuilding via Date is timezone-safe (constructing
+  // `new Date('2000-01-01')` would parse as UTC midnight and could
+  // shift to the previous day in PHT, displaying "December 31, 1999").
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(raw));
+  let d;
+  if (m) {
+    d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  } else {
+    d = new Date(raw);
+  }
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+};
+
 // ─── auth + role check ───────────────────────────────────────────────────────
 let currentMod = null;
 
@@ -1451,14 +1474,40 @@ async function loadChangeRequests() {
     return;
   }
 
-  // Hydrate user info
+  // Hydrate user info AND each user's current author_kyc row so the
+  // reviewer sees the full verification context (not just the diff).
+  // Approving a change request is the same trust decision as approving
+  // a withdrawal or KYC submission — same identity attachments matter.
   const userIds = [...new Set(rows.map(r => r.user_id))];
-  const { data: users } = await supabase.from('profiles').select('id, username, avatar_url, email').in('id', userIds);
+  const [{ data: users }, { data: kycRows }] = await Promise.all([
+    supabase.from('profiles').select('id, username, avatar_url, email').in('id', userIds),
+    supabase.from('author_kyc')
+      .select('user_id, full_name, date_of_birth, id_type, id_number, id_document_url, payment_qr_url, signature_url, payment_method, phone, email, address, status')
+      .in('user_id', userIds),
+  ]);
   const userMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+  const kycMap  = Object.fromEntries((kycRows || []).map(k => [k.user_id, k]));
+
+  // Pre-sign image URLs (QR / signature / valid-ID) — same recipe as
+  // loadPayouts and loadKycList.
+  const signTasks = [];
+  for (const k of (kycRows || [])) {
+    if (k.payment_qr_url && !/^https?:\/\//i.test(k.payment_qr_url)) {
+      signTasks.push(_signKycUrl(k.payment_qr_url).then((u) => { k.payment_qr_signed = u; }));
+    } else { k.payment_qr_signed = k.payment_qr_url || null; }
+    if (k.signature_url && !/^https?:\/\//i.test(k.signature_url)) {
+      signTasks.push(_signKycUrl(k.signature_url).then((u) => { k.signature_signed = u; }));
+    } else { k.signature_signed = k.signature_url || null; }
+    if (k.id_document_url && !/^https?:\/\//i.test(k.id_document_url)) {
+      signTasks.push(_signKycUrl(k.id_document_url).then((u) => { k.id_document_signed = u; }));
+    } else { k.id_document_signed = k.id_document_url || null; }
+  }
+  await Promise.all(signTasks);
 
   listEl.innerHTML = '';
   for (const r of rows) {
     const user = userMap[r.user_id];
+    const k = kycMap[r.user_id] || {};
     const card = document.createElement('div');
     card.className = 'kyc-card';
 
@@ -1478,6 +1527,46 @@ async function loadChangeRequests() {
         </div>
         <span class="payout-status-badge payout-status-badge-${r.status}">${r.status}</span>
       </div>
+
+      <!-- Full identity context. Same shape as the Withdrawals + KYC
+           review cards so reviewers don't have to context-switch when
+           flipping between tabs. -->
+      <div class="payout-verify">
+        <div class="payout-verify-grid">
+          <div class="payout-verify-row"><span class="payout-verify-label">Full name</span><span class="payout-verify-val">${esc(k.full_name || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Birthdate</span><span class="payout-verify-val">${esc(_formatBirthdate(k.date_of_birth) || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Phone</span><span class="payout-verify-val">${esc(k.phone || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Email (user)</span><span class="payout-verify-val">${esc(k.email || user?.email || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(k.payment_method || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">ID type</span><span class="payout-verify-val">${esc(k.id_type || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">ID number</span><span class="payout-verify-val">${esc(k.id_number || '—')}</span></div>
+          <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(k.address || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Requested</span><span class="payout-verify-val">${timeAgo(r.requested_at)}</span></div>
+          ${r.reviewed_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Reviewed</span><span class="payout-verify-val">${timeAgo(r.reviewed_at)}</span></div>` : ''}
+        </div>
+
+        <div class="payout-verify-media">
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">GCash QR</div>
+            ${k.payment_qr_signed
+              ? `<a href="${esc(k.payment_qr_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(k.payment_qr_signed)}" alt="GCash QR" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">Signature</div>
+            ${k.signature_signed
+              ? `<a href="${esc(k.signature_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(k.signature_signed)}" alt="Signature" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">Valid ID</div>
+            ${k.id_document_signed
+              ? `<a href="${esc(k.id_document_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(k.id_document_signed)}" alt="Valid ID" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+        </div>
+      </div>
+
       <div class="cr-reason"><strong>Reason:</strong> ${esc(r.reason || '—')}</div>
       <div class="cr-diff-list">${diffRows.join('') || '<em>No changes captured</em>'}</div>
       ${r.rejection_reason ? `<div class="cr-rejection"><strong>Rejection:</strong> ${esc(r.rejection_reason)}</div>` : ''}
@@ -1600,7 +1689,10 @@ async function loadPayouts() {
       .select('id, username, email, avatar_url, role')
       .in('id', authorIds),
     supabase.from('author_kyc')
-      .select('user_id, full_name, address, email, phone, payment_method, payment_qr_url, signature_url, id_document_url, status, submitted_at')
+      // date_of_birth added 2026-05-10 so the admin verification grid
+      // can show it alongside phone — finance needs to confirm the
+      // recipient's identity matches the GCash account before paying.
+      .select('user_id, full_name, address, email, phone, date_of_birth, payment_method, payment_qr_url, signature_url, id_document_url, status, submitted_at')
       .in('user_id', authorIds),
   ]);
   const aMap = Object.fromEntries((authors || []).map(a => [a.id, a]));
@@ -1624,6 +1716,15 @@ async function loadPayouts() {
       );
     } else {
       k.signature_signed = k.signature_url || null;
+    }
+    // Valid-ID document — same sign-or-pass-through pattern as QR
+    // and signature so the third media card renders without a flicker.
+    if (k.id_document_url && !/^https?:\/\//i.test(k.id_document_url)) {
+      signTasks.push(
+        _signKycUrl(k.id_document_url).then((u) => { k.id_document_signed = u; }),
+      );
+    } else {
+      k.id_document_signed = k.id_document_url || null;
     }
   }
   await Promise.all(signTasks);
@@ -1675,6 +1776,8 @@ async function loadPayouts() {
           <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(w.payout_method || k.payment_method || '—')}</span></div>
           <div class="payout-verify-row"><span class="payout-verify-label">Account name</span><span class="payout-verify-val">${esc(accountName || '—')}</span></div>
           <div class="payout-verify-row"><span class="payout-verify-label">Account #</span><span class="payout-verify-val">${esc(accountNumber || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Birthdate</span><span class="payout-verify-val">${esc(_formatBirthdate(k.date_of_birth) || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Phone</span><span class="payout-verify-val">${esc(k.phone || '—')}</span></div>
           <div class="payout-verify-row"><span class="payout-verify-label">Email (user)</span><span class="payout-verify-val">${esc(userEmail || '—')}</span></div>
           <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(homeAddress || '—')}</span></div>
           <div class="payout-verify-row"><span class="payout-verify-label">Requested</span><span class="payout-verify-val">${timeAgo(w.requested_at)}</span></div>
@@ -1694,6 +1797,16 @@ async function loadPayouts() {
             <div class="payout-verify-media-label">Signature</div>
             ${k.signature_signed
               ? `<a href="${esc(k.signature_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(k.signature_signed)}" alt="Signature" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+          <!-- Valid ID — added 2026-05-10. Finance verifies the
+               recipient's government-issued ID matches the account
+               name + birthdate before processing the payout. Same
+               sign-on-load pattern as QR + Signature. -->
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">Valid ID</div>
+            ${k.id_document_signed
+              ? `<a href="${esc(k.id_document_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(k.id_document_signed)}" alt="Valid ID" loading="lazy"/></a>`
               : `<div class="payout-verify-media-empty">— not provided —</div>`}
           </div>
         </div>
@@ -2003,9 +2116,14 @@ async function loadKycList() {
   if (!listEl) return;
   listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
 
+  // Match the Withdrawals card's selection so KYC reviewers see the
+  // full verification context (phone, address, payment method + the
+  // three image attachments) before approving. Reviewing identity
+  // without the QR / signature / valid-ID side-by-side is essentially
+  // approving blind.
   let q = supabase
     .from('author_kyc')
-    .select('user_id, full_name, date_of_birth, id_type, id_number, id_document_url, selfie_url, status, rejection_reason, submitted_at, reviewed_at')
+    .select('user_id, full_name, date_of_birth, id_type, id_number, id_document_url, selfie_url, payment_qr_url, signature_url, payment_method, phone, email, address, status, rejection_reason, submitted_at, reviewed_at')
     .order('submitted_at', { ascending: false })
     .limit(200);
   if (filter !== 'all') q = q.eq('status', filter);
@@ -2023,11 +2141,32 @@ async function loadKycList() {
     .in('id', userIds);
   const uMap = Object.fromEntries((users || []).map(u => [u.id, u]));
 
+  // Pre-sign the three image URLs (QR / signature / valid-ID) in
+  // parallel. Same pattern as loadPayouts so cards render with usable
+  // <img src> in one paint instead of flickering after each card mounts.
+  const signTasks = [];
+  for (const r of rows) {
+    if (r.payment_qr_url && !/^https?:\/\//i.test(r.payment_qr_url)) {
+      signTasks.push(_signKycUrl(r.payment_qr_url).then((u) => { r.payment_qr_signed = u; }));
+    } else { r.payment_qr_signed = r.payment_qr_url || null; }
+    if (r.signature_url && !/^https?:\/\//i.test(r.signature_url)) {
+      signTasks.push(_signKycUrl(r.signature_url).then((u) => { r.signature_signed = u; }));
+    } else { r.signature_signed = r.signature_url || null; }
+    if (r.id_document_url && !/^https?:\/\//i.test(r.id_document_url)) {
+      signTasks.push(_signKycUrl(r.id_document_url).then((u) => { r.id_document_signed = u; }));
+    } else { r.id_document_signed = r.id_document_url || null; }
+  }
+  await Promise.all(signTasks);
+
   listEl.innerHTML = '';
   for (const r of rows) {
     const u = uMap[r.user_id];
     const card = document.createElement('div');
     card.className = `kyc-card kyc-status-${r.status}`;
+    // Reuses the .payout-* CSS classes so both cards share the visual
+    // language (verify grid + verify-media row of three image cards).
+    // Same structure as the loadPayouts card, minus the amount/currency
+    // header (KYC review isn't tied to a specific withdrawal amount).
     card.innerHTML = `
       <div class="payout-card-head">
         <div class="payout-author">
@@ -2039,15 +2178,44 @@ async function loadKycList() {
         </div>
         <span class="payout-status-badge payout-status-badge-${r.status}">${esc(r.status)}</span>
       </div>
-      <div class="payout-details">
-        <div><strong>Full name:</strong> ${esc(r.full_name)}</div>
-        ${r.date_of_birth ? `<div><strong>DOB:</strong> ${esc(r.date_of_birth)}</div>` : ''}
-        <div><strong>ID type:</strong> ${esc(r.id_type || '—')}</div>
-        <div><strong>ID number:</strong> ${esc(r.id_number || '—')}</div>
-        <div><strong>Submitted:</strong> ${timeAgo(r.submitted_at)}</div>
-        ${r.reviewed_at ? `<div><strong>Reviewed:</strong> ${timeAgo(r.reviewed_at)}</div>` : ''}
-        ${r.rejection_reason ? `<div><strong>Rejection reason:</strong> ${esc(r.rejection_reason)}</div>` : ''}
+
+      <div class="payout-verify">
+        <div class="payout-verify-grid">
+          <div class="payout-verify-row"><span class="payout-verify-label">Full name</span><span class="payout-verify-val">${esc(r.full_name || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Birthdate</span><span class="payout-verify-val">${esc(_formatBirthdate(r.date_of_birth) || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Phone</span><span class="payout-verify-val">${esc(r.phone || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Email (user)</span><span class="payout-verify-val">${esc(r.email || u?.email || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(r.payment_method || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">ID type</span><span class="payout-verify-val">${esc(r.id_type || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">ID number</span><span class="payout-verify-val">${esc(r.id_number || '—')}</span></div>
+          <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(r.address || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Submitted</span><span class="payout-verify-val">${timeAgo(r.submitted_at)}</span></div>
+          ${r.reviewed_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Reviewed</span><span class="payout-verify-val">${timeAgo(r.reviewed_at)}</span></div>` : ''}
+          ${r.rejection_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Rejection reason</span><span class="payout-verify-val">${esc(r.rejection_reason)}</span></div>` : ''}
+        </div>
+
+        <div class="payout-verify-media">
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">GCash QR</div>
+            ${r.payment_qr_signed
+              ? `<a href="${esc(r.payment_qr_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.payment_qr_signed)}" alt="GCash QR" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">Signature</div>
+            ${r.signature_signed
+              ? `<a href="${esc(r.signature_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.signature_signed)}" alt="Signature" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+          <div class="payout-verify-media-card">
+            <div class="payout-verify-media-label">Valid ID</div>
+            ${r.id_document_signed
+              ? `<a href="${esc(r.id_document_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.id_document_signed)}" alt="Valid ID" loading="lazy"/></a>`
+              : `<div class="payout-verify-media-empty">— not provided —</div>`}
+          </div>
+        </div>
       </div>
+
       <div class="payout-actions">
         ${r.status === 'pending'
           ? `<button class="admin-btn admin-btn-primary" data-act="kyc-approve">Approve</button>
