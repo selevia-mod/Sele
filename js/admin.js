@@ -1609,12 +1609,19 @@ async function _signKycUrl(rawUrl) {
   if (!rawUrl) return null;
   // Already an https URL (e.g. legacy Appwrite asset) — pass through.
   if (/^https?:\/\//i.test(rawUrl)) return rawUrl;
-  // Otherwise treat it as a path inside the user_documents bucket.
-  // The bucket name matches what mobile uploads to in user-documents.js.
+  // Otherwise treat it as a path inside the kyc-uploads bucket. Bucket
+  // name MUST match what mobile (lib/user-documents.js) and web (the
+  // creator-side KYC form) use; previously this read 'user_documents'
+  // which silently broke admin previews for every mobile submission —
+  // the path landed in kyc-uploads, the sign call asked user_documents,
+  // and createSignedUrl returned a not-found error so the admin
+  // rendered "— not provided —" for every field even though the DB
+  // had valid paths. Caught 2026-05-10 with the form-open OTA when
+  // creators started re-saving and the discrepancy became visible.
   try {
     const { data, error } = await supabase
       .storage
-      .from('user_documents')
+      .from('kyc-uploads')
       .createSignedUrl(rawUrl, 60 * 60);
     if (error) return null;
     return data?.signedUrl || null;
