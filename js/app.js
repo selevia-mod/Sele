@@ -1195,24 +1195,68 @@ function playRewardedAd() {
 
 // ── Return-from-HitPay handler ──
 // HitPay redirects users back to /?store=success&ref=<purchase_id> after
-// payment. We detect that on load, show a friendly toast, and clean the URL.
-function handleStoreReturn() {
+// payment AND after cancel — the redirect_url field in a HitPay
+// payment-request is single-purpose, so the URL alone can't tell us
+// whether the user actually paid or just hit Back. The fix (May 2026)
+// is to verify against the database: when we see ?store=success&ref=…,
+// fetch the matching coin_purchases row and look at its real status.
+//
+// Only `completed`/`paid` rows trigger the success toast. `failed`/
+// `cancelled` rows trigger the cancel toast. `pending` rows (webhook
+// hasn't fired yet OR was never going to because the user bailed)
+// stay silent — the wallet's realtime subscription will still credit
+// the coins if a webhook eventually lands, and we'd rather show no
+// toast than a wrong toast.
+async function handleStoreReturn() {
   const params = new URLSearchParams(window.location.search);
-  const status = params.get('store');
-  if (!status) return;
-  if (status === 'success') {
-    toast('Payment received! Your coins will land any moment.', 'success');
-    // Realtime on wallets will auto-update the pill once the webhook lands.
-    // Open the Store page so the user sees the balance update.
-    setTimeout(() => showStore(), 50);
-  } else if (status === 'cancelled' || status === 'cancel') {
-    toast('Payment cancelled.', 'error');
-  }
-  // Strip the param so a refresh doesn't re-trigger the toast
+  const storeFlag = params.get('store');
+  const ref = params.get('ref');
+  if (!storeFlag) return;
+
+  // Strip params first so refresh / back-forward navigation doesn't
+  // keep re-firing this logic. The toast itself fires async below.
   params.delete('store');
   params.delete('ref');
   const newQuery = params.toString();
   history.replaceState(null, '', window.location.pathname + (newQuery ? '?' + newQuery : '') + window.location.hash);
+
+  if (storeFlag !== 'success') {
+    if (storeFlag === 'cancelled' || storeFlag === 'cancel') {
+      toast('Payment cancelled.', 'error');
+    }
+    return;
+  }
+
+  // success branch — verify the purchase row actually completed.
+  if (!ref) {
+    // No reference id to verify against. Stay silent — better than
+    // a false positive. The webhook (if it fires) will still credit
+    // the wallet via the realtime subscription on `wallets`.
+    return;
+  }
+
+  let purchaseStatus = null;
+  try {
+    const { data, error } = await supabase
+      .from('coin_purchases')
+      .select('status')
+      .eq('id', ref)
+      .maybeSingle();
+    if (!error && data) purchaseStatus = data.status;
+  } catch (e) {
+    // Network blip or RLS reject — stay silent rather than guess.
+    console.warn('[store] purchase status verify failed:', e?.message);
+    return;
+  }
+
+  if (purchaseStatus === 'completed' || purchaseStatus === 'paid') {
+    toast('Payment received! Your coins will land any moment.', 'success');
+    setTimeout(() => showStore(), 50);
+  } else if (purchaseStatus === 'failed' || purchaseStatus === 'cancelled') {
+    toast('Payment was not completed. No coins added.', 'error');
+  }
+  // pending OR null OR anything else → silent. The realtime wallet
+  // subscription handles the credit if a delayed webhook lands.
 }
 // Run on initial load (after auth has had a chance to mount).
 setTimeout(handleStoreReturn, 800);
