@@ -5962,7 +5962,37 @@ async function vuStartUpload() {
 
   try {
     status.textContent = 'Preparing upload…';
-    const uploadInfo = await callEdgeFunction('bunny-upload', { title });
+    // Tier-3 (May 2026): pass the FULL metadata payload to bunny-upload
+    // so the Edge Function can stash it in the new Bunny video's
+    // metaTags BEFORE returning the upload URL. After Bunny finishes
+    // encoding, the bunny-video-ready webhook reads those metaTags
+    // back and inserts BOTH the videos row AND the hidden home-feed
+    // post row server-side.
+    //
+    // Why we no longer call supabase.from('videos').insert(...) +
+    // supabase.from('posts').insert(...) here:
+    //   The previous architecture had THIS file inserting both rows
+    //   directly after the Bunny upload finished. When Supabase had a
+    //   Cloudflare 502 mid-upload (May 2026), the file landed safely
+    //   on Bunny but the two inserts lost — orphaned video, no feed
+    //   post, user thought the upload had failed. Now Bunny calls our
+    //   webhook, which is retried server-side until Supabase is
+    //   reachable. Uploads survive Supabase outages.
+    const isMonetized = document.getElementById('vuMonetized')?.checked || false;
+    const uploadInfo = await callEdgeFunction('bunny-upload', {
+      title,
+      description,
+      tags,
+      is_monetized: isMonetized,
+      scheduled_publish_at: scheduledPublishAt,
+      // Web doesn't upload a separate thumbnail to Bunny Storage —
+      // Bunny auto-generates one from the video. The webhook falls
+      // back to the auto-generated thumbnail URL when this is empty.
+      thumbnail_key: '',
+      // Web flow needs the hidden home-feed post created server-side
+      // (videos surface on the home feed via posts).
+      create_feed_post: true,
+    });
 
     status.textContent = 'Uploading video…';
     await uploadFileToBunny(pendingVideoFile, uploadInfo, (pct, loaded, total) => {
@@ -5983,32 +6013,15 @@ async function vuStartUpload() {
       }
     });
 
-    status.textContent = 'Saving…';
-    const isMonetized = document.getElementById('vuMonetized')?.checked || false;
-    const { data: newVideo, error } = await supabase.from('videos').insert({
-      bunny_video_id: uploadInfo.videoId,
-      bunny_library_id: uploadInfo.libraryId,
-      video_url: uploadInfo.videoUrl,
-      thumbnail_url: uploadInfo.thumbnailUrl,
-      title, description, tags,
-      uploader_id: currentUser.id,
-      status: 'processing',
-      scheduled_publish_at: scheduledPublishAt,
-      is_monetized: isMonetized,
-    }).select().single();
-    if (error) throw error;
-
-    // Create the home-feed post but keep it hidden until the bunny webhook
-    // flips video.status to 'ready' (trigger flips post.is_hidden then).
-    const postBody = description || title;
-    const { error: postError } = await supabase.from('posts').insert({
-      user_id: currentUser.id,
-      body: postBody,
-      video_id: newVideo.id,
-      is_hidden: true,
-    });
-    if (postError) console.error('Failed to create feed post:', postError);
-
+    // Bunny upload complete. The videos row + hidden home-feed post
+    // are created server-side by the bunny-video-ready webhook when
+    // Bunny finishes encoding (typically 5-30 seconds). We
+    // intentionally do NOT block the user on those inserts here:
+    //   1. The file is safely on Bunny (the slow part is done).
+    //   2. The webhook is retried server-side on failure.
+    //   3. If Supabase is degraded right now, the user's experience
+    //      isn't blocked — the webhook will land the row when
+    //      Supabase recovers.
     fill.style.width = '100%';
     pctEl.textContent = '100%';
     status.textContent = 'Upload complete';
