@@ -140,6 +140,12 @@ let _walletConfigDefaults = {     // mirrors app_config; loaded once on signin
   video_recurring_unlock_seconds:  600,  // Phase 6 — 10 min star window
   min_chapter_words:               100,  // chapter publish floor
   max_chapter_words:               10000, // chapter publish ceiling
+  // Earnings hold knob — read by the Author Earnings card so the
+  // "available in N days" copy stays in sync with whatever the SQL
+  // app_config.author_earnings_hold_days is set to. Default 7 matches
+  // the current production value (down from 14 on May 2026). Update
+  // SQL → both web + mobile picks it up; no client deploy needed.
+  author_earnings_hold_days:       7,
 };
 let _walletChannel = null;
 
@@ -5956,7 +5962,37 @@ async function vuStartUpload() {
 
   try {
     status.textContent = 'Preparing upload…';
-    const uploadInfo = await callEdgeFunction('bunny-upload', { title });
+    // Tier-3 (May 2026): pass the FULL metadata payload to bunny-upload
+    // so the Edge Function can stash it in the new Bunny video's
+    // metaTags BEFORE returning the upload URL. After Bunny finishes
+    // encoding, the bunny-video-ready webhook reads those metaTags
+    // back and inserts BOTH the videos row AND the hidden home-feed
+    // post row server-side.
+    //
+    // Why we no longer call supabase.from('videos').insert(...) +
+    // supabase.from('posts').insert(...) here:
+    //   The previous architecture had THIS file inserting both rows
+    //   directly after the Bunny upload finished. When Supabase had a
+    //   Cloudflare 502 mid-upload (May 2026), the file landed safely
+    //   on Bunny but the two inserts lost — orphaned video, no feed
+    //   post, user thought the upload had failed. Now Bunny calls our
+    //   webhook, which is retried server-side until Supabase is
+    //   reachable. Uploads survive Supabase outages.
+    const isMonetized = document.getElementById('vuMonetized')?.checked || false;
+    const uploadInfo = await callEdgeFunction('bunny-upload', {
+      title,
+      description,
+      tags,
+      is_monetized: isMonetized,
+      scheduled_publish_at: scheduledPublishAt,
+      // Web doesn't upload a separate thumbnail to Bunny Storage —
+      // Bunny auto-generates one from the video. The webhook falls
+      // back to the auto-generated thumbnail URL when this is empty.
+      thumbnail_key: '',
+      // Web flow needs the hidden home-feed post created server-side
+      // (videos surface on the home feed via posts).
+      create_feed_post: true,
+    });
 
     status.textContent = 'Uploading video…';
     await uploadFileToBunny(pendingVideoFile, uploadInfo, (pct, loaded, total) => {
@@ -5977,32 +6013,15 @@ async function vuStartUpload() {
       }
     });
 
-    status.textContent = 'Saving…';
-    const isMonetized = document.getElementById('vuMonetized')?.checked || false;
-    const { data: newVideo, error } = await supabase.from('videos').insert({
-      bunny_video_id: uploadInfo.videoId,
-      bunny_library_id: uploadInfo.libraryId,
-      video_url: uploadInfo.videoUrl,
-      thumbnail_url: uploadInfo.thumbnailUrl,
-      title, description, tags,
-      uploader_id: currentUser.id,
-      status: 'processing',
-      scheduled_publish_at: scheduledPublishAt,
-      is_monetized: isMonetized,
-    }).select().single();
-    if (error) throw error;
-
-    // Create the home-feed post but keep it hidden until the bunny webhook
-    // flips video.status to 'ready' (trigger flips post.is_hidden then).
-    const postBody = description || title;
-    const { error: postError } = await supabase.from('posts').insert({
-      user_id: currentUser.id,
-      body: postBody,
-      video_id: newVideo.id,
-      is_hidden: true,
-    });
-    if (postError) console.error('Failed to create feed post:', postError);
-
+    // Bunny upload complete. The videos row + hidden home-feed post
+    // are created server-side by the bunny-video-ready webhook when
+    // Bunny finishes encoding (typically 5-30 seconds). We
+    // intentionally do NOT block the user on those inserts here:
+    //   1. The file is safely on Bunny (the slow part is done).
+    //   2. The webhook is retried server-side on failure.
+    //   3. If Supabase is degraded right now, the user's experience
+    //      isn't blocked — the webhook will land the row when
+    //      Supabase recovers.
     fill.style.width = '100%';
     pctEl.textContent = '100%';
     status.textContent = 'Upload complete';
@@ -8257,13 +8276,64 @@ async function saveReadingProgress(bookId, chapterId, chapterNumber) {
   try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
+    const nowIso = new Date().toISOString();
+
+    // 1) book_reads — per-user reading progress (continue-reading rail).
+    //    Composite PK (user_id, book_id), one row per user per book ever.
     await supabase.from('book_reads').upsert({
       user_id: user.id,
       book_id: bookId,
       last_chapter_id: chapterId,
       last_chapter_number: chapterNumber,
-      last_read_at: new Date().toISOString(),
+      last_read_at: nowIso,
     }, { onConflict: 'user_id,book_id' });
+
+    // 2) chapter_reads — per-(user, chapter) row that drives the
+    //    aggregate views counter. The bump_views_on_chapter_read
+    //    trigger fires here:
+    //      - On INSERT (first read of this chapter for this user) →
+    //        +1 to chapters.views_count and books.views_count.
+    //      - On UPDATE-after-24h cooldown → +1 again.
+    //    Mobile already does the same write (lib/book-reads-supabase.js
+    //    → readBookChapter); without this branch on web, chapter
+    //    reads from web readers were never feeding into the aggregate
+    //    counter and writers' view totals only reflected mobile
+    //    readers. Mirroring mobile's INSERT-then-UPDATE-on-23505
+    //    pattern keeps both surfaces uniform.
+    if (chapterId) {
+      try {
+        const { error: insertErr } = await supabase
+          .from('chapter_reads')
+          .insert({
+            chapter_id: chapterId,
+            user_id: user.id,
+            read_count: 1,
+            last_read_at: nowIso,
+          });
+        if (insertErr && insertErr.code === '23505') {
+          // Row already exists — bump read_count + last_read_at so the
+          // trigger's UPDATE branch can decide whether the cooldown
+          // has elapsed.
+          const { data: existing } = await supabase
+            .from('chapter_reads')
+            .select('read_count')
+            .eq('chapter_id', chapterId)
+            .eq('user_id', user.id)
+            .maybeSingle();
+          await supabase
+            .from('chapter_reads')
+            .update({
+              read_count: (existing?.read_count ?? 0) + 1,
+              last_read_at: nowIso,
+            })
+            .eq('chapter_id', chapterId)
+            .eq('user_id', user.id);
+        }
+      } catch (_) {
+        // Best-effort. A stats write must never block a reader from
+        // continuing through the chapter.
+      }
+    }
   } catch (e) { /* ignore */ }
 }
 
@@ -9220,9 +9290,18 @@ function renderAuthorEarningsBalance() {
   document.getElementById('earningsAvailablePhp').textContent = formatPhpFromMinor(availMinor);
   document.getElementById('earningsPendingPhp').textContent   = formatPhpFromMinor(pendMinor);
 
-  // Hold copy — kept as "1–3 days" range regardless of underlying config
+  // Hold copy — driven by app_config.author_earnings_hold_days so web
+  // and mobile stay aligned whenever the SQL knob changes (was 14d,
+  // dropped to 7d May 2026). The previous hardcoded "1–3 days" went
+  // stale the moment the SQL was flipped; now the only update needed
+  // is the SQL row + page reload.
+  const holdDays = Number(_walletConfigDefaults.author_earnings_hold_days) || 7;
   const foot = document.getElementById('earningsHoldFootnote');
-  if (foot) foot.textContent = "Earnings become available 1–3 days after they're earned.";
+  if (foot) {
+    foot.textContent = holdDays === 1
+      ? "Earnings become available 1 day after they're earned."
+      : `Earnings become available ${holdDays} days after they're earned.`;
+  }
 
   // Minimum payout hint — show admin-configured floor, or ₱100 by default
   const minPayoutMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
@@ -13214,9 +13293,149 @@ async function loadNotifications() {
   _notifications = raw;
   await hydrateActorProfiles(_notifications);
 
+  // Compute unread count from RAW rows BEFORE grouping. Grouping
+  // collapses N rows into 1, so counting after grouping would
+  // under-report the badge (5 unread comments on the same post would
+  // show as "1" instead of "5"). Unread badge mirrors what the user
+  // would see if grouping were turned off — every individual unread
+  // notification counts.
   _notifUnreadCount = _notifications.filter(n => !n.is_read).length;
   updateNotifBadge();
+
+  // Facebook-style grouping (May 2026) — see groupNotifications below.
+  // Mobile (selebox-mobile-main) ships the same pass in
+  // lib/notifications-supabase.js. Keeping web + mobile parallel so the
+  // bell experience matches across platforms.
+  _notifications = groupNotifications(_notifications);
   renderNotifications();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Facebook-style notification grouping
+// ─────────────────────────────────────────────────────────────────────────
+// Collapses same-type-same-target rows into one bell entry so the panel
+// stays clean when many users engage with the same post/video/book.
+//
+// Rules:
+//   - All-time window. We don't bucket by recency window — every row in
+//     the loaded page that shares (type, target) merges. (Pagination
+//     limits how far back we go, but anything in `raw` is fair game.)
+//   - Group: comments / replies on the same post / video / chapter,
+//     reactions on the same post / video / book / comment, and ALL
+//     follow events into one bucket (follows have target_id=NULL — the
+//     trigger can't tie them to a resource — so per the product call we
+//     collapse them globally per recipient).
+//   - Timestamp = most recent action. The newest entry's created_at
+//     becomes the head's timestamp, so the grouped row floats up the
+//     bell list as new actors join.
+//
+// Output shape:
+//   - head row with `actor_ids` set to the deduplicated list of actors
+//     across all buckets entries (the existing notificationLabel
+//     renderer already reads `actor_ids` and produces "X, Y and N
+//     others" — no renderer change needed).
+//   - `_grouped_source_ids` = every row's id in the bucket. Used by
+//     onNotificationClick to mark all underlying rows read in one
+//     UPDATE round-trip.
+//   - is_read = true only when EVERY underlying entry is read.
+//
+// Anything not bucketable (mention_comment, dm_message, follow_new_post,
+// follow_new_video, follow_new_book, follow_repost, default) passes
+// through unchanged so it keeps its existing behavior.
+function _notifGroupKey(n) {
+  const t = n?.type || '';
+
+  // Bare "X started following you" — single global bucket per recipient.
+  // No target to key on, but the user explicitly asked to merge them.
+  if (t === 'follow') return 'follow:any';
+
+  // Reactions / likes — one bucket per liked target.
+  if (t === 'like_post' || t === 'post_like') {
+    return n.target_id ? `like-post:${n.target_id}` : null;
+  }
+  if (t === 'like_video' || t === 'video_like') {
+    return n.target_id ? `like-video:${n.target_id}` : null;
+  }
+  if (t === 'like_book' || t === 'book_like') {
+    return n.target_id ? `like-book:${n.target_id}` : null;
+  }
+  if (t === 'like_comment' || t === 'post_comment_like' || t === 'video_comment_like') {
+    return n.target_id ? `like-comment:${n.target_id}` : null;
+  }
+
+  // Comments + replies — comments and replies on the same post merge
+  // into one bucket because the user-facing verb is the same ("X and Y
+  // commented on your post"). If we wanted to split them ("X commented"
+  // vs "Y replied to your comment"), we'd add a `:reply` suffix here.
+  if (t === 'comment_post' || t === 'post_comment' || t === 'reply_comment'
+      || t === 'post_comment_reply' || t === 'video_comment_reply') {
+    if (t === 'reply_comment' || t === 'post_comment_reply' || t === 'video_comment_reply') {
+      // reply_comment carries parent_target_id = the post/video the
+      // parent comment lives on. Group with comment_post / comment_video
+      // by that id when present.
+      return n.parent_target_id ? `comment-post:${n.parent_target_id}` : (n.target_id ? `reply:${n.target_id}` : null);
+    }
+    return n.target_id ? `comment-post:${n.target_id}` : null;
+  }
+  if (t === 'comment_video' || t === 'video_comment') {
+    return n.target_id ? `comment-video:${n.target_id}` : null;
+  }
+  if (t === 'comment_chapter' || t === 'chapter_comment'
+      || t === 'reply_chapter_comment' || t === 'chapter_comment_reply') {
+    return n.target_id ? `comment-chapter:${n.target_id}` : null;
+  }
+
+  return null; // not groupable — passes through
+}
+
+function groupNotifications(rows) {
+  if (!Array.isArray(rows) || !rows.length) return rows || [];
+
+  const buckets = new Map();
+  const passThrough = [];
+
+  for (const n of rows) {
+    const key = _notifGroupKey(n);
+    if (!key) { passThrough.push(n); continue; }
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(n);
+  }
+
+  const grouped = [];
+  for (const entries of buckets.values()) {
+    if (entries.length === 1) {
+      grouped.push(entries[0]);
+      continue;
+    }
+    // Newest first — head's timestamp wins.
+    entries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const head = entries[0];
+
+    // Dedupe actors. Same person commenting twice on a post counts
+    // once — matches Facebook's behavior where one actor never appears
+    // twice in a grouped row's actor list.
+    const seen = new Set();
+    const actor_ids = [];
+    for (const e of entries) {
+      const id = e?.actor_id;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      actor_ids.push(id);
+    }
+
+    grouped.push({
+      ...head,
+      actor_ids,
+      _grouped_source_ids: entries.map(e => e?.id).filter(Boolean),
+      is_read: entries.every(e => !!e?.is_read),
+    });
+  }
+
+  // Re-sort everything by created_at desc to keep grouped rows in the
+  // right chronological position relative to ungrouped ones.
+  const all = [...grouped, ...passThrough];
+  all.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return all;
 }
 
 async function hydrateActorProfiles(items) {
@@ -13402,13 +13621,26 @@ async function onNotificationClick(notifId) {
   const n = _notifications.find(x => x.id === notifId);
   if (!n) return;
 
-  // Mark as read locally + in DB (optimistic)
+  // Mark as read locally + in DB (optimistic).
+  //
+  // Grouped rows expand into all their underlying source ids — without
+  // this the bell badge would tick down by 1 even when 5 individual
+  // unread rows were collapsed into the row that was tapped. We also
+  // need to count how many of those sources were ACTUALLY unread before
+  // adjusting the badge (some entries in a bucket may have been read
+  // independently before the user tapped the grouped representation).
   if (!n.is_read) {
     n.is_read = true;
-    _notifUnreadCount = Math.max(0, _notifUnreadCount - 1);
+    const sourceIds = Array.isArray(n._grouped_source_ids) && n._grouped_source_ids.length
+      ? n._grouped_source_ids
+      : [notifId];
+    // Decrement the badge by the count of underlying unread rows.
+    // _notifUnreadCount was computed from the raw (pre-grouping) set,
+    // so we need the same granularity here.
+    _notifUnreadCount = Math.max(0, _notifUnreadCount - sourceIds.length);
     updateNotifBadge();
     renderNotifications();
-    supabase.from('notifications').update({ is_read: true }).eq('id', notifId)
+    supabase.from('notifications').update({ is_read: true }).in('id', sourceIds)
       .then(({ error }) => { if (error) console.warn('Mark read failed:', error); });
   }
 
@@ -15478,7 +15710,7 @@ async function loadMessages(convId) {
   const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
     supabase
       .from('messages')
-      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id, image_url, image_kind')
+      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id, image_url, image_urls, image_kind')
       .eq('conversation_id', convId)
       .order('created_at', { ascending: false })
       .limit(100),
@@ -15490,7 +15722,15 @@ async function loadMessages(convId) {
     return;
   }
   // Reverse to chronological order (oldest first → newest at bottom of thread)
-  dmState.messages = (msgs || []).slice().reverse();
+  // and normalize image fields so the renderer always sees image_urls as an
+  // array. Pre-2026-05-07 rows only have image_url populated; new rows have
+  // both. The mobile lib does the same shape promotion; matching here means
+  // renderMessages doesn't have to branch on legacy schema shape.
+  dmState.messages = (msgs || []).slice().reverse().map((m) => {
+    if (Array.isArray(m.image_urls) && m.image_urls.length > 0) return m;
+    if (m.image_url) return { ...m, image_urls: [m.image_url] };
+    return { ...m, image_urls: [] };
+  });
   dmState.reactions = reactionsByMsg;
   renderMessages();
   // Initial open of a thread → always pin to bottom regardless of prior scroll.
@@ -15607,15 +15847,48 @@ function renderMessages() {
       const who = mine ? 'You' : escHTML(dmState.activeOther?.username || 'User');
       bubbleContent = `<span class="dm-bubble-deleted">${who} unsent a message</span>`;
     } else {
-      // Image attachment (uploaded photo OR GIF from picker)
-      if (m.image_url) {
-        const isGif = m.image_kind === 'gif' || /\.gif(\?|$)/i.test(m.image_url);
-        imageHtml = `
-          <div class="dm-bubble-image ${isGif ? 'is-gif' : ''}" data-img-url="${escHTML(m.image_url)}">
-            <img src="${escHTML(m.image_url)}" alt="Attachment" loading="lazy"/>
-            ${isGif ? '<span class="dm-bubble-image-tag">GIF</span>' : ''}
-          </div>
-        `;
+      // Image attachment(s) — multi-image post-2026-05-07. The loadMessages
+      // normalizer above guarantees `m.image_urls` is always an array
+      // (possibly empty); legacy `m.image_url` rows are promoted to
+      // length-1 arrays at fetch time. GIF detection still uses the lead
+      // url's image_kind/extension since GIFs are always single-attachment.
+      const imageUrls = Array.isArray(m.image_urls) && m.image_urls.length > 0
+        ? m.image_urls
+        : (m.image_url ? [m.image_url] : []);
+      if (imageUrls.length > 0) {
+        const leadUrl = imageUrls[0];
+        const isGif = m.image_kind === 'gif' || /\.gif(\?|$)/i.test(leadUrl);
+        if (imageUrls.length === 1) {
+          // Single image keeps the existing markup so the surrounding CSS
+          // (rounded corners, GIF tag, lightbox click handler) all still
+          // applies unchanged.
+          imageHtml = `
+            <div class="dm-bubble-image ${isGif ? 'is-gif' : ''}" data-img-url="${escHTML(leadUrl)}">
+              <img src="${escHTML(leadUrl)}" alt="Attachment" loading="lazy"/>
+              ${isGif ? '<span class="dm-bubble-image-tag">GIF</span>' : ''}
+            </div>
+          `;
+        } else {
+          // Gallery grid for 2+ images. We render up to 4 thumbs; if there
+          // are more, the 4th cell gets a "+N" overlay. Each thumb is
+          // tappable via the same data-img-url lightbox hook the single
+          // image uses, so existing click handlers keep working.
+          const visible = imageUrls.slice(0, 4);
+          const overflow = imageUrls.length - 4;
+          imageHtml = `
+            <div class="dm-bubble-gallery dm-bubble-gallery-${visible.length}">
+              ${visible.map((url, idx) => {
+                const isOverflow = idx === 3 && overflow > 0;
+                return `
+                  <div class="dm-bubble-gallery-cell" data-img-url="${escHTML(url)}">
+                    <img src="${escHTML(url)}" alt="Attachment" loading="lazy"/>
+                    ${isOverflow ? `<span class="dm-bubble-gallery-overflow">+${overflow}</span>` : ''}
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          `;
+        }
       }
       // Body text (skip if message is image-only with whitespace body)
       const trimmedBody = (m.body || '').trim();
@@ -16308,11 +16581,13 @@ async function copyMessageText(messageId) {
 
 // Bubble hover/click → show menu (works on mobile via tap)
 document.addEventListener('click', (e) => {
-  // Click on a DM image → open lightbox, don't open hover menu
-  const dmImg = e.target.closest('.dm-bubble-image');
-  if (dmImg) {
+  // Click on a DM image OR a gallery cell → open lightbox, don't open
+  // hover menu. Both selectors carry data-img-url, so the same handler
+  // covers single-image bubbles and multi-image grids.
+  const dmImgTarget = e.target.closest('.dm-bubble-image, .dm-bubble-gallery-cell');
+  if (dmImgTarget) {
     e.stopPropagation();
-    const url = dmImg.dataset.imgUrl;
+    const url = dmImgTarget.dataset.imgUrl;
     if (url) window.openLightbox?.(url);
     return;
   }
@@ -17522,7 +17797,14 @@ const DM_BUCKET = 'dm-attachments';
 // Public client-side use is the intended exposure — Giphy rate-limits per IP.
 const DM_GIPHY_KEY = 'UYrH9t3qUegWfBNynMFTHL3uEHsySkSm';
 
-let _dmPendingAttachment = null;   // { file, dataUrl, kind: 'upload' | 'gif', gifUrl }
+// _dmPendingAttachment shapes (post-2026-05-07 multi-image):
+//   { kind: 'upload', files: File[], dataUrls: string[] } — 1..10 photos
+//   { kind: 'gif',    gifUrl: string }                     — single Giphy
+// Kept as one variable so the existing show/hide/send paths can keep
+// switching on `.kind`. The legacy { file, dataUrl } shape is gone —
+// the upload path always uses arrays now (single-photo sends just have
+// length-1 arrays).
+let _dmPendingAttachment = null;
 let _dmAttachMenuEl = null;
 let _dmGifPickerEl = null;
 let _dmEmojiPickerEl = null;
@@ -17578,35 +17860,59 @@ document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
 
 // ── File picker → preview (with size check + JPEG compression for big photos) ──
 document.getElementById('dmFileInput')?.addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
+  const picked = Array.from(e.target.files || []);
   e.target.value = ''; // allow re-selecting same file later
-  if (!file) return;
+  if (!picked.length) return;
 
-  // Hard reject anything way over the limit
-  if (file.size > DM_MAX_IMAGE_BYTES * 4) {
-    toast(`Image too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max 2.5 MB.`, 'error');
+  // Cap at 10 total — combine with anything already staged. If the user
+  // exceeds the cap we keep the first N and toast the rest.
+  const existing = _dmPendingAttachment?.kind === 'upload' ? _dmPendingAttachment.files : [];
+  const remainingSlots = Math.max(0, 10 - existing.length);
+  if (remainingSlots === 0) {
+    toast('Limit reached — up to 10 photos per message.', 'warning');
     return;
   }
+  const incoming = picked.slice(0, remainingSlots);
+  if (picked.length > remainingSlots) {
+    toast(`Only added the first ${remainingSlots} (10-photo limit per message).`, 'warning');
+  }
 
-  let finalFile = file;
-  // Compress non-GIF static images that are over the cap (GIFs lose animation if compressed)
-  if (file.size > DM_MAX_IMAGE_BYTES && file.type !== 'image/gif') {
-    try {
-      finalFile = await compressImageToJpeg(file, DM_MAX_IMAGE_BYTES);
-    } catch (err) {
-      console.warn('[dm] compress failed, sending original', err);
+  // Process each file: size check → compress if needed → bail if still over.
+  // Failures are reported per-file so the user knows which one didn't make it
+  // and the rest still go through.
+  const processed = [];
+  for (const file of incoming) {
+    if (file.size > DM_MAX_IMAGE_BYTES * 4) {
+      toast(`${file.name}: too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max 2.5 MB.`, 'error');
+      continue;
     }
+    let finalFile = file;
+    if (file.size > DM_MAX_IMAGE_BYTES && file.type !== 'image/gif') {
+      try {
+        finalFile = await compressImageToJpeg(file, DM_MAX_IMAGE_BYTES);
+      } catch (err) {
+        console.warn('[dm] compress failed, sending original', err);
+      }
+    }
+    if (finalFile.size > DM_MAX_IMAGE_BYTES) {
+      toast(`${file.name}: still ${(finalFile.size / 1024 / 1024).toFixed(1)} MB after compress.`, 'error');
+      continue;
+    }
+    processed.push(finalFile);
   }
+  if (!processed.length) return;
 
-  if (finalFile.size > DM_MAX_IMAGE_BYTES) {
-    toast(`Image still ${(finalFile.size / 1024 / 1024).toFixed(1)} MB after compress. Try a smaller one (max 2.5 MB).`, 'error');
-    return;
-  }
+  // Build data URLs for ALL processed files in parallel for the preview strip.
+  const dataUrls = await Promise.all(processed.map(fileToDataUrl));
 
-  // Build a data-URL preview (for the composer's preview strip)
-  const dataUrl = await fileToDataUrl(finalFile);
-  _dmPendingAttachment = { file: finalFile, dataUrl, kind: 'upload' };
-  showDmAttachPreview(dataUrl, finalFile.name, finalFile.size);
+  // Merge with anything already staged so the user can pick in batches.
+  const allFiles = [...existing, ...processed];
+  const allDataUrls = _dmPendingAttachment?.kind === 'upload'
+    ? [..._dmPendingAttachment.dataUrls, ...dataUrls]
+    : dataUrls;
+
+  _dmPendingAttachment = { kind: 'upload', files: allFiles, dataUrls: allDataUrls };
+  showDmAttachPreview(allDataUrls, allFiles);
   updateSendButton();
 });
 
@@ -17656,11 +17962,75 @@ async function compressImageToJpeg(file, maxBytes) {
   return file;
 }
 
-function showDmAttachPreview(src, name, size) {
+// Now takes either:
+//   showDmAttachPreview(dataUrl, name, size)              — legacy single-image / GIF call sites
+//   showDmAttachPreview(dataUrls: string[], files: File[]) — multi-image upload path
+// We detect the multi-image shape by Array.isArray on the first arg and
+// render a thumbnail strip; the legacy callers (gif preview) still get
+// the original single-image markup so nothing else has to change.
+function showDmAttachPreview(srcOrUrls, nameOrFiles, size) {
   const wrap = document.getElementById('dmAttachPreview');
-  document.getElementById('dmAttachPreviewImg').src = src;
-  document.getElementById('dmAttachPreviewName').textContent = name || 'Image';
-  document.getElementById('dmAttachPreviewSize').textContent = size ? `· ${formatBytes(size)}` : '';
+  const isMulti = Array.isArray(srcOrUrls);
+  if (isMulti) {
+    const dataUrls = srcOrUrls;
+    const files = Array.isArray(nameOrFiles) ? nameOrFiles : [];
+    // Lead image goes in the existing single-image slot; the rest get
+    // injected as a horizontal thumb row right after. Each thumb has its
+    // own X overlay that drops just that file from the staged batch.
+    const leadImg = document.getElementById('dmAttachPreviewImg');
+    if (leadImg) leadImg.src = dataUrls[0] || '';
+    document.getElementById('dmAttachPreviewName').textContent = files.length === 1
+      ? (files[0]?.name || 'Image')
+      : `${files.length} photos`;
+    const totalBytes = files.reduce((sum, f) => sum + (f?.size || 0), 0);
+    document.getElementById('dmAttachPreviewSize').textContent = totalBytes ? `· ${formatBytes(totalBytes)}` : '';
+    // Render the supplementary thumb strip if more than one. Reuses the
+    // existing #dmAttachPreviewExtra container when present, otherwise
+    // appends one inside #dmAttachPreview so no HTML change is required.
+    let extra = document.getElementById('dmAttachPreviewExtra');
+    if (files.length > 1) {
+      if (!extra) {
+        extra = document.createElement('div');
+        extra.id = 'dmAttachPreviewExtra';
+        extra.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;';
+        wrap?.appendChild(extra);
+      }
+      extra.style.display = '';
+      extra.innerHTML = dataUrls.map((u, idx) => `
+        <div style="position:relative;width:48px;height:48px;border-radius:6px;overflow:hidden;background:#222">
+          <img src="${u}" style="width:100%;height:100%;object-fit:cover" alt=""/>
+          <button type="button" data-dm-remove-idx="${idx}" style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,0.85);color:#fff;border:none;font-size:11px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Remove">×</button>
+        </div>
+      `).join('');
+      // Wire per-thumb X buttons.
+      extra.querySelectorAll('[data-dm-remove-idx]').forEach((btn) => {
+        btn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const idx = parseInt(btn.dataset.dmRemoveIdx, 10);
+          if (!_dmPendingAttachment || _dmPendingAttachment.kind !== 'upload') return;
+          _dmPendingAttachment.files.splice(idx, 1);
+          _dmPendingAttachment.dataUrls.splice(idx, 1);
+          if (_dmPendingAttachment.files.length === 0) {
+            hideDmAttachPreview();
+          } else {
+            showDmAttachPreview(_dmPendingAttachment.dataUrls, _dmPendingAttachment.files);
+          }
+          updateSendButton();
+        });
+      });
+    } else if (extra) {
+      extra.style.display = 'none';
+      extra.innerHTML = '';
+    }
+  } else {
+    // Legacy single-image path (still used by GIF preview).
+    document.getElementById('dmAttachPreviewImg').src = srcOrUrls;
+    document.getElementById('dmAttachPreviewName').textContent = nameOrFiles || 'Image';
+    document.getElementById('dmAttachPreviewSize').textContent = size ? `· ${formatBytes(size)}` : '';
+    const extra = document.getElementById('dmAttachPreviewExtra');
+    if (extra) { extra.style.display = 'none'; extra.innerHTML = ''; }
+  }
   if (wrap) wrap.style.display = '';
 }
 function hideDmAttachPreview() {
@@ -17684,29 +18054,39 @@ async function sendDmAttachment() {
   if (!dmState.activeConvId || !_dmPendingAttachment) return false;
   const att = _dmPendingAttachment;
 
-  let imageUrl = null;
+  let imageUrls = [];
   let imageKind = att.kind;
 
   if (att.kind === 'gif') {
-    imageUrl = att.gifUrl;
+    // GIFs are always single-attachment.
+    imageUrls = [att.gifUrl];
   } else {
-    // Upload to Supabase Storage at {user_id}/{timestamp}-{name}
-    const ext = (att.file.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
-    const path = `${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const { error: upErr } = await supabase.storage.from(DM_BUCKET).upload(path, att.file, {
-      contentType: att.file.type,
-      cacheControl: '3600',
-      upsert: false,
+    // Upload all picked files in parallel. Order is preserved by Promise.all
+    // so the gallery grid renders in the user's selection order. A single
+    // failed upload aborts the whole send so the user knows something went
+    // wrong rather than silently shipping a partial batch.
+    const uploads = att.files.map(async (file) => {
+      const ext = (file.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+      const path = `${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+      const { error: upErr } = await supabase.storage.from(DM_BUCKET).upload(path, file, {
+        contentType: file.type,
+        cacheControl: '3600',
+        upsert: false,
+      });
+      if (upErr) throw upErr;
+      const { data: urlData } = supabase.storage.from(DM_BUCKET).getPublicUrl(path);
+      if (!urlData?.publicUrl) throw new Error('No public URL returned');
+      return urlData.publicUrl;
     });
-    if (upErr) {
+    try {
+      imageUrls = await Promise.all(uploads);
+    } catch (upErr) {
       console.error('[dm] upload failed', upErr);
       toast(upErr.message || 'Upload failed', 'error');
       return false;
     }
-    const { data: urlData } = supabase.storage.from(DM_BUCKET).getPublicUrl(path);
-    imageUrl = urlData?.publicUrl;
   }
-  if (!imageUrl) { toast('Failed to attach image', 'error'); return false; }
+  if (!imageUrls.length) { toast('Failed to attach image(s)', 'error'); return false; }
 
   const input = document.getElementById('dmInput');
   const body = (input?.value || '').trim();
@@ -17714,14 +18094,17 @@ async function sendDmAttachment() {
   dmState.replyingTo = null;
   hideReplyPreview();
 
-  // Optimistic render
+  // Optimistic render — image_url stays = the lead image so any code that
+  // still reads the singular field (legacy code paths, push notifications)
+  // sees something; image_urls is the canonical ordered list.
   const tempId = 'temp-' + Date.now();
   dmState.messages.push({
     id: tempId,
     conversation_id: dmState.activeConvId,
     sender_id: currentUser.id,
     body: body || '',
-    image_url: imageUrl,
+    image_url: imageUrls[0],
+    image_urls: imageUrls,
     image_kind: imageKind,
     reply_to_id: replyToId,
     created_at: new Date().toISOString(),
@@ -17738,7 +18121,8 @@ async function sendDmAttachment() {
     conversation_id: dmState.activeConvId,
     sender_id: currentUser.id,
     body: body || ' ',     // body has a NOT-NULL/length constraint; one-space passes
-    image_url: imageUrl,
+    image_url: imageUrls[0],
+    image_urls: imageUrls,
     image_kind: imageKind,
     reply_to_id: replyToId,
   }).select().single();
