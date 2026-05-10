@@ -8263,13 +8263,64 @@ async function saveReadingProgress(bookId, chapterId, chapterNumber) {
   try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
+    const nowIso = new Date().toISOString();
+
+    // 1) book_reads — per-user reading progress (continue-reading rail).
+    //    Composite PK (user_id, book_id), one row per user per book ever.
     await supabase.from('book_reads').upsert({
       user_id: user.id,
       book_id: bookId,
       last_chapter_id: chapterId,
       last_chapter_number: chapterNumber,
-      last_read_at: new Date().toISOString(),
+      last_read_at: nowIso,
     }, { onConflict: 'user_id,book_id' });
+
+    // 2) chapter_reads — per-(user, chapter) row that drives the
+    //    aggregate views counter. The bump_views_on_chapter_read
+    //    trigger fires here:
+    //      - On INSERT (first read of this chapter for this user) →
+    //        +1 to chapters.views_count and books.views_count.
+    //      - On UPDATE-after-24h cooldown → +1 again.
+    //    Mobile already does the same write (lib/book-reads-supabase.js
+    //    → readBookChapter); without this branch on web, chapter
+    //    reads from web readers were never feeding into the aggregate
+    //    counter and writers' view totals only reflected mobile
+    //    readers. Mirroring mobile's INSERT-then-UPDATE-on-23505
+    //    pattern keeps both surfaces uniform.
+    if (chapterId) {
+      try {
+        const { error: insertErr } = await supabase
+          .from('chapter_reads')
+          .insert({
+            chapter_id: chapterId,
+            user_id: user.id,
+            read_count: 1,
+            last_read_at: nowIso,
+          });
+        if (insertErr && insertErr.code === '23505') {
+          // Row already exists — bump read_count + last_read_at so the
+          // trigger's UPDATE branch can decide whether the cooldown
+          // has elapsed.
+          const { data: existing } = await supabase
+            .from('chapter_reads')
+            .select('read_count')
+            .eq('chapter_id', chapterId)
+            .eq('user_id', user.id)
+            .maybeSingle();
+          await supabase
+            .from('chapter_reads')
+            .update({
+              read_count: (existing?.read_count ?? 0) + 1,
+              last_read_at: nowIso,
+            })
+            .eq('chapter_id', chapterId)
+            .eq('user_id', user.id);
+        }
+      } catch (_) {
+        // Best-effort. A stats write must never block a reader from
+        // continuing through the chapter.
+      }
+    }
   } catch (e) { /* ignore */ }
 }
 
