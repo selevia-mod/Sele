@@ -16762,6 +16762,14 @@ async function loadMoreNotifications() {
   // Re-group the merged set. Grouping is idempotent.
   _notifications = groupNotifications(_notifications);
 
+  // Mobile parity (May 2026) — refresh the unread badge from the
+  // just-merged + grouped set. Mirrors mobile's notif fetch chain in
+  // selebox-mobile-main/lib/notifications-supabase.js, which calls
+  // updateNotifBadge() after every batch so the dot count stays
+  // accurate as load-more pages arrive.
+  _notifUnreadCount = _notifications.filter(n => !n.is_read).length;
+  updateNotifBadge();
+
   renderNotifications();
 }
 
