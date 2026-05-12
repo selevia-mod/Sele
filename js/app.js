@@ -243,6 +243,15 @@ async function onSignedIn(user) {
   // Notifications — fetch initial batch + start realtime subscription
   initNotifications();
 
+  // Daily-goal: tick "Log in today". Dedupe key is the date so
+  // multiple signed-in sessions in one calendar day count ONCE.
+  // Mirrors mobile at context/global-provider.js:325. Wrapped in
+  // try/catch — never let a goal hiccup break sign-in.
+  try {
+    const today = _periodKeyDaily();
+    tickGoalUnique('login', `daily-login:${today}`);
+  } catch {}
+
   // Path-based book deep links. Two acceptable inbound shapes:
   //   /books/<id>               → book detail
   //   /books/<id>/chapter/<n>   → book + chapter open
@@ -314,6 +323,15 @@ async function onSignedIn(user) {
   } else if (hash === '#earnings') {
     showEarnings();
   } else {
+    // Default destination on fresh page load (no deep link hash) —
+    // the curated home landing. Pre-May-2026 this just called
+    // loadFeed() which kept the default-visible feed shell, so refresh
+    // always landed on the post feed even with Home highlighted.
+    // Now we explicitly route to the landing surface so the sidebar
+    // state and visible content agree.
+    setSidebarActive('btnHome');
+    showHomeLanding();
+    // Preload the feed silently so clicking Post afterwards is instant.
     loadStories();
     loadFeed();
   }
@@ -555,24 +573,58 @@ function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
   document.body.appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('open'));
 
-  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 180); };
+  // Close gate — same in-flight protection as the bulk dialog. The
+  // user can't dismiss while a charge is mid-RPC.
+  const close = () => {
+    if (_unlockInFlight) return;
+    modal.classList.remove('open');
+    setTimeout(() => modal.remove(), 180);
+  };
   modal.querySelector('.unlock-modal-close').onclick = close;
   modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
 
   modal.querySelectorAll('.unlock-option').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (btn.disabled) return;
+      if (_unlockInFlight) return; // a sibling button is already firing
       const currency = btn.dataset.cur;
       btn.classList.add('is-loading');
-      const { data, error } = await supabase.rpc('unlock_content', {
-        p_target_type: targetType,
-        p_target_id:   targetId,
-        p_currency:    currency,
-      });
-      btn.classList.remove('is-loading');
-      if (error) { toast(error.message, 'error'); return; }
+      // Disable BOTH currency buttons while the first one is in flight.
+      // Closes the "tap coin then immediately tap star" race that
+      // could fire two parallel RPCs before either response landed.
+      modal.querySelectorAll('.unlock-option').forEach(b => { b.disabled = true; });
+      _unlockInFlight = true;
+      let data = null, error = null;
+      try {
+        const res = await supabase.rpc('unlock_content', {
+          p_target_type: targetType,
+          p_target_id:   targetId,
+          p_currency:    currency,
+        });
+        data = res.data; error = res.error;
+      } finally {
+        _unlockInFlight = false;
+        btn.classList.remove('is-loading');
+      }
+      if (error) {
+        // Re-enable both buttons so the user can retry / switch currency.
+        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
+        _handleUnlockFailure(error, {
+          target_type: targetType,
+          target_id: targetId,
+          currency,
+          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
+        });
+        return;
+      }
       if (!data?.ok) {
-        toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
+        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
+        _handleUnlockFailure(data, {
+          target_type: targetType,
+          target_id: targetId,
+          currency,
+          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
+        });
         return;
       }
       // Local state update (Realtime will also push, but this avoids the flicker)
@@ -582,6 +634,14 @@ function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
       renderTopbarCoinPill();
       close();
       toast(data.already_unlocked ? 'Already unlocked' : `Unlocked! −${data.cost} ${currency}${data.cost === 1 ? '' : 's'}`, 'success');
+      // Weekly/monthly goal: tick "Unlock N items". Skip the
+      // already_unlocked branch (data.already_unlocked === true means
+      // server didn't charge — no new engagement). Dedupe by
+      // target so re-buying the same unlock can't farm. Mirrors
+      // mobile at lib/book-unlocks-supabase.js:39.
+      if (!data.already_unlocked) {
+        try { tickGoalUnique('unlock', `unlock:${targetType}:${targetId}`); } catch {}
+      }
       if (typeof onUnlocked === 'function') onUnlocked();
     });
   });
@@ -792,6 +852,227 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
   }
 }
 
+// ── Unlock error interpretation + recovery (May 2026, Pass B) ───────
+//
+// Single source of truth for unlock error code → user-facing copy.
+// Mirrors mobile's lib/unlock-error-codes.js exactly — keep both
+// sides in sync. When a new error code lands anywhere in the unlock
+// stack, add a row here AND in mobile.
+//
+// Each entry: { title, message, recoverable, kind }
+//   recoverable — true if the user can fix it (retry, top up, contact support)
+//   kind        — 'coin' | 'star' | 'account' (drives the support-ticket form)
+const _UNLOCK_ERROR_REGISTRY = {
+  not_authenticated: { title: 'Reconnecting your account', message: "We're still connecting your account. Please try again in a moment — if the problem keeps happening, sign out and sign back in.", recoverable: true, kind: 'account' },
+  insufficient_balance: { title: 'Not enough balance', message: "You don't have enough to unlock this. Top up in the Store and try again.", recoverable: true, kind: 'coin' },
+  insufficient_coins: { title: 'Not enough coins', message: "You don't have enough coins to unlock this. Top up in the Store and try again.", recoverable: true, kind: 'coin' },
+  insufficient_stars: { title: 'Not enough stars', message: "You don't have enough stars to unlock this. Earn more from the Goals tab or top up in the Store, then try again.", recoverable: true, kind: 'coin' },
+  wallet_missing: { title: 'Setting up your wallet', message: "We're finalizing your wallet. Please try again in a few seconds. If the issue persists, we'll restore it manually within 24 hours.", recoverable: true, kind: 'coin' },
+  cost_unresolved: { title: 'Pricing temporarily unavailable', message: "We couldn't load the unlock price. Please refresh the screen and try again.", recoverable: true, kind: 'coin' },
+  // May 2026 — added to match mobile registry (lib/unlock-error-codes.js).
+  // unlock_content emits `invalid_cost` when a chapter has NULL/<=0
+  // pricing for the requested currency (author didn't set a price).
+  invalid_cost: { title: 'Pricing missing for this chapter', message: "The author hasn't set a price for this chapter yet. Try a different chapter or contact support and we'll fix it within 24 hours.", recoverable: true, kind: 'coin' },
+  // unlock_book_bulk equivalent — bulk pricing missing on the book row.
+  invalid_book_cost: { title: 'Bulk pricing missing', message: "The author hasn't set a whole-book price yet. You can still unlock individual chapters, or contact support and we'll resolve it within 24 hours.", recoverable: true, kind: 'coin' },
+  invalid_currency: { title: 'Unlock unavailable', message: 'Something went wrong with the payment type. Please refresh and try again.', recoverable: true, kind: 'coin' },
+  invalid_target_type: { title: 'Unlock unavailable', message: "This item can't be unlocked right now. Please refresh and try again.", recoverable: false, kind: 'coin' },
+  invalid_target_id: { title: 'Item not found', message: "We couldn't find this chapter or book. It may have been removed by the author.", recoverable: false, kind: 'coin' },
+  book_not_found: { title: 'Book not found', message: "We couldn't find this book. It may have been removed.", recoverable: false, kind: 'coin' },
+  no_locks_on_book: { title: 'Already free to read', message: "This book doesn't have any locked chapters — you can start reading right away.", recoverable: false, kind: 'coin' },
+  kyc_not_approved: { title: 'Verify your account first', message: 'Please complete your Payment Info before unlocking content.', recoverable: true, kind: 'account' },
+  // Alias: withdrawal RPC + future paywall paths emit `kyc_required` while
+  // the registry historically used `kyc_not_approved`. Same user-facing copy.
+  kyc_required: { title: 'Verify your account first', message: 'Please complete your Payment Info before unlocking content.', recoverable: true, kind: 'account' },
+  network: { title: 'Connection issue', message: "We couldn't reach our servers. Check your connection and try again.", recoverable: true, kind: 'coin' },
+  rate_limited: { title: 'Slow down a moment', message: "You're going a little fast. Please wait a few seconds and try again.", recoverable: true, kind: 'coin' },
+  // Wrapper-thrown errors — see _interpretUnlockError's message-string
+  // matchers below. These come from client-side helpers when a legacy
+  // hex id can't be resolved to a Supabase UUID.
+  cannot_resolve_chapter: { title: 'Chapter not ready', message: "This chapter isn't fully synced yet. Please refresh the book and try again.", recoverable: true, kind: 'coin' },
+  cannot_resolve_book: { title: 'Book not ready', message: "This book isn't fully synced yet. Please refresh and try again.", recoverable: true, kind: 'coin' },
+};
+
+// Translate any unlock failure shape (server JSON, thrown Error, raw
+// string) into a uniform UI object. Always returns a populated object.
+// Currency-aware: `insufficient_balance` + payload currency
+// dispatches to `insufficient_coins` / `insufficient_stars`.
+function _interpretUnlockError(input, ctx = {}) {
+  const rawCode = (() => {
+    if (!input) return 'unknown';
+    if (typeof input === 'string') return input;
+    if (typeof input === 'object') {
+      if (typeof input.error === 'string') return input.error;
+      if (typeof input.message === 'string') {
+        // Collapse long wrapper-thrown messages into registry codes
+        // (matches mobile lib/unlock-error-codes.js:213-220). Without
+        // these matchers, the raw error message becomes the lookup key
+        // and falls through to the generic 'Unlock failed' fallback.
+        const m = input.message.toLowerCase();
+        if (m.includes('cannot resolve chapter')) return 'cannot_resolve_chapter';
+        if (m.includes('cannot resolve book')) return 'cannot_resolve_book';
+        if (m.includes('network') || m.includes('fetch')) return 'network';
+        if (m.includes('not signed in') || m.includes('not authenticated')) return 'not_authenticated';
+        return input.message;
+      }
+    }
+    return String(input);
+  })();
+  let lookupCode = rawCode;
+  if (rawCode === 'insufficient_balance') {
+    const cur = ctx.currency || input?.currency;
+    if (cur === 'coin' || cur === 'coins') lookupCode = 'insufficient_coins';
+    else if (cur === 'star' || cur === 'stars') lookupCode = 'insufficient_stars';
+  }
+  const entry = _UNLOCK_ERROR_REGISTRY[lookupCode];
+  if (!entry) {
+    console.warn('[unlock] unmapped error code', rawCode, ctx);
+    return { title: 'Unlock failed', message: "We couldn't complete the unlock. Please try again.", recoverable: true, kind: 'coin', rawCode };
+  }
+  return { ...entry, rawCode };
+}
+
+// File a support ticket against the recovery queue. Server-side
+// per-day dedup prevents spam if the user retries multiple times.
+// Best-effort: any error here is logged and swallowed (we never want
+// to surface "recovery filing failed" on top of the original
+// unlock failure that triggered it).
+async function _submitUnlockRecoveryRequest({ kind, amount, reason, context }) {
+  try {
+    const { error } = await supabase.rpc('submit_balance_recovery_request', {
+      p_kind: kind,
+      p_reported_amount: kind === 'account' ? 1 : Math.max(1, Math.round(Number(amount) || 1)),
+      p_reason: reason || null,
+      p_context: context || {},
+      p_actor_id: currentUser?.id || null,
+    });
+    if (error) console.warn('[unlock] auto-file recovery failed:', error.message);
+  } catch (e) {
+    console.warn('[unlock] auto-file recovery exception:', e?.message || e);
+  }
+}
+
+// Centralized failure handler — toast the friendly message, log the
+// raw code, auto-file a support ticket for recoverable non-balance
+// failures (the user can't fix a wallet_missing or cost_unresolved
+// themselves, so we want admin eyes on it). Mirrors mobile's
+// components/BookChaptersUnlockModal.jsx:893-939.
+function _handleUnlockFailure(errorOrResult, context) {
+  const ui = _interpretUnlockError(errorOrResult, context);
+  toast(ui.message, 'error');
+  console.error('[unlock] failure:', { code: ui.rawCode, ...context });
+  // Don't auto-file for insufficient-* (user just needs to top up)
+  // or hard-data errors (no_locks_on_book — not actually a failure).
+  const shouldFile = ui.recoverable
+    && ui.rawCode !== 'insufficient_balance'
+    && ui.rawCode !== 'insufficient_coins'
+    && ui.rawCode !== 'insufficient_stars'
+    && ui.rawCode !== 'no_locks_on_book';
+  if (shouldFile && currentUser?.id) {
+    _submitUnlockRecoveryRequest({
+      kind: ui.kind === 'account' ? 'account' : (context?.currency === 'star' ? 'star' : 'coin'),
+      amount: context?.cost || 1,
+      reason: [
+        `Unlock failed: ${ui.rawCode}`,
+        context?.target_type && context?.target_id ? `Target: ${context.target_type}/${context.target_id}` : null,
+        context?.currency ? `Currency: ${context.currency}` : null,
+        typeof context?.balance_at_attempt === 'number' ? `Balance at attempt: ${context.balance_at_attempt}` : null,
+      ].filter(Boolean).join('\n'),
+      context: { source: 'web_unlock', ...context },
+    });
+  }
+}
+
+// Diagnostic: after a successful bulk unlock, re-read the user's
+// unlocks rows and warn loudly if the count we expected didn't land.
+// Mirrors mobile's lib/book-unlocks-supabase.js:79-121 — the
+// diagnostic that caught the May 2026 revert-on-refresh bug. Pure
+// observability, doesn't gate any UX. If a mismatch hits production
+// telemetry, admins see it before users complain.
+async function _verifyBulkUnlockPersistence(bookId, expectedUnlocksCount) {
+  try {
+    // Pull all this user's chapter-level unlocks for the book.
+    // Bulk RPC writes chapter rows (one per locked chapter), so the
+    // count comparison is direct.
+    const { data: bookRow } = await supabase
+      .from('books').select('id').eq('id', bookId).maybeSingle();
+    if (!bookRow) return;
+    const { data: chapters } = await supabase
+      .from('chapters').select('id').eq('book_id', bookId);
+    const chapterIds = (chapters || []).map(c => c.id);
+    if (chapterIds.length === 0) return;
+    const { data: unlockRows } = await supabase
+      .from('unlocks')
+      .select('target_id')
+      .eq('user_id', currentUser.id)
+      .eq('target_type', 'chapter')
+      .in('target_id', chapterIds);
+    const persisted = (unlockRows || []).length;
+    if (persisted < expectedUnlocksCount) {
+      console.warn(
+        `[unlock-bulk] PERSISTENCE-MISMATCH book=${bookId}: server said ${expectedUnlocksCount} chapters unlocked, but only ${persisted} unlock rows are visible to the client. Real-money bug — investigate.`,
+        { user_id: currentUser?.id, bookId, expected: expectedUnlocksCount, persisted },
+      );
+    }
+  } catch (e) {
+    // Verification is best-effort — never fail the unlock UX on it.
+    console.warn('[unlock-bulk] verify exception:', e?.message || e);
+  }
+}
+
+// ── Unlock state guard (May 2026 — real-money correctness fix) ──────
+//
+// Module-level boolean that's set the moment ANY unlock RPC fires
+// and cleared in finally. Used by openUnlockDialog +
+// openBulkBookUnlockDialog to short-circuit click handlers and
+// modal-close attempts while a charge is in flight.
+//
+// The exposure this closes: tapping "coin" then "star" on the same
+// unlock modal within ~50ms (before the first RPC's response lands)
+// could fire two parallel RPCs. The server's `unlock_content` is
+// idempotent per (user, target_type, target_id) so the same target
+// won't double-charge — but a coin charge AND a star charge for the
+// same target in flight at once IS a real exposure. This flag
+// blocks the second tap before it gets to the network.
+let _unlockInFlight = false;
+
+// Ask the server for the authoritative bulk-unlock totals. Returns
+// `{ coin: number, star: number }` on success, or `null` if either
+// preview RPC fails — in which case the caller falls back to the
+// client-computed estimate. Mirrors mobile's
+// lib/wallet-supabase.js:253-285 (previewBookBulkUnlock).
+//
+// Rationale: web previously computed the bulk discount client-side
+// (Math.max(1, sum - Math.floor(sum * pct / 100))) and sent the
+// result to unlock_book_bulk, hoping the server agreed. If the
+// discount % gets bumped server-side OR rounding behaves differently
+// than expected, the user could see one price and get charged
+// another. Asking the server for the price BEFORE rendering the
+// modal eliminates that drift.
+async function _previewBookBulkUnlock(bookId) {
+  try {
+    const [coinRes, starRes] = await Promise.all([
+      supabase.rpc('preview_book_bulk_unlock', { p_book_id: bookId, p_currency: 'coin' }),
+      supabase.rpc('preview_book_bulk_unlock', { p_book_id: bookId, p_currency: 'star' }),
+    ]);
+    if (coinRes.error || starRes.error) {
+      console.warn('[bulk-preview] RPC failed; falling back to client estimate',
+        coinRes.error?.message, starRes.error?.message);
+      return null;
+    }
+    const coin = coinRes.data?.total_after ?? coinRes.data?.cost ?? null;
+    const star = starRes.data?.total_after ?? starRes.data?.cost ?? null;
+    if (coin == null || star == null) {
+      console.warn('[bulk-preview] RPC returned no total; falling back to client estimate', coinRes.data, starRes.data);
+      return null;
+    }
+    return { coin, star };
+  } catch (e) {
+    console.warn('[bulk-preview] exception; falling back to client estimate', e);
+    return null;
+  }
+}
+
 // ── Bulk book unlock dialog (Phase 6) ─────────────────────────────────────
 function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, starCost, discountPct, onUnlocked }) {
   const canCoin = _wallet.coin_balance >= coinCost;
@@ -814,7 +1095,12 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
           </span>
           <span class="unlock-option-cost">${coinCost}</span>
           <span class="unlock-option-label">Coin${coinCost === 1 ? '' : 's'}</span>
-          <span class="unlock-option-hint">${canCoin ? 'Tap to unlock all' : `You have ${_wallet.coin_balance}`}</span>
+          <!-- Hint repeats the locked-chapter count next to the
+               action so the user sees exactly what they're paying
+               for. Mirrors mobile's BookChaptersUnlockModal pattern
+               of placing the count inside each option button rather
+               than relying on the modal subtitle alone. -->
+          <span class="unlock-option-hint">${canCoin ? `Unlock all ${lockedCount} part${lockedCount === 1 ? '' : 's'}` : `You have ${_wallet.coin_balance}`}</span>
         </button>
         <div class="unlock-or">or</div>
         <button class="unlock-option unlock-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
@@ -823,7 +1109,7 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
           </span>
           <span class="unlock-option-cost">${starCost}</span>
           <span class="unlock-option-label">Star${starCost === 1 ? '' : 's'}</span>
-          <span class="unlock-option-hint">${canStar ? 'Tap to unlock all' : `You have ${_wallet.star_balance}`}</span>
+          <span class="unlock-option-hint">${canStar ? `Unlock all ${lockedCount} part${lockedCount === 1 ? '' : 's'}` : `You have ${_wallet.star_balance}`}</span>
         </button>
       </div>
       ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Not enough coins or stars yet. Open the Store to top up.</p>' : ''}
@@ -832,23 +1118,93 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
   document.body.appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('open'));
 
-  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 180); };
+  // Refresh displayed prices with the server-authoritative totals
+  // BEFORE the user can tap. If the preview RPC fails, the client
+  // estimates we rendered above stay put as a graceful fallback.
+  _previewBookBulkUnlock(bookId).then((server) => {
+    if (!server) return;
+    const coinEl  = modal.querySelector('.unlock-option-coin .unlock-option-cost');
+    const starEl  = modal.querySelector('.unlock-option-star .unlock-option-cost');
+    const coinLbl = modal.querySelector('.unlock-option-coin .unlock-option-label');
+    const starLbl = modal.querySelector('.unlock-option-star .unlock-option-label');
+    if (coinEl) coinEl.textContent = server.coin;
+    if (starEl) starEl.textContent = server.star;
+    if (coinLbl) coinLbl.textContent = `Coin${server.coin === 1 ? '' : 's'}`;
+    if (starLbl) starLbl.textContent = `Star${server.star === 1 ? '' : 's'}`;
+    // Re-evaluate affordability against the server price — the
+    // displayed totals might be ₱X.XX different from the client
+    // estimate, which could flip a button from enabled to disabled.
+    const canCoinServer = _wallet.coin_balance >= server.coin;
+    const canStarServer = _wallet.star_balance >= server.star;
+    const coinBtn = modal.querySelector('.unlock-option-coin');
+    const starBtn = modal.querySelector('.unlock-option-star');
+    [[coinBtn, canCoinServer, _wallet.coin_balance], [starBtn, canStarServer, _wallet.star_balance]].forEach(([btn, can, bal]) => {
+      if (!btn) return;
+      btn.disabled = !can;
+      btn.classList.toggle('is-disabled', !can);
+      const hint = btn.querySelector('.unlock-option-hint');
+      if (hint) hint.textContent = can
+        ? `Unlock all ${lockedCount} part${lockedCount === 1 ? '' : 's'}`
+        : `You have ${bal}`;
+    });
+    // Cache server totals on the modal so the click handler can use
+    // the same number the user just saw (no race between paint and tap).
+    modal.dataset.coinCost = String(server.coin);
+    modal.dataset.starCost = String(server.star);
+  });
+
+  // Close gate — blocked while an unlock RPC is in flight so we
+  // never tear down the modal mid-charge.
+  const close = () => {
+    if (_unlockInFlight) return;
+    modal.classList.remove('open');
+    setTimeout(() => modal.remove(), 180);
+  };
   modal.querySelector('.unlock-modal-close').onclick = close;
   modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
 
   modal.querySelectorAll('.unlock-option').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (btn.disabled) return;
+      if (_unlockInFlight) return; // guard: a sibling button is already firing
       const currency = btn.dataset.cur;
       btn.classList.add('is-loading');
-      const { data, error } = await supabase.rpc('unlock_book_bulk', {
-        p_book_id:  bookId,
-        p_currency: currency,
-      });
-      btn.classList.remove('is-loading');
-      if (error) { toast(error.message, 'error'); return; }
+      // Disable BOTH buttons + the close while in flight — the user
+      // shouldn't be able to switch currency or escape mid-charge.
+      modal.querySelectorAll('.unlock-option').forEach(b => { b.disabled = true; });
+      _unlockInFlight = true;
+      let data = null, error = null;
+      try {
+        const res = await supabase.rpc('unlock_book_bulk', {
+          p_book_id:  bookId,
+          p_currency: currency,
+        });
+        data = res.data; error = res.error;
+      } finally {
+        _unlockInFlight = false;
+        btn.classList.remove('is-loading');
+      }
+      if (error) {
+        // Re-enable both buttons so the user can retry / pick the other currency.
+        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
+        _handleUnlockFailure(error, {
+          target_type: 'book',
+          target_id: bookId,
+          currency,
+          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
+          locked_count: lockedCount,
+        });
+        return;
+      }
       if (!data?.ok) {
-        toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
+        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
+        _handleUnlockFailure(data, {
+          target_type: 'book',
+          target_id: bookId,
+          currency,
+          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
+          locked_count: lockedCount,
+        });
         return;
       }
       // Update local state — Realtime will push too, but avoid flicker.
@@ -863,6 +1219,20 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
       close();
       const saved = data.cost_before_discount - data.cost;
       toast(`Unlocked ${data.chapters_unlocked} chapter${data.chapters_unlocked === 1 ? '' : 's'} — saved ${saved} ${currency}${saved === 1 ? '' : 's'}`, 'success');
+      // Weekly/monthly goal: tick "Unlock N items". Dedupe by book id
+      // so re-clicking the bulk unlock (already-unlocked → no-op data
+      // from server) doesn't farm. Mirrors mobile at
+      // lib/book-unlocks-supabase.js:127.
+      try { tickGoalUnique('unlock', `unlock:book:${bookId}`); } catch {}
+      // Persistence verification — fire-and-forget. If the server
+      // said "12 chapters unlocked" but only 10 unlock rows are
+      // visible afterward, this logs a PERSISTENCE-MISMATCH warning
+      // to the console for our telemetry to pick up. Production
+      // mismatches mean real money was charged without the unlock
+      // landing. Mirrors mobile's diagnostic at
+      // lib/book-unlocks-supabase.js:79-121.
+      const expected = Number(data.chapters_unlocked) || 0;
+      if (expected > 0) _verifyBulkUnlockPersistence(bookId, expected);
       if (typeof onUnlocked === 'function') onUnlocked();
     });
   });
@@ -906,6 +1276,27 @@ document.querySelectorAll('.earnings-tab').forEach(t => {
 
 // Sidebar entry point
 document.getElementById('btnEarnings')?.addEventListener('click', () => showEarnings());
+
+// Month picker — wired once at page load. Changing the month re-renders
+// the "This Month" tile + breakdown row from the cached data; no
+// network round-trip needed. Both Total Earnings + Available/Under
+// review are NOT month-sensitive so they stay put.
+document.getElementById('earningsMonthPicker')?.addEventListener('change', (e) => {
+  _selectedMonthYear = e.target.value || _currentMonthYearKey();
+  _renderMonthScopedBreakdown();
+});
+
+// Breakdown drill-down — wire tile clicks (delegated to the page so
+// even if the tiles re-render the binding survives), the back
+// button, and the "Load more" pager. Mirrors mobile.
+document.getElementById('earningsPage')?.addEventListener('click', (e) => {
+  const tile = e.target.closest?.('[data-breakdown-category]');
+  if (tile) {
+    openEarningsBreakdown(tile.dataset.breakdownCategory, tile.dataset.breakdownLabel || 'Earnings');
+  }
+});
+document.getElementById('earningsBreakdownBack')?.addEventListener('click', () => closeEarningsBreakdown());
+document.getElementById('btnEarningsBreakdownMore')?.addEventListener('click', () => _loadMoreEarningsBreakdown());
 
 // ── Store page ──────────────────────────────────────────────────────────────
 async function showStore() {
@@ -999,6 +1390,416 @@ function renderStoreBalances() {
   if (c) c.textContent = `${_wallet.coin_balance.toLocaleString()} Coin${_wallet.coin_balance === 1 ? '' : 's'}`;
   if (s) s.textContent = `${_wallet.star_balance.toLocaleString()} Star${_wallet.star_balance === 1 ? '' : 's'}`;
 }
+
+// ── Wallet history (May 2026 — canonical ledger version) ───────────
+//
+// Reads directly from `coin_transactions` / `star_transactions`, the
+// authoritative wallet ledgers that every balance-mutating RPC
+// already writes to. Each row carries:
+//   • delta         signed integer (+credit / −debit)
+//   • balance_after wallet balance immediately after the txn
+//   • type          categorical ('unlock_chapter', 'unlock_video',
+//                                 'unlock_book_bulk', 'admin_adjust',
+//                                 'withdrawal_request', etc.)
+//   • reference_type + reference_id  polymorphic source pointer
+//   • metadata      jsonb with kind-specific extras (chapter_count,
+//                                                     period, period_key,
+//                                                     reason)
+//
+// Replaces last night's reconstruction-from-three-tables approach
+// (which couldn't show debit amounts because the `unlocks` table
+// doesn't store costs). The ledger HAS the cost on every row.
+async function loadWalletHistory(currency) {
+  if (!currentUser) return [];
+  const cur = currency === 'star' ? 'star' : 'coin';
+  const table = cur === 'star' ? 'star_transactions' : 'coin_transactions';
+
+  const { data, error } = await supabase
+    .from(table)
+    .select('id, delta, balance_after, type, reference_type, reference_id, metadata, created_at')
+    .eq('user_id', currentUser.id)
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (error) {
+    console.warn(`[wallet-history] ${table} fetch failed:`, error.message);
+    return [];
+  }
+  const rows = data || [];
+  console.log(`[wallet-history] ${table} fetched`, rows.length, 'rows');
+
+  // Resolve titles for unlock debit rows (chapter / video / book).
+  // The existing _resolveEarningsTitles helper handles all three.
+  // We map the ledger's reference_type → the resolver's source_type:
+  //   chapter → chapter, video → video, book → book_bulk
+  // (the resolver caches under "book_bulk:" for whole-book lookups).
+  const titleLookupInput = [];
+  for (const r of rows) {
+    if (r.delta >= 0) continue;        // credits don't need titles
+    if (!r.reference_type || !r.reference_id) continue;
+    const refType =
+      r.reference_type === 'book' ? 'book_bulk' :
+      r.reference_type === 'chapter' ? 'chapter' :
+      r.reference_type === 'video' ? 'video' :
+      null;
+    if (!refType) continue;
+    titleLookupInput.push({ source_type: refType, source_id: r.reference_id });
+  }
+  const titles = titleLookupInput.length
+    ? await _resolveEarningsTitles(titleLookupInput)
+    : new Map();
+
+  // Map ledger rows → display events.
+  const events = [];
+  for (const r of rows) {
+    // delta = 0 rows are pure audit (e.g., withdrawal_request) —
+    // skip from the user-facing list. They're still useful for
+    // admins reading the table directly.
+    if (r.delta === 0) continue;
+
+    const direction = r.delta > 0 ? 'credit' : 'debit';
+    const amount = Math.abs(r.delta);
+    let title = '';
+    let sub = '';
+
+    switch (r.type) {
+      case 'unlock_chapter':
+        title = titles.get(`chapter:${r.reference_id}`) || 'Chapter unlock';
+        sub = 'Chapter unlock';
+        break;
+      case 'unlock_video':
+        title = titles.get(`video:${r.reference_id}`) || 'Video unlock';
+        sub = 'Video unlock';
+        break;
+      case 'unlock_book_bulk': {
+        const chapterCount = r.metadata?.chapter_count;
+        const bookTitle = titles.get(`book_bulk:${r.reference_id}`) || 'a book';
+        title = chapterCount
+          ? `Bulk unlock — ${chapterCount} chapter${chapterCount === 1 ? '' : 's'} from ${bookTitle}`
+          : `Bulk unlock — ${bookTitle}`;
+        sub = 'Whole book unlock';
+        break;
+      }
+      case 'admin_adjust': {
+        const reason = r.metadata?.reason;
+        if (r.reference_type === 'goal_pool_claim' || reason === 'goal_pool_claim') {
+          const period = r.metadata?.period;
+          title = _walletHistoryClaimTitle(period);
+          sub = r.metadata?.period_key || 'Goal pool claim';
+        } else if (r.reference_type === 'balance_recovery' || reason === 'balance_recovery') {
+          title = 'Balance restored';
+          sub = 'Approved recovery request';
+        } else {
+          title = 'Admin adjustment';
+          sub = reason || r.reference_type || '';
+        }
+        break;
+      }
+      case 'purchase':
+      case 'coin_purchase':
+      case 'iap_purchase':
+      case 'hitpay_purchase':
+        title = 'Store top-up';
+        sub = r.metadata?.package_name
+          || r.metadata?.product_id
+          || (r.reference_type === 'hitpay' ? 'HitPay purchase' : 'In-app purchase');
+        break;
+      case 'withdrawal_request':
+        // Usually delta=0 (filtered above). If non-zero, it's the
+        // settle moment when funds actually leave the wallet.
+        title = 'Withdrawal';
+        sub = 'Payout to bank';
+        break;
+      case 'ad_reward':
+        title = 'Star earned';
+        sub = 'Rewarded ad';
+        break;
+      default:
+        // Unknown type — surface it verbatim so we notice in dev.
+        title = String(r.type || 'Wallet event').replace(/_/g, ' ');
+        sub = r.reference_type || '';
+    }
+
+    events.push({
+      kind: r.type,
+      direction,
+      amount,
+      currency: cur,
+      title,
+      sub,
+      at: r.created_at,
+      balance_after: r.balance_after,
+    });
+  }
+  return events;
+}
+
+function _walletHistoryClaimTitle(period) {
+  if (period === 'daily')   return 'Daily goal pool claim';
+  if (period === 'weekly')  return 'Weekly goal pool claim';
+  if (period === 'monthly') return 'Monthly goal pool claim';
+  return 'Goal pool claim';
+}
+
+// Compact, two-piece timestamp: "9:55 AM" + (date, when not today/yesterday).
+// Date grouping lives at the section-header level so individual rows
+// only need the time. Returns { primary, secondary }:
+//   • primary   — short time ("9:55 AM")
+//   • secondary — relative day for older rows ("Mar 14" or "Mar 14, 2025"
+//                 when not in current year); blank for today / yesterday
+function _formatWalletHistoryTime(iso) {
+  if (!iso) return { primary: '—', secondary: '' };
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return { primary: '—', secondary: '' };
+
+  const primary = d.toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit',
+  });
+
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  if (sameDay || isYesterday) return { primary, secondary: '' };
+
+  const secondary = d.getFullYear() === now.getFullYear()
+    ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return { primary, secondary };
+}
+
+// Group key + display label for date section headers. Keeps the
+// wallet history list visually segmented so the eye can scan blocks
+// instead of an undifferentiated wall of rows.
+function _walletHistoryDateKey(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return { key: 'unknown', label: 'Unknown date' };
+
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return { key: 'today', label: 'Today' };
+
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) {
+    return { key: 'yesterday', label: 'Yesterday' };
+  }
+
+  const dayDiff = Math.floor((now - d) / (1000 * 60 * 60 * 24));
+  if (dayDiff < 7) {
+    return {
+      key: d.toDateString(),
+      label: d.toLocaleDateString('en-US', { weekday: 'long' }),
+    };
+  }
+
+  if (d.getFullYear() === now.getFullYear()) {
+    return {
+      key: d.toDateString(),
+      label: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+    };
+  }
+  return {
+    key: d.toDateString(),
+    label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+  };
+}
+
+async function openWalletHistory(currency) {
+  const cur = currency === 'star' ? 'star' : 'coin';
+  const modal = document.getElementById('walletHistoryModal');
+  if (!modal) return;
+
+  // Update header for the chosen currency
+  const titleText = document.getElementById('walletHistoryTitleText');
+  const iconWrap  = document.getElementById('walletHistoryIcon');
+  if (titleText) titleText.textContent = cur === 'star' ? 'Stars history' : 'Coins history';
+  if (iconWrap) iconWrap.innerHTML = _walletCurrencyIconSvg(cur, 20);
+
+  // Current balance card — render the new SVG glyph inline rather than
+  // an emoji (the 🪙 / ⭐ emoji render as flat gray discs at small sizes
+  // on many systems, which is what made the icon read as a moon).
+  const balEl = document.getElementById('walletHistoryBalance');
+  const summaryGlyphHtml = `<span class="wallet-history-summary-glyph" aria-hidden="true">${_walletCurrencyIconSvg(cur, 14)}</span>`;
+  if (balEl) {
+    const bal = cur === 'star' ? (_wallet.star_balance || 0) : (_wallet.coin_balance || 0);
+    balEl.innerHTML = `${bal.toLocaleString()} ${summaryGlyphHtml}`;
+  }
+
+  // Reset summary + list to loading state.
+  document.getElementById('walletHistoryEarned').innerHTML = `+0 ${summaryGlyphHtml}`;
+  document.getElementById('walletHistorySpent').innerHTML  = `−0 ${summaryGlyphHtml}`;
+  const list = document.getElementById('walletHistoryList');
+  if (list) {
+    list.innerHTML = `
+      <div class="wallet-history-loading">
+        <div class="wallet-history-loading-spinner" aria-hidden="true"></div>
+        <div class="wallet-history-loading-text">Loading your history…</div>
+      </div>
+    `;
+  }
+
+  modal.style.display = 'flex';
+
+  // Fetch + render.
+  const events = await loadWalletHistory(cur);
+
+  // Compute summary totals
+  let earned = 0, spent = 0;
+  for (const e of events) {
+    if (e.direction === 'credit' && e.amount) earned += e.amount;
+    if (e.direction === 'debit'  && e.amount) spent  += e.amount;
+  }
+  document.getElementById('walletHistoryEarned').innerHTML = `+${earned.toLocaleString()} ${summaryGlyphHtml}`;
+  document.getElementById('walletHistorySpent').innerHTML  = `−${spent.toLocaleString()} ${summaryGlyphHtml}`;
+
+  if (!events.length) {
+    list.innerHTML = `
+      <div class="wallet-history-empty">
+        <div class="wallet-history-empty-illustration" aria-hidden="true">${_walletCurrencyIconSvg(cur, 56)}</div>
+        <div class="wallet-history-empty-title">No history yet</div>
+        <div class="wallet-history-empty-sub">When you earn or spend ${cur === 'star' ? 'stars' : 'coins'}, entries will show here.</div>
+      </div>
+    `;
+    return;
+  }
+
+  // Build the list. Credits → green + sign, debits → red − sign.
+  // Bulk-unlock rows get a "BULK" pill, a stacked-books icon, and a
+  // soft purple tint so a whole-book purchase is visually distinct
+  // from individual chapter/video unlocks.
+  //
+  // Premium redesign (May 2026):
+  //   • Date section dividers ("Today", "Yesterday", "Tuesday", "Sat, May 3")
+  //     so the eye scans clusters instead of an undifferentiated list.
+  //   • Two-line metadata: title + sub-line, time on the right column above
+  //     the running balance for at-a-glance verification.
+  //   • Card-style rows with subtle elevation on hover.
+  //   • Stagger fade-in animation per row.
+  // Tiny version of the currency icon for the inline "Bal 514" line on
+  // each row. 11px keeps it secondary to the amount column.
+  const rowBalGlyph = `<span class="wallet-history-bal-glyph" aria-hidden="true">${_walletCurrencyIconSvg(cur, 11)}</span>`;
+  let lastDateKey = null;
+  const html = [];
+  events.forEach((e, idx) => {
+    const grp = _walletHistoryDateKey(e.at);
+    if (grp.key !== lastDateKey) {
+      lastDateKey = grp.key;
+      html.push(`<div class="wallet-history-date-divider"><span>${escHTML(grp.label)}</span></div>`);
+    }
+
+    const sign = e.direction === 'credit' ? '+' : '−';
+    const dirCls = e.direction === 'credit' ? 'wallet-history-row-credit' : 'wallet-history-row-debit';
+    const kindCls = e.kind === 'unlock_book_bulk' ? 'wallet-history-row-bulk' : '';
+    const amountText = e.amount != null
+      ? `${sign}${e.amount.toLocaleString()}`
+      : '—';
+    const icon = _walletHistoryIconFor(e);
+    const pill = e.kind === 'unlock_book_bulk'
+      ? '<span class="wallet-history-pill wallet-history-pill-bulk" title="Whole-book purchase">BULK</span>'
+      : '';
+    const t = _formatWalletHistoryTime(e.at);
+    // Right-column secondary line: balance-after, so the user can mentally
+    // verify the ledger ("after this row I had 514 coins"). Falls back to
+    // the date secondary (when not Today/Yesterday) if balance not present.
+    // balanceHtml is raw HTML (contains the inline SVG glyph) — when
+    // empty we fall back to the escaped date secondary.
+    const balanceHtml = e.balance_after != null
+      ? `Bal ${Number(e.balance_after).toLocaleString()} ${rowBalGlyph}`
+      : (t.secondary ? escHTML(t.secondary) : '');
+    const subText = e.sub ? escHTML(e.sub) : '';
+    const stagger = `style="animation-delay:${Math.min(idx * 20, 600)}ms"`;
+    html.push(`
+      <div class="wallet-history-row ${dirCls} ${kindCls}" ${stagger}>
+        <div class="wallet-history-row-icon" aria-hidden="true">${icon}</div>
+        <div class="wallet-history-row-meta">
+          <div class="wallet-history-row-title" title="${escHTML(e.title)}">
+            <span class="wallet-history-row-title-text">${escHTML(e.title)}</span>
+            ${pill}
+          </div>
+          <div class="wallet-history-row-sub">
+            ${subText}${subText && t.primary ? '<span class="wallet-history-row-sub-dot">·</span>' : ''}<span class="wallet-history-row-time">${escHTML(t.primary)}${t.secondary ? `, ${escHTML(t.secondary)}` : ''}</span>
+          </div>
+        </div>
+        <div class="wallet-history-row-right">
+          <div class="wallet-history-row-amount">${amountText}</div>
+          ${balanceHtml ? `<div class="wallet-history-row-balance">${balanceHtml}</div>` : ''}
+        </div>
+      </div>
+    `);
+  });
+  list.innerHTML = html.join('');
+}
+
+// Currency icon SVG — used by the modal header AND every credit row.
+// Two designs, both disc-shaped so they read as "currency" at a glance
+// (the previous coin icon was a stacked cylinder that looked like a
+// crescent moon at small sizes):
+//   • coin → two overlapping gold discs with a faint inner ring on the
+//     top coin (suggests dimensional embossing)
+//   • star → light-purple disc with a deep-purple star emblem inside
+//     (matches Selebox's existing star-as-purple-glyph convention while
+//     pairing visually with the coin disc as a sibling)
+// The `size` arg lets the same SVG drive 20px header icons and 18px
+// row icons without duplicating markup.
+function _walletCurrencyIconSvg(currency, size = 18) {
+  if (currency === 'star') {
+    return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" aria-hidden="true">`
+      + `<circle cx="12" cy="12" r="9" fill="#c4b5fd" stroke="#6b21a8" stroke-width="1.2"/>`
+      + `<path d="M12 6.8l1.55 3.25 3.6.3-2.78 2.36.88 3.49L12 14.45l-3.25 1.75.88-3.49-2.78-2.36 3.6-.3z" fill="#5b21b6"/>`
+      + `</svg>`;
+  }
+  // coin — two overlapping discs, the upper one a shade darker with an
+  // inner ring so it doesn't melt into the lower disc.
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" aria-hidden="true">`
+    + `<circle cx="9" cy="14.5" r="6.6" fill="#fbbf24" stroke="#b45309" stroke-width="1.2"/>`
+    + `<circle cx="15" cy="9.5"  r="6.6" fill="#f59e0b" stroke="#b45309" stroke-width="1.2"/>`
+    + `<circle cx="15" cy="9.5"  r="3.4" fill="none"   stroke="#78350f" stroke-width="0.8" opacity="0.55"/>`
+    + `</svg>`;
+}
+
+// Pick an icon by event kind. Each row gets a small left-side glyph
+// so the eye lands on the right category without reading. Bulk
+// unlocks get a books-stack so they pop visually next to single-
+// chapter or single-video unlocks. Credits get currency-specific
+// glyphs (coin / star) instead of a kind icon — money in is money
+// in, regardless of source.
+function _walletHistoryIconFor(e) {
+  if (e.direction === 'credit') {
+    return _walletCurrencyIconSvg(e.currency, 18);
+  }
+  // Debits — pick by kind.
+  switch (e.kind) {
+    case 'unlock_book_bulk':
+      // Books stack (three offset rectangles)
+      return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6v16H4z"/><path d="M10 4h6v16h-6z"/><path d="M16.5 5.5l5 1.2-3.4 14.6-5-1.2z"/></svg>';
+    case 'unlock_chapter':
+      // Single document with lines
+      return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>';
+    case 'unlock_video':
+      // Play in rounded rectangle
+      return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>';
+    case 'withdrawal_request':
+      // Bank
+      return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8 2 8 12 2"/><line x1="5" y1="11" x2="5" y2="18"/><line x1="10" y1="11" x2="10" y2="18"/><line x1="14" y1="11" x2="14" y2="18"/><line x1="19" y1="11" x2="19" y2="18"/><line x1="2" y1="22" x2="22" y2="22"/></svg>';
+    default:
+      // Generic shopping bag for unknown debits
+      return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>';
+  }
+}
+
+function closeWalletHistory() {
+  const modal = document.getElementById('walletHistoryModal');
+  if (modal) modal.style.display = 'none';
+}
+
+// Wire the clickable balance cards + the close button.
+document.querySelectorAll('[data-history-currency]').forEach((btn) => {
+  btn.addEventListener('click', () => openWalletHistory(btn.dataset.historyCurrency));
+});
+document.getElementById('btnCloseWalletHistory')?.addEventListener('click', closeWalletHistory);
+document.getElementById('walletHistoryModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'walletHistoryModal') closeWalletHistory();
+});
 
 // Re-render store balances on Realtime wallet change too.
 // (renderTopbarCoinPill is called by the wallet realtime; we hook the store
@@ -1195,24 +1996,68 @@ function playRewardedAd() {
 
 // ── Return-from-HitPay handler ──
 // HitPay redirects users back to /?store=success&ref=<purchase_id> after
-// payment. We detect that on load, show a friendly toast, and clean the URL.
-function handleStoreReturn() {
+// payment AND after cancel — the redirect_url field in a HitPay
+// payment-request is single-purpose, so the URL alone can't tell us
+// whether the user actually paid or just hit Back. The fix (May 2026)
+// is to verify against the database: when we see ?store=success&ref=…,
+// fetch the matching coin_purchases row and look at its real status.
+//
+// Only `completed`/`paid` rows trigger the success toast. `failed`/
+// `cancelled` rows trigger the cancel toast. `pending` rows (webhook
+// hasn't fired yet OR was never going to because the user bailed)
+// stay silent — the wallet's realtime subscription will still credit
+// the coins if a webhook eventually lands, and we'd rather show no
+// toast than a wrong toast.
+async function handleStoreReturn() {
   const params = new URLSearchParams(window.location.search);
-  const status = params.get('store');
-  if (!status) return;
-  if (status === 'success') {
-    toast('Payment received! Your coins will land any moment.', 'success');
-    // Realtime on wallets will auto-update the pill once the webhook lands.
-    // Open the Store page so the user sees the balance update.
-    setTimeout(() => showStore(), 50);
-  } else if (status === 'cancelled' || status === 'cancel') {
-    toast('Payment cancelled.', 'error');
-  }
-  // Strip the param so a refresh doesn't re-trigger the toast
+  const storeFlag = params.get('store');
+  const ref = params.get('ref');
+  if (!storeFlag) return;
+
+  // Strip params first so refresh / back-forward navigation doesn't
+  // keep re-firing this logic. The toast itself fires async below.
   params.delete('store');
   params.delete('ref');
   const newQuery = params.toString();
   history.replaceState(null, '', window.location.pathname + (newQuery ? '?' + newQuery : '') + window.location.hash);
+
+  if (storeFlag !== 'success') {
+    if (storeFlag === 'cancelled' || storeFlag === 'cancel') {
+      toast('Payment cancelled.', 'error');
+    }
+    return;
+  }
+
+  // success branch — verify the purchase row actually completed.
+  if (!ref) {
+    // No reference id to verify against. Stay silent — better than
+    // a false positive. The webhook (if it fires) will still credit
+    // the wallet via the realtime subscription on `wallets`.
+    return;
+  }
+
+  let purchaseStatus = null;
+  try {
+    const { data, error } = await supabase
+      .from('coin_purchases')
+      .select('status')
+      .eq('id', ref)
+      .maybeSingle();
+    if (!error && data) purchaseStatus = data.status;
+  } catch (e) {
+    // Network blip or RLS reject — stay silent rather than guess.
+    console.warn('[store] purchase status verify failed:', e?.message);
+    return;
+  }
+
+  if (purchaseStatus === 'completed' || purchaseStatus === 'paid') {
+    toast('Payment received! Your coins will land any moment.', 'success');
+    setTimeout(() => showStore(), 50);
+  } else if (purchaseStatus === 'failed' || purchaseStatus === 'cancelled') {
+    toast('Payment was not completed. No coins added.', 'error');
+  }
+  // pending OR null OR anything else → silent. The realtime wallet
+  // subscription handles the credit if a delayed webhook lands.
 }
 // Run on initial load (after auth has had a chance to mount).
 setTimeout(handleStoreReturn, 800);
@@ -3396,6 +4241,12 @@ async function handleReaction(targetId, targetType, emojiKey) {
 
   if (mutErr) {
     toast('Reaction failed: ' + mutErr.message, 'error');
+  } else if (targetType === 'post' && !(existing && existing.emoji === emojiKey)) {
+    // Daily-goal: tick "Like & comment N posts". Dedup key is per-post
+    // so like + comment on the same post still counts as ONE engagement
+    // (mirrors mobile's PostInformation.jsx:249, PostCommentModal:1982).
+    // Toggle-off branch skipped — only ADDS count toward the goal.
+    try { tickGoalUnique('like_comment', `like_comment:${targetId}`); } catch {}
   }
   loadReactions(targetId, targetType);
 }
@@ -3731,6 +4582,13 @@ async function submitComment(postId, parentId, textarea, previewId, videoId = nu
   else insertRow.post_id = postId;
   const { error } = await supabase.from('comments').insert(insertRow);
   if (error) { toast(error.message, 'error'); return; }
+  // Daily-goal: tick "Like & comment N posts". Same dedup key as the
+  // reaction path so commenting + liking the same post counts ONCE.
+  // Skipped for video comments (videoId set) since the daily quest is
+  // post-specific per the spec.
+  if (!videoId) {
+    try { tickGoalUnique('like_comment', `like_comment:${postId}`); } catch {}
+  }
   textarea.value = '';
   textarea.style.height = 'auto';
   if (previewId) {
@@ -4002,13 +4860,882 @@ const storiesEl = document.getElementById('storiesRow');
 const composeEl = document.querySelector('.compose');
 let viewingProfileId = null;
 
+// ── Home landing — data wiring ──────────────────────────────────────
+//
+// The mosaic has 7 video slots (1 hero + 3 Recent + 3 Trending) plus
+// 2 book shelves. Each surface uses its own ranking:
+//   · Hero    — single most recently published video (eye-catcher)
+//   · Recent  — next 3 most recent
+//   · Trending — top 3 by views_count (dedupped against hero+recent)
+//
+// Both queries run in parallel, fail soft (the skeleton stays if the
+// network drops), and cache for 60s so re-clicking the Home tab in a
+// session doesn't refetch unnecessarily.
+const HOME_DATA_TTL_MS = 60 * 1000;
+let _homeDataLoadedAt = 0;
+let _homeDataInFlight = null;
+
+// Dear Jen uploader id, resolved once per session and cached. The hero
+// slot is "random video from the Dear Jen channel", so we need the
+// profile id to filter videos by. Profile ids don't change at runtime;
+// cache for the session, not just 60s.
+let _dearJenUploaderId = null;
+let _dearJenLookupAttempted = false;
+
+// Book shelf pagination — each shelf holds up to 14 books split across
+// 2 pages of 7. The right-arrow on the shelf header toggles between
+// page 0 and page 1, cycling back to 0 after the second click. Pools
+// are populated by loadHomeVideos and consulted by the arrow handler.
+const _bookShelfPools = { trending: [], recent: [] };
+const _bookShelfPages = { trending: 0, recent: 0 };
+const _BOOKS_PER_PAGE = 6;
+async function _resolveDearJenUploaderId() {
+  if (_dearJenLookupAttempted) return _dearJenUploaderId;
+  _dearJenLookupAttempted = true;
+  try {
+    const { data } = await supabase
+      .from('profiles')
+      .select('id, username')
+      .ilike('username', '%Dear Jen%')
+      .limit(1)
+      .maybeSingle();
+    if (data?.id) {
+      _dearJenUploaderId = data.id;
+      console.log(`[home] Dear Jen uploader resolved: "${data.username}" id=${data.id}`);
+    } else {
+      console.warn('[home] No profile matched username ILIKE "%Dear Jen%" — featured slot will stay empty');
+    }
+  } catch (err) {
+    console.warn('[home] Dear Jen profile lookup failed:', err?.message || err);
+  }
+  return _dearJenUploaderId;
+}
+
+// Short-form view-count formatter — "4,213" → "4.2K", "1,580,000" → "1.6M"
+const _formatHomeViews = (n) => {
+  const num = Number(n) || 0;
+  if (num >= 1000000) return (num / 1000000).toFixed(num >= 10000000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+  if (num >= 1000)    return (num / 1000).toFixed(num >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+  return String(num);
+};
+
+// HH:MM:SS / MM:SS — reuses the same shape as formatDuration() below but
+// inlined here so loadHomeVideos isn't ordering-dependent on file position.
+const _formatHomeDuration = (seconds) => {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (!s) return '';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+  return `${m}:${String(r).padStart(2, '0')}`;
+};
+
+// HTML-escape user-supplied strings before interpolating into innerHTML.
+// Titles + usernames are stored verbatim in the DB; a creator who put
+// "<3 my fans" in their video title would otherwise blow up our markup.
+const _escHtml = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+// Normalize a Bunny CDN URL.
+//
+// Legacy uploads (pre-May 2026) wrote thumbnail_url + video_url with a
+// trailing slash in the CDN hostname constant, producing URLs like:
+//   https://tales-of-siren-videos.b-cdn.net//abc/abc.jpg
+// Bunny.net normalizes that inconsistently — sometimes the double-slash
+// resolves, sometimes the request 404s. The hostname constant was fixed
+// for new uploads, but historical rows still carry the malformed URL.
+// We collapse the extra slash on render so playback / thumbnails work
+// reliably without a DB backfill.
+const _cleanCdnUrl = (url) => {
+  if (!url) return '';
+  // Preserve the "://" after the protocol; collapse any other "//" to "/".
+  return String(url).replace(/([^:])\/\/+/g, '$1/');
+};
+
+// Supabase Storage cover with server-side ratio crop. Matches what
+// mobile does in lib/utils/image-source.js — rewrites the URL to use
+// the render/image endpoint with width+height+resize=cover params,
+// which makes Supabase return a perfectly cropped 2:3 image centered
+// on the source. CSS no longer has to fight with aspect mismatches:
+// the image arrives at the target ratio.
+//
+// For Bunny, Appwrite, or other hosts, this is a no-op (pass-through).
+// For Supabase URLs already at /render/image/public/, we just swap
+// the params. For /object/public/ URLs, we rewrite the path too.
+const _supabaseRatioCrop = (url, { width, height } = {}) => {
+  if (!url || typeof url !== 'string') return url;
+  if (!url.includes('.supabase.co')) return url;
+  // Rewrite /object/public/ → /render/image/public/ if needed.
+  const rendered = url.includes('/storage/v1/render/image/public/')
+    ? url
+    : url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/');
+  if (!width || !height) return rendered;
+  const [base, rawQuery = ''] = rendered.split('?');
+  // Strip any existing transform params so our values win; preserve anything else.
+  const preserved = rawQuery
+    .split('&')
+    .filter(p => p && !/^(width|height|quality|resize)=/i.test(p));
+  preserved.push(`width=${width}`);
+  preserved.push(`height=${height}`);
+  preserved.push('resize=cover');
+  preserved.push('quality=80');
+  return `${base}?${preserved.join('&')}`;
+};
+
+// Build the inner HTML for one card slot. Type drives which fields show:
+//   'hero'     → big card, no creator/views (those live in the meta band)
+//   'recent'   → medium card with duration chip + title + creator
+//   'trending' → small card with TRENDING chip + duration + title + creator·views
+const _renderHomeVideoCard = (video, type) => {
+  if (!video) return ''; // leave the existing skeleton DOM untouched
+  const thumb = _cleanCdnUrl(video.thumbnail_url);
+  const title = video.title || 'Untitled';
+  const author = video.profiles?.username || 'Unknown';
+  const dur = _formatHomeDuration(video.duration);
+  const views = _formatHomeViews(video.views);
+  // No TRENDING chip in the minimal redesign — the "Trending" header
+  // above the column carries that signal now. Variable kept (empty)
+  // so the template literal below still has its slot.
+  const trendingChip = '';
+  const durChip = dur ? `<span class="home-thumb-dur">${dur}</span>` : '';
+  const thumbClass = type === 'hero' ? 'home-thumb home-thumb-wide' : 'home-thumb';
+  // Real <img> element rather than CSS background-image. The rest of
+  // the app uses <img> for thumbnails (search results, video cards,
+  // post images) and we know those work — so the home cards do the
+  // same to avoid the silent-fail trap that bit us with background-
+  // image. Bonus: <img> shows a broken-image icon if the URL 404s,
+  // making future debugging trivial.
+  const thumbImg = thumb
+    ? `<img class="home-thumb-img" src="${_escHtml(thumb)}" alt="${_escHtml(title)}" loading="lazy" referrerpolicy="no-referrer"/>`
+    : '';
+
+  // Trending — thumbnail-only (May 2026). Title / creator / views were
+  // dropped because each thumbnail is heavily branded with title + author
+  // overlay baked into the cover art itself, so the secondary metadata
+  // was duplicating the cover. Hover-title attribute is added on the
+  // wrapper article via _wireHomeVideoCard for accessibility.
+  if (type === 'trending') {
+    return `
+      <div class="${thumbClass}">
+        ${thumbImg}
+        ${trendingChip}
+        ${durChip}
+      </div>
+    `;
+  }
+  const sub = type === 'hero'
+    ? `${author} · ${views} views`
+    : author;
+  return `
+    <div class="${thumbClass}">
+      ${thumbImg}
+      ${trendingChip}
+      ${durChip}
+    </div>
+    <div class="home-card-meta">
+      <div class="home-card-title">${_escHtml(title)}</div>
+      <div class="home-card-sub">${_escHtml(sub)}</div>
+    </div>
+  `;
+};
+
+// Render the Featured Post panel — replaces the skeleton overlay
+// content with the post's real title, author byline, and (if available)
+// a background image. Visual treatment stays the same as the skeleton:
+//   · overline pill "SELEBOX POST"
+//   · big title (the post body, line-clamped in CSS to 3 lines)
+//   · byline with avatar + author + time-ago
+// If the post has an image_url, we use it as the panel's background;
+// otherwise the existing purple gradient placeholder stays visible
+// behind the overlay's bottom fade.
+const _renderHomeFeaturedPost = (post) => {
+  if (!post) return '';
+  const author = post.profiles?.username || 'Unknown';
+  const avatar = _cleanCdnUrl(post.profiles?.avatar_url);
+  const body = post.body || '(No content)';
+  const when = (typeof timeAgo === 'function') ? timeAgo(post.created_at) : '';
+  // Prefer the post's own image; fall back to the joined video's
+  // thumbnail for video-posts (so the panel never sits as pure
+  // gradient when media is available).
+  const mediaUrl = _cleanCdnUrl(post.image_url) ||
+                   _cleanCdnUrl(post.videos?.thumbnail_url);
+  const mediaStyle = mediaUrl
+    ? `style="background-image: linear-gradient(180deg, rgba(20,11,56,0.30) 0%, rgba(14,8,42,0.65) 100%), url(${JSON.stringify(mediaUrl)}); background-size: cover; background-position: center;"`
+    : '';
+  const avatarStyle = avatar
+    ? `style="background-image: url(${JSON.stringify(avatar)}); background-size: cover; background-position: center;"`
+    : '';
+  return `
+    <div class="home-featured-post-media" ${mediaStyle}></div>
+    <div class="home-featured-post-overlay">
+      <span class="home-featured-post-overline">Selebox Post</span>
+      <h2 class="home-featured-post-title">${_escHtml(body)}</h2>
+      <div class="home-featured-post-byline">
+        <div class="home-featured-post-avatar" ${avatarStyle}></div>
+        <div class="home-featured-post-author">${_escHtml(author)}</div>
+        <span class="home-featured-post-dot">·</span>
+        <div class="home-featured-post-when">${_escHtml(when)}</div>
+      </div>
+    </div>
+  `;
+};
+
+// Render the current page of a book shelf — slices the pool stored in
+// _bookShelfPools[shelf] by _bookShelfPages[shelf] and hands the visible
+// 7 books to _renderBookShelf. Also updates the right-arrow button's
+// disabled state when there's no page 2 available.
+const _renderBookShelfPage = (shelf) => {
+  const pool = _bookShelfPools[shelf] || [];
+  const page = _bookShelfPages[shelf] || 0;
+  const sectionId = shelf === 'trending' ? 'homeBooksTrending' : 'homeBooksRecent';
+  const start = page * _BOOKS_PER_PAGE;
+  const slice = pool.slice(start, start + _BOOKS_PER_PAGE);
+  // If fewer than 7 in the slice (e.g., pool has only 9 books total),
+  // pad with empty so the trailing slots clear out instead of holding
+  // page-1 leftover content.
+  while (slice.length < _BOOKS_PER_PAGE) slice.push(null);
+  _renderBookShelf(sectionId, slice, shelf);
+  // Disable the arrow if there's no second page worth of books.
+  const arrow = document.querySelector(`.home-books-next[data-shelf="${shelf}"]`);
+  if (arrow) arrow.disabled = pool.length <= _BOOKS_PER_PAGE;
+};
+
+// One-time wire-up for both shelf arrows. Idempotent — repeat calls
+// (from re-runs of loadHomeVideos) won't stack listeners.
+let _bookShelfArrowsWired = false;
+const _wireBookShelfArrowsOnce = () => {
+  if (_bookShelfArrowsWired) return;
+  document.querySelectorAll('.home-books-next').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const shelf = btn.dataset.shelf;
+      if (!shelf) return;
+      const pool = _bookShelfPools[shelf] || [];
+      const maxPage = Math.max(0, Math.ceil(pool.length / _BOOKS_PER_PAGE) - 1);
+      // Cycle: 0 → 1 → 0 → ... The user gets a "next" arrow that wraps
+      // back to the first page on the second click. Simpler than
+      // showing both prev/next arrows for a 2-page list.
+      _bookShelfPages[shelf] = (_bookShelfPages[shelf] || 0) >= maxPage
+        ? 0
+        : (_bookShelfPages[shelf] || 0) + 1;
+      _renderBookShelfPage(shelf);
+    });
+  });
+  // "See all" → navigate to the full Books page. Same effect as
+  // clicking Books in the sidebar — sets the sidebar active state and
+  // shows the books surface. Wrapped in the same idempotent flag so
+  // re-runs of loadHomeVideos don't stack handlers.
+  document.querySelectorAll('.home-books-seeall').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      setSidebarActive('btnBook');
+      if (typeof showBook === 'function') showBook();
+    });
+  });
+  _bookShelfArrowsWired = true;
+};
+
+// Admin "replace cover" flow — used by the inline edit pencil on each
+// home book card. Opens a file picker → existing crop modal (with the
+// aspect lock removed) → uploads to Supabase Storage → updates the
+// book's cover_url → re-renders the shelf so the new cover shows
+// immediately, no page reload. Same upload destination + path pattern
+// the book editor uses, so the replacement file lives next to the
+// original in the bucket.
+async function _replaceBookCoverFromHome(bookId) {
+  if (!bookId) return;
+  // Pop a file picker via a one-shot dynamic <input>. Cleaner than a
+  // shared hidden input that would need its value reset between uses.
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = 'image/*';
+  picker.onchange = () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
+    if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
+
+    openCropModal(file, {
+      aspectRatio: NaN, // no aspect lock — admin keeps full aspect or freely re-crops
+      title: 'Replace book cover',
+      onSave: async (croppedFile) => {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) { toast('Sign in first', 'error'); return; }
+
+        const path = `${user.id}/${bookId}-${Date.now()}.jpg`;
+        const { error: upErr } = await supabase.storage
+          .from('book-covers')
+          .upload(path, croppedFile, { upsert: true, contentType: 'image/jpeg' });
+        if (upErr) { toast('Upload failed: ' + upErr.message, 'error'); return; }
+
+        const { data: { publicUrl } } = supabase.storage
+          .from('book-covers')
+          .getPublicUrl(path);
+        const { error: updErr } = await supabase
+          .from('books')
+          .update({ cover_url: publicUrl, updated_at: new Date().toISOString() })
+          .eq('id', bookId);
+        if (updErr) { toast('Saved file but DB update failed: ' + updErr.message, 'error'); return; }
+
+        toast('Cover replaced', 'success');
+
+        // Refresh the local pool + re-render any shelf that contains
+        // this book so the new cover appears immediately without a
+        // full page reload.
+        ['trending', 'recent'].forEach(shelf => {
+          const pool = _bookShelfPools[shelf] || [];
+          const idx = pool.findIndex(b => b?.id === bookId);
+          if (idx >= 0) {
+            pool[idx] = { ...pool[idx], cover_url: publicUrl };
+            _renderBookShelfPage(shelf);
+          }
+        });
+      },
+    });
+  };
+  picker.click();
+}
+
+// Render a book shelf — fills the existing 7 .home-book-card skeletons
+// inside the section with the given id. Each card gets:
+//   · cover image as the .home-book-cover background
+//   · title
+//   · author username
+// And a click handler that opens the book detail page via the existing
+// openBookDetail() route. If a book entry is null (pool was short),
+// the slot resets to skeleton state instead of carrying over page-1
+// content.
+const _renderBookShelf = (sectionId, books, shelfType) => {
+  const section = document.getElementById(sectionId);
+  if (!section) return;
+  const cards = section.querySelectorAll('.home-book-card');
+  cards.forEach((card, i) => {
+    const book = books[i];
+    if (!book) {
+      // Pool ran short for this slot — reset to neutral skeleton so we
+      // don't show carried-over page-1 content when paginating.
+      card.innerHTML = `
+        <div class="home-book-cover"></div>
+        <div class="home-book-title">&nbsp;</div>
+        <div class="home-book-author">&nbsp;</div>
+      `;
+      card.classList.add('home-skeleton-card');
+      card.style.cursor = 'default';
+      card.onclick = null;
+      return;
+    }
+    const rawCover = _cleanCdnUrl(book.cover_url);
+    // Ask Supabase to crop the image server-side to a perfect 2:3 at
+    // 400×600 px — same technique mobile uses. For 9:16 source covers,
+    // this returns a centered 2:3 crop with full width preserved (only
+    // the top/bottom of the source ends up trimmed). For Appwrite /
+    // Bunny / other hosts, this is a no-op pass-through.
+    const cover = _supabaseRatioCrop(rawCover, { width: 400, height: 600 });
+    const title = book.title || 'Untitled';
+    const author = book.profiles?.username || 'Unknown';
+    // Single <img> at object-fit:cover. Now that Supabase pre-crops to
+    // the slot ratio, the image arrives ALREADY at 2:3 — no letterbox-
+    // blur needed, no awkward gaps, no horizontal stretch. CSS just
+    // renders edge-to-edge.
+    const coverImg = cover
+      ? `<img class="home-book-cover-img" src="${_escHtml(cover)}" alt="${_escHtml(title)}" loading="lazy" referrerpolicy="no-referrer"/>`
+      : '';
+
+    // Admin-only inline edit pencil — appears on hover over the cover.
+    // Clicking triggers _replaceBookCoverFromHome which opens the file
+    // picker → cropper (no aspect lock) → upload + DB swap → live
+    // re-render of this shelf. data-book-id is what the click handler
+    // reads to know which book to replace. stopPropagation prevents
+    // the card's own click (openBookDetail) from firing too.
+    const isAdmin = currentProfile?.role === 'admin' || currentProfile?.role === 'moderator';
+    const editBtn = isAdmin
+      ? `<button class="home-book-edit" data-book-id="${_escHtml(book.id)}" title="Replace cover" type="button" aria-label="Replace cover">
+           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4z"/></svg>
+         </button>`
+      : '';
+
+    // Cover overlays — vary by shelf type. Same chip style as the
+    // video card's "TRENDING" pill so the visual language is
+    // consistent.
+    //   trending → TRENDING pill (top-left) + total reads (bottom)
+    //   recent   → NEW CH. {N} pill (top-left)
+    let coverChip = '';
+    if (shelfType === 'trending') {
+      coverChip = '<span class="home-book-chip home-book-chip-trending">TRENDING</span>';
+    } else if (shelfType === 'recent') {
+      const num = book._latestChapter?.number;
+      const chipText = Number.isFinite(num)
+        ? `NEW · CH. ${num}`
+        : 'NEW CHAPTER';
+      coverChip = `<span class="home-book-chip home-book-chip-new">${_escHtml(chipText)}</span>`;
+    }
+
+    // Reads chip on the cover bottom — Trending only. Uses the same
+    // view-shortener as the videos (4213 → 4.2K).
+    let readsChip = '';
+    if (shelfType === 'trending') {
+      const reads = _formatHomeViews(book.views_count || 0);
+      readsChip = `<span class="home-book-reads">${_escHtml(reads)} reads</span>`;
+    }
+
+    card.innerHTML = `
+      <div class="home-book-cover">
+        ${coverImg}
+        ${coverChip}
+        ${readsChip}
+        ${editBtn}
+      </div>
+      <div class="home-book-title">${_escHtml(title)}</div>
+      <div class="home-book-author">${_escHtml(author)}</div>
+    `;
+    card.classList.remove('home-skeleton-card');
+    card.style.cursor = 'pointer';
+    card.onclick = (e) => {
+      // Honor the inline edit pencil — if the click was on it (or its
+      // SVG child), the replace flow handles it and we don't open the
+      // book detail page.
+      if (e.target.closest('.home-book-edit')) {
+        e.stopPropagation();
+        const editEl = e.target.closest('.home-book-edit');
+        _replaceBookCoverFromHome(editEl.dataset.bookId);
+        return;
+      }
+      openBookDetail(book.id);
+    };
+  });
+};
+
+// Wire one rendered card to navigate to the player.
+const _wireHomeVideoCard = (el, video) => {
+  if (!el || !video) return;
+  el.classList.remove('home-skeleton-card');
+  el.classList.add('home-live-card');
+  el.dataset.videoId = video.id;
+  el.onclick = () => {
+    // Hydrate the all-videos cache so playVideo can find the row.
+    // Mirrors what runSearch does after a server fetch.
+    const formatted = {
+      $id: 'sb_' + video.id,
+      _supabase: true,
+      _supabaseId: video.id,
+      title: video.title,
+      description: video.description || '',
+      tags: video.tags || [],
+      uploader: video.uploader_id,
+      thumbnail: video.thumbnail_url,
+      videoUrl: video.video_url,
+      uri: video.video_url,
+      videoStats: { views: video.views || 0, duration: video.duration || 0 },
+      is_locked: !!video.is_locked,
+      is_monetized: !!video.is_monetized,
+      duration: video.duration || 0,
+      unlock_cost_coins: video.unlock_cost_coins ?? null,
+      unlock_cost_stars: video.unlock_cost_stars ?? null,
+      status: 'ready',
+      $createdAt: video.created_at,
+      _uploaderInfo: video.profiles ? {
+        $id: video.profiles.id,
+        username: video.profiles.username,
+        avatar: video.profiles.avatar_url,
+      } : null,
+    };
+    if (typeof allVideosCache !== 'undefined' && !allVideosCache.find(x => x.$id === formatted.$id)) {
+      allVideosCache.push(formatted);
+    }
+    if (video.profiles && typeof allUploadersCache !== 'undefined' && !allUploadersCache[video.uploader_id]) {
+      allUploadersCache[video.uploader_id] = formatted._uploaderInfo;
+    }
+    playVideo(formatted.$id);
+  };
+};
+
+// Fisher-Yates shuffle — returns a shuffled copy, doesn't mutate.
+const _shuffle = (arr) => {
+  const out = [...arr];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+};
+
+async function loadHomeVideos({ force = false } = {}) {
+  // Cache short-circuit
+  if (!force && _homeDataLoadedAt && Date.now() - _homeDataLoadedAt < HOME_DATA_TTL_MS) return;
+  if (_homeDataInFlight) return _homeDataInFlight;
+
+  const SELECT_COLS = `
+    id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url,
+    views, duration, created_at, uploader_id, is_locked, is_monetized,
+    unlock_cost_coins, unlock_cost_stars,
+    profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )
+  `;
+
+  // ── Per-slot queries ──────────────────────────────────────────────
+  // The home mosaic uses three different content sources:
+  //
+  //   Hero (Featured) — random video from the "Dear Jen" channel (the
+  //     flagship Tagalog drama uploader). We resolve the channel's
+  //     uploader_id from the profiles table once per session, then
+  //     filter videos by that id and pick one client-side.
+  //
+  //   Trending — random pick of 3 from videos with views >= 100. The
+  //     100-view floor filters out brand-new uploads that haven't yet
+  //     proven traction; "random" within that pool gives the Home tab
+  //     variety on every refresh.
+  //
+  //   Recent — newest 3 by created_at. Deterministic, not random.
+  //
+  // Overfetch + dedupe is the canonical pattern: fetch a pool larger
+  // than needed (handles banned uploaders + cross-slot overlap), then
+  // dedupe by id at the end.
+  //
+  // Status filter: 'published' is the canonical "publicly visible" state
+  // on this DB (735 rows). 'ready' is a legacy state that only 28 rows
+  // match. The home mosaic wants the full library, so 'published' is
+  // the right gate.
+  const COMMON_FILTERS = (q) => q.eq('status', 'published').eq('is_hidden', false);
+
+  // Resolve the Dear Jen uploader id first. If we can't find the
+  // channel, the hero query short-circuits to an empty result — the
+  // skeleton stays put. The other two queries are independent of
+  // this lookup and fire whether or not the channel was found.
+  const dearJenUploaderId = await _resolveDearJenUploaderId();
+
+  const heroPromise = dearJenUploaderId
+    ? COMMON_FILTERS(supabase.from('videos').select(SELECT_COLS))
+        .eq('uploader_id', dearJenUploaderId)
+        .order('created_at', { ascending: false })
+        .limit(60) // bigger pool — series has 100+ episodes, want real randomness
+    : Promise.resolve({ data: [], error: null });
+
+  const trendingPromise = COMMON_FILTERS(
+    supabase.from('videos').select(SELECT_COLS),
+  )
+    .gte('views', 100)
+    .order('views', { ascending: false })
+    .limit(60);
+
+  // Recent row was removed from the home layout (May 2026). Keep a
+  // minimal stub here so the destructure below doesn't break — the
+  // resolved data is never used.
+  const recentPromise = Promise.resolve({ data: [], error: null });
+
+  // Featured Posts — most-recent visible posts (Discover-feed
+  // convention). We render up to 10 stacked vertically in the panel,
+  // and the panel scrolls so the user can browse without leaving Home.
+  // Overfetch some extras since banned-user rows are filtered client-
+  // side after the join.
+  const FEATURED_POST_SELECT = `
+    id, body, image_url, created_at, user_id, reposted_from,
+    profiles!user_id ( id, username, avatar_url, is_guest, is_banned, role ),
+    videos ( id, video_url, thumbnail_url, title, duration ),
+    original:reposted_from ( *, profiles!user_id ( id, username, avatar_url, is_guest, is_banned, role ), videos ( id, video_url, thumbnail_url, title, duration ) )
+  `;
+  const featuredPostPromise = supabase
+    .from('posts')
+    .select(FEATURED_POST_SELECT)
+    .eq('is_hidden', false)
+    .order('created_at', { ascending: false })
+    .limit(30); // overfetch — first 20 non-banned wins
+
+  // ── Book shelves ──
+  // Trending     — books with the highest views_count (= total reads).
+  //                Filter to actually-published rows so drafts don't leak.
+  // RecentUpdate — books that just got new published chapters. We can't
+  //                join + group-by cleanly from PostgREST, so this is a
+  //                two-step:
+  //                  1. fetch the 40 most-recent published chapters
+  //                  2. dedupe by book_id (preserving order), take ~10
+  //                  3. fetch those books and reorder client-side
+  // Both shelves use the slimmer BOOK_CARD_SELECT (cover + title + author).
+  const BOOK_HOME_SELECT = `
+    id, title, cover_url, status, views_count, chapters_count,
+    published_at, created_at, author_id,
+    profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
+  `;
+
+  const trendingBooksPromise = supabase
+    .from('books')
+    .select(BOOK_HOME_SELECT)
+    .not('published_at', 'is', null)
+    .order('views_count', { ascending: false, nullsFirst: false })
+    .limit(20); // overfetch — keep 14 after banned-author filter for 2 pages of 7
+
+  // Step 1 of Recent Update — get recent published chapter rows. We
+  // restrict to is_published=true AND (no schedule OR schedule passed)
+  // so a future-scheduled chapter doesn't make its book "recently
+  // updated" until the cron actually promotes it.
+  const nowIso = new Date().toISOString();
+  const recentChaptersPromise = supabase
+    .from('chapters')
+    .select('book_id, chapter_number, title, created_at, scheduled_publish_at, is_published')
+    .eq('is_published', true)
+    .or(`scheduled_publish_at.is.null,scheduled_publish_at.lte.${nowIso}`)
+    .order('created_at', { ascending: false })
+    .limit(80); // overfetch — need ~14 unique book_ids for 2 pages of 7
+
+  _homeDataInFlight = Promise.all([
+    heroPromise, trendingPromise, recentPromise, featuredPostPromise,
+    trendingBooksPromise, recentChaptersPromise,
+  ])
+    .then(async ([heroRes, trendingRes, recentRes, featuredPostRes, trendingBooksRes, recentChaptersRes]) => {
+      if (heroRes.error)     console.warn('[home] hero (Dear Jen) query failed:', heroRes.error.message);
+      if (trendingRes.error) console.warn('[home] trending (views>=100) query failed:', trendingRes.error.message);
+      if (recentRes.error)   console.warn('[home] recent query failed:', recentRes.error.message);
+      if (featuredPostRes.error) console.warn('[home] featured post query failed:', featuredPostRes.error.message);
+      if (trendingBooksRes.error) console.warn('[home] trending books query failed:', trendingBooksRes.error.message);
+      if (recentChaptersRes.error) console.warn('[home] recent chapters query failed:', recentChaptersRes.error.message);
+
+      // Quick visibility — strip these logs once the home page is
+      // observed populating reliably across browsers.
+      console.log('[home] hero pool (Dear Jen channel):', heroRes.data?.length ?? 0);
+      console.log('[home] trending pool (views>=100):', trendingRes.data?.length ?? 0);
+      console.log('[home] recent pool:', recentRes.data?.length ?? 0);
+      console.log('[home] featured post pool:', featuredPostRes.data?.length ?? 0);
+      console.log('[home] trending books pool:', trendingBooksRes.data?.length ?? 0);
+      console.log('[home] recent-chapter rows pool:', recentChaptersRes.data?.length ?? 0);
+
+      // Drop banned-uploader rows post-fetch (RLS can't see is_banned).
+      const heroPool = (heroRes.data || []).filter(v => !v.profiles?.is_banned);
+      const trendingPool = (trendingRes.data || []).filter(v => !v.profiles?.is_banned);
+      const recentPool = (recentRes.data || []).filter(v => !v.profiles?.is_banned);
+
+      // Pick the hero first so we can exclude it from the other slots.
+      const hero = heroPool.length > 0 ? _shuffle(heroPool)[0] : null;
+      const usedIds = new Set();
+      if (hero) usedIds.add(hero.id);
+
+      // Recent row was removed from the home layout. Skip — recentPool
+      // is intentionally empty.
+      const recent = [];
+
+      // Trending list — shuffled pool, take the first 5 that aren't
+      // the hero. Variety on every refresh. 4 slots — capped at 4 after
+      // the May 2026 redesign where the cards became thumbnail-only and
+      // each card grew taller (no more title/creator/views meta row).
+      const trending = _shuffle(trendingPool)
+        .filter(v => !usedIds.has(v.id))
+        .slice(0, 4);
+
+      // ── Render hero ──
+      const heroEl = document.getElementById('homeHeroVideo');
+      if (heroEl && hero) {
+        heroEl.innerHTML = _renderHomeVideoCard(hero, 'hero');
+        _wireHomeVideoCard(heroEl, hero);
+        // Once the thumbnail decodes, the hero's height is final —
+        // sync the trending + post columns then. We also fire an
+        // immediate sync below the .then() chain for the case where
+        // there's no image (skeleton placeholder still showing).
+        const heroImg = heroEl.querySelector('img.home-thumb-img');
+        if (heroImg && !heroImg.complete) {
+          heroImg.addEventListener('load', _syncHomeTopHeights, { once: true });
+        }
+      }
+
+      // ── Render Recent row ──
+      const recentRow = document.getElementById('homeVideoMediumRow');
+      if (recentRow) {
+        const cards = recentRow.querySelectorAll('.home-video-medium');
+        cards.forEach((el, i) => {
+          const v = recent[i];
+          if (!v) return; // leave skeleton if no data for this slot
+          el.innerHTML = _renderHomeVideoCard(v, 'recent');
+          _wireHomeVideoCard(el, v);
+        });
+      }
+
+      // ── Render Trending stack ──
+      const trendingStack = document.getElementById('homeVideoSide');
+      if (trendingStack) {
+        const cards = trendingStack.querySelectorAll('.home-video-trending');
+        cards.forEach((el, i) => {
+          const v = trending[i];
+          if (!v) return;
+          el.innerHTML = _renderHomeVideoCard(v, 'trending');
+          _wireHomeVideoCard(el, v);
+        });
+      }
+
+      // ── Render the Featured Posts column ──
+      // Up to 20 most-recent visible posts (Discover-feed convention),
+      // banned-author rows stripped. Each post renders via the regular
+      // renderPost() so it matches the Post tab exactly — the only
+      // difference is the column is narrower, so it reads as "mini
+      // Discover." The panel scrolls so the user can browse all 20
+      // without leaving the Home tab. Bumped from 10 → 20 once the
+      // hero grew and gave the column more vertical room.
+      const featuredPosts = (featuredPostRes.data || [])
+        .filter(p => !p.profiles?.is_banned)
+        .slice(0, 20);
+      const featuredPostEl = document.getElementById('homeFeaturedPost');
+      if (featuredPostEl && featuredPosts.length > 0) {
+        featuredPostEl.innerHTML = '';
+        featuredPostEl.classList.remove('home-skeleton-card');
+        featuredPosts.forEach((post) => {
+          try {
+            const postCardEl = renderPost(post);
+            // Click anywhere outside the inner interactive elements
+            // opens the full post (same fallback pattern as the
+            // Discover feed). Inner handlers (profile link, lightbox,
+            // 3-dot menu) keep their own behavior because they sit on
+            // children — when their target matches, we bail out.
+            postCardEl.addEventListener('click', (e) => {
+              if (e.target.closest('.profile-link, .post-menu-btn, .post-image, .post-video, a, button')) return;
+              openPostFromSearch(post.id);
+            });
+            postCardEl.style.cursor = 'pointer';
+            featuredPostEl.appendChild(postCardEl);
+          } catch (err) {
+            console.warn('[home] renderPost failed for featured post:', post.id, err?.message || err);
+          }
+        });
+      }
+
+      // ── Trending books shelf ──
+      // Already sorted by views_count DESC at the DB. Strip banned-
+      // author rows + take up to 14 (2 pages × 7). Store the full
+      // pool in module state so the right-arrow button can flip to
+      // the second page without re-querying.
+      _bookShelfPools.trending = (trendingBooksRes.data || [])
+        .filter(b => !b.profiles?.is_banned)
+        .slice(0, _BOOKS_PER_PAGE * 2);
+      _bookShelfPages.trending = 0;
+      _renderBookShelfPage('trending');
+
+      // ── Recent Update books shelf ──
+      // Dedupe the recent-chapter rows by book_id, preserving the
+      // newest-first order. Also build a Map of book_id → the most
+      // recent chapter (number + title) so the card can show "NEW
+      // CH. {N}" on the cover.
+      const orderedBookIds = [];
+      const latestChapterByBook = new Map();
+      const seen = new Set();
+      for (const ch of (recentChaptersRes.data || [])) {
+        if (!ch.book_id || seen.has(ch.book_id)) continue;
+        seen.add(ch.book_id);
+        orderedBookIds.push(ch.book_id);
+        // First-seen wins because the chapters query is sorted newest-
+        // first — so this is always the most recent chapter per book.
+        latestChapterByBook.set(ch.book_id, {
+          number: ch.chapter_number,
+          title: ch.title,
+        });
+        if (orderedBookIds.length >= _BOOKS_PER_PAGE * 2 + 4) break; // a few extras for banned drop-off
+      }
+      if (orderedBookIds.length > 0) {
+        const { data: recentBooksData, error: recentBooksErr } = await supabase
+          .from('books')
+          .select(BOOK_HOME_SELECT)
+          .in('id', orderedBookIds)
+          .not('published_at', 'is', null);
+        if (recentBooksErr) {
+          console.warn('[home] recent-update books query failed:', recentBooksErr.message);
+        } else {
+          // Re-order to match the chapter-recency order from step 1,
+          // then attach the latest-chapter info on each book row so
+          // the renderer can show it without a second lookup.
+          const byId = new Map((recentBooksData || []).map(b => [b.id, b]));
+          _bookShelfPools.recent = orderedBookIds
+            .map(id => byId.get(id))
+            .filter(b => b && !b.profiles?.is_banned)
+            .map(b => ({ ...b, _latestChapter: latestChapterByBook.get(b.id) || null }))
+            .slice(0, _BOOKS_PER_PAGE * 2);
+          _bookShelfPages.recent = 0;
+          _renderBookShelfPage('recent');
+        }
+      }
+
+      // Wire the arrow buttons once. The "once" flag prevents stacking
+      // duplicate listeners on every loadHomeVideos call (which happens
+      // on Home re-visits within the same session).
+      _wireBookShelfArrowsOnce();
+
+      // Force the Trending + Featured Post columns to exactly match
+      // the hero's height. Wire the resize-sync once too. Both are
+      // idempotent — safe to call on every refresh.
+      _syncHomeTopHeights();
+      _wireHomeTopHeightSync();
+
+      _homeDataLoadedAt = Date.now();
+    })
+    .catch(err => {
+      console.warn('[home] loadHomeVideos failed:', err?.message || err);
+      // Skeleton stays — no destructive UI change on failure.
+    })
+    .finally(() => {
+      _homeDataInFlight = null;
+    });
+
+  return _homeDataInFlight;
+}
+
+// Sync the Trending column + Featured Post column heights to exactly
+// match the hero card. CSS Grid's align-items:stretch *should* handle
+// this, but with intrinsic-content constraints on flex children and
+// the post-column's scroll behavior, the columns can end up a few px
+// taller than the hero in practice. Measuring the hero post-render and
+// applying that as an explicit pixel height guarantees the three top
+// columns end at the exact same horizontal line — top of hero
+// thumbnail to bottom of "Dear Jen · 49 views" byline.
+//
+// Called after loadHomeVideos paints, then again on window resize +
+// hero image load (since the hero's height depends on the thumb image
+// being decoded for it to settle).
+const _syncHomeTopHeights = () => {
+  // May 2026 — post panel is now CSS-controlled (fixed 900px height),
+  // independent of the trending column. Just clear any prior inline
+  // heights we might have stamped in earlier passes and let CSS own
+  // sizing from here on. No more height math.
+  const trendingCol = document.getElementById('homeVideoSide');
+  const featuredPost = document.getElementById('homeFeaturedPost');
+  if (trendingCol) trendingCol.style.height = '';
+  if (featuredPost) featuredPost.style.height = '';
+};
+
+// One-time wire-up — debounced resize listener that re-syncs the
+// column heights when the viewport changes (col widths shift → hero
+// 16:9 height shifts → trending + post need to follow).
+let _homeTopResizeWired = false;
+const _wireHomeTopHeightSync = () => {
+  if (_homeTopResizeWired) return;
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(_syncHomeTopHeights, 120);
+  });
+  _homeTopResizeWired = true;
+};
+
+// showHomeLanding — the curated Home tab (mosaic: hero video + Recent
+// row + Trending stack + Featured post + Book shelves). Lives parallel
+// to showFeed (the Post tab) so each sidebar item targets its own
+// surface.
+function showHomeLanding() {
+  hideAllMainPages();
+  const homeLanding = document.getElementById('homeLanding');
+  if (homeLanding) homeLanding.style.display = '';
+  // Opt into a body class so .main-wrap goes full-bleed (the default
+  // 900px reading column is wrong for this mosaic).
+  document.body.classList.add('on-home-landing');
+  viewingProfileId = null;
+  stopVideoPlayer();
+  if (window.location.hash) history.pushState(null, '', window.location.pathname);
+  // Kick the data load. Fire-and-forget — the function is internally
+  // cached + de-duped, so it's safe to call on every show.
+  loadHomeVideos();
+}
+
 function showFeed() {
   hideAllMainPages();
   feedEl.style.display = '';
   // storiesEl intentionally untouched — inline display:none in HTML keeps it hidden.
   // To bring stories back, remove `style="display:none"` from #storiesRow in index.html.
   composeEl.style.display = '';
-  // Restore feed mode tabs (For You / Following / Discover) — Home only
+  // Restore feed mode tabs (For You / Following / Discover) — Post feed only
   const feedTabs = document.getElementById('feedTabs');
   if (feedTabs) feedTabs.style.display = '';
   // Restore the feed sentinel only when there's actually more to load and posts already rendered
@@ -4247,14 +5974,30 @@ function clearProfileSkeleton() {
   });
 }
 
-// Render Member/Guest pill + Creator/Writer/Pioneer/etc. earned badges
+// Render the user's badge identification. Replaces the old "Member"
+// pill (which was redundant on every signed-up account) with whatever
+// badges the user has actually earned (Creator, Verified, Writer,
+// Pioneer, Staff). The base pill now only surfaces for guest accounts
+// — which IS a meaningful identification distinct from any earned
+// badge.
 function renderProfileBadges(profile, badges) {
   clearProfileSkeleton();
 
   const baseBadge = document.getElementById('profileBadge');
-  baseBadge.textContent     = profile.is_guest ? 'Guest' : 'Member';
-  baseBadge.className       = 'profile-badge' + (profile.is_guest ? ' guest' : '');
-  baseBadge.style.visibility = ''; // un-hide after skeleton
+  if (profile.is_guest) {
+    // Guest is still meaningful — keep the pill.
+    baseBadge.textContent     = 'Guest';
+    baseBadge.className       = 'profile-badge guest';
+    baseBadge.style.visibility = '';
+    baseBadge.style.display    = '';
+  } else {
+    // Regular member — hide the generic "Member" pill entirely. The
+    // earned badges below tell the user's real story (Creator,
+    // Verified, etc.).
+    baseBadge.textContent     = '';
+    baseBadge.className       = 'profile-badge';
+    baseBadge.style.display    = 'none';
+  }
 
   // Earned badges live in a sibling container so they sit inline with username
   let extra = document.getElementById('profileBadgesExtra');
@@ -4266,25 +6009,50 @@ function renderProfileBadges(profile, badges) {
   }
   extra.innerHTML = '';
 
+  // Badge identification — only show pills for users who have actually
+  // earned one of these four roles. Plain "user" accounts (no role)
+  // get nothing rendered here, and the generic "Member" pill is hidden
+  // for them too (handled above) so the row stays empty rather than
+  // showing a meaningless badge.
   const META = {
-    creator:  { label: 'Creator',  icon: '🎬', cls: 'badge-creator',  title: 'Creator — earned by sharing original videos' },
-    writer:   { label: 'Writer',   icon: '✍️', cls: 'badge-writer',   title: 'Writer — earned by publishing books on Selebox' },
-    pioneer:  { label: 'Pioneer',  icon: '⭐', cls: 'badge-pioneer',  title: 'Pioneer — early Selebox community member' },
-    verified: { label: 'Verified', icon: '✓',  cls: 'badge-verified', title: 'Verified account' },
-    staff:    { label: 'Staff',    icon: '🛡', cls: 'badge-staff',    title: 'Selebox team member' },
+    creator:   { label: 'Creator',   icon: '🎬', cls: 'badge-creator',   title: 'Creator — earned by sharing original videos' },
+    writer:    { label: 'Writer',    icon: '✍️', cls: 'badge-writer',    title: 'Writer — earned by publishing books on Selebox' },
+    pioneer:   { label: 'Pioneer',   icon: '⭐', cls: 'badge-pioneer',   title: 'Pioneer — early Selebox community member' },
+    moderator: { label: 'Moderator', icon: '🛡', cls: 'badge-moderator', title: 'Moderator — Selebox community team' },
   };
 
-  // Stable display order
-  const order = ['staff','verified','pioneer','creator','writer'];
-  order.forEach(key => {
-    if (!badges.includes(key)) return;
+  // Resolve the user's badge set from the SAME source as the inline
+  // role seal (profile.role / profile.roles), not from the separate
+  // user_badges table the badges parameter reads. The two sources
+  // were drifting — the inline seal would show "Creator" while the
+  // pills row showed nothing because the badges table was empty.
+  // Unifying on profile.role(s) means whatever role makes the gold
+  // seal appear also makes the pill appear.
+  const rolesArr = Array.isArray(profile.roles) ? profile.roles : [];
+  const roleStr  = typeof profile.role === 'string' ? profile.role : '';
+  const userRoleSet = new Set([
+    ...rolesArr.map(r => String(r).toLowerCase()),
+    roleStr ? roleStr.toLowerCase() : null,
+    // Keep the legacy `badges` array as a secondary source so accounts
+    // that have entries in user_badges but no role column still light up.
+    ...(Array.isArray(badges) ? badges.map(b => String(b).toLowerCase()) : []),
+  ].filter(Boolean));
+
+  // Stable display order (higher-status first). Picks the FIRST
+  // matching role only — mirrors the mobile app's behavior of showing
+  // a single text label next to the name (Moderator / Pioneer /
+  // Creator / Writer), not a pill stack with icons.
+  const order = ['moderator','pioneer','creator','writer'];
+  for (const key of order) {
+    if (!userRoleSet.has(key)) continue;
     const m = META[key];
     const el = document.createElement('span');
-    el.className = `earned-badge ${m.cls}`;
+    el.className = 'profile-role-text';
     el.title = m.title;
-    el.innerHTML = `<span class="earned-badge-icon">${m.icon}</span><span>${m.label}</span>`;
+    el.textContent = m.label;
     extra.appendChild(el);
-  });
+    break; // only one label, like mobile
+  }
 }
 
 function setProfileTabCount(tab, n) {
@@ -4715,6 +6483,10 @@ async function toggleFollow(userId, currentlyFollowing) {
       // 23505 = unique_violation. Treat as already-following → no-op success.
       if (error && error.code !== '23505') throw error;
       toast('Following!', 'success');
+      // Daily-goal: tick "Follow N new users". Deduped by target id so
+      // follow → unfollow → re-follow within a day counts ONCE. Mirrors
+      // mobile at components/Profile.jsx:199 + user-connections:365.
+      try { tickGoalUnique('follow_user', `follow:${userId}`); } catch {}
     }
   } catch (err) {
     console.error('[toggleFollow]', err);
@@ -5196,16 +6968,28 @@ function setSidebarActive(buttonId) {
   if (btn) btn.classList.add('active');
 }
 
-// Wire Home button → goes to feed + sets active
+// Wire Home button → curated landing page (featured hero + shelves).
+// The home landing is the new May-2026 surface that lives parallel to
+// the social feed; it's a discovery destination, not a timeline.
 document.getElementById('btnHome')?.addEventListener('click', () => {
   setSidebarActive('btnHome');
+  showHomeLanding();
+});
+
+// Wire Post button → the social text/image feed (the surface this app
+// historically called "Home"). Sidebar split lets users browse curated
+// content (Home) separately from following their network's posts (Post).
+document.getElementById('btnPost')?.addEventListener('click', () => {
+  setSidebarActive('btnPost');
   showFeed();
 });
 
-// Logo click → home + scroll to top (whether already on feed or elsewhere)
+// Logo click → home landing + scroll to top (whether already on landing
+// or elsewhere). Mirrors the Home button so the logo always returns to
+// the discovery destination, never to the post feed.
 document.getElementById('topbarLogoBtn')?.addEventListener('click', () => {
   setSidebarActive('btnHome');
-  showFeed();
+  showHomeLanding();
   scrollToTop();
 });
 
@@ -5216,8 +7000,13 @@ window.addEventListener('popstate', () => {
     const userId = hash.replace('#profile/', '');
     openProfile(userId);
   } else {
-    showFeed();
-    loadFeed();
+    // Default back-navigation destination — the home landing.
+    // Pre-May-2026 fallback was showFeed() + loadFeed(); switched here
+    // for the same reason as the initial-load fallback (refresh / no
+    // hash should land on the new curated Home tab, not the social feed
+    // that now lives behind the Post tab).
+    setSidebarActive('btnHome');
+    showHomeLanding();
   }
 });
 
@@ -6014,14 +7803,59 @@ async function vuStartUpload() {
     });
 
     // Bunny upload complete. The videos row + hidden home-feed post
-    // are created server-side by the bunny-video-ready webhook when
-    // Bunny finishes encoding (typically 5-30 seconds). We
-    // intentionally do NOT block the user on those inserts here:
-    //   1. The file is safely on Bunny (the slow part is done).
-    //   2. The webhook is retried server-side on failure.
-    //   3. If Supabase is degraded right now, the user's experience
-    //      isn't blocked — the webhook will land the row when
-    //      Supabase recovers.
+    // are normally created server-side by the bunny-video-ready
+    // webhook when Bunny finishes encoding (typically 5-30 seconds).
+    //
+    // BUT — May 2026 — we observed orphaned uploads on web: file
+    // present in Bunny, zero matching row in `videos`, invisible in
+    // Studio. The mobile side already mitigates this with a
+    // client-side `createNewVideo` call (lib/video-supabase.js) that
+    // runs alongside the webhook so either path lands the row. The
+    // web flow had no such safety net — when the webhook silently
+    // no-op'd (200 response with no insert, a known issue
+    // documented in UploadVideo.jsx), the upload became a permanent
+    // orphan.
+    //
+    // Fix: do the same client-side insert here as a safety net.
+    // Field shape mirrors the webhook's insertPayload exactly
+    // (functions/bunny-video-ready/index.ts ~L261-274), and we
+    // upsert with onConflict: 'bunny_video_id' + ignoreDuplicates so
+    // whichever side fires first wins. Status is 'processing' here
+    // (the client knows the bytes are uploaded but not that Bunny
+    // has finished encoding) — the webhook later promotes to
+    // 'ready'. Wrapped in try/catch because the file IS safely on
+    // Bunny at this point; we don't want to fail the user-visible
+    // "Done" state if the DB write hiccups — log loudly so we can
+    // diagnose orphans rather than silently lose them.
+    try {
+      const { error: insertErr } = await supabase
+        .from('videos')
+        .upsert(
+          {
+            bunny_video_id: uploadInfo.videoId,
+            bunny_library_id: String(uploadInfo.libraryId),
+            title,
+            description,
+            tags,
+            video_url: uploadInfo.videoUrl,
+            thumbnail_url: uploadInfo.thumbnailUrl,
+            uploader_id: currentUser.id,
+            status: 'processing',
+            is_monetized: isMonetized,
+            scheduled_publish_at: scheduledPublishAt,
+            is_hidden: scheduledPublishAt ? true : false,
+          },
+          { onConflict: 'bunny_video_id', ignoreDuplicates: true },
+        );
+      if (insertErr) {
+        console.warn('[vuStartUpload] client-side videos upsert failed (webhook may still land row):', insertErr.message);
+      } else {
+        console.log('[vuStartUpload] client-side videos row written for', uploadInfo.videoId);
+      }
+    } catch (e) {
+      console.warn('[vuStartUpload] client-side videos upsert exception:', e?.message || e);
+    }
+
     fill.style.width = '100%';
     pctEl.textContent = '100%';
     status.textContent = 'Upload complete';
@@ -6275,13 +8109,17 @@ const earningsPage = document.getElementById('earningsPage');
 function hideAllMainPages() {
   // Drop layout-mode body classes — each show* opts back in if it needs a
   // wider canvas. (Currently used by the videos and books pages.)
-  document.body.classList.remove('on-videos', 'on-books');
+  document.body.classList.remove('on-videos', 'on-books', 'on-home-landing', 'on-studio');
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
-  // Feed mode tabs (For You / Following / Discover) — only on Home
+  // Feed mode tabs (For You / Following / Discover) — only on the Post feed
   const feedTabs = document.getElementById('feedTabs');
   if (feedTabs) feedTabs.style.display = 'none';
+  // New curated landing page — Home tab (May 2026 redesign). Lives parallel
+  // to the social feed so each sidebar item maps to its own surface.
+  const homeLanding = document.getElementById('homeLanding');
+  if (homeLanding) homeLanding.style.display = 'none';
   if (profilePage) profilePage.style.display = 'none';
   if (videosPage) videosPage.style.display = 'none';
   if (videoPlayerPage) videoPlayerPage.style.display = 'none';
@@ -6356,6 +8194,10 @@ function showStudio(forceReload = false) {
   hideAllMainPages();
   studioPage.style.display = 'block';
   document.body.classList.remove('on-videos');
+  // Edge-to-edge canvas — Studio mosaic looks cramped inside the
+  // feed's 900px reading column. CSS rule on `body.on-studio
+  // .main-wrap` lifts the max-width and zeroes the lateral padding.
+  document.body.classList.add('on-studio');
   stopVideoPlayer();
   history.pushState(null, '', '#studio');
   // Studio shows the user's own uploads — those don't change unless they
@@ -6880,8 +8722,16 @@ function _renderBookCardV2(b) {
   card.onclick = () => openBookDetail(b.id);
 
   const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
-  const cover = b.cover_url
-    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy" onerror="this.style.display='none'"/>`
+  // Use Supabase's server-side image transform to crop the cover to a
+  // clean 2:3 (400x600 px) — same trick the home shelves use. Without
+  // this, 9:16 video-shaped source covers would render in their
+  // native tall aspect inside our 2:3 container, looking stretched.
+  // Pass-through for non-Supabase URLs (Appwrite/Bunny).
+  const croppedCover = b.cover_url
+    ? _supabaseRatioCrop(_cleanCdnUrl(b.cover_url), { width: 400, height: 600 })
+    : null;
+  const cover = croppedCover
+    ? `<img src="${escHTML(croppedCover)}" alt="" loading="lazy" onerror="this.style.display='none'"/>`
     : `<div class="book-card-v2-cover-placeholder">${escHTML(initialLetter)}</div>`;
   const isPaid = (b.lock_from_chapter || 0) > 0;
   const author = b.author?.username || b.profiles?.username || 'Unknown';
@@ -8161,6 +10011,16 @@ async function openChapterReader(chapterIndex) {
   hideAllMainPages();
   chapterReaderPage.style.display = 'block';
 
+  // Daily-goal: "Read N chapters" tick. Dedupe by chapter id (strip
+  // the 'sb_' prefix if present) so re-opening the same chapter
+  // mid-session doesn't farm. Fire-and-forget — the RPC is best-
+  // effort and never gates the reader render. Mirrors mobile at
+  // app/(book)/book-reading.jsx:444.
+  try {
+    const ckey = String(chapter.id || '').replace(/^sb_/, '');
+    if (ckey) tickGoalUnique('read_chapters', ckey);
+  } catch {}
+
   document.getElementById('readerBookTitle').textContent = currentBookDetail.book.title || 'Book';
   document.getElementById('readerChapterTitle').textContent = chapter.title || `Chapter ${chapter.chapter_number}`;
   document.getElementById('readerProgress').textContent = `Chapter ${chapter.chapter_number} of ${currentBookDetail.chapters.length}`;
@@ -8380,12 +10240,17 @@ async function applyReaderWatermark() {
   el.style.setProperty('--reader-watermark-bg', dataUri);
 }
 
-// Re-render watermark when theme toggles (so colour matches background)
-document.getElementById('btnTheme')?.addEventListener('click', () => {
-  // Run after the body class actually flips
-  setTimeout(() => {
-    if (chapterReaderPage?.style.display === 'block') applyReaderWatermark();
-  }, 50);
+// Re-render watermark when theme toggles (so colour matches background).
+// May 2026: theme switcher moved from a single topbar button to a
+// segmented radio (Light/Dark) in the sidebar — listen on both so
+// the watermark stays in sync regardless of which option is picked.
+document.querySelectorAll('#sidebarThemeToggle .sidebar-theme-option').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    // Run after the body class actually flips
+    setTimeout(() => {
+      if (chapterReaderPage?.style.display === 'block') applyReaderWatermark();
+    }, 50);
+  });
 });
 
 // ── Anti-copy protection on the reader ──
@@ -9221,6 +11086,15 @@ function ensureLockPromptHandler() {
 
 let _authorBalance = null;
 let _authorKyc     = null;
+// Earnings page state (May 2026 mobile-parity refresh)
+// ───────────────────────────────────────────────────────────────
+// `_allEarningsCache` and `_allWithdrawalsCache` retain the full
+// fetched datasets so the month picker can re-filter without going
+// back to the network. `_selectedMonthYear` is the picker's current
+// value as a "YYYY-MM" string; null means "current month".
+let _allEarningsCache    = [];
+let _allWithdrawalsCache = [];
+let _selectedMonthYear   = null;
 
 async function loadAuthorEarnings() {
   if (!currentUser) return;
@@ -9229,6 +11103,9 @@ async function loadAuthorEarnings() {
 
   // Fire all four reads in parallel — pulls all earnings rows for the
   // breakdown calculation (small per-author dataset, fine to fetch in full).
+  // Withdrawals limit bumped 20 → 200 to match mobile so the lifetime
+  // total includes ALL paid-out / in-flight money (counting only the
+  // latest 20 would under-report lifetime gross on heavy creators).
   const [balanceRes, earningsRes, withdrawalsRes, kycRes] = await Promise.all([
     supabase.rpc('author_balance_for', { p_author_id: currentUser.id }),
     supabase.from('author_earnings')
@@ -9240,23 +11117,651 @@ async function loadAuthorEarnings() {
       .select('id, amount_coins, amount_php_minor, status, payout_method, requested_at, approved_at, paid_at, rejection_reason')
       .eq('author_id', currentUser.id)
       .order('requested_at', { ascending: false })
-      .limit(20),
+      .limit(200),
     supabase.from('author_kyc')
       .select('status, rejection_reason, submitted_at, reviewed_at')
       .eq('user_id', currentUser.id)
       .maybeSingle(),
   ]);
 
-  _authorBalance = balanceRes.data || { available_coins: 0, pending_coins: 0, available_php_minor: 0, pending_php_minor: 0 };
-  _authorKyc     = kycRes.data || null;
+  _authorBalance        = balanceRes.data || { available_coins: 0, pending_coins: 0, available_php_minor: 0, pending_php_minor: 0 };
+  _authorKyc            = kycRes.data || null;
+  _allEarningsCache     = earningsRes.data || [];
+  _allWithdrawalsCache  = withdrawalsRes.data || [];
 
-  const earnings = earningsRes.data || [];
+  // Initialize the month picker to the current month on first paint
+  // (subsequent renders preserve whatever the user picked).
+  if (_selectedMonthYear === null) _selectedMonthYear = _currentMonthYearKey();
+
+  _populateMonthPicker();
   renderAuthorEarningsBalance();
-  renderEarningsBreakdown(earnings);
-  renderAuthorEarningsList(earnings.slice(0, 50));
-  renderAuthorWithdrawalsList(withdrawalsRes.data || []);
+  renderEarningsTotals();      // new — Total + This Month tiles
+  _renderMonthScopedBreakdown(); // breakdown now respects the picker
+
+  // Recent earnings is paginated to keep the DOM small (creators with
+  // thousands of rows + per-row title lookups would otherwise lag).
+  // Render the current page; the helper itself does the title resolve
+  // for the visible window.
+  _renderRecentEarningsPage();
+
+  _renderWithdrawalsPage();
   renderAuthorKycBanner();
   syncAuthorPayoutButton();
+}
+
+// "YYYY-MM" for the current month — the canonical default the picker
+// starts at, matching mobile's behavior.
+function _currentMonthYearKey(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+// Filter a list of earnings rows to a single "YYYY-MM" bucket using
+// `available_at` (mirrors mobile — see lib/earnings-supabase.js line
+// 119-121 comment block on why available_at not created_at).
+function _filterEarningsByMonthYear(rows, monthYear) {
+  if (!monthYear) return rows;
+  const [yStr, mStr] = monthYear.split('-');
+  const year = Number(yStr);
+  const monthIndex = Number(mStr) - 1;
+  if (!Number.isFinite(year) || !Number.isInteger(monthIndex)) return rows;
+  const start = new Date(year, monthIndex, 1, 0, 0, 0).getTime();
+  const end   = new Date(year, monthIndex + 1, 0, 23, 59, 59).getTime();
+  return rows.filter((r) => {
+    const t = new Date(r.available_at || r.created_at || 0).getTime();
+    return t >= start && t <= end;
+  });
+}
+
+// Build the month picker options from the earliest earning forward
+// to the current month. Newest first so the picker opens to the
+// current month by default. Re-populates idempotently on every
+// loadAuthorEarnings since the underlying data may grow.
+function _populateMonthPicker() {
+  const sel = document.getElementById('earningsMonthPicker');
+  if (!sel) return;
+
+  // Find the earliest available_at across all cached earnings. Falls
+  // back to "August 2025" (the platform's first month with author
+  // earnings, matching mobile's hardcoded floor).
+  let earliest = new Date(2025, 7, 1); // August = month index 7
+  for (const r of _allEarningsCache) {
+    const t = new Date(r.available_at || r.created_at || 0);
+    if (!isNaN(t.getTime()) && t < earliest) earliest = t;
+  }
+
+  const now = new Date();
+  const cur = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const opts = [];
+  // Walk from current month backwards to the earliest available.
+  let cursor = new Date(cur.getFullYear(), cur.getMonth(), 1);
+  while (cursor >= new Date(earliest.getFullYear(), earliest.getMonth(), 1)) {
+    const y = cursor.getFullYear();
+    const m = cursor.getMonth();
+    const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+    const label = `${monthNames[m]} ${y}`;
+    opts.push(`<option value="${key}"${key === _selectedMonthYear ? ' selected' : ''}>${label}</option>`);
+    cursor = new Date(y, m - 1, 1);
+  }
+  sel.innerHTML = opts.join('');
+}
+
+// Re-render the month-scoped pieces: This Month tile + breakdown.
+// Lifetime total + balance cards are NOT month-sensitive.
+function _renderMonthScopedBreakdown() {
+  const filtered = _filterEarningsByMonthYear(_allEarningsCache, _selectedMonthYear);
+  renderEarningsBreakdown(filtered);
+  // Also update the "This Month" tile total.
+  const monthMinor = filtered.reduce((sum, r) => sum + (r.net_php_minor || 0), 0);
+  const monthEl = document.getElementById('earningsMonthPhp');
+  if (monthEl) monthEl.textContent = formatPhpFromMinor(monthMinor);
+  // Label updates to match the selected month for clarity.
+  const labelEl = document.getElementById('earningsMonthLabel');
+  if (labelEl) {
+    labelEl.textContent = _selectedMonthYear === _currentMonthYearKey() ? 'This month' : 'Selected month';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Shared title resolver for any list of `author_earnings` rows. Used
+// by BOTH the drill-down transaction view AND the main "Recent
+// earnings" list. Resolves chapter / book_bulk / video / post titles
+// in parallel and returns a Map<"<source_type>:<source_id>", title>.
+//
+// Posts get a short content excerpt since they have no `title`
+// column. Returns "Untitled <thing>" as a defensive fallback.
+//
+// Partition-by-id-format: rows backfilled from Appwrite have hex
+// `source_id`s that fail Postgres's UUID cast, so we split each id
+// list into UUIDs (queried by `id`) and legacy hex (queried by
+// `legacy_appwrite_id`). The combined `.or()` filter that mobile
+// tried first silently returned zero rows for the legacy partition;
+// two separate queries per kind sidestep the cast error entirely.
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function _resolveEarningsTitles(rows) {
+  const titleByKey = new Map();
+  if (!rows || !rows.length) return titleByKey;
+
+  const partition = (ids) => {
+    const uuids = [], legacy = [];
+    for (const id of ids) { if (_UUID_RE.test(id)) uuids.push(id); else legacy.push(id); }
+    return { uuids, legacy };
+  };
+  const setTitle = (key, label) => { if (label) titleByKey.set(key, label); };
+
+  const chapterIds  = [...new Set(rows.filter(r => r.source_type === 'chapter').map(r => r.source_id))];
+  const bookBulkIds = [...new Set(rows.filter(r => r.source_type === 'book_bulk').map(r => r.source_id))];
+  const videoIds    = [...new Set(rows.filter(r => r.source_type === 'video').map(r => r.source_id))];
+  const postIds     = [...new Set(rows.filter(r => r.source_type === 'post').map(r => r.source_id))];
+
+  const tasks = [];
+
+  if (chapterIds.length) {
+    tasks.push((async () => {
+      const { uuids, legacy } = partition(chapterIds);
+      const handle = (rs) => (rs || []).forEach((row) => {
+        const bookTitle    = row.books?.title || '';
+        const chapterTitle = row.title || '';
+        const label = bookTitle && chapterTitle
+          ? `${bookTitle} — ${chapterTitle}`
+          : chapterTitle || bookTitle || 'Untitled chapter';
+        setTitle(`chapter:${row.id}`, label);
+        if (row.legacy_appwrite_id) setTitle(`chapter:${row.legacy_appwrite_id}`, label);
+      });
+      const q = [];
+      if (uuids.length)  q.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('id', uuids).then(({ data }) => handle(data)));
+      if (legacy.length) q.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
+      await Promise.all(q);
+    })());
+  }
+  if (bookBulkIds.length) {
+    tasks.push((async () => {
+      const { uuids, legacy } = partition(bookBulkIds);
+      const handle = (rs) => (rs || []).forEach((row) => {
+        const label = row.title ? `${row.title} (full book)` : 'Untitled book (full)';
+        setTitle(`book_bulk:${row.id}`, label);
+        if (row.legacy_appwrite_id) setTitle(`book_bulk:${row.legacy_appwrite_id}`, label);
+      });
+      const q = [];
+      if (uuids.length)  q.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
+      if (legacy.length) q.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
+      await Promise.all(q);
+    })());
+  }
+  if (videoIds.length) {
+    tasks.push((async () => {
+      const { uuids, legacy } = partition(videoIds);
+      const handle = (rs) => (rs || []).forEach((row) => {
+        const label = row.title || 'Untitled video';
+        setTitle(`video:${row.id}`, label);
+        if (row.legacy_appwrite_id) setTitle(`video:${row.legacy_appwrite_id}`, label);
+      });
+      const q = [];
+      if (uuids.length)  q.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
+      if (legacy.length) q.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
+      await Promise.all(q);
+    })());
+  }
+  if (postIds.length) {
+    // Posts have no `title` column — use a short excerpt from the
+    // first non-empty line of `content` (or `caption` for legacy
+    // rows). Mobile doesn't resolve post titles at all (shows
+    // "Unknown item"); this small upgrade gives web a slightly
+    // better empty-fallback without diverging from mobile data.
+    tasks.push((async () => {
+      const { uuids, legacy } = partition(postIds);
+      const handle = (rs) => (rs || []).forEach((row) => {
+        const raw = (row.content || row.caption || '').trim();
+        const firstLine = raw.split(/\n/)[0] || '';
+        const label = firstLine
+          ? (firstLine.length > 60 ? firstLine.slice(0, 60) + '…' : firstLine)
+          : 'Post';
+        setTitle(`post:${row.id}`, label);
+        if (row.legacy_appwrite_id) setTitle(`post:${row.legacy_appwrite_id}`, label);
+      });
+      const q = [];
+      if (uuids.length)  q.push(supabase.from('posts').select('id, content, caption, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
+      if (legacy.length) q.push(supabase.from('posts').select('id, content, caption, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
+      await Promise.all(q);
+    })());
+  }
+
+  await Promise.all(tasks);
+  return titleByKey;
+}
+
+// Cache for the Recent earnings list. Populated by loadAuthorEarnings
+// for the visible window so renderAuthorEarningsList can render
+// titles synchronously without flicker.
+let _earningsRecentTitles = new Map();
+
+// Pagination state for the Recent earnings list. Default 10 per page
+// — keeps the DOM cheap and the title resolver fast. User can bump
+// to 20/50/100 via the picker; choice persists in localStorage.
+const EARNINGS_RECENT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+let _earningsRecentPageIdx = 1;
+let _earningsRecentPageSize = (() => {
+  const stored = parseInt(localStorage.getItem('selebox_earnings_recent_page_size') || '10', 10);
+  return EARNINGS_RECENT_PAGE_SIZE_OPTIONS.includes(stored) ? stored : 10;
+})();
+
+// Same pagination story for the Withdrawal history list — separate
+// state so the two pickers don't interfere with each other.
+const WITHDRAWALS_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+let _withdrawalsPageIdx = 1;
+let _withdrawalsPageSize = (() => {
+  const stored = parseInt(localStorage.getItem('selebox_withdrawals_page_size') || '10', 10);
+  return WITHDRAWALS_PAGE_SIZE_OPTIONS.includes(stored) ? stored : 10;
+})();
+
+// ─────────────────────────────────────────────────────────────────────
+// Pass C — Earnings breakdown drill-down (May 2026 mobile parity).
+//
+// Click a per-source tile (Posts / Videos / Books) on the Earnings
+// page → opens a focused view showing a paginated transaction log
+// for that category plus a summary card with coins / stars / unlock
+// totals. Mirrors mobile's app/(payments)/earnings-breakdown.jsx +
+// lib/earnings-supabase.js {getAuthorEarningsSummary,
+// getAuthorEarningsTransactions}.
+//
+// State is local to this section; no module-globals leak beyond.
+// ─────────────────────────────────────────────────────────────────────
+
+const _BREAKDOWN_PAGE_SIZE = 15;
+let _breakdownState = {
+  category: null,   // 'post' | 'video' | 'book'
+  label: '',        // header copy ("From Videos", etc.)
+  monthYear: null,  // honors the Earnings page's month picker
+  items: [],
+  offset: 0,
+  hasMore: false,
+  loading: false,
+};
+
+// source_type fan-out — books are stored as TWO row variants
+// (chapter unlock vs full-book bulk), mirroring mobile's mapping.
+function _breakdownSourceTypes(category) {
+  if (category === 'book')  return ['chapter', 'book_bulk'];
+  if (category === 'video') return ['video'];
+  if (category === 'post')  return ['post'];
+  return [];
+}
+
+// Summary fetch — sums net_php_minor + gross_coins (split by
+// currency) + row count across ALL rows matching the filter.
+// Independent of pagination; the summary stays stable as the user
+// scrolls. Limit cap = 20,000, same as mobile.
+async function _fetchEarningsBreakdownSummary({ category, monthYear }) {
+  const empty = { total_pesos: 0, total_coins: 0, total_stars: 0, total_unlocks: 0 };
+  const sourceTypes = _breakdownSourceTypes(category);
+  if (!currentUser || sourceTypes.length === 0) return empty;
+
+  let query = supabase
+    .from('author_earnings')
+    .select('net_php_minor, gross_coins, currency_used')
+    .eq('author_id', currentUser.id)
+    .in('source_type', sourceTypes)
+    .limit(20000);
+
+  if (monthYear) {
+    const range = _parseMonthRange(monthYear);
+    if (range) {
+      query = query
+        .gte('available_at', range.start.toISOString())
+        .lte('available_at', range.end.toISOString());
+    }
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.warn('[earnings-breakdown] summary fetch failed:', error.message);
+    return empty;
+  }
+
+  let pesosMinor = 0, coins = 0, stars = 0, unlocks = 0;
+  for (const r of data || []) {
+    pesosMinor += r.net_php_minor || 0;
+    unlocks += 1;
+    const amount = r.gross_coins || 0;
+    if (r.currency_used === 'star') stars += amount;
+    else coins += amount;
+  }
+  return {
+    total_pesos: pesosMinor / 100,
+    total_coins: coins,
+    total_stars: stars,
+    total_unlocks: unlocks,
+  };
+}
+
+// "YYYY-MM" → { start, end } Date pair. Mirrors mobile's
+// parseMonthYear in lib/earnings-supabase.js.
+function _parseMonthRange(monthYear) {
+  if (!monthYear) return null;
+  const [yStr, mStr] = monthYear.split('-');
+  const year = Number(yStr);
+  const monthIndex = Number(mStr) - 1;
+  if (!Number.isFinite(year) || !Number.isInteger(monthIndex)) return null;
+  return {
+    start: new Date(year, monthIndex, 1, 0, 0, 0),
+    end:   new Date(year, monthIndex + 1, 0, 23, 59, 59),
+  };
+}
+
+// Paginated transaction fetch — limit+1 rows so we can detect
+// hasMore without a separate count query. Titles are resolved
+// per-page (separate small queries against chapters / books /
+// videos) so we never load thousands of titles up front.
+async function _fetchEarningsBreakdownTransactions({ category, monthYear, limit = _BREAKDOWN_PAGE_SIZE, offset = 0 }) {
+  const empty = { items: [], hasMore: false };
+  const sourceTypes = _breakdownSourceTypes(category);
+  if (!currentUser || sourceTypes.length === 0) return empty;
+
+  let query = supabase
+    .from('author_earnings')
+    .select('source_id, source_type, gross_coins, currency_used, net_php_minor, created_at, available_at')
+    .eq('author_id', currentUser.id)
+    .in('source_type', sourceTypes)
+    .order('available_at', { ascending: false, nullsFirst: false })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit); // inclusive — +1 row probes hasMore
+
+  if (monthYear) {
+    const range = _parseMonthRange(monthYear);
+    if (range) {
+      query = query
+        .gte('available_at', range.start.toISOString())
+        .lte('available_at', range.end.toISOString());
+    }
+  }
+
+  const { data: rows, error } = await query;
+  if (error) {
+    console.warn('[earnings-breakdown] transactions fetch failed:', error.message);
+    return empty;
+  }
+
+  const all = rows || [];
+  const hasMore = all.length > limit;
+  const pageRows = hasMore ? all.slice(0, limit) : all;
+
+  // Resolve titles for this page only. Same logic as mobile —
+  // partition ids into UUIDs vs legacy Appwrite hex strings; legacy
+  // hex would fail the `id` column's uuid cast, so we query by
+  // `legacy_appwrite_id` for those.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const partition = (ids) => {
+    const uuids = [], legacy = [];
+    for (const id of ids) { if (UUID_RE.test(id)) uuids.push(id); else legacy.push(id); }
+    return { uuids, legacy };
+  };
+  const titleByKey = new Map();
+  const setTitle = (key, label) => { if (label) titleByKey.set(key, label); };
+
+  const chapterIds = pageRows.filter(r => r.source_type === 'chapter').map(r => r.source_id);
+  const bookBulkIds = pageRows.filter(r => r.source_type === 'book_bulk').map(r => r.source_id);
+  const videoIds   = pageRows.filter(r => r.source_type === 'video').map(r => r.source_id);
+
+  const tasks = [];
+
+  if (chapterIds.length) {
+    tasks.push((async () => {
+      const { uuids, legacy } = partition(chapterIds);
+      const handle = (rows) => (rows || []).forEach((row) => {
+        const bookTitle = row.books?.title || '';
+        const chapterTitle = row.title || '';
+        const label = bookTitle && chapterTitle ? `${bookTitle} — ${chapterTitle}`
+          : chapterTitle ? chapterTitle
+          : bookTitle ? bookTitle
+          : 'Untitled chapter';
+        setTitle(`chapter:${row.id}`, label);
+        if (row.legacy_appwrite_id) setTitle(`chapter:${row.legacy_appwrite_id}`, label);
+      });
+      const subqueries = [];
+      if (uuids.length)  subqueries.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('id', uuids).then(({ data }) => handle(data)));
+      if (legacy.length) subqueries.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
+      await Promise.all(subqueries);
+    })());
+  }
+  if (bookBulkIds.length) {
+    tasks.push((async () => {
+      const { uuids, legacy } = partition(bookBulkIds);
+      const handle = (rows) => (rows || []).forEach((row) => {
+        const label = row.title ? `${row.title} (full book)` : 'Untitled book (full)';
+        setTitle(`book_bulk:${row.id}`, label);
+        if (row.legacy_appwrite_id) setTitle(`book_bulk:${row.legacy_appwrite_id}`, label);
+      });
+      const subqueries = [];
+      if (uuids.length)  subqueries.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
+      if (legacy.length) subqueries.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
+      await Promise.all(subqueries);
+    })());
+  }
+  if (videoIds.length) {
+    tasks.push((async () => {
+      const { uuids, legacy } = partition(videoIds);
+      const handle = (rows) => (rows || []).forEach((row) => {
+        const label = row.title || 'Untitled video';
+        setTitle(`video:${row.id}`, label);
+        if (row.legacy_appwrite_id) setTitle(`video:${row.legacy_appwrite_id}`, label);
+      });
+      const subqueries = [];
+      if (uuids.length)  subqueries.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
+      if (legacy.length) subqueries.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
+      await Promise.all(subqueries);
+    })());
+  }
+
+  await Promise.all(tasks);
+
+  const items = pageRows.map((r) => ({
+    title: titleByKey.get(`${r.source_type}:${r.source_id}`) || 'Unknown item',
+    amount: r.gross_coins || 0,
+    currency: r.currency_used === 'star' ? 'star' : 'coin',
+    pesos: (r.net_php_minor || 0) / 100,
+    // created_at = real transaction time. DO NOT switch to
+    // available_at — that's the vesting date, which is in the
+    // FUTURE for rows still inside the hold window (would display
+    // "May 21" for an unlock that actually happened on May 7).
+    // Mobile hit this exact bug; comment block at lib/earnings-
+    // supabase.js:601-616 documents the trap.
+    created_at: r.created_at || r.available_at,
+    source_id: r.source_id,
+    source_type: r.source_type,
+  }));
+
+  return { items, hasMore };
+}
+
+// "May 5, 2026 · 3:42 PM"
+function _formatBreakdownTimestamp(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return `${date} · ${time}`;
+}
+
+// Open the drill-down view for `category`. Loads summary + first
+// page in parallel. Hides the main earnings tab content + tabs while
+// open so the user gets a focused, full-page view.
+async function openEarningsBreakdown(category, label) {
+  if (!currentUser) return;
+  const view = document.getElementById('earningsBreakdownView');
+  if (!view) return;
+
+  // Honor the current Earnings month picker — if "this month" is
+  // selected we filter; if the user is on the current month and
+  // nothing was filtered, monthYear stays as-is. Use the same
+  // _selectedMonthYear shared with the parent page.
+  _breakdownState = {
+    category,
+    label: label || 'Earnings',
+    monthYear: _selectedMonthYear || null,
+    items: [],
+    offset: 0,
+    hasMore: false,
+    loading: true,
+  };
+
+  // Hide tabs + tab content; show drill-down view.
+  document.querySelectorAll('#earningsPage .earnings-tabs, #earningsPage .earnings-tab-content').forEach(el => el.style.display = 'none');
+  view.style.display = 'block';
+
+  // Header — label + accent-colored icon for the chosen category
+  document.getElementById('earningsBreakdownLabel').textContent = label;
+  const iconWrap = document.getElementById('earningsBreakdownIcon');
+  if (iconWrap) {
+    iconWrap.dataset.category = category;
+    iconWrap.innerHTML = _breakdownCategoryIcon(category);
+  }
+
+  // Loading skeleton in list + summary
+  const list = document.getElementById('earningsBreakdownList');
+  if (list) list.innerHTML = '<div class="earnings-breakdown-loading">Loading transactions…</div>';
+  _renderEarningsBreakdownSummary({ total_pesos: 0, total_coins: 0, total_stars: 0, total_unlocks: 0 });
+
+  // Parallel fetch
+  const [sum, page] = await Promise.all([
+    _fetchEarningsBreakdownSummary({ category, monthYear: _breakdownState.monthYear }),
+    _fetchEarningsBreakdownTransactions({ category, monthYear: _breakdownState.monthYear, limit: _BREAKDOWN_PAGE_SIZE, offset: 0 }),
+  ]);
+
+  _renderEarningsBreakdownSummary(sum);
+  _breakdownState.items   = page.items;
+  _breakdownState.offset  = page.items.length;
+  _breakdownState.hasMore = page.hasMore;
+  _breakdownState.loading = false;
+  _renderEarningsBreakdownList();
+}
+
+function closeEarningsBreakdown() {
+  const view = document.getElementById('earningsBreakdownView');
+  if (view) view.style.display = 'none';
+  document.querySelectorAll('#earningsPage .earnings-tabs').forEach(el => el.style.display = '');
+  // Restore whichever tab was active when we opened. Default = earnings.
+  document.querySelectorAll('#earningsPage .earnings-tab-content').forEach(el => {
+    el.style.display = el.dataset.etabContent === 'earnings' ? 'block' : 'none';
+  });
+  // Make sure the Earnings tab is visually selected.
+  document.querySelectorAll('#earningsPage .earnings-tab').forEach(t => t.classList.toggle('active', t.dataset.etab === 'earnings'));
+}
+
+async function _loadMoreEarningsBreakdown() {
+  const st = _breakdownState;
+  if (!st.hasMore || st.loading) return;
+  st.loading = true;
+  const btn = document.getElementById('btnEarningsBreakdownMore');
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+  const page = await _fetchEarningsBreakdownTransactions({
+    category: st.category,
+    monthYear: st.monthYear,
+    limit: _BREAKDOWN_PAGE_SIZE,
+    offset: st.offset,
+  });
+  st.items = [...st.items, ...page.items];
+  st.offset = st.items.length;
+  st.hasMore = page.hasMore;
+  st.loading = false;
+  if (btn) { btn.disabled = false; btn.textContent = 'Load more'; }
+  _renderEarningsBreakdownList();
+}
+
+function _renderEarningsBreakdownSummary(sum) {
+  const labelEl   = document.getElementById('earningsBreakdownSummaryLabel');
+  const amountEl  = document.getElementById('earningsBreakdownSummaryAmount');
+  const coinsEl   = document.getElementById('earningsBreakdownCoins');
+  const starsEl   = document.getElementById('earningsBreakdownStars');
+  const unlocksEl = document.getElementById('earningsBreakdownUnlocks');
+  const unlocksLb = document.getElementById('earningsBreakdownUnlocksLabel');
+  if (labelEl) {
+    labelEl.textContent = _breakdownState.monthYear
+      ? `Earnings · ${_humanizeMonthYear(_breakdownState.monthYear)}`
+      : 'Lifetime earnings';
+  }
+  if (amountEl)  amountEl.textContent = '₱' + (sum.total_pesos || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (coinsEl)   coinsEl.textContent   = (sum.total_coins || 0).toLocaleString();
+  if (starsEl)   starsEl.textContent   = (sum.total_stars || 0).toLocaleString();
+  if (unlocksEl) unlocksEl.textContent = (sum.total_unlocks || 0).toLocaleString();
+  if (unlocksLb) unlocksLb.textContent = (sum.total_unlocks === 1) ? 'unlock' : 'unlocks';
+}
+
+function _renderEarningsBreakdownList() {
+  const list = document.getElementById('earningsBreakdownList');
+  const pager = document.getElementById('earningsBreakdownPager');
+  if (!list) return;
+  if (_breakdownState.items.length === 0) {
+    list.innerHTML = `
+      <div class="earnings-breakdown-empty">
+        <div class="earnings-breakdown-empty-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>
+        </div>
+        <div class="earnings-breakdown-empty-title">No earnings yet for this category</div>
+        <div class="earnings-breakdown-empty-sub">When readers unlock your ${_breakdownLabelLowerNoun(_breakdownState.category)}, entries will show here.</div>
+      </div>
+    `;
+    if (pager) pager.style.display = 'none';
+    return;
+  }
+  list.innerHTML = _breakdownState.items.map((it) => `
+    <div class="earnings-breakdown-row">
+      <div class="earnings-breakdown-row-text">
+        <div class="earnings-breakdown-row-title" title="${escHTML(it.title)}">${escHTML(it.title)}</div>
+        <div class="earnings-breakdown-row-date">${escHTML(_formatBreakdownTimestamp(it.created_at))}</div>
+      </div>
+      <div class="earnings-breakdown-row-amount">
+        <span class="earnings-breakdown-row-num">+${(it.amount || 0).toLocaleString()}</span>
+        ${it.currency === 'star'
+          ? `<svg viewBox="0 0 24 24" width="13" height="13" fill="#a855f7"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg><span class="earnings-breakdown-row-suffix">${it.amount === 1 ? 'star' : 'stars'}</span>`
+          : `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#b45309" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/></svg><span class="earnings-breakdown-row-suffix">${it.amount === 1 ? 'coin' : 'coins'}</span>`
+        }
+      </div>
+    </div>
+  `).join('');
+  if (pager) pager.style.display = _breakdownState.hasMore ? '' : 'none';
+}
+
+function _breakdownLabelLowerNoun(category) {
+  if (category === 'post')  return 'posts';
+  if (category === 'video') return 'videos';
+  if (category === 'book')  return 'books';
+  return 'content';
+}
+
+function _breakdownCategoryIcon(category) {
+  // Returns an inline SVG matching the per-source tile glyph, sized
+  // 18px to slot inside the breakdown header.
+  if (category === 'post')  return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+  if (category === 'video') return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>';
+  if (category === 'book')  return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>';
+  return '';
+}
+
+function _humanizeMonthYear(monthYear) {
+  if (!monthYear) return '';
+  const [y, m] = monthYear.split('-');
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  return `${monthNames[Number(m) - 1] || ''} ${y}`;
+}
+
+// Lifetime total = available + under-review + every withdrawal still
+// in flight or completed (pending/approved/paid). Excludes
+// rejected/failed — those didn't take money out. Mirrors mobile math
+// at lib/earnings-supabase.js:687-758. Critical: count `pending`
+// withdrawals so the lifetime total doesn't artificially drop when an
+// author requests a payout (Charles flagged this exact bug in mobile).
+function renderEarningsTotals() {
+  const b = _authorBalance || {};
+  const balanceMinor = (b.available_php_minor || 0) + (b.pending_php_minor || 0);
+  const paidOutMinor = (_allWithdrawalsCache || [])
+    .filter((w) => w.status === 'pending' || w.status === 'approved' || w.status === 'paid')
+    .reduce((sum, w) => sum + (w.amount_php_minor || 0), 0);
+  const lifetimeMinor = balanceMinor + paidOutMinor;
+  const el = document.getElementById('earningsTotalLifetimePhp');
+  if (el) el.textContent = formatPhpFromMinor(lifetimeMinor);
 }
 
 // Breakdown by source_type — Posts / Videos / Books (Books = chapter + book_bulk)
@@ -9311,31 +11816,158 @@ function renderAuthorEarningsBalance() {
   // Cache for the payout-button gate
   _authorBalance._computed_available_minor = availMinor;
   _authorBalance._computed_pending_minor   = pendMinor;
+
+  // Latest-withdrawal status callout — mirrors mobile's colored-dot
+  // "pending - ₱X.XX" / "approved - ₱X.XX" / "paid - ₱X.XX" badge
+  // under the Available amount. Only renders when the latest
+  // withdrawal is in-flight or recently completed; otherwise hidden.
+  const wEl   = document.getElementById('earningsWithdrawalStatus');
+  const wText = wEl?.querySelector('.author-earnings-withdrawal-text');
+  const wDot  = wEl?.querySelector('.author-earnings-withdrawal-dot');
+  const latest = (_allWithdrawalsCache || [])[0]; // newest-first per query order
+  if (wEl && wText && wDot && latest && ['pending', 'approved', 'paid'].includes(latest.status)) {
+    const amt = formatPhpFromMinor(latest.amount_php_minor || 0);
+    wText.textContent = `${latest.status} · ${amt}`;
+    // Reset previous state classes, then apply the current one. Each
+    // state maps to a distinct color in CSS.
+    wEl.classList.remove('is-pending', 'is-approved', 'is-paid');
+    wEl.classList.add(`is-${latest.status}`);
+    wEl.style.display = '';
+  } else if (wEl) {
+    wEl.style.display = 'none';
+  }
 }
 
 function formatPhpFromMinor(m) {
   return '₱' + (m / 100).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// Slice + render the current Recent-earnings page. Computes the
+// page window from _earningsRecentPageIdx + _earningsRecentPageSize,
+// renders rows immediately with placeholder labels, then resolves
+// titles for the slice in the background and re-renders. Also
+// renders/updates the pagination bar below the list.
+function _renderRecentEarningsPage() {
+  const all = _allEarningsCache || [];
+  const total = all.length;
+  const pageSize = _earningsRecentPageSize;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (_earningsRecentPageIdx > totalPages) _earningsRecentPageIdx = totalPages;
+  if (_earningsRecentPageIdx < 1) _earningsRecentPageIdx = 1;
+  const start = (_earningsRecentPageIdx - 1) * pageSize;
+  const end   = Math.min(start + pageSize, total);
+  const slice = all.slice(start, end);
+
+  // First paint: placeholder labels (source_type fallback).
+  renderAuthorEarningsList(slice);
+
+  // Title resolve in background, then second paint with real labels.
+  // We MERGE into _earningsRecentTitles instead of replacing so
+  // titles already resolved for previous pages don't get wiped.
+  _resolveEarningsTitles(slice).then((titles) => {
+    titles.forEach((v, k) => _earningsRecentTitles.set(k, v));
+    renderAuthorEarningsList(slice);
+  }).catch(() => { /* swallow — page keeps placeholder labels */ });
+
+  _renderRecentEarningsPager({ total, totalPages, start, end });
+}
+
+// Pagination controls below the Recent earnings list — same shape as
+// the Creator Studio pager (per-page pill picker + Prev/Next + range
+// label). Targets a sibling container; creates it lazily on first call.
+function _renderRecentEarningsPager({ total, totalPages, start, end }) {
+  const listEl = document.getElementById('authorEarningsList');
+  if (!listEl) return;
+  let pager = document.getElementById('authorEarningsPager');
+  if (!pager) {
+    pager = document.createElement('div');
+    pager.id = 'authorEarningsPager';
+    pager.className = 'studio-pagination'; // reuse Studio pager styling
+    listEl.parentNode.insertBefore(pager, listEl.nextSibling);
+  }
+  if (total === 0) {
+    pager.style.display = 'none';
+    return;
+  }
+  pager.style.display = '';
+  pager.innerHTML = `
+    <div class="studio-pagination-pagesize">
+      <span class="studio-pagination-label">Rows per page</span>
+      <div class="studio-pagesize-group" role="radiogroup" aria-label="Rows per page">
+        ${EARNINGS_RECENT_PAGE_SIZE_OPTIONS.map(n => `
+          <button type="button" class="studio-pagesize-option ${n === _earningsRecentPageSize ? 'is-selected' : ''}" data-earnings-pagesize="${n}" role="radio" aria-checked="${n === _earningsRecentPageSize ? 'true' : 'false'}">${n}</button>
+        `).join('')}
+      </div>
+    </div>
+    <div class="studio-pagination-nav">
+      <span class="studio-pagination-info">${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} · Page ${_earningsRecentPageIdx} of ${totalPages}</span>
+      <button type="button" class="studio-pagination-btn" data-earnings-page-action="prev" ${_earningsRecentPageIdx <= 1 ? 'disabled' : ''} title="Previous page">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button type="button" class="studio-pagination-btn" data-earnings-page-action="next" ${_earningsRecentPageIdx >= totalPages ? 'disabled' : ''} title="Next page">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
+  `;
+  pager.querySelectorAll('[data-earnings-pagesize]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = parseInt(btn.dataset.earningsPagesize, 10);
+      if (!EARNINGS_RECENT_PAGE_SIZE_OPTIONS.includes(next) || next === _earningsRecentPageSize) return;
+      _earningsRecentPageSize = next;
+      _earningsRecentPageIdx = 1;
+      localStorage.setItem('selebox_earnings_recent_page_size', String(next));
+      _renderRecentEarningsPage();
+    });
+  });
+  pager.querySelectorAll('[data-earnings-page-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dir = btn.dataset.earningsPageAction;
+      if (dir === 'prev') _earningsRecentPageIdx = Math.max(1, _earningsRecentPageIdx - 1);
+      else if (dir === 'next') _earningsRecentPageIdx = _earningsRecentPageIdx + 1;
+      _renderRecentEarningsPage();
+      const list = document.getElementById('authorEarningsList');
+      if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+}
+
 function renderAuthorEarningsList(rows) {
   const el = document.getElementById('authorEarningsList');
   if (!el) return;
   if (!rows.length) {
-    el.innerHTML = '<div class="page-empty-soft">No earnings yet. Once readers unlock your work with coins, you\'ll see entries here.</div>';
+    // Copy aligned with mobile + post-May-2026 stars overhaul: both
+    // currencies now earn for authors, so the message no longer
+    // singles out coins.
+    el.innerHTML = '<div class="page-empty-soft">No earnings yet. When readers unlock your work, you\'ll see entries here.</div>';
     return;
   }
   // currency_used was added with the May 2026 stars-earn-for-authors
   // overhaul. Older rows pre-migration default to 'coin' (the column has
   // a server-side default), so the fallback below is just defensive
   // against a row that somehow comes back with currency_used=null.
+  //
+  // The "type" line now shows the resolved item title (chapter /
+  // book / video / post excerpt) instead of the bare source_type.
+  // Source kind moves to a small label inside the sub-line so the
+  // user still knows what kind of content earned the row, without
+  // duplicating "Video" as the dominant label on every line.
+  const sourceKindLabel = (st) => {
+    if (st === 'chapter')   return 'Chapter';
+    if (st === 'book_bulk') return 'Book';
+    if (st === 'video')     return 'Video';
+    if (st === 'post')      return 'Post';
+    return st.replace('_', ' ');
+  };
   el.innerHTML = rows.map(r => {
     const cur   = (r.currency_used || 'coin').toLowerCase();
     const label = cur === 'star' ? 'star' : 'coin';
+    const resolvedTitle = _earningsRecentTitles.get(`${r.source_type}:${r.source_id}`)
+      || sourceKindLabel(r.source_type); // first-paint fallback before titles resolve
     return `
     <div class="earnings-row">
       <div class="earnings-row-meta">
-        <div class="earnings-row-type">${escHTML(r.source_type.replace('_', ' '))}</div>
-        <div class="earnings-row-sub">${timeAgo(r.created_at)} · ${r.share_pct}% share of ${r.gross_coins} ${label}${r.gross_coins === 1 ? '' : 's'}</div>
+        <div class="earnings-row-type" title="${escHTML(resolvedTitle)}">${escHTML(resolvedTitle)}</div>
+        <div class="earnings-row-sub">${escHTML(sourceKindLabel(r.source_type))} · ${timeAgo(r.created_at)} · ${r.share_pct}% share of ${r.gross_coins} ${label}${r.gross_coins === 1 ? '' : 's'}</div>
       </div>
       <div class="earnings-row-amount">+${r.net_coins} <small>${label}${r.net_coins === 1 ? '' : 's'}</small></div>
       <div class="earnings-row-php">${formatPhpFromMinor(r.net_php_minor)}</div>
@@ -9355,6 +11987,79 @@ function earningsStatusLabel(r) {
   if (r.status === 'withdrawn') return 'Withdrawn';
   if (r.status === 'reversed')  return 'Reversed';
   return r.status;
+}
+
+// Slice + render the current Withdrawal history page. Mirrors the
+// Recent-earnings paginator: caps DOM cost, persists user's pick.
+function _renderWithdrawalsPage() {
+  const all = _allWithdrawalsCache || [];
+  const total = all.length;
+  const pageSize = _withdrawalsPageSize;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (_withdrawalsPageIdx > totalPages) _withdrawalsPageIdx = totalPages;
+  if (_withdrawalsPageIdx < 1) _withdrawalsPageIdx = 1;
+  const start = (_withdrawalsPageIdx - 1) * pageSize;
+  const end   = Math.min(start + pageSize, total);
+  const slice = all.slice(start, end);
+
+  renderAuthorWithdrawalsList(slice);
+  _renderWithdrawalsPager({ total, totalPages, start, end });
+}
+
+function _renderWithdrawalsPager({ total, totalPages, start, end }) {
+  const listEl = document.getElementById('authorWithdrawalsList');
+  if (!listEl) return;
+  let pager = document.getElementById('authorWithdrawalsPager');
+  if (!pager) {
+    pager = document.createElement('div');
+    pager.id = 'authorWithdrawalsPager';
+    pager.className = 'studio-pagination';
+    listEl.parentNode.insertBefore(pager, listEl.nextSibling);
+  }
+  if (total === 0) {
+    pager.style.display = 'none';
+    return;
+  }
+  pager.style.display = '';
+  pager.innerHTML = `
+    <div class="studio-pagination-pagesize">
+      <span class="studio-pagination-label">Rows per page</span>
+      <div class="studio-pagesize-group" role="radiogroup" aria-label="Rows per page">
+        ${WITHDRAWALS_PAGE_SIZE_OPTIONS.map(n => `
+          <button type="button" class="studio-pagesize-option ${n === _withdrawalsPageSize ? 'is-selected' : ''}" data-withdrawals-pagesize="${n}" role="radio" aria-checked="${n === _withdrawalsPageSize ? 'true' : 'false'}">${n}</button>
+        `).join('')}
+      </div>
+    </div>
+    <div class="studio-pagination-nav">
+      <span class="studio-pagination-info">${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} · Page ${_withdrawalsPageIdx} of ${totalPages}</span>
+      <button type="button" class="studio-pagination-btn" data-withdrawals-page-action="prev" ${_withdrawalsPageIdx <= 1 ? 'disabled' : ''} title="Previous page">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button type="button" class="studio-pagination-btn" data-withdrawals-page-action="next" ${_withdrawalsPageIdx >= totalPages ? 'disabled' : ''} title="Next page">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
+  `;
+  pager.querySelectorAll('[data-withdrawals-pagesize]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = parseInt(btn.dataset.withdrawalsPagesize, 10);
+      if (!WITHDRAWALS_PAGE_SIZE_OPTIONS.includes(next) || next === _withdrawalsPageSize) return;
+      _withdrawalsPageSize = next;
+      _withdrawalsPageIdx = 1;
+      localStorage.setItem('selebox_withdrawals_page_size', String(next));
+      _renderWithdrawalsPage();
+    });
+  });
+  pager.querySelectorAll('[data-withdrawals-page-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dir = btn.dataset.withdrawalsPageAction;
+      if (dir === 'prev') _withdrawalsPageIdx = Math.max(1, _withdrawalsPageIdx - 1);
+      else if (dir === 'next') _withdrawalsPageIdx = _withdrawalsPageIdx + 1;
+      _renderWithdrawalsPage();
+      const list = document.getElementById('authorWithdrawalsList');
+      if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
 }
 
 function renderAuthorWithdrawalsList(rows) {
@@ -10489,10 +13194,18 @@ document.getElementById('bookCoverFile')?.addEventListener('change', async (e) =
   if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
   if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
 
-  // Open the crop modal at 2:3 (book cover standard). The save callback
-  // uploads the cropped JPEG to book-covers and updates books.cover_url.
+  // Open the crop modal with NO forced aspect ratio. The previous
+  // hardcoded 2:3 silently chopped the sides off every uploaded
+  // cover — creators upload at 9:16 (vertical-video aspect), the
+  // 2:3 crop box locks narrower, and pixels outside that frame are
+  // permanently discarded before reaching Supabase Storage. That's
+  // why almost every cover on Selebox had its title clipped at the
+  // edges. With aspectRatio: NaN, Cropper.js lets the creator
+  // resize the crop box freely — by default it covers 100% of the
+  // image (autoCropArea: 1), so most uploads will just save the
+  // entire original at full aspect.
   openCropModal(file, {
-    aspectRatio: 2 / 3,
+    aspectRatio: NaN,
     title: 'Crop book cover',
     onSave: async (croppedFile) => {
       const { data: { user } } = await supabase.auth.getUser();
@@ -11435,6 +14148,72 @@ window.addEventListener('beforeunload', (e) => {
 
 let studioVideosCache = [];
 let studioSearchQuery = '';
+// Lifetime video revenue (PHP minor units = centavos). Populated by
+// loadStudio() summing author_earnings.net_php_minor for the current
+// user's video earnings. Shown in the 4th stat card.
+let studioRevenuePhpMinor = 0;
+// Per-video earnings map: Map<videoId, php_minor>. Same source as
+// studioRevenuePhpMinor (just bucketed by source_id instead of summed
+// globally). Populated by loadStudio. Read by the Earnings column.
+const studioEarningsByVideoId = new Map();
+// Pagination state. Persisted page-size choice means the user's
+// preference (25/50/100) survives reloads; current page resets on
+// every filter change so we never end up "stuck" on page 7 of a
+// 3-page filtered list.
+let studioPageIdx = 1;
+const STUDIO_PAGE_SIZE_OPTIONS = [25, 50, 100];
+let studioPageSize = (() => {
+  const stored = parseInt(localStorage.getItem('selebox_studio_page_size') || '25', 10);
+  return STUDIO_PAGE_SIZE_OPTIONS.includes(stored) ? stored : 25;
+})();
+
+// Visibility filter — 'all' or one of the buckets returned by
+// _studioDeriveVisibility (published, scheduled, processing, private,
+// failed). The chip row above the search drives this. We never
+// persist it: a creator usually wants to see "all" by default on
+// re-entry to Studio.
+let studioVisibilityFilter = 'all';
+
+// Sort state. Default mirrors the pre-pagination behavior (newest
+// first). Sortable keys: 'created_at', 'views', 'likes', 'title'.
+// dir is 'asc' | 'desc'.
+let studioSort = { key: 'created_at', dir: 'desc' };
+
+// Bulk-selection state — set of row ids the user has checked. Empty
+// = no bulk bar shown. Cleared on every renderStudio() invocation
+// that follows a non-selection action (search/filter/sort/page
+// change) since stale ids referring to off-screen rows are confusing
+// to the user.
+let studioSelectedIds = new Set();
+
+// Single source of truth for the visibility bucket a row falls into.
+// Used by both the chip-row counts and the per-row visibility pill
+// so the two never disagree (e.g. chip says 1 Scheduled but the pill
+// reads Processing — that's exactly the kind of drift this helper
+// prevents).
+function _studioDeriveVisibility(v) {
+  const isReadyAndScheduled = v.status === 'ready'
+    && !!v.scheduled_publish_at
+    && new Date(v.scheduled_publish_at).getTime() > Date.now();
+  if (isReadyAndScheduled) return 'scheduled';
+  if (v.status === 'ready' || v.status === 'published') return 'published';
+  if (v.status === 'uploading' || v.status === 'processing') return 'processing';
+  if (v.status === 'unpublished') return 'private';
+  if (v.status === 'failed' || v.status === 'error') return 'failed';
+  return 'unknown';
+}
+
+// Numeric/string accessor for the sortable columns. Keeps the
+// comparator in renderStudio one-liner clean.
+function _studioGetSortValue(v, key) {
+  if (key === 'views')    return (v.views_count ?? v.views ?? 0);
+  if (key === 'likes')    return (v.likes_count ?? v.likes ?? 0);
+  if (key === 'comments') return (v.comments_count ?? 0);
+  if (key === 'earnings') return studioEarningsByVideoId.get(v.id) || 0;
+  if (key === 'created_at') return new Date(v.created_at || 0).getTime();
+  if (key === 'title')    return (v.title || '').toLowerCase();
+  return 0;
+}
 let studioEditingVideoId = null;
 
 // Lightweight client-side substitute for the scheduled-publish cron.
@@ -11463,9 +14242,31 @@ async function loadStudio() {
   // Background sweep: surface any scheduled videos whose publish time has passed.
   maybeFlushDueScheduledVideos();
 
+  // Fetch videos + per-video earnings rows in parallel. We use the
+  // earnings rows for TWO things:
+  //   1. Header "Revenue" stat card = sum of net_php_minor.
+  //   2. Per-row "Earnings" column = group rows by source_id then
+  //      sum, populating a Map<videoId, php_minor>.
+  // Net (not gross) so both surfaces reflect money the creator
+  // actually keeps after the platform share.
+  const earningsP = supabase
+    .from('author_earnings')
+    .select('source_id, net_php_minor')
+    .eq('author_id', currentUser.id)
+    .eq('source_type', 'video');
+
   const { data: videos, error } = await supabase
     .from('videos')
-    .select('id, title, description, thumbnail_url, video_url, views, likes, duration, status, created_at, tags, category, bunny_video_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars')
+    // Engagement counters — read BOTH the canonical trigger-maintained
+    // counters (views_count / likes_count / comments_count, kept fresh
+    // by migration_videos_engagement_counts.sql, also what mobile's
+    // CreatorVideoCard reads via the videoStats adapter) AND the bare
+    // legacy columns (views, likes) for older rows that never got the
+    // trigger backfill. The render code below prefers _count over the
+    // bare column. Without this, Studio shows real views in the
+    // legacy `views` column but always-zero likes — because the
+    // `likes` bare column isn't maintained anywhere.
+    .select('id, title, description, thumbnail_url, video_url, views, likes, views_count, likes_count, comments_count, duration, status, created_at, tags, category, bunny_video_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, scheduled_publish_at, is_hidden')
     .eq('uploader_id', currentUser.id)
     .order('created_at', { ascending: false });
   
@@ -11475,6 +14276,28 @@ async function loadStudio() {
   }
   
   studioVideosCache = videos || [];
+
+  // Tally lifetime video revenue + build per-video earnings map.
+  // Failure here isn't fatal — we just fall back to empty so the
+  // rest of the Studio still renders cleanly.
+  studioEarningsByVideoId.clear();
+  studioRevenuePhpMinor = 0;
+  try {
+    const { data: earnRows } = await earningsP;
+    for (const r of earnRows || []) {
+      const cents = r.net_php_minor || 0;
+      studioRevenuePhpMinor += cents;
+      if (r.source_id) {
+        studioEarningsByVideoId.set(
+          r.source_id,
+          (studioEarningsByVideoId.get(r.source_id) || 0) + cents,
+        );
+      }
+    }
+  } catch {
+    // Map already cleared, total already 0 — nothing to do.
+  }
+
   renderStudio();
 }
 
@@ -11503,19 +14326,76 @@ function renderStudio() {
   }
   
   const totalVideos = videos.length;
-  const totalViews = videos.reduce((sum, v) => sum + (v.views || 0), 0);
-  const totalLikes = videos.reduce((sum, v) => sum + (v.likes || 0), 0);
-  const publishedCount = videos.filter(v => v.status === 'ready').length;
+  // Prefer the trigger-maintained _count columns; fall back to the
+  // bare legacy columns for older rows that pre-date the trigger
+  // backfill. This mirrors how mobile's mapRowToVideo reads engagement.
+  const totalViews = videos.reduce((sum, v) => sum + (v.views_count ?? v.views ?? 0), 0);
+  const totalLikes = videos.reduce((sum, v) => sum + (v.likes_count ?? v.likes ?? 0), 0);
+  // "Published" includes both the web-era 'ready' status and the
+  // mobile-era 'published' status — same parity the visibility pill
+  // applies below. Without including 'published' the header card
+  // undercounts on profiles that have any mobile-uploaded rows.
+  const publishedCount = videos.filter(v => {
+    const isReadyAndScheduled = v.status === 'ready' && v.scheduled_publish_at && new Date(v.scheduled_publish_at).getTime() > Date.now();
+    return (v.status === 'ready' || v.status === 'published') && !isReadyAndScheduled;
+  }).length;
   
-  // Filter by search
+  // ── 1. Visibility chip counts (always computed on the full cache so
+  // counts are stable as the user filters / searches). ──────────────
+  const visibilityCounts = { all: videos.length, published: 0, scheduled: 0, processing: 0, private: 0, failed: 0 };
+  for (const v of videos) {
+    const bucket = _studioDeriveVisibility(v);
+    if (visibilityCounts[bucket] != null) visibilityCounts[bucket]++;
+  }
+
+  // ── 2. Apply visibility chip filter ──────────────────────────────
+  const afterChip = studioVisibilityFilter === 'all'
+    ? videos
+    : videos.filter(v => _studioDeriveVisibility(v) === studioVisibilityFilter);
+
+  // ── 3. Apply text search ─────────────────────────────────────────
   const q = studioSearchQuery.trim().toLowerCase();
-  const filtered = q
-    ? videos.filter(v => 
+  const afterSearch = q
+    ? afterChip.filter(v =>
         (v.title || '').toLowerCase().includes(q) ||
         (v.description || '').toLowerCase().includes(q) ||
         (v.tags || []).some(t => t.toLowerCase().includes(q))
       )
-    : videos;
+    : afterChip;
+
+  // ── 4. Apply sort ────────────────────────────────────────────────
+  // Don't sort in-place — the cache is the source of truth and shared
+  // with the edit modal. Spread first.
+  const sorted = [...afterSearch].sort((a, b) => {
+    const av = _studioGetSortValue(a, studioSort.key);
+    const bv = _studioGetSortValue(b, studioSort.key);
+    if (av < bv) return studioSort.dir === 'asc' ? -1 : 1;
+    if (av > bv) return studioSort.dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+  const filtered = sorted; // alias for downstream references
+
+  // ── 5. Pagination. Clamp defensively. ────────────────────────────
+  const totalPages   = Math.max(1, Math.ceil(filtered.length / studioPageSize));
+  if (studioPageIdx > totalPages) studioPageIdx = totalPages;
+  if (studioPageIdx < 1)          studioPageIdx = 1;
+  const pageStart    = (studioPageIdx - 1) * studioPageSize;
+  const pageEnd      = Math.min(pageStart + studioPageSize, filtered.length);
+  const pageSlice    = filtered.slice(pageStart, pageEnd);
+  // Human-readable "1–25 of 412" label for the toolbar.
+  const rangeLabel   = filtered.length === 0
+    ? '0 videos'
+    : `${(pageStart + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`;
+
+  // ── 6. Bulk-selection helpers ────────────────────────────────────
+  // Prune ids that no longer exist in the current visible slice so
+  // the "Delete N" copy never lies. The set itself is preserved so a
+  // user who filters down to processing, selects 3, then clears the
+  // chip filter still has those 3 selected on the broader view.
+  const visiblePageIds = new Set(pageSlice.map(v => v.id));
+  const selectedOnPage = pageSlice.filter(v => studioSelectedIds.has(v.id));
+  const allOnPageSelected = pageSlice.length > 0 && selectedOnPage.length === pageSlice.length;
+  const someOnPageSelected = selectedOnPage.length > 0 && !allOnPageSelected;
   
   content.innerHTML = `
     <div class="studio-stats">
@@ -11546,15 +14426,40 @@ function renderStudio() {
           <div class="studio-stat-label">Total likes</div>
         </div>
       </div>
-      <div class="studio-stat">
+      <button type="button" class="studio-stat studio-stat-clickable" id="studioStatRevenueBtn" title="View detailed earnings & withdraw">
         <div class="studio-stat-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          <!-- Peso glyph in a soft circle — same money cue as the
+               monetize toggle, in green to keep the "earnings" semantic. -->
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 5h5.5a3.5 3.5 0 0 1 0 7H8"/>
+            <line x1="6" y1="9" x2="14" y2="9"/>
+            <line x1="6" y1="13" x2="11" y2="13"/>
+            <line x1="8" y1="3" x2="8" y2="19"/>
+          </svg>
         </div>
-        <div>
-          <div class="studio-stat-value">${publishedCount.toLocaleString()}</div>
-          <div class="studio-stat-label">Published</div>
+        <div class="studio-stat-text">
+          <div class="studio-stat-value">${formatPhpFromMinor(studioRevenuePhpMinor || 0)}</div>
+          <div class="studio-stat-label">
+            Revenue
+            <span class="studio-stat-cta" aria-hidden="true">View earnings →</span>
+          </div>
         </div>
-      </div>
+      </button>
+    </div>
+
+    <div class="studio-filter-chips" role="tablist" aria-label="Filter and sort">
+      ${[
+        ['all',        'All'],
+        ['published',  'Published'],
+        ['scheduled',  'Scheduled'],
+        ['processing', 'Processing'],
+        ['private',    'Private'],
+        ['failed',     'Failed'],
+      ].map(([key, label]) => `
+        <button type="button" class="studio-filter-chip studio-filter-chip-${key} ${studioVisibilityFilter === key ? 'is-selected' : ''}" data-filter="${key}" role="tab" aria-selected="${studioVisibilityFilter === key ? 'true' : 'false'}">
+          ${label}<span class="studio-filter-chip-count">${(visibilityCounts[key] || 0).toLocaleString()}</span>
+        </button>
+      `).join('')}
     </div>
 
     <div class="studio-toolbar">
@@ -11562,40 +14467,98 @@ function renderStudio() {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="text" id="studioSearchInput" placeholder="Search your videos..." value="${escHTML(studioSearchQuery)}"/>
       </div>
-      <div class="studio-toolbar-info">${filtered.length} of ${totalVideos} ${totalVideos === 1 ? 'video' : 'videos'}</div>
+      <div class="studio-toolbar-info">${rangeLabel}${filtered.length !== totalVideos ? ` (filtered from ${totalVideos.toLocaleString()})` : ''}</div>
     </div>
+
+    ${studioSelectedIds.size > 0 ? `
+      <div class="studio-bulk-bar" role="region" aria-label="Bulk actions">
+        <div class="studio-bulk-count">
+          <strong>${studioSelectedIds.size.toLocaleString()}</strong> selected
+        </div>
+        <div class="studio-bulk-actions">
+          <button type="button" class="studio-bulk-btn studio-bulk-btn-monetize" data-bulk-action="monetize-off" title="Disable monetization on selected">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><circle cx="12" cy="12" r="9"/></svg>
+            Disable monetization
+          </button>
+          <button type="button" class="studio-bulk-btn studio-bulk-btn-delete" data-bulk-action="delete" title="Delete selected">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            Delete
+          </button>
+          <button type="button" class="studio-bulk-btn studio-bulk-btn-clear" data-bulk-action="clear" title="Clear selection">
+            Clear
+          </button>
+        </div>
+      </div>
+    ` : ''}
 
     <div class="studio-table-wrap">
       ${filtered.length === 0 ? `
         <div class="studio-empty" style="padding:3rem 1rem">
-          <h3>No matches</h3>
-          <p>Try a different search term</p>
+          <h3>${studioVisibilityFilter === 'all' && !q ? 'No videos' : 'No matches'}</h3>
+          <p>${studioVisibilityFilter === 'all' && !q ? '' : 'Try a different filter or search term'}</p>
         </div>
       ` : `
         <table class="studio-table">
           <thead>
             <tr>
-              <th class="studio-col-video">Video</th>
+              <th class="studio-col-select">
+                <input type="checkbox" class="studio-checkbox" id="studioSelectAll" ${allOnPageSelected ? 'checked' : ''} ${someOnPageSelected ? 'data-indeterminate="true"' : ''} aria-label="Select all on this page"/>
+              </th>
+              <th class="studio-col-num">#</th>
+              <th class="studio-col-video studio-sortable ${studioSort.key === 'title' ? 'is-sorted' : ''}" data-sort-key="title">
+                Video${studioSort.key === 'title' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
+              </th>
               <th class="studio-col-status">Visibility</th>
-              <th class="studio-col-date">Date</th>
-              <th class="studio-col-views">Views</th>
-              <th class="studio-col-likes">Likes</th>
+              <th class="studio-col-date studio-sortable ${studioSort.key === 'created_at' ? 'is-sorted' : ''}" data-sort-key="created_at">
+                Date${studioSort.key === 'created_at' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
+              </th>
+              <th class="studio-col-views studio-sortable ${studioSort.key === 'views' ? 'is-sorted' : ''}" data-sort-key="views">
+                Views${studioSort.key === 'views' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
+              </th>
+              <th class="studio-col-likes studio-sortable ${studioSort.key === 'likes' ? 'is-sorted' : ''}" data-sort-key="likes">
+                Likes${studioSort.key === 'likes' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
+              </th>
+              <th class="studio-col-comments">Comments</th>
               <th class="studio-col-actions">Actions</th>
             </tr>
           </thead>
           <tbody>
-            ${filtered.map(v => renderStudioRow(v)).join('')}
+            ${pageSlice.map((v, i) => renderStudioRow(v, pageStart + i + 1, studioSelectedIds.has(v.id))).join('')}
           </tbody>
         </table>
       `}
     </div>
+    ${filtered.length > 0 ? `
+      <div class="studio-pagination">
+        <div class="studio-pagination-pagesize">
+          <span class="studio-pagination-label">Rows per page</span>
+          <div class="studio-pagesize-group" role="radiogroup" aria-label="Rows per page">
+            ${STUDIO_PAGE_SIZE_OPTIONS.map(n => `
+              <button type="button" class="studio-pagesize-option ${n === studioPageSize ? 'is-selected' : ''}" data-pagesize="${n}" role="radio" aria-checked="${n === studioPageSize ? 'true' : 'false'}">${n}</button>
+            `).join('')}
+          </div>
+        </div>
+        <div class="studio-pagination-nav">
+          <span class="studio-pagination-info">Page ${studioPageIdx} of ${totalPages}</span>
+          <button type="button" class="studio-pagination-btn" data-page-action="prev" ${studioPageIdx <= 1 ? 'disabled' : ''} title="Previous page">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <button type="button" class="studio-pagination-btn" data-page-action="next" ${studioPageIdx >= totalPages ? 'disabled' : ''} title="Next page">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+    ` : ''}
   `;
-  
+
   // Wire up search input
   const searchInput = document.getElementById('studioSearchInput');
   if (searchInput) {
     searchInput.addEventListener('input', (e) => {
       studioSearchQuery = e.target.value;
+      // Filter changed → reset to page 1 so we don't end up stuck on
+      // page 7 of a 2-page filtered result set.
+      studioPageIdx = 1;
       renderStudio();
       // Re-focus the input after re-render
       const newInput = document.getElementById('studioSearchInput');
@@ -11605,7 +14568,139 @@ function renderStudio() {
       }
     });
   }
-  
+
+  // Wire up pagination controls
+  content.querySelectorAll('[data-pagesize]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = parseInt(btn.dataset.pagesize, 10);
+      if (!STUDIO_PAGE_SIZE_OPTIONS.includes(next) || next === studioPageSize) return;
+      studioPageSize = next;
+      studioPageIdx = 1; // resize collapses page indices — start from the top
+      localStorage.setItem('selebox_studio_page_size', String(next));
+      renderStudio();
+    });
+  });
+  content.querySelectorAll('[data-page-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dir = btn.dataset.pageAction;
+      if (dir === 'prev') studioPageIdx = Math.max(1, studioPageIdx - 1);
+      else if (dir === 'next') studioPageIdx = studioPageIdx + 1; // clamp happens inside renderStudio
+      renderStudio();
+      // Scroll the table back to the top so the new page starts at row 1.
+      const wrap = document.querySelector('#studioPage .studio-table-wrap');
+      if (wrap) wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+
+  // Wire the Revenue stat card → opens the dedicated Earnings page.
+  // Uses the same showEarnings() entry point as the sidebar's
+  // Earnings button so the route, breadcrumbs, and sidebar active
+  // state stay consistent.
+  const revenueBtn = document.getElementById('studioStatRevenueBtn');
+  if (revenueBtn) {
+    revenueBtn.addEventListener('click', () => showEarnings());
+  }
+
+  // Wire visibility filter chips
+  content.querySelectorAll('[data-filter]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const next = chip.dataset.filter;
+      if (next === studioVisibilityFilter) return;
+      studioVisibilityFilter = next;
+      studioPageIdx = 1;            // filter narrowed → start from page 1
+      renderStudio();
+    });
+  });
+
+
+  // Wire sortable header clicks. Same-key click → flip direction;
+  // different-key click → switch key and start descending (default for
+  // the visual sort metaphor "most first" — most views, newest date, etc).
+  content.querySelectorAll('[data-sort-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sortKey;
+      if (studioSort.key === key) {
+        studioSort.dir = studioSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        studioSort.key = key;
+        studioSort.dir = key === 'title' ? 'asc' : 'desc'; // titles read better A→Z, metrics most-first
+      }
+      studioPageIdx = 1;
+      renderStudio();
+    });
+  });
+
+  // Wire the page header checkbox: toggle all visible rows.
+  const selectAll = document.getElementById('studioSelectAll');
+  if (selectAll) {
+    // The DOM doesn't accept an indeterminate attribute at parse time;
+    // hydrate it imperatively from the data attribute the renderer set.
+    if (selectAll.dataset.indeterminate === 'true') selectAll.indeterminate = true;
+    selectAll.addEventListener('change', () => {
+      if (selectAll.checked) {
+        // Add every visible-page id to the selection set.
+        pageSlice.forEach(v => studioSelectedIds.add(v.id));
+      } else {
+        // Drop just the visible-page ids; selections on other pages
+        // (in case the user paged then came back) are preserved.
+        pageSlice.forEach(v => studioSelectedIds.delete(v.id));
+      }
+      renderStudio();
+    });
+  }
+
+  // Wire per-row checkboxes.
+  content.querySelectorAll('.studio-row-checkbox').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const id = cb.dataset.id;
+      if (cb.checked) studioSelectedIds.add(id);
+      else            studioSelectedIds.delete(id);
+      renderStudio();
+    });
+  });
+
+  // Wire bulk action bar.
+  content.querySelectorAll('[data-bulk-action]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const action = btn.dataset.bulkAction;
+      const ids = Array.from(studioSelectedIds);
+      if (action === 'clear') {
+        studioSelectedIds.clear();
+        renderStudio();
+        return;
+      }
+      if (!ids.length) return;
+
+      if (action === 'delete') {
+        if (!confirm(`Delete ${ids.length} video${ids.length === 1 ? '' : 's'} forever? This can't be undone.`)) return;
+        btn.disabled = true;
+        const { error } = await supabase.from('videos').delete().in('id', ids);
+        btn.disabled = false;
+        if (error) { toast(error.message, 'error'); return; }
+        // Prune local cache + clear selection so the UI converges
+        // without an extra round-trip.
+        studioVideosCache = studioVideosCache.filter(v => !ids.includes(v.id));
+        studioSelectedIds.clear();
+        toast(`Deleted ${ids.length} video${ids.length === 1 ? '' : 's'}`, 'success');
+        renderStudio();
+        return;
+      }
+
+      if (action === 'monetize-off') {
+        btn.disabled = true;
+        const { error } = await supabase.from('videos').update({ is_monetized: false }).in('id', ids);
+        btn.disabled = false;
+        if (error) { toast(error.message, 'error'); return; }
+        // Patch the in-memory cache so the next render reflects the change.
+        for (const v of studioVideosCache) if (ids.includes(v.id)) v.is_monetized = false;
+        toast(`Monetization disabled on ${ids.length} video${ids.length === 1 ? '' : 's'}`, 'success');
+        renderStudio();
+        return;
+      }
+    });
+  });
+
   // Wire up monetize/edit/delete buttons via delegation
   content.querySelectorAll('[data-studio-action]').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -11639,12 +14734,53 @@ async function toggleStudioMonetize(videoId, btn) {
     return;
   }
 
-  // Turning on → check duration. If 0 (legacy/migrated), prompt them to open
-  // edit modal which auto-probes the file for actual duration.
+  // Turning on → check duration.
+  //
+  // If 0 (legacy/migrated rows that never had duration persisted), we
+  // used to bounce the user into the Edit modal so it could auto-probe
+  // the file. That's a friction tax for a one-tap action. Instead we
+  // do the same client-side probe inline here, persist the discovered
+  // duration back to the DB, then re-evaluate the gate and flip the
+  // toggle without any modal in between. Mirrors the helper at
+  // openStudioEditModal's auto-probe block.
   if (!v.duration || v.duration === 0) {
-    toast('Open Edit to read this video\'s duration first, then toggle monetization there.', 'error');
-    openStudioEditModal(videoId);
-    return;
+    if (!(v.video_url || v.videoUrl)) {
+      toast('Missing video URL — cannot read duration.', 'error');
+      return;
+    }
+    btn.disabled = true;
+    const prevHTML = btn.querySelector('.studio-btn-peso')?.textContent;
+    const peso = btn.querySelector('.studio-btn-peso');
+    if (peso) peso.textContent = '…'; // small visual cue while we probe
+    try {
+      const real = await new Promise((resolve) => {
+        const probe = document.createElement('video');
+        probe.preload = 'metadata';
+        probe.muted = true;
+        probe.crossOrigin = 'anonymous';
+        probe.style.display = 'none';
+        probe.src = v.video_url || v.videoUrl;
+        const done = (val) => { probe.remove(); resolve(val); };
+        probe.onloadedmetadata = () => done(Math.round(probe.duration || 0));
+        probe.onerror = () => done(0);
+        document.body.appendChild(probe);
+      });
+      if (peso && prevHTML !== undefined) peso.textContent = prevHTML;
+      btn.disabled = false;
+      if (real > 0) {
+        v.duration = real;
+        // Persist so we never need to probe again for this row.
+        try { await supabase.from('videos').update({ duration: real }).eq('id', videoId); } catch {}
+      } else {
+        toast('Could not read video duration. Try again in a moment.', 'error');
+        return;
+      }
+    } catch {
+      if (peso && prevHTML !== undefined) peso.textContent = prevHTML;
+      btn.disabled = false;
+      toast('Could not read video duration.', 'error');
+      return;
+    }
   }
   if (v.duration < minSec) {
     const mins = Math.floor(v.duration / 60);
@@ -11664,7 +14800,7 @@ async function toggleStudioMonetize(videoId, btn) {
   toast('Monetization enabled 💰', 'success');
 }
 
-function renderStudioRow(v) {
+function renderStudioRow(v, rowNumber, isSelected = false) {
   const thumb = v.thumbnail_url 
     ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>` 
     : '<div class="studio-thumb-placeholder"></div>';
@@ -11672,13 +14808,28 @@ function renderStudioRow(v) {
   const desc = v.description 
     ? `<div class="studio-row-desc">${escHTML(v.description.slice(0, 100))}${v.description.length > 100 ? '…' : ''}</div>` 
     : '<div class="studio-row-desc" style="color:#aaa;font-style:italic">No description</div>';
-  const statusBadge = v.status === 'ready' 
-    ? '<span class="studio-badge studio-badge-ready"><span class="studio-dot studio-dot-green"></span>Public</span>' 
-    : `<span class="studio-badge studio-badge-processing"><span class="studio-dot studio-dot-yellow"></span>Processing</span>`;
+  // Visibility pill — derives from the shared _studioDeriveVisibility
+  // helper so the chip-row counts and the per-row pill can never
+  // disagree. Mirrors mobile's CreatorVideoCard mapping.
+  const _bucket = _studioDeriveVisibility(v);
+  const _badgeMap = {
+    published:  { cls: 'studio-badge-published',  dot: 'studio-dot-green',  label: 'Published' },
+    scheduled:  { cls: 'studio-badge-scheduled',  dot: 'studio-dot-purple', label: 'Scheduled' },
+    processing: { cls: 'studio-badge-processing', dot: 'studio-dot-yellow', label: v.status === 'uploading' ? 'Uploading' : 'Processing' },
+    private:    { cls: 'studio-badge-private',    dot: 'studio-dot-red',    label: 'Private' },
+    failed:     { cls: 'studio-badge-failed',     dot: 'studio-dot-red',    label: v.status === 'failed' ? 'Failed' : 'Error' },
+    unknown:    { cls: 'studio-badge-processing', dot: 'studio-dot-yellow', label: v.status || 'Unknown' },
+  };
+  const _b = _badgeMap[_bucket] || _badgeMap.unknown;
+  const statusBadge = `<span class="studio-badge ${_b.cls}"><span class="studio-dot ${_b.dot}"></span>${_b.label}</span>`;
   const duration = v.duration ? formatDuration(v.duration) : '';
   
   return `
-    <tr data-video-id="${v.id}">
+    <tr data-video-id="${v.id}" class="${isSelected ? 'is-selected' : ''}">
+      <td class="studio-col-select-cell">
+        <input type="checkbox" class="studio-checkbox studio-row-checkbox" data-id="${v.id}" ${isSelected ? 'checked' : ''} aria-label="Select video"/>
+      </td>
+      <td class="studio-col-num-cell">${rowNumber != null ? rowNumber.toLocaleString() : ''}</td>
       <td>
         <div class="studio-row-video">
           <div class="studio-thumb">
@@ -11691,18 +14842,15 @@ function renderStudioRow(v) {
           </div>
         </div>
       </td>
-      <td>${statusBadge}</td>
-      <td><span class="studio-cell-muted">${date}</span></td>
-      <td>${(v.views || 0).toLocaleString()}</td>
-      <td>${(v.likes || 0).toLocaleString()}</td>
-      <td>
+      <td class="studio-col-status">${statusBadge}</td>
+      <td class="studio-col-date"><span class="studio-cell-muted">${date}</span></td>
+      <td class="studio-col-views">${((v.views_count ?? v.views) || 0).toLocaleString()}</td>
+      <td class="studio-col-likes">${((v.likes_count ?? v.likes) || 0).toLocaleString()}</td>
+      <td class="studio-col-comments">${(v.comments_count || 0).toLocaleString()}</td>
+      <td class="studio-col-actions">
         <div class="studio-actions">
           <button class="studio-btn studio-btn-monetize ${v.is_monetized ? 'is-on' : ''}" data-studio-action="monetize" data-id="${v.id}" title="${v.is_monetized ? 'Monetized — click to disable' : 'Toggle monetization'}">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9"/>
-              <path d="M14.8 9.5c-.4-1-1.4-1.5-2.8-1.5-1.7 0-3 1-3 2.5 0 1.4 1.3 2 2.7 2.4 1.6.4 3.3.9 3.3 2.6 0 1.5-1.3 2.5-3 2.5-1.6 0-2.8-.6-3.2-1.7"/>
-              <path d="M12 6v2"/><path d="M12 16v2"/>
-            </svg>
+            <span class="studio-btn-peso" aria-hidden="true">₱</span>
           </button>
           <button class="studio-btn" data-studio-action="edit" data-id="${v.id}" title="Edit details">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
@@ -12785,10 +15933,37 @@ async function playVideo(videoId) {
       player.addEventListener('loadedmetadata', startPlayback, { once: true });
     }
 
-    // Save position every 3 seconds
+    // Save position every 3 seconds + accumulate watch-time toward
+    // the "Watch N mins of video" daily goal. tickGoal('watch_video',
+    // 1) fires once per full minute of actual playback (paused time
+    // doesn't count). Mirrors mobile at app/(video)/video-player.jsx.
+    // _accumWatchSec lives on the player element so we don't pollute
+    // module scope and so it resets cleanly when the player is reused.
+    player._accumWatchSec = player._accumWatchSec || 0;
+    player._lastTickSec   = (player.currentTime > 0) ? player.currentTime : 0;
     let saveInterval = setInterval(() => {
       if (!player.paused && player.currentTime > 0) {
         saveResumeTime(videoId, player.currentTime, player.duration);
+
+        // Watch-time accumulator. Use the *delta* between samples so
+        // seeking forward doesn't farm the counter (a 30-second skip
+        // only adds 3 seconds — the interval tick width — to the
+        // accumulator). On backward seek the delta goes negative,
+        // which we clamp to zero so a rewind doesn't reduce credit.
+        const delta = Math.max(0, Math.min(3, player.currentTime - player._lastTickSec));
+        player._lastTickSec   = player.currentTime;
+        player._accumWatchSec = (player._accumWatchSec || 0) + delta;
+        // Fire ONE minute-tick per 60s crossed. Loop in case the
+        // interval was paused (browser tab background throttling) and
+        // we accumulated multiple minutes at once.
+        while (player._accumWatchSec >= 60) {
+          tickGoal('watch_video', 1);
+          player._accumWatchSec -= 60;
+        }
+      } else if (!player.paused && player.currentTime > 0) {
+        // Player resumed after a pause — update the baseline so the
+        // first delta after resume doesn't credit paused time.
+        player._lastTickSec = player.currentTime;
       }
     }, 3000);
 
@@ -13034,6 +16209,29 @@ async function setupVideoActions(video) {
   // Polymorphic id used for the reactions table — works for both Supabase and legacy now
   const videoIdForActions = supabaseVideoId || legacyVideoId;
 
+  // ── Record a unique view (May 2026 parity fix) ──────────────────────
+  // Mobile inserts into public.video_views on open; web previously had
+  // no view-recording path at all, so videos.views_count never advanced
+  // from web traffic. Composite PK (video_id, viewer_id) makes this
+  // idempotent — a returning viewer hits ON CONFLICT and the trigger
+  // doesn't double-count. We deliberately don't await this; the player
+  // shouldn't block on analytics.
+  if (supabaseVideoId && currentUser?.id) {
+    // Strip the 'sb_' prefix that resolveSupabaseVideoId prepends for
+    // cache lookups. The DB column is the bare UUID.
+    const rawVideoId = supabaseVideoId.startsWith('sb_')
+      ? supabaseVideoId.slice(3)
+      : supabaseVideoId;
+    // Fire-and-forget. Swallow errors silently — RLS or transient
+    // network blips here must never interrupt playback.
+    supabase
+      .from('video_views')
+      .upsert({ video_id: rawVideoId, viewer_id: currentUser.id }, { onConflict: 'video_id,viewer_id', ignoreDuplicates: true })
+      .then(({ error }) => {
+        if (error) console.warn('[recordVideoView] failed (non-fatal):', error.message);
+      });
+  }
+
   const reactionWrap = actionsBar.querySelector('.reaction-wrap[data-type="video"]');
   const reactionBtn  = actionsBar.querySelector('.reaction-trigger[data-type="video"]');
   const picker       = actionsBar.querySelector('.reaction-picker');
@@ -13157,24 +16355,38 @@ window.addEventListener('popstate', () => {
   } else if (hash === '#earnings') {
     showEarnings();
   } else {
+    // Default destination when no deep link matched — curated home
+    // landing (May 2026). The post feed lives behind the Post tab now.
     setSidebarActive('btnHome');
-    showFeed();
-    loadFeed();
+    showHomeLanding();
   }
 });
 
 // ── Theme toggle ──
+// May 2026: moved from topbar sun-icon button to a segmented radio
+// in the sidebar (above Log out). The selected option carries the
+// purple-glass highlight via `.is-selected`; we keep aria-checked in
+// sync for screen readers, and persist the choice in localStorage.
 function applyTheme(theme) {
   if (theme === 'light') document.body.classList.add('light');
   else document.body.classList.remove('light');
+  // Sync the segmented radio UI to match the applied theme.
+  const options = document.querySelectorAll('#sidebarThemeToggle .sidebar-theme-option');
+  options.forEach((btn) => {
+    const isSelected = btn.dataset.theme === theme;
+    btn.classList.toggle('is-selected', isSelected);
+    btn.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+  });
 }
 applyTheme(localStorage.getItem('selebox_theme') || 'dark');
 
-document.getElementById('btnTheme').addEventListener('click', () => {
-  const isLight = document.body.classList.contains('light');
-  const newTheme = isLight ? 'dark' : 'light';
-  applyTheme(newTheme);
-  localStorage.setItem('selebox_theme', newTheme);
+document.querySelectorAll('#sidebarThemeToggle .sidebar-theme-option').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const newTheme = btn.dataset.theme === 'light' ? 'light' : 'dark';
+    if ((newTheme === 'light') === document.body.classList.contains('light')) return; // no-op
+    applyTheme(newTheme);
+    localStorage.setItem('selebox_theme', newTheme);
+  });
 });
 
 // ════════════════════════════════════════
@@ -13187,10 +16399,165 @@ let _notifChannel = null;
 let _notifPanelOpen = false;
 let _notifFilter = 'all';      // 'all' | 'you' | 'following'
 const _notifActorCache = {};   // user_id → { username, avatar_url }
+// Resource hydration cache — { "kind:id": { title, thumbnail } }.
+// 2-minute TTL via _notifResourceCacheAt so a refresh picks up
+// renamed videos / updated book covers without a full reload.
+// Mirrors mobile's lib/notifications-supabase.js:227-360.
+const _notifResourceCache = new Map();
+const _notifResourceCacheAt = new Map();
+const NOTIF_RESOURCE_TTL_MS = 2 * 60 * 1000;
+// Infinite-scroll cursor: oldest loaded created_at. Pagination is
+// cursor-based (`.lt('created_at', _notifCursor)`) — mirrors mobile's
+// `lastId`-style pager but keyed on timestamps since our query is
+// ordered by created_at desc.
+let _notifCursor = null;
+let _notifHasMore = false;
+let _notifLoadingMore = false;
+// Guard: only mark-as-read once per panel-open. Prevents redundant
+// UPDATEs if the user opens/closes/opens the panel quickly.
+let _notifMarkedReadThisOpen = false;
 
-// Categorize a notification for the filter tabs
+// ─── Sound chime + tab-title flash (May 2026) ────────────────────────
+// Sound state persisted in localStorage so the user's preference
+// survives reloads. Tab-title flash uses Visibility API: only mutate
+// document.title when the tab is hidden — restore on focus.
+let _notifSoundMuted = localStorage.getItem('selebox_notif_muted') === '1';
+let _notifTitleFlashTimer = null;
+let _notifTitleOriginal   = null;
+let _notifTitleFlashCount = 0;
+
+// One-shot WebAudio beep — no asset file required. Tiny envelope so
+// it doesn't startle, mid-frequency so it carries on cheap speakers.
+let _notifAudioCtx = null;
+function _playNotifChime() {
+  if (_notifSoundMuted) return;
+  try {
+    if (!_notifAudioCtx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      _notifAudioCtx = new Ctx();
+    }
+    const ctx = _notifAudioCtx;
+    // Some browsers suspend the AudioContext until user interaction;
+    // try to resume but don't break if it stays suspended.
+    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
+    const now = ctx.currentTime;
+    // Two-tone chime: 880 Hz then 1175 Hz, ~70ms each.
+    const make = (freq, start, dur) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      // Quick attack + decay envelope so it sounds like a chime, not a buzz.
+      g.gain.setValueAtTime(0, start);
+      g.gain.linearRampToValueAtTime(0.18, start + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      o.connect(g).connect(ctx.destination);
+      o.start(start);
+      o.stop(start + dur);
+    };
+    make(880,  now,         0.08);
+    make(1175, now + 0.075, 0.10);
+  } catch (e) {
+    // Don't crash the realtime handler on a sound hiccup.
+  }
+}
+
+// Tab title flasher — when the tab is hidden, swap the title to
+// "(N) Selebox" and oscillate the prefix between "(N)" and a bullet
+// so the OS tab title flashes the user's attention. Resets on
+// visibilitychange.
+function _startNotifTitleFlash() {
+  if (!document.hidden) return;
+  if (!_notifTitleOriginal) _notifTitleOriginal = document.title.replace(/^\(\d+\) /, '').replace(/^[•●] /, '');
+  _notifTitleFlashCount = _notifUnreadCount;
+  if (_notifTitleFlashTimer) clearInterval(_notifTitleFlashTimer);
+  let toggle = false;
+  _notifTitleFlashTimer = setInterval(() => {
+    toggle = !toggle;
+    document.title = toggle
+      ? `(${_notifTitleFlashCount}) ${_notifTitleOriginal}`
+      : `• ${_notifTitleOriginal}`;
+  }, 1100);
+}
+function _stopNotifTitleFlash() {
+  if (_notifTitleFlashTimer) { clearInterval(_notifTitleFlashTimer); _notifTitleFlashTimer = null; }
+  if (_notifTitleOriginal)   { document.title = _notifTitleOriginal; _notifTitleOriginal = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) _stopNotifTitleFlash();
+});
+
+// Wire the sound-mute toggle (button lives in the notif panel header).
+// The icon swap (speaker-on / speaker-off) reflects current state.
+function _syncNotifSoundIcon() {
+  const btn = document.getElementById('notifSoundToggle');
+  if (!btn) return;
+  const on  = btn.querySelector('.notif-sound-on');
+  const off = btn.querySelector('.notif-sound-off');
+  if (on)  on.style.display  = _notifSoundMuted ? 'none' : '';
+  if (off) off.style.display = _notifSoundMuted ? ''     : 'none';
+  btn.setAttribute('aria-pressed', _notifSoundMuted ? 'true' : 'false');
+  btn.title = _notifSoundMuted ? 'Unmute notification sounds' : 'Mute notification sounds';
+}
+document.getElementById('notifSoundToggle')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  _notifSoundMuted = !_notifSoundMuted;
+  localStorage.setItem('selebox_notif_muted', _notifSoundMuted ? '1' : '0');
+  _syncNotifSoundIcon();
+});
+_syncNotifSoundIcon();
+
+// ─── Time bucketing (May 2026) ───────────────────────────────────────
+// Group the rendered list into Today / Yesterday / This week / Older
+// section headers. Cheap render-time logic on existing created_at —
+// no schema or query changes.
+function _notifTimeBucket(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'older';
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYesterday = startOfToday - 86400000;
+  const startOfThisWeek  = startOfToday - 6 * 86400000; // last 7 calendar days including today
+  const t = d.getTime();
+  if (t >= startOfToday)     return 'today';
+  if (t >= startOfYesterday) return 'yesterday';
+  if (t >= startOfThisWeek)  return 'thisweek';
+  return 'older';
+}
+const _NOTIF_BUCKET_LABELS = {
+  today:     'Today',
+  yesterday: 'Yesterday',
+  thisweek:  'This week',
+  older:     'Older',
+};
+
+// Categorize a notification for the filter tabs.
+// Mirrors mobile's `categorizeNotification`
+// (app/(notification)/notification.jsx:21-34). Maps to web's
+// underscored type strings:
+//   "you"       — something happened TO you (your content or your
+//                  relationship): likes, comments, replies, mentions,
+//                  follow (somebody followed you), dm_message,
+//                  reposts of your stuff.
+//   "following" — somebody you follow CREATED something new
+//                  (follow_new_post/video/book, follow_repost).
+//   "all"       — fall-through; only visible in the All tab.
 function notifCategory(n) {
-  return (n?.type || '').startsWith('follow_') ? 'following' : 'you';
+  const t = (n?.type || '').toLowerCase();
+  if (!t) return 'all';
+  if (t === 'follow_new_post' || t === 'follow_new_video'
+      || t === 'follow_new_book' || t === 'follow_repost') {
+    return 'following';
+  }
+  if (t === 'follow' || t === 'dm_message') return 'you';
+  if (t.includes('comment') || t.includes('reply')
+      || t.startsWith('like_') || t.endsWith('_like')
+      || t.startsWith('mention_')
+      || t === 'post_repost' || t === 'repost_post') {
+    return 'you';
+  }
+  return 'all';
 }
 
 async function initNotifications() {
@@ -13213,13 +16580,22 @@ async function initNotifications() {
         filter: `recipient_id=eq.${currentUser.id}`,
       }, async (payload) => {
         const n = payload.new;
-        // Fetch the actor profile for nicer rendering
-        await hydrateActorProfiles([n]);
+        // Fetch the actor profile AND target resource (thumbnail +
+        // title) so the bell card paints with full context.
+        await Promise.all([
+          hydrateActorProfiles([n]),
+          hydrateNotifResources([n]),
+        ]);
         _notifications.unshift(n);
         if (_notifications.length > 100) _notifications.length = 100;
         _notifUnreadCount += 1;
         updateNotifBadge();
         renderNotifications();
+        // New incoming notification → audible + visual cue. Chime
+        // muted via the per-user toggle; title flash only when tab
+        // is in the background (no point flashing the visible tab).
+        _playNotifChime();
+        if (document.hidden) _startNotifTitleFlash();
         // No toast on incoming notifications — the bell badge + dropdown
         // already surfaces them. Toast was too intrusive (especially for DMs
         // where the unread badge on the Messages sidebar entry is enough).
@@ -13234,7 +16610,10 @@ async function initNotifications() {
         // (preview/timestamp updated). Replace the row in-place — DON'T re-increment
         // the badge (it was already counted on first INSERT).
         const n = payload.new;
-        await hydrateActorProfiles([n]);
+        await Promise.all([
+          hydrateActorProfiles([n]),
+          hydrateNotifResources([n]),
+        ]);
         const idx = _notifications.findIndex(x => x.id === n.id);
         if (idx >= 0) {
           _notifications[idx] = n;
@@ -13253,7 +16632,12 @@ async function initNotifications() {
 
 async function loadNotifications() {
   const list = document.getElementById('notificationsList');
-  if (list) list.innerHTML = '<div class="notifications-empty">Loading…</div>';
+  if (list) list.innerHTML = _notifSkeletonHTML();
+
+  // Reset pagination state on every cold load.
+  _notifCursor = null;
+  _notifHasMore = false;
+  _notifMarkedReadThisOpen = false;
 
   const { data, error } = await supabase
     .from('notifications')
@@ -13274,24 +16658,19 @@ async function loadNotifications() {
   // appear in the bell. We collect all dm_message conversation IDs and
   // bulk-fetch the is_secret flag in one query, then drop the matching
   // notifications.
-  const dmConvIds = Array.from(new Set(
-    raw
-      .filter(n => n.type === 'dm_message' && n.parent_target_type === 'conversation' && n.parent_target_id)
-      .map(n => n.parent_target_id),
-  ));
-  if (dmConvIds.length) {
-    const { data: convs } = await supabase
-      .from('conversations')
-      .select('id, is_secret')
-      .in('id', dmConvIds);
-    const secretSet = new Set((convs || []).filter(c => c.is_secret).map(c => c.id));
-    if (secretSet.size > 0) {
-      raw = raw.filter(n => !(n.type === 'dm_message' && secretSet.has(n.parent_target_id)));
-    }
-  }
+  raw = await _filterSecretDmConversations(raw);
 
   _notifications = raw;
-  await hydrateActorProfiles(_notifications);
+  // Advance cursor + hasMore from the fetched window.
+  if (_notifications.length) _notifCursor = _notifications[_notifications.length - 1].created_at;
+  _notifHasMore = raw.length === NOTIF_PAGE_SIZE;
+
+  // Resolve actor profiles + target resources (post/video/book/chapter
+  // titles + thumbnails) in parallel — both needed for first paint.
+  await Promise.all([
+    hydrateActorProfiles(_notifications),
+    hydrateNotifResources(_notifications),
+  ]);
 
   // Compute unread count from RAW rows BEFORE grouping. Grouping
   // collapses N rows into 1, so counting after grouping would
@@ -13308,6 +16687,236 @@ async function loadNotifications() {
   // bell experience matches across platforms.
   _notifications = groupNotifications(_notifications);
   renderNotifications();
+}
+
+// Filter out dm_message notifications whose conversation is Secret.
+// Pulled into its own helper so loadMoreNotifications can reuse it.
+async function _filterSecretDmConversations(rows) {
+  const dmConvIds = Array.from(new Set(
+    rows
+      .filter(n => n.type === 'dm_message' && n.parent_target_type === 'conversation' && n.parent_target_id)
+      .map(n => n.parent_target_id),
+  ));
+  if (!dmConvIds.length) return rows;
+  const { data: convs } = await supabase
+    .from('conversations')
+    .select('id, is_secret')
+    .in('id', dmConvIds);
+  const secretSet = new Set((convs || []).filter(c => c.is_secret).map(c => c.id));
+  if (secretSet.size === 0) return rows;
+  return rows.filter(n => !(n.type === 'dm_message' && secretSet.has(n.parent_target_id)));
+}
+
+// Fetch the next page using `.lt('created_at', _notifCursor)`. Called
+// from the scroll-near-bottom handler installed by openNotifPanel.
+async function loadMoreNotifications() {
+  if (!currentUser || !_notifHasMore || _notifLoadingMore || !_notifCursor) return;
+  _notifLoadingMore = true;
+  // Render a tiny "loading more" footer immediately so the user gets
+  // visual feedback before the round-trip resolves.
+  _renderNotifLoadMoreFooter(true);
+
+  const { data, error } = await supabase
+    .from('notifications')
+    .select('*')
+    .eq('recipient_id', currentUser.id)
+    .lt('created_at', _notifCursor)
+    .order('created_at', { ascending: false })
+    .limit(NOTIF_PAGE_SIZE);
+
+  _notifLoadingMore = false;
+  if (error) {
+    console.warn('Notifications loadMore error:', error);
+    _renderNotifLoadMoreFooter(false);
+    return;
+  }
+  let raw = data || [];
+  raw = await _filterSecretDmConversations(raw);
+
+  if (raw.length === 0) {
+    _notifHasMore = false;
+    _renderNotifLoadMoreFooter(false);
+    return;
+  }
+
+  // Merge into the existing list. Re-build _notifications by taking
+  // the RAW (pre-grouping) source — we don't have that anymore, so
+  // re-run grouping over the appended set. Simpler than maintaining a
+  // separate raw cache.
+  // Track the raw rows we already have by id to avoid duplicates when
+  // a realtime INSERT hit and the row is now also in the loadMore page.
+  const seen = new Set(_notifications.map(n => n.id));
+  const fresh = raw.filter(n => !seen.has(n.id));
+
+  // Hydrate actors + resources for the new rows.
+  await Promise.all([
+    hydrateActorProfiles(fresh),
+    hydrateNotifResources(fresh),
+  ]);
+
+  // Append, advance cursor + hasMore.
+  _notifications = _notifications.concat(fresh);
+  if (raw.length) _notifCursor = raw[raw.length - 1].created_at;
+  _notifHasMore = raw.length === NOTIF_PAGE_SIZE;
+
+  // Re-group the merged set. Grouping is idempotent.
+  _notifications = groupNotifications(_notifications);
+
+  renderNotifications();
+}
+
+// Skeleton rows shown during the initial load — same visual mass as
+// the real items so the panel doesn't jump when data arrives.
+function _notifSkeletonHTML() {
+  const skel = `
+    <div class="notification-item notification-skeleton">
+      <div class="notification-avatar skel-block"></div>
+      <div class="notification-body">
+        <div class="skel-line skel-line-1"></div>
+        <div class="skel-line skel-line-2"></div>
+      </div>
+      <div class="notification-thumb skel-block"></div>
+    </div>`;
+  return skel.repeat(5);
+}
+
+function _renderNotifLoadMoreFooter(isLoading) {
+  const list = document.getElementById('notificationsList');
+  if (!list) return;
+  let footer = list.querySelector('.notif-loadmore-footer');
+  if (!_notifHasMore && !isLoading) {
+    if (footer) footer.remove();
+    return;
+  }
+  if (!footer) {
+    footer = document.createElement('div');
+    footer.className = 'notif-loadmore-footer';
+    list.appendChild(footer);
+  }
+  footer.innerHTML = isLoading
+    ? '<div class="notif-loadmore-spinner">Loading more…</div>'
+    : '';
+}
+
+// Resource hydration — port of mobile's hydrateResources (see
+// lib/notifications-supabase.js:227-360). Batches one SELECT per
+// resource kind. Hits a 2-minute TTL cache so realtime INSERTs +
+// load-more pages don't redundantly re-query. Each cache entry has
+// { title, thumbnail }; renderNotifications reads from this map.
+async function hydrateNotifResources(rows) {
+  if (!rows || !rows.length) return;
+  const now = Date.now();
+
+  // Resolve the SURFACE id for each row. Comments target the comment
+  // row, but the actual openable resource lives in parent_target_*.
+  const buckets = { post: new Set(), video: new Set(), book: new Set(), chapter: new Set() };
+
+  const KIND_MAP = {
+    // surface mapping for direct target_type
+    post: 'post', video: 'video', book: 'book',
+    chapter: 'chapter', 'book-chapter': 'chapter',
+  };
+
+  for (const n of rows) {
+    // Comment-type rows: hydrate the parent surface (the post/video/
+    // chapter the comment was made on) so the bell card gets a
+    // thumbnail and clicks land on the openable resource.
+    let kind = n.target_type;
+    let id   = n.target_id;
+    if (kind === 'comment' && n.parent_target_type && n.parent_target_id) {
+      kind = n.parent_target_type;
+      id   = n.parent_target_id;
+    }
+    const surface = KIND_MAP[kind];
+    if (!surface || !id) continue;
+    const cacheKey = `${surface}:${id}`;
+    // Skip if cached AND not stale.
+    const ts = _notifResourceCacheAt.get(cacheKey);
+    if (ts && now - ts < NOTIF_RESOURCE_TTL_MS) continue;
+    buckets[surface].add(id);
+  }
+
+  const tasks = [];
+
+  if (buckets.post.size) {
+    tasks.push((async () => {
+      const ids = [...buckets.post];
+      const { data, error } = await supabase
+        .from('posts')
+        .select('id, body, image_url, video_id, videos(id, thumbnail_url)')
+        .in('id', ids);
+      if (error) { console.warn('[hydrateNotifResources:post]', error.message); return; }
+      for (const p of data || []) {
+        _notifResourceCache.set(`post:${p.id}`, {
+          title: p.body ? p.body.slice(0, 80) : null,
+          thumbnail: p.image_url || p.videos?.thumbnail_url || null,
+        });
+        _notifResourceCacheAt.set(`post:${p.id}`, now);
+      }
+    })());
+  }
+  if (buckets.video.size) {
+    tasks.push((async () => {
+      const { data, error } = await supabase
+        .from('videos')
+        .select('id, title, thumbnail_url')
+        .in('id', [...buckets.video]);
+      if (error) { console.warn('[hydrateNotifResources:video]', error.message); return; }
+      for (const v of data || []) {
+        _notifResourceCache.set(`video:${v.id}`, { title: v.title || null, thumbnail: v.thumbnail_url || null });
+        _notifResourceCacheAt.set(`video:${v.id}`, now);
+      }
+    })());
+  }
+  if (buckets.book.size) {
+    tasks.push((async () => {
+      const { data, error } = await supabase
+        .from('books')
+        .select('id, title, cover_url')
+        .in('id', [...buckets.book]);
+      if (error) { console.warn('[hydrateNotifResources:book]', error.message); return; }
+      for (const b of data || []) {
+        _notifResourceCache.set(`book:${b.id}`, { title: b.title || null, thumbnail: b.cover_url || null });
+        _notifResourceCacheAt.set(`book:${b.id}`, now);
+      }
+    })());
+  }
+  if (buckets.chapter.size) {
+    tasks.push((async () => {
+      const { data, error } = await supabase
+        .from('chapters')
+        .select('id, title, cover_url, book_id, books(id, cover_url)')
+        .in('id', [...buckets.chapter]);
+      if (error) { console.warn('[hydrateNotifResources:chapter]', error.message); return; }
+      for (const c of data || []) {
+        _notifResourceCache.set(`chapter:${c.id}`, {
+          title: c.title || null,
+          // Chapter cover may be null — fall back to the parent book's
+          // cover so the bell card still renders something.
+          thumbnail: c.cover_url || c.books?.cover_url || null,
+        });
+        _notifResourceCacheAt.set(`chapter:${c.id}`, now);
+      }
+    })());
+  }
+
+  await Promise.all(tasks);
+}
+
+// Helper for renderNotifications — looks up the cached resource for
+// a notification row (or null). Resolves comment-type rows via their
+// parent surface.
+function _notifResourceFor(n) {
+  let kind = n.target_type;
+  let id   = n.target_id;
+  if (kind === 'comment' && n.parent_target_type && n.parent_target_id) {
+    kind = n.parent_target_type;
+    id   = n.parent_target_id;
+  }
+  const KIND_TO_KEY = { post: 'post', video: 'video', book: 'book', chapter: 'chapter', 'book-chapter': 'chapter' };
+  const k = KIND_TO_KEY[kind];
+  if (!k || !id) return null;
+  return _notifResourceCache.get(`${k}:${id}`) || null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -13493,7 +17102,17 @@ function renderNotifications() {
     return;
   }
 
+  // Build the rendered HTML by walking visible in order, inserting
+  // a section header whenever the time bucket changes. Visible is
+  // already sorted desc by created_at (Today → Older), so a single
+  // pass with a "lastBucket" tracker is enough.
+  let lastBucket = null;
   list.innerHTML = visible.map(n => {
+    const bucket = _notifTimeBucket(n.created_at);
+    const headerHTML = bucket !== lastBucket
+      ? `<div class="notif-bucket-header">${_NOTIF_BUCKET_LABELS[bucket] || ''}</div>`
+      : '';
+    lastBucket = bucket;
     const actor = _notifActorCache[n.actor_id] || {};
     // Privacy treatment (lock avatar, "Someone sent you a private
     // message", no preview) is reserved for SECRET-CHAT DMs only. The
@@ -13511,12 +17130,25 @@ function renderNotifications() {
     const text = isPrivateDm
       ? 'Someone sent you a private message'
       : notificationLabel(n, actor.username);
-    // Snippets reveal context — also hidden for Secret DMs.
-    const snippet = isPrivateDm ? '' : (n.metadata?.snippet || n.metadata?.caption || '');
-    const snippetHTML = snippet
-      ? `<div class="notification-snippet">"${escHTML(snippet)}"</div>`
+    // Resource thumbnail + title — pulled from _notifResourceCache,
+    // populated by hydrateNotifResources. Skipped for private DMs
+    // (their content is the whole point of being private) and for
+    // notifications without an openable surface (follow, mention with
+    // no parent, etc.). Mirrors mobile's NotificationCard right-side
+    // 48px thumbnail.
+    const resource = isPrivateDm ? null : _notifResourceFor(n);
+    const thumbHTML = resource && resource.thumbnail
+      ? `<div class="notification-thumb"><img src="${escHTML(resource.thumbnail)}" alt="" loading="lazy"/></div>`
       : '';
-    return `
+    // Snippets reveal context — also hidden for Secret DMs.
+    // Prefer the resolved resource title when it's richer than the
+    // metadata snippet; falls back to the metadata for legacy rows
+    // where hydration didn't find anything.
+    const snippet = isPrivateDm ? '' : (resource?.title || n.metadata?.snippet || n.metadata?.caption || '');
+    const snippetHTML = snippet
+      ? `<div class="notification-snippet">"${escHTML(snippet.slice(0, 120))}"</div>`
+      : '';
+    return `${headerHTML}
       <div class="notification-item ${n.is_read ? '' : 'unread'}${isPrivateDm ? ' notification-private' : ''}" data-id="${n.id}">
         <div class="notification-avatar">${avatar}</div>
         <div class="notification-body">
@@ -13524,9 +17156,14 @@ function renderNotifications() {
           ${snippetHTML}
           <div class="notification-time">${timeAgo(n.created_at)}</div>
         </div>
+        ${thumbHTML}
         <span class="notification-dot"></span>
       </div>`;
   }).join('');
+
+  // Re-attach the load-more footer (if there's more to fetch) after
+  // the list rebuild, since innerHTML wiped it.
+  if (_notifHasMore) _renderNotifLoadMoreFooter(false);
 
   list.querySelectorAll('.notification-item').forEach(item => {
     item.addEventListener('click', () => onNotificationClick(item.dataset.id));
@@ -13586,6 +17223,27 @@ function notificationLabel(n, knownUsername) {
     case 'reply_chapter_comment':
     case 'chapter_comment_reply':  // legacy
       return `${actorTag} replied to your chapter comment`;
+    // Book-level comments (the conversation thread on the book itself,
+    // not a chapter). Mobile renders these distinctly via the
+    // `book-comment` / `book-comment-reply` keys; web previously fell
+    // through to the "did something on Selebox" default. Both
+    // verb_noun and legacy noun_verb shapes covered.
+    case 'comment_book':
+    case 'book_comment':
+      return `${actorTag} commented on your book${titleHint}`;
+    case 'reply_book_comment':
+    case 'book_comment_reply':
+      return `${actorTag} replied to your book comment`;
+    // Inline-comment notifications — annotations attached to a
+    // specific passage inside a chapter (highlighted-text comments).
+    // Mobile routes these to /book-reading with anchorKey to scroll
+    // to the passage; web doesn't have a chapter anchor yet, so the
+    // click handler routes to the book detail as an acceptable
+    // degradation. Three legacy variants covered for safety.
+    case 'book_chapter_inline_comment':
+    case 'book_chapter_inline_comment_reply':
+    case 'book_chapter_inline_comment_mention':
+      return `${actorTag} commented on a passage in your chapter`;
     case 'repost_post':
     case 'post_repost':            // legacy
       return `${actorTag} reposted your post`;
@@ -13691,12 +17349,39 @@ async function onNotificationClick(notifId) {
     kind = null;
   }
 
+  // Inline-comment notifications (annotations attached to a specific
+  // passage inside a chapter). Mobile routes to /book-reading with
+  // an `anchorKey` so the reader scrolls to the highlighted passage;
+  // web doesn't have a chapter anchor yet, so we land on the book
+  // detail page (acceptable degradation — user can navigate to the
+  // chapter themselves). Three variants handled.
+  //
+  // The bell row carries target_type='inline_comment' (or similar)
+  // and target_id pointing at the comment. parent_target_type may be
+  // 'book-chapter' or 'chapter', parent_target_id is the chapter id.
+  // If we have a chapter id, that's our routing key; fall back to
+  // any book id if the chapter info is missing.
+  const isInlineComment = (n.type === 'book_chapter_inline_comment'
+    || n.type === 'book_chapter_inline_comment_reply'
+    || n.type === 'book_chapter_inline_comment_mention');
+  if (isInlineComment) {
+    // Force kind=chapter (which the routes map points at openBookDetail
+    // anyway) so we land in the right place even if the trigger
+    // populated an unrecognized kebab-case parent_target_type.
+    kind = 'chapter';
+    id = n.parent_target_id || n.target_id || id;
+  }
+
   const ROUTES = {
-    post:    (postId)    => openPostFromSearch(postId),
-    video:   (videoUuid) => playVideo('sb_' + videoUuid),
-    book:    (bookId)    => openBookDetail(bookId),
-    chapter: (bookId)    => openBookDetail(bookId),
-    profile: (userId)    => openProfile(userId),
+    post:           (postId)    => openPostFromSearch(postId),
+    video:          (videoUuid) => playVideo('sb_' + videoUuid),
+    book:           (bookId)    => openBookDetail(bookId),
+    chapter:        (bookId)    => openBookDetail(bookId),
+    // Mobile uses kebab 'book-chapter' for the chapter kind on its
+    // adapter side; some trigger paths may write that token instead
+    // of the underscored 'chapter'. Alias both.
+    'book-chapter': (bookId)    => openBookDetail(bookId),
+    profile:        (userId)    => openProfile(userId),
   };
 
   const opener = kind ? ROUTES[kind] : null;
@@ -13706,21 +17391,44 @@ async function onNotificationClick(notifId) {
   }
 
   // ── Final fallback ──
+  // App boot landed without a specific deep link — show the curated home
+  // landing as the default surface. Pre-May-2026 this called showFeed(),
+  // but Home now points at the curated landing while the social feed
+  // lives behind the Post tab.
   setSidebarActive('btnHome');
-  showFeed();
+  showHomeLanding();
 }
 
 async function markAllNotificationsRead() {
-  if (!_notifUnreadCount) return;
-  const unread = _notifications.filter(n => !n.is_read).map(n => n.id);
-  _notifications.forEach(n => { n.is_read = true; });
+  if (!currentUser) return;
+  // Optimistic local update first so the UI doesn't lag the network.
+  _notifications.forEach((n) => { n.is_read = true; });
   _notifUnreadCount = 0;
   updateNotifBadge();
   renderNotifications();
-  if (unread.length) {
-    const { error } = await supabase.from('notifications').update({ is_read: true }).in('id', unread);
-    if (error) console.warn('Mark all read failed:', error);
-  }
+
+  // Single sweeping UPDATE — covers EVERY unread row owned by the
+  // current user, not just the currently-loaded page. Two reasons
+  // the previous implementation was wrong:
+  //
+  //   1. `_notifications` after grouping holds only HEAD rows. A
+  //      grouped row collapses N raw rows into one — using its `id`
+  //      in the UPDATE only marks 1 of the N. The remaining N-1 stay
+  //      unread, so the badge resurrects the next time the panel
+  //      opens.
+  //   2. Loaded rows are paginated (page size 25). Anything past the
+  //      first page wasn't being touched at all.
+  //
+  // The `eq('recipient_id', me).eq('is_read', false)` filter scopes
+  // the UPDATE server-side — RLS already restricts to the user's
+  // own rows, but the explicit recipient_id keeps the query plan
+  // sane and the intent obvious. No round-trip per row.
+  const { error } = await supabase
+    .from('notifications')
+    .update({ is_read: true })
+    .eq('recipient_id', currentUser.id)
+    .eq('is_read', false);
+  if (error) console.warn('Mark all read failed:', error);
 }
 
 function toggleNotifPanel() {
@@ -13732,12 +17440,44 @@ function openNotifPanel() {
   if (!panel) return;
   panel.style.display = 'flex';
   _notifPanelOpen = true;
+
+  // Mark-as-read on open — mirrors mobile's behavior (clears the
+  // badge the moment the bell opens). Only fires once per
+  // panel-open session so opening / closing / re-opening doesn't
+  // hammer the DB with redundant UPDATEs. Soft: only marks the
+  // currently-loaded rows; load-more pages stay unread until
+  // explicitly clicked or marked. mark-all-read button still works
+  // for the explicit "I want a clean slate" intent.
+  if (!_notifMarkedReadThisOpen && _notifUnreadCount > 0) {
+    _notifMarkedReadThisOpen = true;
+    markAllNotificationsRead();
+  }
+
+  // Install scroll handler for infinite-scroll. Idempotent — only
+  // attaches once per page lifetime (guard via dataset flag).
+  const list = document.getElementById('notificationsList');
+  if (list && !list.dataset.scrollWired) {
+    list.dataset.scrollWired = 'true';
+    list.addEventListener('scroll', () => {
+      // Fire when the user is within 80px of the bottom — gives the
+      // network request time to land before the user runs out of
+      // content. Threshold chosen to match the typical card height.
+      const nearBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 80;
+      if (nearBottom && _notifHasMore && !_notifLoadingMore) {
+        loadMoreNotifications();
+      }
+    });
+  }
 }
 function closeNotifPanel() {
   const panel = document.getElementById('notificationsPanel');
   if (!panel) return;
   panel.style.display = 'none';
   _notifPanelOpen = false;
+  // Reset the per-open guard so the NEXT open will mark-as-read
+  // again if any new unread arrived in the meantime (e.g. from
+  // realtime INSERT while the panel was closed).
+  _notifMarkedReadThisOpen = false;
 }
 
 document.getElementById('btnNotifications')?.addEventListener('click', (e) => {
@@ -13765,23 +17505,30 @@ document.addEventListener('click', (e) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// DAILY QUESTS — brainstorming surface (web-only, hardcoded data)
+// DAILY QUESTS
 // ════════════════════════════════════════════════════════════════════════════
-// Goal: ship a clickable UI we can iterate on for daily-quest UX +
-// economics WITHOUT writing schema or backend yet. The hardcoded
-// `_dailyQuestsState` below is the single source of truth — change it
-// to mock different progress states and reload.
+// Cross-platform reward feature backed by Supabase
+// (migration_goals_progress.sql: `user_goal_progress`, `user_goal_claims`,
+// RPCs `tick_user_goal` + `claim_user_goal_pool`). Web + mobile share
+// the same tables — opening this panel on either surface shows the
+// same state.
 //
-// Once the design feels right, we replace _dailyQuestsState with a
-// fetch from `daily_quests` (quest definitions) + `user_quest_progress`
-// (per-user-per-day completion) on Supabase, and port the same UI to
-// mobile via NotificationCard's pattern.
+// `_dailyQuestsState` below is the in-memory rendering state. Progress
+// values are kept in sync via three paths:
+//   1. _fetchGoalsFromSupabase()  — server → state on panel open
+//   2. tickGoal() / tickGoalUnique() — engagement events fire the
+//      tick_user_goal RPC and bump local state optimistically (see
+//      the helpers near `_QUEST_ID_MAP`). Call sites are spread
+//      across the engagement layer: openChapterReader, video-player
+//      saveInterval, handleReaction, submitComment, toggleFollow,
+//      the unlock_content / unlock_book_bulk RPCs, and onSignedIn.
+//   3. _saveDailyQuestsToStorage() — localStorage cache keeps the
+//      panel painting instantly on next open.
 //
 // Quests are organized to drive the behaviors we actually want: open
 // the app, read chapters (the core engagement metric), watch videos,
-// engage socially. Rewards are tuned so the heaviest task pays the
-// most per minute of effort, and the meta-bonus for completing all
-// makes the streak emotionally sticky.
+// engage socially. The pool reward model (clear N of M quests to
+// claim the pool) keeps the daily payout envelope strictly bounded.
 
 // Quest definitions for each cadence (Daily / Weekly / Monthly).
 // `progress` and `claimed` are mutable state and would come from
@@ -13798,7 +17545,11 @@ document.addEventListener('click', (e) => {
 const _dailyQuestsState = {
   // Streak: consecutive days the user has completed the daily set.
   // Same number powers the topbar badge + the "Day N" pip strip.
-  streak: 7,
+  // Seeded at 0 (May 2026 — was 7, which was a hardcoded demo value
+  // that pretended the user had a 7-day streak on first paint).
+  // Real streak source isn't yet plumbed end-to-end; until it is,
+  // the badge stays hidden when streak === 0 (see renderDailyQuests).
+  streak: 0,
   bonusClaimed: false,
   activeTab: 'daily', // 'daily' | 'weekly' | 'monthly'
 
@@ -14029,7 +17780,14 @@ function _loadDailyQuestsFromStorage() {
     if (!raw) return;
     const saved = JSON.parse(raw);
     if (saved.day !== new Date().toISOString().slice(0, 10)) return; // new day → reset
-    if (typeof saved.streak === 'number') _dailyQuestsState.streak = saved.streak;
+    // Streak intentionally NOT restored from localStorage (May 2026).
+    // The previous code seeded a hardcoded `streak: 7` demo value that
+    // got persisted on first save, then resurrected on every reload —
+    // so even after zeroing the seed, returning users still saw a
+    // fake "7" on the topbar trophy. Until a real streak source is
+    // wired (server-side compute or mobile-synced field), the streak
+    // stays at the in-memory seed (0) which hides the badge.
+    // if (typeof saved.streak === 'number') _dailyQuestsState.streak = saved.streak;
     if (typeof saved.bonusClaimed === 'boolean') _dailyQuestsState.bonusClaimed = saved.bonusClaimed;
     if (typeof saved.activeTab === 'string') _dailyQuestsState.activeTab = saved.activeTab;
     if (saved.featuredState && typeof saved.featuredState === 'object') {
@@ -14054,7 +17812,11 @@ function _saveDailyQuestsToStorage() {
     const snap = (list) => list.map(q => ({ id: q.id, progress: q.progress, claimed: !!q.claimed }));
     localStorage.setItem(_dailyQuestsState._persistKey, JSON.stringify({
       day: new Date().toISOString().slice(0, 10),
-      streak: _dailyQuestsState.streak,
+      // streak persistence intentionally omitted (May 2026) — see
+      // matching note in _loadDailyQuestsFromStorage. We write a
+      // sentinel 0 so any existing cache holding a stale "7" gets
+      // overwritten on the first save after this deploy.
+      streak: 0,
       bonusClaimed: _dailyQuestsState.bonusClaimed,
       activeTab: _dailyQuestsState.activeTab,
       daily: snap(_dailyQuestsState.daily),
@@ -14144,6 +17906,85 @@ async function _fetchGoalsFromSupabase() {
   } catch (e) {
     console.warn('[goals] fetch fatal', e);
   }
+}
+
+// ─── Goal dispatch (May 2026 — closes web-vs-mobile parity gap) ─────
+// `tickGoal(category, delta)` mirrors mobile's lib/goals-store.js
+// export of the same name. Web engagement events (chapter open,
+// video minute crossed, like, follow, share, unlock, login) call
+// this helper instead of building their own RPC payload. Each event
+// fans out to up to three periods (daily / weekly / monthly) per the
+// QUEST_ID_MAP table — same map mobile uses, kept in sync by hand.
+//
+// On call we ALSO bump the matching row in `_dailyQuestsState[tab]`
+// so the panel reflects the new progress instantly without waiting
+// for the next _fetchGoalsFromSupabase(). The server-side RPC is
+// fire-and-forget — local state is already correct, a failed network
+// hop just means the next panel-open re-syncs from the source of
+// truth.
+const _QUEST_ID_MAP = {
+  login:         { daily: 'login',         weekly: null,              monthly: null              },
+  read_chapters: { daily: 'read_chapters', weekly: 'w_read_chapters', monthly: 'm_read_chapters' },
+  watch_video:   { daily: 'watch_video',   weekly: 'w_watch_video',   monthly: 'm_watch_video'   },
+  like_comment:  { daily: 'like_comment',  weekly: 'w_like_comment',  monthly: 'm_like_comment'  },
+  follow_user:   { daily: 'follow_user',   weekly: 'w_follow_users',  monthly: 'm_follow_users'  },
+  share:         { daily: null,            weekly: 'w_share',         monthly: 'm_share'         },
+  unlock:        { daily: null,            weekly: 'w_unlock',        monthly: 'm_unlock'        },
+  watch_ads:     { daily: 'watch_ads',     weekly: 'w_watch_ads',     monthly: 'm_watch_ads'     },
+  invite_friend: { daily: 'invite_friend', weekly: 'w_invite_friend', monthly: 'm_invite_friend' },
+  purchase_coin: { daily: null,            weekly: 'w_purchase_coin', monthly: 'm_purchase_coin' },
+  active_day:    { daily: null,            weekly: null,              monthly: 'm_active30'      },
+};
+
+// Bump the matching quest's progress in the local state for optimistic
+// UI. Cap at the target so we never render "11/10 chapters".
+function _optimisticBumpGoal(period, questId, delta) {
+  const list = _dailyQuestsState[period];
+  if (!Array.isArray(list)) return;
+  const q = list.find((x) => x.id === questId);
+  if (!q) return;
+  q.progress = Math.min((q.progress || 0) + delta, q.target || Infinity);
+}
+
+// Public-facing dispatcher. Categories are stable abstract names; the
+// underlying quest IDs are the implementation detail tracked in
+// _QUEST_ID_MAP. Callers stay simple: `tickGoal('read_chapters')`.
+function tickGoal(category, delta = 1) {
+  if (!currentUser?.id) return; // logged-out — no goals
+  const map = _QUEST_ID_MAP[category];
+  if (!map) { console.warn('[goals] unknown category', category); return; }
+  if (!Number.isFinite(delta) || delta === 0) return;
+  for (const period of ['daily', 'weekly', 'monthly']) {
+    const questId = map[period];
+    if (!questId) continue;
+    _optimisticBumpGoal(period, questId, delta);
+    _fireTickGoalRpc(period, { [questId]: delta });
+  }
+  // Persist the optimistic state so a quick reload doesn't flicker
+  // back to the pre-tick values before _fetchGoalsFromSupabase lands.
+  try { _saveDailyQuestsToStorage?.(); } catch {}
+  // Re-render the panel if it's open, so the user watches the bar
+  // advance as soon as the event lands.
+  try { if (_dailyQuestsPanelOpen) renderDailyQuests?.(); } catch {}
+}
+
+// Deduped tick — used for things like read_chapters where a user
+// could re-open the same chapter multiple times in one day; we only
+// want the first open to count. Local-only dedup, mirrors mobile's
+// SEEN_PREFIX approach. Server-side dedup is a future hardening.
+const _GOAL_SEEN_PREFIX = 'selebox_goal_seen_v1';
+function tickGoalUnique(category, uniqueKey, delta = 1) {
+  if (!currentUser?.id || !uniqueKey) return false;
+  if (!_QUEST_ID_MAP[category]) return false;
+  const dayKey = _periodKeyDaily();
+  const storageKey = `${_GOAL_SEEN_PREFIX}:${dayKey}:${category}`;
+  let seen = [];
+  try { seen = JSON.parse(localStorage.getItem(storageKey) || '[]') || []; } catch {}
+  if (seen.includes(uniqueKey)) return false;
+  seen.push(uniqueKey);
+  try { localStorage.setItem(storageKey, JSON.stringify(seen)); } catch {}
+  tickGoal(category, delta);
+  return true;
 }
 
 // Fire the tick_user_goal RPC for a given (period, deltas) pair.
@@ -14564,33 +18405,13 @@ function toggleDailyQuestsPanel() {
 // Demo reset — clears localStorage state so we can start fresh during
 // brainstorming. Held back behind the panel header's circular "↻"
 // button so it doesn't show up to real users when this ships.
-function _resetDailyQuestsDemo() {
-  localStorage.removeItem(_dailyQuestsState._persistKey);
-  _dailyQuestsState.streak = 7;
-  _dailyQuestsState.bonusClaimed = false;
-  _dailyQuestsState.featuredState = {};
-  const dailyDefaults = {
-    login: 1, read5: 2, read10: 2, watch30: 12, watch60: 12,
-    like3: 0, comment3: 0, follow_creator: 0, watch_ads: 0, invite_friend: 0,
-  };
-  const weeklyDefaults = {
-    w_read25: 11, w_finish1: 0, w_watch3hr: 47, w_comment10: 2, w_streak7: 7,
-  };
-  const monthlyDefaults = {
-    m_read100: 38, m_finish3: 1, m_streak30: 7, m_engage: 24,
-  };
-  const apply = (list, defaults) => {
-    for (const q of list) {
-      if (q.id in defaults) q.progress = defaults[q.id];
-      q.claimed = false;
-    }
-  };
-  apply(_dailyQuestsState.daily, dailyDefaults);
-  apply(_dailyQuestsState.weekly, weeklyDefaults);
-  apply(_dailyQuestsState.monthly, monthlyDefaults);
-  renderDailyQuests();
-  _renderQuestsCountdown();
-}
+// _resetDailyQuestsDemo() removed May 2026 — it only wiped
+// localStorage, not the real Supabase state. The demo reset button
+// it powered (#questsResetDemo) was also removed from the markup.
+// To reset progress in production for legitimate debug, run the
+// matching DELETE / RPC against user_goal_progress + user_goal_claims
+// directly via Supabase SQL.
+
 
 // Boot — load any persisted state then paint the streak badge.
 _loadDailyQuestsFromStorage();
@@ -14600,10 +18421,9 @@ document.getElementById('btnDailyQuests')?.addEventListener('click', (e) => {
   e.stopPropagation();
   toggleDailyQuestsPanel();
 });
-document.getElementById('questsResetDemo')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  _resetDailyQuestsDemo();
-});
+// Demo reset button removed May 2026 — it only wiped localStorage,
+// not Supabase, so users saw progress "reset" then immediately
+// resurrect on the next panel open from the real server state.
 // Tab-bar clicks switch which quest list is rendered.
 document.querySelectorAll('.quests-tab').forEach(tab => {
   tab.addEventListener('click', (e) => {

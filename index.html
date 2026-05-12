@@ -6,7 +6,7 @@
   <title>Selebox All-In-One</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css"/>
-  <link rel="stylesheet" href="css/style.css?v=2026-04-30-books-tightleft"/>
+  <link rel="stylesheet" href="css/style.css?v=2026-05-12-unlock-registry-parity"/>
 
   <!-- ─── Google Analytics ─────────────────────────────────────────────── -->
   <!-- Replace G-XXXXXXXXXX with your real Measurement ID from
@@ -122,7 +122,10 @@
                  "Weekly Quests" / "Monthly Quests" in the narrow panel. -->
             <div class="quests-header-row">
               <h3 id="questsTitle">Daily Goals</h3>
-              <button class="quests-reset-demo" id="questsResetDemo" title="Reset (demo)">↻</button>
+              <!-- Demo reset button removed May 2026 — it only wiped
+                   localStorage, not the real Supabase state, so it
+                   misled testers into thinking progress was reset
+                   when the server still held real counts. -->
             </div>
             <!-- Compact info strip: streak chip + countdown side-by-side
                  instead of stacking. Streak label is "Xd" (no "streak"
@@ -159,7 +162,16 @@
         <div class="notifications-panel" id="notificationsPanel" style="display:none">
           <div class="notifications-header">
             <h3>Notifications</h3>
-            <button class="notifications-mark-all" id="notifMarkAll">Mark all read</button>
+            <div class="notifications-header-actions">
+              <!-- Sound-mute toggle (May 2026) — silences the chime
+                   that plays on new realtime notifications. State
+                   persisted in localStorage('selebox_notif_muted'). -->
+              <button class="notifications-sound-toggle" id="notifSoundToggle" title="Mute notification sounds" aria-pressed="false">
+                <svg class="notif-sound-on" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                <svg class="notif-sound-off" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+              </button>
+              <button class="notifications-mark-all" id="notifMarkAll">Mark all read</button>
+            </div>
           </div>
           <div class="notif-filter-tabs" role="tablist">
             <button class="notif-filter-tab active" data-filter="all" role="tab">All</button>
@@ -171,20 +183,17 @@
           </div>
         </div>
       </div>
-      <button class="topbar-icon-btn" title="Toggle theme" id="btnTheme">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-      </button>
-      <button class="topbar-coin-pill" id="topbarCoinPill" title="Your wallet — click to open Store">
+      <button class="topbar-coin-pill icon-only" id="topbarCoinPill" title="Your wallet — click to open Store">
+        <!-- Icon-only wallet button — the Goals-Store logo is the
+             entire affordance. Balances still exist in the DOM as
+             hidden spans so existing JS that writes to
+             #topbarCoinBalance / #topbarStarBalance keeps working
+             without changes. -->
         <span class="topbar-coin-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
-            <path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/>
-            <path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
-          </svg>
+          <img src="img/goals-store-logo.png" alt="Goals Store"/>
         </span>
-        <span class="topbar-coin-balance" id="topbarCoinBalance">0</span>
-        <span class="topbar-star-tip" id="topbarStarTip" title="Stars">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="#a855f7"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg>
+        <span class="topbar-coin-balance" id="topbarCoinBalance" hidden>0</span>
+        <span class="topbar-star-tip" id="topbarStarTip" hidden>
           <span id="topbarStarBalance">0</span>
         </span>
       </button>
@@ -193,12 +202,30 @@
   </header>
 
   <!-- LEFT SIDEBAR -->
+  <!--
+    Grouped layout (May 2026 redesign):
+      Group 1 — Content surfaces:  Home · Post · Video · Book
+      Group 2 — Creator tools:     Studio · Author · Bookmarks
+      Group 3 — User personal:     Message · Profile · Earnings
+      Group 4 — Session:           Log out
+    Dividers between groups give the eye a clear break and match the
+    "Discover Nature's Wonders" reference deck — sectioned nav rather
+    than a flat scroll of 10 buttons.
+  -->
   <aside class="sidebar">
+    <!-- Group 1: Content surfaces -->
     <button class="sidebar-item active" title="Home" id="btnHome">
       <span class="sidebar-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V20a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2V9.5z"/></svg>
       </span>
       <span class="sidebar-label">Home</span>
+    </button>
+    <button class="sidebar-item" title="Post" id="btnPost">
+      <span class="sidebar-icon">
+        <!-- Speech-bubble-with-pencil glyph: signals "create / browse posts" -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-13.4 6.9L3 20l1.6-4.6A8.5 8.5 0 1 1 21 11.5z"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="8" y1="14" x2="12" y2="14"/></svg>
+      </span>
+      <span class="sidebar-label">Post</span>
     </button>
     <button class="sidebar-item" title="Videos" id="btnVideos">
       <span class="sidebar-icon">
@@ -210,8 +237,12 @@
       <span class="sidebar-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/><line x1="12" y1="2" x2="12" y2="20"/></svg>
       </span>
-      <span class="sidebar-label">Book</span>
+      <span class="sidebar-label">Books</span>
     </button>
+
+    <div class="sidebar-divider"></div>
+
+    <!-- Group 2: Creator tools -->
     <button class="sidebar-item" title="Creator Studio" id="btnStudio">
       <span class="sidebar-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.09 5.26L19.5 9l-4.5 3.27L16.18 18 12 14.77 7.82 18 9 12.27 4.5 9l5.41-.74L12 3z"/></svg>
@@ -230,6 +261,10 @@
       </span>
       <span class="sidebar-label">Bookmarks</span>
     </button>
+
+    <div class="sidebar-divider"></div>
+
+    <!-- Group 3: User personal -->
     <button class="sidebar-item" title="Messages" id="btnMessages">
       <span class="sidebar-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
@@ -249,7 +284,30 @@
       </span>
       <span class="sidebar-label">Earnings</span>
     </button>
+
     <div class="sidebar-divider"></div>
+
+    <!-- Theme toggle — premium segmented radio (Light / Dark).
+         Replaces the old topbar sun-icon button (May 2026). The
+         selected option carries the purple-glass highlight; the
+         other sits flat. Click either to switch + persist in
+         localStorage('selebox_theme'). Wired in js/app.js. -->
+    <div class="sidebar-theme-toggle" id="sidebarThemeToggle" role="radiogroup" aria-label="Theme">
+      <button type="button" class="sidebar-theme-option" data-theme="light" role="radio" aria-checked="false">
+        <span class="sidebar-theme-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"/></svg>
+        </span>
+        <span class="sidebar-theme-label">Light</span>
+      </button>
+      <button type="button" class="sidebar-theme-option is-selected" data-theme="dark" role="radio" aria-checked="true">
+        <span class="sidebar-theme-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </span>
+        <span class="sidebar-theme-label">Dark</span>
+      </button>
+    </div>
+
+    <!-- Group 4: Session -->
     <button class="sidebar-item sidebar-item-logout" title="Log out" id="btnSignOut">
       <span class="sidebar-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -264,8 +322,11 @@
     <!-- Stories / People row — hidden for now (minimalist feed) -->
     <div class="stories-row" id="storiesRow" style="display:none"></div>
 
-    <!-- Compose -->
-    <div class="compose">
+    <!-- Compose. Hidden by default (May 2026) so the page no longer
+         flashes the post-feed shell on first paint before the init
+         script routes to the new home landing. showFeed() reveals
+         this when the user actually navigates to the Post tab. -->
+    <div class="compose" style="display:none">
         <div class="compose-top">
           <div class="avatar" id="composeAvatar">?</div>
           <div class="compose-text-wrap">
@@ -303,17 +364,212 @@
         </div>
       </div>
 
-    <!-- Feed mode tabs (For You / Following / Discover) -->
-    <nav class="feed-tabs" id="feedTabs">
+    <!-- Feed mode tabs (For You / Following / Discover). Hidden by
+         default so they don't flash on first paint — showFeed() shows
+         them when the Post tab is selected. -->
+    <nav class="feed-tabs" id="feedTabs" style="display:none">
       <button class="feed-tab active" data-feed="foryou">For You</button>
       <button class="feed-tab" data-feed="following">Following</button>
       <button class="feed-tab" data-feed="discover">Discover</button>
     </nav>
 
-    <!-- Feed -->
-    <div id="feed"><div class="loading">Loading feed...</div></div>
+    <!-- Feed. Hidden by default — the old "Loading feed..." placeholder
+         used to render as the first visible content on every cold load
+         (the feed used to be Home; it's now the Post tab) which made
+         users see the OLD home design briefly before showHomeLanding
+         swapped it out. showFeed() now explicitly displays it. -->
+    <div id="feed" style="display:none"><div class="loading">Loading feed...</div></div>
     <div id="feedSentinel" class="book-grid-sentinel" style="display:none">
       <div class="book-grid-loadmore">Loading more posts…</div>
+    </div>
+
+    <!--
+      Home Landing Page (May 2026 redesign)
+      ─────────────────────────────────────────────────────────────────
+      The new curated landing — featured hero + Up Next rail at the
+      top, then horizontal-scroll shelves for For You / Trending.
+      Lives alongside the social feed (which now backs the "Post" tab)
+      so each surface has a clear identity:
+        Home → curated discovery, big visual hero
+        Post → social text/image feed (composer + timeline)
+      Skeleton content for now — real data wires in the next iteration
+      once the layout is approved.
+    -->
+    <div id="homeLanding" class="home-landing" style="display:none">
+      <!--
+        Mosaic layout (May 2026 wireframe):
+          Top region — 3-column grid:
+            • Col 1 (videos main): 1 big featured video + 3 medium video cards
+            • Col 2 (videos side):  3 small video cards stacked vertically
+            • Col 3 (post):         1 featured post spanning the full top height
+          Bottom region:
+            • Row of 5 portrait book covers
+        Each colored block in the wireframe maps to a class here:
+          red    → .home-video-* (any video card)
+          blue   → .home-featured-post
+          yellow → .home-book-card
+      -->
+
+      <!-- TOP REGION ── hero video / trending list / featured post ──── -->
+      <section class="home-top">
+        <!-- Col 1: hero video only (Recent row was removed May 2026 —
+             the side stack handles the rest, this column just holds the
+             single big featured video). -->
+        <div class="home-video-main" id="homeVideoMain">
+          <article class="home-video-hero home-skeleton-card" id="homeHeroVideo">
+            <div class="home-thumb home-thumb-wide">
+              <span class="home-thumb-dur">9:13</span>
+            </div>
+            <div class="home-card-meta">
+              <div class="home-card-title">Featured video — coming soon</div>
+              <div class="home-card-sub">Creator name · 1.2M views · 2 days ago</div>
+            </div>
+          </article>
+        </div>
+
+        <!-- Col 2: Trending — thumbnail-only column (May 2026 redesign).
+             Each card is just a 16:9 cover; title/creator/views were
+             dropped because the thumb art already carries that info
+             baked-in. 4 cards distribute the column's height equally. -->
+        <div class="home-video-side" id="homeVideoSide">
+          <article class="home-video-trending home-skeleton-card">
+            <div class="home-thumb"><span class="home-thumb-dur">3:14</span></div>
+          </article>
+          <article class="home-video-trending home-skeleton-card">
+            <div class="home-thumb"><span class="home-thumb-dur">5:22</span></div>
+          </article>
+          <article class="home-video-trending home-skeleton-card">
+            <div class="home-thumb"><span class="home-thumb-dur">9:21</span></div>
+          </article>
+          <article class="home-video-trending home-skeleton-card">
+            <div class="home-thumb"><span class="home-thumb-dur">12:03</span></div>
+          </article>
+        </div>
+
+        <!-- Col 3: featured post (spans full top height) -->
+        <article class="home-featured-post home-skeleton-card" id="homeFeaturedPost">
+          <div class="home-featured-post-media">
+            <div class="home-featured-post-placeholder">Featured post</div>
+          </div>
+          <div class="home-featured-post-overlay">
+            <span class="home-featured-post-overline">Selebox Post</span>
+            <h2 class="home-featured-post-title">Featured post headline — coming soon</h2>
+            <div class="home-featured-post-byline">
+              <div class="home-featured-post-avatar"></div>
+              <div class="home-featured-post-author">Author name</div>
+              <span class="home-featured-post-dot">·</span>
+              <div class="home-featured-post-when">2 hr</div>
+            </div>
+          </div>
+        </article>
+
+      <!-- TRENDING BOOKS shelf — moved to the very top of the home
+           landing (May 2026) so it sits ABOVE the hero/trending-video/
+           featured-post mosaic. The original "inside the top grid"
+           attempt didn't lay out well because col 2 + col 3 spanning
+           both rows kept blowing up row 2's height. -->
+        <!-- Books group — wraps Trending + Recent Update so they
+             can be positioned together (May 2026 redesign) inside
+             home-top, beside the featured post. -->
+        <div class="home-books-stack">
+      <section class="home-books-section" id="homeBooksTrending">
+        <header class="home-books-header">
+          <h2 class="home-books-title">Trending</h2>
+          <button class="home-books-seeall" type="button" data-target="books" aria-label="See all books">
+            See all
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </header>
+        <div class="home-books-row">
+          <button class="home-books-next" type="button" data-shelf="trending" aria-label="Show next 7 trending books">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+          <div class="home-books">
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+        </div>
+        </div>
+      </section>
+
+            <section class="home-books-section" id="homeBooksRecent">
+        <header class="home-books-header">
+          <h2 class="home-books-title">Recent Update</h2>
+          <button class="home-books-seeall" type="button" data-target="books" aria-label="See all books">
+            See all
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </header>
+        <div class="home-books-row">
+          <button class="home-books-next" type="button" data-shelf="recent" aria-label="Show next 7 recently updated books">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+          <div class="home-books">
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+          <article class="home-book-card home-skeleton-card">
+            <div class="home-book-cover"></div>
+            <div class="home-book-title">Book title</div>
+            <div class="home-book-author">Author</div>
+          </article>
+        </div>
+        </div>
+      </section>
+        </div>
+
+      </section><!-- /.home-top -->
+
+      
     </div>
 
     <!-- Videos Page -->
@@ -1066,8 +1322,12 @@
         <button class="store-migrate-dismiss" id="btnMigrateDismiss" aria-label="Dismiss">×</button>
       </div>
 
+      <!-- Balance cards (May 2026) — both are now clickable buttons
+           that open the wallet-history modal filtered to the matching
+           currency. The "View history" hint sits below the value so
+           the affordance is obvious without crowding the number. -->
       <div class="store-balance-cards">
-        <div class="store-balance-card store-balance-coin">
+        <button type="button" class="store-balance-card store-balance-coin store-balance-card-clickable" data-history-currency="coin" title="View coins history">
           <div class="store-balance-icon">
             <svg viewBox="0 0 24 24" width="32" height="32">
               <ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/>
@@ -1078,15 +1338,51 @@
           <div class="store-balance-meta">
             <div class="store-balance-label">Coins balance</div>
             <div class="store-balance-value" id="storeCoinBalance">0 Coins</div>
+            <div class="store-balance-cta">View history →</div>
           </div>
-        </div>
-        <div class="store-balance-card store-balance-star">
+        </button>
+        <button type="button" class="store-balance-card store-balance-star store-balance-card-clickable" data-history-currency="star" title="View stars history">
           <div class="store-balance-icon">
             <svg viewBox="0 0 24 24" width="32" height="32" fill="#a855f7"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg>
           </div>
           <div class="store-balance-meta">
             <div class="store-balance-label">Stars balance</div>
             <div class="store-balance-value" id="storeStarBalance">0 Stars</div>
+            <div class="store-balance-cta">View history →</div>
+          </div>
+        </button>
+      </div>
+
+      <!-- Wallet history modal — opened by clicking either balance
+           card. Pulls per-currency credit/debit entries from existing
+           tables (author_earnings for earned credits, user_goal_claims
+           for quest claims, unlocks for debits). No new ledger table
+           required; rebuild from current data sources. -->
+      <div class="modal-backdrop" id="walletHistoryModal" style="display:none">
+        <div class="modal-card wallet-history-modal" role="dialog" aria-labelledby="walletHistoryTitle">
+          <div class="wallet-history-header">
+            <h2 id="walletHistoryTitle">
+              <span class="wallet-history-icon" id="walletHistoryIcon" aria-hidden="true"></span>
+              <span id="walletHistoryTitleText">Coins history</span>
+            </h2>
+            <button class="modal-close" id="btnCloseWalletHistory" aria-label="Close">×</button>
+          </div>
+          <div class="wallet-history-summary">
+            <div class="wallet-history-summary-item">
+              <span class="wallet-history-summary-label">Earned</span>
+              <span class="wallet-history-summary-value wallet-history-summary-positive" id="walletHistoryEarned">+0</span>
+            </div>
+            <div class="wallet-history-summary-item">
+              <span class="wallet-history-summary-label">Spent</span>
+              <span class="wallet-history-summary-value wallet-history-summary-negative" id="walletHistorySpent">−0</span>
+            </div>
+            <div class="wallet-history-summary-item">
+              <span class="wallet-history-summary-label">Current</span>
+              <span class="wallet-history-summary-value" id="walletHistoryBalance">0</span>
+            </div>
+          </div>
+          <div class="wallet-history-list" id="walletHistoryList">
+            <div class="wallet-history-loading">Loading history…</div>
           </div>
         </div>
       </div>
@@ -1118,26 +1414,119 @@
 
     <!-- ── EARNINGS (Phase 7 — own sidebar entry) ── -->
     <div id="earningsPage" style="display:none">
-      <div class="page-hero page-hero-earnings">
-        <div class="page-hero-content">
-          <h1 class="page-hero-title">Earnings</h1>
-          <p class="page-hero-subtitle">Coins from readers who unlock your work. Stars don't count.</p>
-        </div>
-        <div class="page-hero-decoration" aria-hidden="true">
-          <svg viewBox="0 0 80 80" width="120" height="120" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M40 14v52"/>
-            <path d="M52 22H30a8 8 0 0 0 0 16h16a8 8 0 0 1 0 16H22"/>
-          </svg>
-        </div>
-      </div>
+      <!-- Minimalist header (May 2026 — old hero banner removed).
+           Just a tight title + caption stack so the totals tiles
+           below get to be the visual focal point of the page. -->
+      <header class="earnings-header">
+        <h1 class="earnings-header-title">Earnings</h1>
+        <p class="earnings-header-caption">Coins and stars from readers who unlock your work.</p>
+      </header>
 
       <nav class="earnings-tabs">
         <button class="earnings-tab active" data-etab="earnings">Earnings</button>
         <button class="earnings-tab" data-etab="payments">Payments Info</button>
       </nav>
 
+      <!-- Drill-down view (May 2026 — mirrors mobile's
+           app/(payments)/earnings-breakdown.jsx). Hidden by default.
+           Shown when the user clicks a per-source breakdown tile
+           (Posts / Videos / Books). Replaces the tab content + tabs
+           while open so the user gets a focused detail view. Back
+           button restores the main earnings tab. -->
+      <section id="earningsBreakdownView" class="earnings-breakdown-view" style="display:none">
+        <header class="earnings-breakdown-view-header">
+          <button type="button" class="earnings-breakdown-back" id="earningsBreakdownBack" aria-label="Back to earnings">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <h2 class="earnings-breakdown-view-title">
+            <span class="earnings-breakdown-view-icon" id="earningsBreakdownIcon" aria-hidden="true"></span>
+            <span id="earningsBreakdownLabel">Earnings</span>
+          </h2>
+          <span class="earnings-breakdown-view-spacer" aria-hidden="true"></span>
+        </header>
+
+        <!-- Summary card — totals across ALL filtered rows (not just
+             visible). Mirrors mobile's getAuthorEarningsSummary. -->
+        <div class="earnings-breakdown-summary" id="earningsBreakdownSummary">
+          <div class="earnings-breakdown-summary-label" id="earningsBreakdownSummaryLabel">Lifetime earnings</div>
+          <div class="earnings-breakdown-summary-amount" id="earningsBreakdownSummaryAmount">₱0.00</div>
+          <div class="earnings-breakdown-summary-stats">
+            <span class="earnings-breakdown-stat">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/></svg>
+              <span id="earningsBreakdownCoins">0</span> coins
+            </span>
+            <span class="earnings-breakdown-stat-sep" aria-hidden="true">·</span>
+            <span class="earnings-breakdown-stat">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg>
+              <span id="earningsBreakdownStars">0</span> stars
+            </span>
+            <span class="earnings-breakdown-stat-sep" aria-hidden="true">·</span>
+            <span class="earnings-breakdown-stat">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V8a5 5 0 0 1 9.9-1"/></svg>
+              <span id="earningsBreakdownUnlocks">0</span> <span id="earningsBreakdownUnlocksLabel">unlocks</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- Transaction list -->
+        <div class="earnings-breakdown-list" id="earningsBreakdownList"></div>
+
+        <!-- Load more button — sits below the list while there are
+             more pages. Replaced by a loading spinner mid-fetch. -->
+        <div class="earnings-breakdown-pager" id="earningsBreakdownPager" style="display:none">
+          <button type="button" class="btn btn-purple" id="btnEarningsBreakdownMore">Load more</button>
+        </div>
+      </section>
+
       <!-- Earnings tab -->
       <div class="earnings-tab-content" data-etab-content="earnings">
+        <!-- Maintenance banner — withdrawals temporarily paused while
+             pending requests are reconciled. Shown both here and on
+             the mobile Earnings tab so creators don't think their
+             balance disappeared (e.g. Ms.Chaser case — pending
+             withdrawal not subtracted from displayed available, so
+             ₱1,500 looked "missing"). Purple-soft so it reads
+             informational rather than alarming. -->
+        <div class="author-earnings-maintenance-banner">
+          <div class="author-earnings-maintenance-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+          </div>
+          <div class="author-earnings-maintenance-copy">
+            <div class="author-earnings-maintenance-title">Withdrawals temporarily under maintenance</div>
+            <div class="author-earnings-maintenance-body">
+              Your earnings are safe. Pending withdrawal requests are queued and will be processed as soon as maintenance is complete. Thank you for your patience 💜
+            </div>
+          </div>
+        </div>
+
+        <!-- Lifetime totals — Total Earnings (gross since day one) and
+             This Month. Together they answer "how much have I earned
+             ever" and "how am I doing this month", which are the two
+             questions creators actually ask. Mirrors mobile's
+             app/(payments)/earnings.jsx tiles. The "This Month" tile
+             changes when the month picker below is changed. -->
+        <div class="author-earnings-totals">
+          <div class="author-earnings-total-tile author-earnings-total-lifetime">
+            <div class="author-earnings-total-label">Total earnings</div>
+            <div class="author-earnings-total-php" id="earningsTotalLifetimePhp">₱0.00</div>
+            <div class="author-earnings-total-foot">Lifetime — available + under review + withdrawn</div>
+          </div>
+          <div class="author-earnings-total-tile author-earnings-total-month">
+            <div class="author-earnings-total-head">
+              <span class="author-earnings-total-label" id="earningsMonthLabel">This month</span>
+              <!-- Month picker — drives the "This Month" tile + the
+                   per-source breakdown row. Populated by JS on first
+                   render. Mirrors mobile's MonthPickerSheet. -->
+              <select class="author-earnings-month-picker" id="earningsMonthPicker" aria-label="Filter month"></select>
+            </div>
+            <div class="author-earnings-total-php" id="earningsMonthPhp">₱0.00</div>
+            <div class="author-earnings-total-foot">Earnings credited during the selected month</div>
+          </div>
+        </div>
+
         <!-- Balance cards — minimalist purple, peso-primary -->
         <div class="author-earnings-cards">
           <div class="author-earnings-card author-earnings-available">
@@ -1145,21 +1534,59 @@
               <span class="author-earnings-label">Available to withdraw</span>
             </div>
             <div class="author-earnings-amount-php" id="earningsAvailablePhp">₱0.00</div>
-            <button class="btn btn-purple author-earnings-payout-btn" id="btnRequestPayout">Request payout</button>
-            <div class="author-earnings-foot" id="earningsMinPayoutHint">Minimum payout: ₱100.00</div>
+            <!-- Latest-withdrawal status callout — appears under the
+                 Available amount when the user has an in-flight or
+                 recently-paid withdrawal. Colored dot + status text +
+                 amount. Populated by renderAuthorEarningsBalance.
+                 Mirrors mobile's "pending - ₱X.XX" badge. -->
+            <div class="author-earnings-withdrawal-status" id="earningsWithdrawalStatus" style="display:none">
+              <span class="author-earnings-withdrawal-dot" aria-hidden="true"></span>
+              <span class="author-earnings-withdrawal-text"></span>
+            </div>
+            <!-- Withdrawals disabled while under maintenance — matches
+                 the banner copy above. `disabled` both functionally
+                 (the click handler in app.js does nothing on a
+                 disabled button) and visually (the .btn:disabled
+                 style fades it). Restore Request payout label +
+                 remove disabled when maintenance ends. -->
+            <button class="btn btn-purple author-earnings-payout-btn" id="btnRequestPayout" disabled aria-disabled="true">
+              <span class="author-earnings-payout-btn-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                </svg>
+              </span>
+              Maintenance
+            </button>
+            <div class="author-earnings-foot" id="earningsMinPayoutHint">Withdrawals temporarily paused — your earnings are safe.</div>
           </div>
           <div class="author-earnings-card author-earnings-pending">
             <div class="author-earnings-card-head">
-              <span class="author-earnings-label">Pending (hold period)</span>
+              <!-- Label renamed May 2026 — "Pending" was being confused
+                   with "pending withdrawal request" (entirely different
+                   concept). "Under Review" matches mobile's wording and
+                   makes the meaning unambiguous: the platform is
+                   reviewing fresh earnings during the hold window. -->
+              <span class="author-earnings-label">Under review</span>
             </div>
             <div class="author-earnings-amount-php" id="earningsPendingPhp">₱0.00</div>
-            <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available 1–3 days after they're earned.</div>
+            <!-- Pre-render placeholder. renderAuthorEarningsBalance()
+                 overwrites this on signin with the actual hold period
+                 from app_config.author_earnings_hold_days (currently
+                 7 days). Kept generic so the static copy doesn't
+                 contradict the dynamic value during the brief paint
+                 between mount and first render. -->
+            <div class="author-earnings-foot" id="earningsHoldFootnote">Earnings become available after a short hold period.</div>
           </div>
         </div>
 
-        <!-- Earnings breakdown by source — peso primary -->
+        <!-- Earnings breakdown by source — peso primary. Each tile
+             is now a button: click to drill into the per-source
+             transaction log. data-breakdown-category drives which
+             source_type(s) the drill-down filters by. Mirrors
+             mobile's tappable tiles in app/(payments)/earnings.jsx. -->
         <div class="earnings-breakdown">
-          <div class="earnings-breakdown-card">
+          <button type="button" class="earnings-breakdown-card earnings-breakdown-card-clickable" data-breakdown-category="post" data-breakdown-label="From Posts">
             <div class="earnings-breakdown-icon">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </div>
@@ -1167,8 +1594,11 @@
               <div class="earnings-breakdown-label">From Posts</div>
               <div class="earnings-breakdown-php" id="breakdownPostsPhp">₱0.00</div>
             </div>
-          </div>
-          <div class="earnings-breakdown-card">
+            <span class="earnings-breakdown-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </span>
+          </button>
+          <button type="button" class="earnings-breakdown-card earnings-breakdown-card-clickable" data-breakdown-category="video" data-breakdown-label="From Videos">
             <div class="earnings-breakdown-icon">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
             </div>
@@ -1176,8 +1606,11 @@
               <div class="earnings-breakdown-label">From Videos</div>
               <div class="earnings-breakdown-php" id="breakdownVideosPhp">₱0.00</div>
             </div>
-          </div>
-          <div class="earnings-breakdown-card">
+            <span class="earnings-breakdown-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </span>
+          </button>
+          <button type="button" class="earnings-breakdown-card earnings-breakdown-card-clickable" data-breakdown-category="book" data-breakdown-label="From Books">
             <div class="earnings-breakdown-icon">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
             </div>
@@ -1185,7 +1618,10 @@
               <div class="earnings-breakdown-label">From Books</div>
               <div class="earnings-breakdown-php" id="breakdownBooksPhp">₱0.00</div>
             </div>
-          </div>
+            <span class="earnings-breakdown-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </span>
+          </button>
         </div>
 
         <h3 class="author-section-subtitle">Recent earnings</h3>
@@ -1408,7 +1844,8 @@
               </button>
             </div>
 
-            <input type="file" id="dmFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none"/>
+            <!-- multiple lets the user pick up to 10 photos in one gesture; the change handler caps + processes them. -->
+            <input type="file" id="dmFileInput" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none"/>
 
             <form class="dm-composer" id="dmComposer" onsubmit="return false">
               <button type="button" class="dm-composer-btn" id="dmAttachBtn" title="Attach photo or GIF" aria-label="Attach">
@@ -2143,6 +2580,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
-<script type="module" src="js/app.js?v=2026-04-30-books-tightleft"></script>
+<script type="module" src="js/app.js?v=2026-05-12-unlock-registry-parity"></script>
 </body>
 </html>

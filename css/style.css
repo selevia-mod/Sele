@@ -47,33 +47,83 @@ body.light .stories-row,
 body.light .auth-card {
   box-shadow: 0 2px 12px rgba(0,0,0,0.04);
 }
-body.light .topbar-search input {
-  background: #fff;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-}
 body.light .comment-bubble {
   background: var(--bg3);
   color: var(--text);
 }
-body.light .topbar-avatar,
-body.light .topbar-icon-btn {
-  background: rgba(255,255,255,0.2);
-}
-body.light .topbar-icon-btn:hover {
-  background: rgba(255,255,255,0.3);
-}
+/* Note: light-mode .topbar / .topbar-search input / .topbar-icon-btn /
+   .topbar-avatar overrides now live next to their respective dark-mode
+   rules further down (the "Purple-glass premium" block) so each pair
+   is co-located and easier to keep in sync. */
 
 html { scroll-behavior: smooth; }
 body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; -webkit-font-smoothing: antialiased; }
 a { text-decoration: none; color: inherit; }
 button { font-family: var(--font); cursor: pointer; }
 
-/* ── TOP HEADER ── */
+/* ── TOP HEADER ──
+   Purple-glass premium (May 2026 redesign).
+   Layers:
+     · A translucent purple gradient base (keeps the brand color saturated
+       so the logo's mix-blend-mode multiply still resolves correctly)
+     · backdrop-filter: blur(20px) saturate(180%) — the actual glass
+     · An inner radial highlight at the top-left for dimensional sheen
+     · A glowing 1px bottom border shimmer (mirrors the .quests-panel
+       accent at its top edge) for the premium-tier finish
+   Falls back to the prior solid gradient on browsers without backdrop-
+   filter support — graceful degradation, no broken UI.
+   ───────────────────────────────────────────────────────────────────── */
 .topbar {
   position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
-  background: var(--purple-grad);
+  /* Deeper purple base — pushed both the alpha (0.78 → 0.92) and the
+     hue (slightly darker, more saturated indigo-violet) so the bar reads
+     as a rich, near-solid material rather than a translucent wash. The
+     radial accents got a small bump too so they still register against
+     the richer base. */
+  background:
+    radial-gradient(120% 100% at 0% 0%, rgba(167, 139, 250, 0.32) 0%, transparent 55%),
+    radial-gradient(80% 100% at 100% 100%, rgba(91, 33, 182, 0.50) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(35, 10, 80, 0.92) 0%, rgba(14, 8, 42, 0.95) 100%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  /* No hard border / shimmer line — the bottom edge fades softly via
+     the ::after gradient panel below. Keeps the inset highlight at the
+     top for the glass sheen, drops the harsh outer shadow that would
+     have read as a "line" too. */
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
   display: flex; align-items: center; padding: 0 1.5rem;
   z-index: 100; gap: 1.5rem;
+}
+/* Bottom-edge fade — a 24px-tall gradient panel that extends below
+   the topbar, fading from the bar's deep-violet tone down to fully
+   transparent. Replaces the previous 1px shimmer line so the topbar
+   feels like it dissolves into the content below rather than sitting
+   above a hard rule. Pointer-events disabled so it doesn't block
+   clicks on whatever is underneath. */
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  top: 100%;
+  height: 24px;
+  background: linear-gradient(180deg,
+    rgba(14, 8, 42, 0.55) 0%,
+    rgba(14, 8, 42, 0.22) 45%,
+    transparent 100%);
+  pointer-events: none;
+}
+body.light .topbar {
+  background:
+    radial-gradient(120% 100% at 0% 0%, rgba(167, 139, 250, 0.20) 0%, transparent 55%),
+    radial-gradient(80% 100% at 100% 100%, rgba(124, 58, 237, 0.18) 0%, transparent 60%),
+    linear-gradient(135deg, rgba(245, 240, 255, 0.85) 0%, rgba(232, 222, 252, 0.85) 100%);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.55) inset;
+}
+body.light .topbar::after {
+  background: linear-gradient(180deg,
+    rgba(232, 222, 252, 0.65) 0%,
+    rgba(232, 222, 252, 0.22) 45%,
+    transparent 100%);
 }
 /* Premium SELE logo — clickable button that returns to home + scroll-to-top */
 .topbar-logo {
@@ -122,19 +172,68 @@ button { font-family: var(--font); cursor: pointer; }
 }
 
 .topbar-search { flex: 1; max-width: 560px; position: relative; }
+/* Glassy dark input — translucent purple-tinted fill, soft purple border,
+   focus ring grows the border to a luminous violet (matches the topbar's
+   bottom shimmer accent). The submit button on the right gets a brand-
+   purple gradient + glow. */
 .topbar-search input {
-  width: 100%; background: #fff; border: none; border-radius: 99px;
-  padding: 0.7rem 3rem 0.7rem 1.4rem; font-family: var(--font); font-size: 0.9rem;
-  color: #333; outline: none;
+  width: 100%;
+  background: rgba(15, 8, 36, 0.40);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  border-radius: 99px;
+  padding: 0.7rem 3rem 0.7rem 1.4rem;
+  font-family: var(--font);
+  font-size: 0.9rem;
+  color: #fff;
+  outline: none;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
-.topbar-search input::placeholder { color: #9ca3af; }
+.topbar-search input::placeholder {
+  color: rgba(196, 181, 253, 0.55);
+  font-weight: 400;
+}
+.topbar-search input:hover {
+  border-color: rgba(167, 139, 250, 0.38);
+  background: rgba(15, 8, 36, 0.55);
+}
+.topbar-search input:focus {
+  border-color: rgba(196, 181, 253, 0.72);
+  background: rgba(15, 8, 36, 0.65);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.18), 0 0 24px -4px rgba(167, 139, 250, 0.35);
+}
+body.light .topbar-search input {
+  background: rgba(255, 255, 255, 0.70);
+  border-color: rgba(124, 58, 237, 0.18);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.06);
+}
+body.light .topbar-search input::placeholder { color: #9ca3af; }
+body.light .topbar-search input:hover {
+  background: rgba(255, 255, 255, 0.88);
+  border-color: rgba(124, 58, 237, 0.28);
+}
+body.light .topbar-search input:focus {
+  background: #fff;
+  border-color: rgba(124, 58, 237, 0.55);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.12), 0 4px 16px rgba(124, 58, 237, 0.18);
+}
 .topbar-search-btn {
   position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
-  background: var(--purple-dk); border: none; color: #fff;
+  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
+  border: none; color: #fff;
   width: 38px; height: 38px; border-radius: 50%; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 12px -2px rgba(124, 58, 237, 0.55);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
-.topbar-search-btn:hover { background: var(--purple); }
+.topbar-search-btn:hover {
+  background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
+  transform: translateY(-50%) scale(1.05);
+  box-shadow: 0 6px 18px -2px rgba(167, 139, 250, 0.7);
+}
+.topbar-search-btn:active { transform: translateY(-50%) scale(0.96); }
 .topbar-search-btn svg { width: 16px; height: 16px; }
 
 .topbar-results {
@@ -153,14 +252,38 @@ button { font-family: var(--font); cursor: pointer; }
 .search-result-item .srsub { font-size: 0.72rem; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .topbar-actions { display: flex; align-items: center; gap: 1rem; margin-left: auto; }
+/* Icon buttons — glassy circles with a soft purple border. Hover bumps
+   the violet glow + lifts slightly. Matches the search input's frosted
+   panel treatment so the whole top bar reads as one material. */
 .topbar-icon-btn {
   width: 42px; height: 42px; border-radius: 50%;
-  background: rgba(255,255,255,0.15); border: none; color: #fff;
+  background: rgba(15, 8, 36, 0.40);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  color: #fff;
   display: flex; align-items: center; justify-content: center;
-  cursor: pointer; position: relative; transition: background 0.15s;
+  cursor: pointer; position: relative;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.12s ease, box-shadow 0.18s ease;
 }
-.topbar-icon-btn:hover { background: rgba(255,255,255,0.25); }
+.topbar-icon-btn:hover {
+  background: rgba(139, 92, 246, 0.20);
+  border-color: rgba(167, 139, 250, 0.45);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px -6px rgba(167, 139, 250, 0.55);
+}
+.topbar-icon-btn:active { transform: translateY(0) scale(0.97); }
 .topbar-icon-btn svg { width: 18px; height: 18px; }
+body.light .topbar-icon-btn {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(124, 58, 237, 0.18);
+  color: var(--text);
+}
+body.light .topbar-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(124, 58, 237, 0.35);
+  box-shadow: 0 6px 16px -6px rgba(124, 58, 237, 0.35);
+}
 
 /* ── NOTIFICATION BELL ── */
 .topbar-bell-wrap { position: relative; }
@@ -1098,6 +1221,65 @@ body.light .notifications-header h3 {
   color: #c4b5fd;
 }
 
+/* Header actions cluster — wraps the sound toggle + mark-all. */
+.notifications-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+/* Sound toggle — same hit area + hover treatment as mark-all,
+   icon-only. aria-pressed swaps the speaker-on/off icons. */
+.notifications-sound-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  padding: 0.3rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  transition: background 0.15s, color 0.15s;
+}
+.notifications-sound-toggle:hover {
+  background: rgba(139, 92, 246, 0.10);
+  color: #c4b5fd;
+}
+.notifications-sound-toggle[aria-pressed="true"] {
+  color: #f87171; /* red-ish when muted — quick visual cue */
+}
+.notifications-sound-toggle[aria-pressed="true"]:hover {
+  background: rgba(239, 68, 68, 0.10);
+  color: #fca5a5;
+}
+
+/* Time-bucket headers (May 2026) — section labels between
+   notification rows. Sticky to the top of the scroll container so
+   long lists keep context as the user scrolls. */
+.notif-bucket-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 0.42rem 1rem 0.32rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text3);
+  background: linear-gradient(180deg, rgba(20, 12, 35, 0.96), rgba(20, 12, 35, 0.88));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(139, 92, 246, 0.10);
+}
+body.light .notif-bucket-header {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 245, 255, 0.88));
+  color: #6b7280;
+  border-bottom-color: rgba(139, 92, 246, 0.12);
+}
+
 .notif-filter-tabs {
   display: flex;
   gap: 0.25rem;
@@ -1138,7 +1320,12 @@ body.light .notif-filter-tab.active {
 .notifications-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0.35rem 0;
+  /* Top padding zeroed (May 2026) — the sticky bucket header
+     (.notif-bucket-header) is positioned at `top: 0` of this scroll
+     container; any top padding here becomes a visible gap above the
+     first header (no notification sits there to fill the padding).
+     Bottom padding kept so the last row has breathing room. */
+  padding: 0 0 0.35rem;
 }
 .notifications-empty {
   text-align: center;
@@ -1215,6 +1402,64 @@ body.light .notification-item:hover { background: rgba(124, 58, 237, 0.06); }
   display: none;
 }
 .notification-item.unread .notification-dot { display: block; }
+
+/* Resource thumbnail — 48px square on the right of every card.
+   Shows the post image / video thumbnail / book cover / chapter
+   cover so the bell card has visual context. Mobile parity:
+   components/NotificationCard.jsx ~L468-485. Hidden by default if
+   the row's target type doesn't have an openable resource (follow,
+   mention with no parent, etc.). */
+.notification-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: rgba(139, 92, 246, 0.08);
+  margin-right: 14px; /* breathing room from the unread dot */
+}
+.notification-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Skeleton rows shown during cold-load. Same shape as the real
+   item so the panel doesn't jump when data arrives. */
+.notification-skeleton { pointer-events: none; }
+.notification-skeleton .skel-block {
+  background: linear-gradient(90deg, rgba(139,92,246,0.10) 25%, rgba(139,92,246,0.18) 37%, rgba(139,92,246,0.10) 63%);
+  background-size: 400% 100%;
+  animation: notifSkelShimmer 1.4s ease infinite;
+  border-radius: 8px;
+}
+.notification-skeleton .skel-line {
+  height: 9px;
+  border-radius: 4px;
+  margin-top: 4px;
+  background: linear-gradient(90deg, rgba(139,92,246,0.10) 25%, rgba(139,92,246,0.18) 37%, rgba(139,92,246,0.10) 63%);
+  background-size: 400% 100%;
+  animation: notifSkelShimmer 1.4s ease infinite;
+}
+.notification-skeleton .skel-line-1 { width: 78%; }
+.notification-skeleton .skel-line-2 { width: 42%; height: 8px; }
+@keyframes notifSkelShimmer {
+  0%   { background-position: 100% 0; }
+  100% { background-position: 0 0; }
+}
+
+/* Load-more footer — sits at the very bottom of the list while a
+   load-more fetch is in flight. */
+.notif-loadmore-footer {
+  padding: 0.6rem 1rem;
+  text-align: center;
+}
+.notif-loadmore-spinner {
+  font-size: 0.78rem;
+  color: var(--text3);
+  font-weight: 500;
+}
 
 /* ── @MENTION AUTOCOMPLETE ── */
 .mention-dropdown {
@@ -1449,24 +1694,140 @@ body.light .video-comments-wrap {
 .mention-token:hover { color: #a78bfa; text-decoration: underline; }
 body.light .mention-token { color: #7c3aed; }
 body.light .mention-token:hover { color: #4c1d95; }
+/* Avatar — glowing purple ring like the reference deck.
+   Uses a 2px solid violet border + box-shadow stack for the bloom:
+     outer  shadow = soft falloff halo
+     middle shadow = brighter inner ring
+     inset  shadow = subtle dark vignette inside the ring for depth
+   Hover intensifies the bloom so the avatar reads as the "you are
+   here" anchor in the corner. */
 .topbar-avatar {
   width: 44px; height: 44px; border-radius: 50%; overflow: hidden; cursor: pointer;
-  background: var(--purple-dk); display: flex; align-items: center; justify-content: center;
-  color: #fff; font-weight: 600; font-size: 0.8rem; border: 2px solid rgba(255,255,255,0.3);
+  background: var(--purple-dk);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 600; font-size: 0.8rem;
+  border: 2px solid rgba(196, 181, 253, 0.85);
+  box-shadow:
+    0 0 0 1px rgba(15, 8, 36, 0.6),
+    0 0 16px 2px rgba(167, 139, 250, 0.55),
+    0 4px 16px -2px rgba(124, 58, 237, 0.55),
+    inset 0 0 0 1px rgba(15, 8, 36, 0.35);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
 }
+.topbar-avatar:hover {
+  transform: translateY(-1px) scale(1.04);
+  border-color: rgba(221, 214, 254, 1);
+  box-shadow:
+    0 0 0 1px rgba(15, 8, 36, 0.6),
+    0 0 22px 4px rgba(196, 181, 253, 0.75),
+    0 8px 24px -2px rgba(167, 139, 250, 0.7),
+    inset 0 0 0 1px rgba(15, 8, 36, 0.35);
+}
+.topbar-avatar:active { transform: translateY(0) scale(0.98); }
 .topbar-avatar img { width: 100%; height: 100%; object-fit: cover; }
+body.light .topbar-avatar {
+  border-color: rgba(124, 58, 237, 0.75);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.8),
+    0 0 16px 2px rgba(124, 58, 237, 0.35),
+    0 4px 12px -2px rgba(124, 58, 237, 0.30);
+}
+body.light .topbar-avatar:hover {
+  border-color: rgba(76, 29, 149, 1);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.9),
+    0 0 22px 4px rgba(124, 58, 237, 0.5),
+    0 8px 22px -2px rgba(124, 58, 237, 0.5);
+}
 
-/* ── LEFT SIDEBAR (premium) ── */
+/* ── LEFT SIDEBAR — floating premium glass (May 2026 redesign) ──
+   Pulled inset from the viewport edges so it reads as a floating
+   panel rather than a flush column. Glass material identical in
+   spirit to the topbar:
+     · translucent purple-tinted gradient base
+     · radial highlight at the top-left for sheen
+     · backdrop-filter: blur(20px) saturate(180%) — the actual glass
+     · soft violet border, rounded corners
+     · stacked box-shadow for the float (close drop + softer glow halo)
+   The main-wrap's left margin (var(--sidebar-w)) is unchanged; the
+   sidebar is INSET inside that reserved width, leaving an organic
+   gap between its right edge and the start of the main content. */
 .sidebar {
-  position: fixed; top: var(--header-h); left: 0; bottom: 0; width: var(--sidebar-w);
-  background: linear-gradient(180deg, var(--bg) 0%, rgba(15, 8, 30, 0.65) 100%);
-  border-right: 1px solid rgba(139, 92, 246, 0.10);
-  display: flex; flex-direction: column; align-items: stretch;
-  padding: 1.25rem 0.75rem; gap: 0.2rem; z-index: 90;
+  position: fixed;
+  top: calc(var(--header-h) + 12px);
+  left: 12px;
+  bottom: 12px;
+  width: calc(var(--sidebar-w) - 24px);
+  /* See-through glass — base alpha dropped from ~0.80 to ~0.18 so the
+     panel reads as nearly transparent. Whatever sits behind (the body
+     bg, the home mosaic, scrolling posts) shows through as a softly
+     blurred watercolor underlayer. The blur radius is bumped to 32px
+     to compensate — without strong blur, see-through glass just looks
+     like a tinted window and visually competes with the content. */
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgba(167, 139, 250, 0.18) 0%, transparent 60%),
+    radial-gradient(100% 40% at 100% 100%, rgba(91, 33, 182, 0.22) 0%, transparent 55%),
+    linear-gradient(180deg, rgba(35, 10, 80, 0.18) 0%, rgba(14, 8, 42, 0.28) 100%);
+  -webkit-backdrop-filter: blur(32px) saturate(200%);
+  backdrop-filter: blur(32px) saturate(200%);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  border-radius: 22px;
+  box-shadow:
+    /* inset top highlight — adds glass-sheen on the upper edge */
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    /* close drop — anchors the panel to the surface */
+    0 14px 36px -12px rgba(0, 0, 0, 0.45),
+    /* soft purple halo — premium glow bleed */
+    0 24px 60px -20px rgba(124, 58, 237, 0.40),
+    /* outer 1px violet line — ties it to the topbar's bottom-edge fade */
+    0 0 0 1px rgba(167, 139, 250, 0.10);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 1rem 0.65rem;
+  gap: 0.2rem;
+  z-index: 90;
+  overflow: hidden; /* keeps the rounded corners crisp + clips any item hover bleed */
+}
+/* Subtle right-edge sheen — a 1px luminous violet gradient hugging
+   the inside of the right border. Mirrors the topbar's bottom-fade
+   technique so the two glass surfaces feel like siblings. */
+.sidebar::after {
+  content: '';
+  position: absolute;
+  top: 16px; bottom: 16px;
+  right: 0;
+  width: 1px;
+  background: linear-gradient(180deg,
+    transparent 0%,
+    rgba(196, 181, 253, 0.18) 30%,
+    rgba(167, 139, 250, 0.32) 50%,
+    rgba(196, 181, 253, 0.18) 70%,
+    transparent 100%);
+  pointer-events: none;
 }
 body.light .sidebar {
-  background: linear-gradient(180deg, #ffffff 0%, #faf8ff 100%);
-  border-right-color: rgba(124, 58, 237, 0.12);
+  /* Same see-through treatment in light mode — the white base drops
+     to ~0.30 alpha so the page content shows through softly, then
+     the 32px backdrop blur smooths it into a watercolor. */
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgba(167, 139, 250, 0.14) 0%, transparent 60%),
+    radial-gradient(100% 40% at 100% 100%, rgba(124, 58, 237, 0.08) 0%, transparent 55%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.30) 0%, rgba(250, 245, 255, 0.42) 100%);
+  border-color: rgba(124, 58, 237, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 14px 36px -12px rgba(124, 58, 237, 0.18),
+    0 24px 60px -20px rgba(124, 58, 237, 0.22),
+    0 0 0 1px rgba(124, 58, 237, 0.06);
+}
+body.light .sidebar::after {
+  background: linear-gradient(180deg,
+    transparent 0%,
+    rgba(124, 58, 237, 0.18) 30%,
+    rgba(124, 58, 237, 0.32) 50%,
+    rgba(124, 58, 237, 0.18) 70%,
+    transparent 100%);
 }
 .sidebar-item {
   position: relative;
@@ -1558,6 +1919,99 @@ body.light .sidebar-item-logout:hover .sidebar-icon {
   background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.18), transparent);
   margin: 0.55rem auto;
   border: 0;
+}
+
+/* ── SIDEBAR THEME TOGGLE — premium segmented radio (May 2026) ──
+   Two-option Light/Dark switcher that sits between the last divider
+   and the Log-out button. The container is a purple-tinted glass
+   pill; the selected option carries a brighter purple gradient with
+   a soft inner glow. Replaces the old topbar sun-icon button. */
+.sidebar-theme-toggle {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin: 0.35rem 0.75rem 0.5rem 0.75rem;
+  padding: 4px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(40, 24, 70, 0.55), rgba(28, 16, 50, 0.45));
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 6px 18px rgba(15, 8, 30, 0.35);
+  backdrop-filter: blur(10px) saturate(160%);
+  -webkit-backdrop-filter: blur(10px) saturate(160%);
+}
+.sidebar-theme-option {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.5rem;
+  min-height: 32px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(229, 220, 255, 0.65);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.12s ease;
+}
+.sidebar-theme-option:hover:not(.is-selected) {
+  background: rgba(139, 92, 246, 0.10);
+  color: rgba(238, 232, 255, 0.92);
+}
+.sidebar-theme-option:active {
+  transform: scale(0.97);
+}
+.sidebar-theme-option .sidebar-theme-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+.sidebar-theme-option .sidebar-theme-icon svg {
+  width: 100%;
+  height: 100%;
+}
+.sidebar-theme-option.is-selected {
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.85), rgba(124, 58, 237, 0.85));
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(60, 20, 120, 0.35),
+    0 4px 12px rgba(124, 58, 237, 0.45);
+}
+.sidebar-theme-option:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.6);
+  outline-offset: 2px;
+}
+/* Light-theme variant: lighter glass + subtler chrome */
+body.light .sidebar-theme-toggle {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(244, 240, 255, 0.62));
+  border-color: rgba(124, 58, 237, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 -1px 0 rgba(124, 58, 237, 0.06),
+    0 6px 14px rgba(124, 58, 237, 0.10);
+}
+body.light .sidebar-theme-option {
+  color: rgba(58, 30, 110, 0.62);
+}
+body.light .sidebar-theme-option:hover:not(.is-selected) {
+  background: rgba(124, 58, 237, 0.08);
+  color: rgba(58, 30, 110, 0.95);
+}
+body.light .sidebar-theme-option.is-selected {
+  background: linear-gradient(180deg, #a78bfa, #7c3aed);
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -1px 0 rgba(60, 20, 120, 0.35),
+    0 4px 12px rgba(124, 58, 237, 0.35);
 }
 
 /* ── BOOK / AUTHOR PAGE HERO ── */
@@ -1878,7 +2332,11 @@ body.light .book-grid-loadmore {
 }
 .book-cover {
   position: relative;
-  aspect-ratio: 3 / 4;
+  /* 2:3 — standard print-book-cover portrait ratio. Matches the
+     home-shelf cards (.home-book-cover) so the Books tab and home
+     page look consistent. Was 3:4 (squatter); under that ratio
+     covers read as stretched/wider than they should. */
+  aspect-ratio: 2 / 3;
   border-radius: 12px;
   overflow: hidden;
   background: linear-gradient(135deg, #1a1428, #0f0a1c);
@@ -1987,7 +2445,8 @@ body.light .book-card:hover .book-card-title { color: #7c3aed; }
   .book-detail-cover { max-width: 240px; margin: 0 auto; }
 }
 .book-detail-cover {
-  aspect-ratio: 3 / 4;
+  /* 2:3 print-book ratio (was 3:4 — caused covers to read stretched). */
+  aspect-ratio: 2 / 3;
   border-radius: 16px;
   overflow: hidden;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(139, 92, 246, 0.15);
@@ -2293,7 +2752,8 @@ body.light .author-book-row { border-bottom-color: #e5e7eb; }
 .author-book-row:hover { background: rgba(139, 92, 246, 0.06); }
 .author-book-row-cover {
   width: 50px;
-  aspect-ratio: 3/4;
+  /* 2:3 print-book ratio (was 3:4). */
+  aspect-ratio: 2/3;
   border-radius: 6px;
   overflow: hidden;
   background: linear-gradient(135deg, #1a1428, #0f0a1c);
@@ -2353,7 +2813,8 @@ body.light .author-book-row { border-bottom-color: #e5e7eb; }
   .book-editor-cover-wrap { max-width: 200px; }
 }
 .book-editor-cover {
-  aspect-ratio: 3/4;
+  /* 2:3 print-book ratio (was 3:4). */
+  aspect-ratio: 2/3;
   border-radius: 14px;
   overflow: hidden;
   background: linear-gradient(135deg, #1a1428, #0f0a1c);
@@ -3732,6 +4193,37 @@ body.on-videos .main-wrap {
   margin-left: var(--sidebar-w) !important;
   margin-right: 0 !important;
   padding: 1rem 1.5rem !important;
+}
+
+/* Home landing — same full-bleed treatment as videos / books. The default
+   .main-wrap is locked to 900px for the post feed's reading column; the
+   mosaic home view needs every pixel it can get for the 3-column layout
+   to breathe (hero video + side stack + featured post all fit only when
+   the column-constraint is lifted). Lower padding too, since the home
+   landing has its own gap rhythm. */
+body.on-home-landing .main-wrap {
+  max-width: none !important;
+  width: calc(100vw - var(--sidebar-w)) !important;
+  margin-left: var(--sidebar-w) !important;
+  margin-right: 0 !important;
+  /* Horizontal padding tightened further — 5px off each side.
+     Left: 0.25rem (~4px) → 0 (hero flush against the sidebar gap).
+     Right: 1.2rem (~19px) → 0.875rem (~14px) (post column gains
+     another 5px of visual reach toward the viewport edge). Top and
+     bottom padding unchanged. */
+  padding: 1rem 0.875rem 1rem 0 !important;
+}
+
+/* While on the Home landing, force-hide the post-feed's infinite-scroll
+   sentinel ("Loading more posts…" pill). The feed loads in the
+   background for instant Post-tab nav, and setupFeedInfiniteScroll
+   sets the sentinel to display:block — which leaks visually above the
+   home mosaic. The loadMoreFeed callback has a visibility guard that
+   stops actual fetches, but the pill itself stays on screen until this
+   override fires. Hidden via body class so the rule disappears
+   automatically when the user navigates to the Post tab. */
+body.on-home-landing #feedSentinel {
+  display: none !important;
 }
 
 .video-thumb-duration {
@@ -5178,9 +5670,29 @@ body.light .vu-btn-secondary {
    ════════════════════════════════════════ */
 
 #studioPage {
-  padding: 1.5rem 1.75rem 3rem;
-  max-width: 1280px;
-  margin: 0 auto;
+  /* Safe-area removed (May 2026 redesign). The Studio canvas now goes
+     edge-to-edge — outer .main-wrap gets its padding zeroed by the
+     body.on-studio rule, and we drop the page's own max-width + side
+     padding here. Top/bottom padding retained for breathing room
+     above the header and below the table. */
+  /* Left padding trimmed 10px (16px → 6px) so the table sits closer
+     to the sidebar edge — gives the wider columns more horizontal
+     room. Top, right, and bottom unchanged. */
+  padding: 1rem 1rem 3rem 6px;
+  max-width: none;
+  margin: 0;
+}
+
+/* Edge-to-edge canvas for Studio — mirrors the on-home-landing pattern.
+   .main-wrap's 900px reading-column constraint cramps the Studio's
+   stats grid + video table; here we let it fill the viewport minus
+   the sidebar. */
+body.on-studio .main-wrap {
+  max-width: none !important;
+  width: calc(100vw - var(--sidebar-w)) !important;
+  margin-left: var(--sidebar-w) !important;
+  margin-right: 0 !important;
+  padding: 0 !important;
 }
 
 .studio-header {
@@ -5188,8 +5700,8 @@ body.light .vu-btn-secondary {
   justify-content: space-between;
   align-items: flex-start;
   gap: 1rem;
-  margin-bottom: 1.75rem;
-  padding-bottom: 1.25rem;
+  margin-bottom: 5px;
+  padding-bottom: 2px;
   border-bottom: 1px solid rgba(168, 85, 247, 0.12);
 }
 
@@ -5216,6 +5728,7 @@ body.light .vu-btn-secondary {
   grid-template-columns: repeat(4, 1fr);
   gap: 0.85rem;
   margin-bottom: 1.5rem;
+  padding-top: 2px;
 }
 
 .studio-stat {
@@ -5259,6 +5772,66 @@ body.light .vu-btn-secondary {
   color: #6b7280;
   margin-top: 0.15rem;
   font-weight: 500;
+}
+
+/* Clickable variant — Revenue card opens the Earnings page on tap.
+   Inherits the base .studio-stat layout, adds the affordance cues:
+   cursor, deeper hover lift, and a small purple "View earnings →"
+   CTA inside the label. The element is a real <button> so keyboard
+   focus + screen readers get full treatment. */
+.studio-stat-clickable {
+  cursor: pointer;
+  appearance: none;
+  border: 1px solid rgba(34, 197, 94, 0.22);
+  background: linear-gradient(180deg, #fff, #f0fdf4);
+  text-align: left;
+  font: inherit;
+  width: 100%;
+}
+.studio-stat-clickable:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px rgba(34, 197, 94, 0.18);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+.studio-stat-clickable:active { transform: translateY(0); }
+.studio-stat-clickable:focus-visible {
+  outline: 2px solid #22c55e;
+  outline-offset: 2px;
+}
+.studio-stat-text { min-width: 0; }
+.studio-stat-cta {
+  display: inline-block;
+  margin-left: 0.45rem;
+  padding: 0.05rem 0.4rem;
+  background: rgba(34, 197, 94, 0.14);
+  color: #15803d;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+  transition: background 0.15s, color 0.15s;
+}
+.studio-stat-clickable:hover .studio-stat-cta {
+  background: rgba(34, 197, 94, 0.25);
+  color: #14532d;
+}
+/* Dark-mode treatment */
+body:not(.light) .studio-stat-clickable {
+  background: linear-gradient(180deg, rgba(20, 83, 45, 0.18), rgba(6, 78, 59, 0.22));
+  border-color: rgba(74, 222, 128, 0.28);
+}
+body:not(.light) .studio-stat-clickable:hover {
+  box-shadow: 0 8px 22px rgba(74, 222, 128, 0.20);
+  border-color: rgba(74, 222, 128, 0.45);
+}
+body:not(.light) .studio-stat-cta {
+  background: rgba(74, 222, 128, 0.20);
+  color: #86efac;
+}
+body:not(.light) .studio-stat-clickable:hover .studio-stat-cta {
+  background: rgba(74, 222, 128, 0.32);
+  color: #bbf7d0;
 }
 
 /* ─── Toolbar (search + count) ─── */
@@ -5322,6 +5895,11 @@ body.light .vu-btn-secondary {
 .studio-table {
   width: 100%;
   border-collapse: collapse;
+  /* `fixed` so the column widths declared on .studio-col-* are
+     honored. Default `auto` lets the browser ignore them when one
+     cell's content is wider/narrower than expected, which caused
+     the headers and cells to drift apart visually. */
+  table-layout: fixed;
 }
 
 .studio-table thead {
@@ -5329,25 +5907,44 @@ body.light .vu-btn-secondary {
 }
 
 .studio-table th {
-  padding: 0.85rem 1rem;
+  /* Fixed header height — symmetric with tbody rows for visual rhythm. */
+  height: 44px;
+  padding: 0 1rem;
   text-align: left;
   font-weight: 600;
-  font-size: 0.72rem;
+  /* Header text trimmed 1px so labels + sort arrows fit comfortably
+     within their column widths without crowding (was 0.72rem). */
+  font-size: 0.66rem;
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: #6b7280;
+  /* Single thin line under the header strip stays — it separates the
+     column labels from the data. All other borders (row dividers
+     between tbody rows, vertical column dividers) are removed
+     intentionally for a cleaner, line-free table aesthetic. */
   border-bottom: 1px solid rgba(168, 85, 247, 0.1);
+  vertical-align: middle;
 }
 
 .studio-table td {
-  padding: 0.95rem 1rem;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  /* Horizontal padding only — vertical centering comes from the row's
+     fixed `height` + `vertical-align: middle`, so every cell on every
+     row lands on the same baseline. */
+  padding: 0 1rem;
+  /* Borderless rows — line-free table aesthetic. The fixed row height
+     plus row hover background provides enough separation without
+     visible grid lines. */
   vertical-align: middle;
   color: #1f2937;
   font-size: 0.9rem;
 }
 
+/* Fixed row height — guarantees identical vertical rhythm regardless
+   of which cell has the tallest content. 88px = 68px thumbnail + 20px
+   of evenly distributed top/bottom breathing room (10px each, paired
+   with vertical-align: middle). */
 .studio-table tbody tr {
+  height: 88px;
   transition: background 0.1s;
 }
 
@@ -5359,12 +5956,280 @@ body.light .vu-btn-secondary {
   border-bottom: none;
 }
 
-.studio-col-video { min-width: 280px; }
-.studio-col-status { width: 130px; }
-.studio-col-date { width: 120px; }
-.studio-col-views { width: 90px; }
-.studio-col-likes { width: 90px; }
-.studio-col-actions { width: 100px; text-align: right; }
+/* ─── Visibility filter chips (May 2026) ─── */
+.studio-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.25rem 0 0.75rem;
+}
+.studio-filter-chip {
+  appearance: none;
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  background: rgba(139, 92, 246, 0.06);
+  color: #6b21a8;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+.studio-filter-chip:hover:not(.is-selected) {
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.32);
+}
+.studio-filter-chip:active { transform: scale(0.97); }
+.studio-filter-chip.is-selected {
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.95), rgba(124, 58, 237, 0.95));
+  color: #fff;
+  border-color: rgba(124, 58, 237, 0.6);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 3px 10px rgba(124, 58, 237, 0.35);
+}
+.studio-filter-chip-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 18px;
+  padding: 0 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.14);
+  color: #5b21b6;
+}
+.studio-filter-chip.is-selected .studio-filter-chip-count {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+/* Thin divider between the visibility-filter chips and the sort
+   shortcut chips. Keeps the two groups visually separate without a
+   heavy section heading. */
+.studio-filter-divider {
+  display: inline-block;
+  align-self: center;
+  width: 1px;
+  height: 18px;
+  margin: 0 0.25rem;
+  background: rgba(139, 92, 246, 0.22);
+}
+body:not(.light) .studio-filter-divider {
+  background: rgba(167, 139, 250, 0.30);
+}
+
+/* Sort-shortcut variant — same chip shell as the visibility filters
+   but with the arrow glyph styled brighter so the metaphor reads at a
+   glance. The arrow is a sibling span (not a ::after) so it inherits
+   the chip's active/inactive color states. */
+.studio-filter-chip-arrow {
+  display: inline-block;
+  margin-left: 0.35rem;
+  font-size: 0.9em;
+  font-weight: 800;
+  opacity: 0.7;
+}
+.studio-filter-chip.is-selected .studio-filter-chip-arrow {
+  opacity: 1;
+}
+body:not(.light) .studio-filter-chip {
+  background: rgba(139, 92, 246, 0.10);
+  border-color: rgba(139, 92, 246, 0.26);
+  color: #c4b5fd;
+}
+body:not(.light) .studio-filter-chip:hover:not(.is-selected) {
+  background: rgba(139, 92, 246, 0.18);
+  color: #ddd6fe;
+}
+body:not(.light) .studio-filter-chip-count {
+  background: rgba(139, 92, 246, 0.22);
+  color: #ddd6fe;
+}
+
+/* ─── Sortable headers ─── */
+.studio-sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease;
+}
+.studio-sortable:hover { color: #7c3aed; }
+.studio-sortable.is-sorted { color: #6d28d9; }
+body:not(.light) .studio-sortable:hover    { color: #c4b5fd; }
+body:not(.light) .studio-sortable.is-sorted{ color: #ddd6fe; }
+.studio-sort-icon {
+  display: inline-block;
+  margin-left: 0.3rem;
+  font-size: 0.8em;
+}
+.studio-sort-icon.dim { opacity: 0.35; font-weight: 400; }
+
+/* ─── Bulk-action bar ─── */
+.studio-bulk-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(139, 92, 246, 0.16), rgba(124, 58, 237, 0.14));
+  border: 1px solid rgba(124, 58, 237, 0.32);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    0 4px 14px rgba(124, 58, 237, 0.18);
+  font-size: 0.84rem;
+}
+.studio-bulk-count { color: #5b21b6; font-weight: 600; }
+.studio-bulk-count strong { color: #4c1d95; font-size: 1rem; }
+.studio-bulk-actions { display: inline-flex; gap: 0.45rem; align-items: center; }
+.studio-bulk-btn {
+  appearance: none;
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  background: rgba(255, 255, 255, 0.65);
+  color: #5b21b6;
+  padding: 0.4rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.studio-bulk-btn:hover { background: rgba(255, 255, 255, 0.9); color: #4c1d95; transform: translateY(-1px); }
+.studio-bulk-btn-delete {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #b91c1c;
+}
+.studio-bulk-btn-delete:hover { background: rgba(254, 226, 226, 0.85); color: #991b1b; }
+.studio-bulk-btn-clear {
+  background: transparent;
+  border-color: transparent;
+  color: #6b21a8;
+}
+.studio-bulk-btn-clear:hover { background: rgba(139, 92, 246, 0.10); }
+.studio-bulk-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+body:not(.light) .studio-bulk-bar {
+  background: linear-gradient(180deg, rgba(139, 92, 246, 0.22), rgba(124, 58, 237, 0.18));
+  border-color: rgba(167, 139, 250, 0.32);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+body:not(.light) .studio-bulk-count       { color: #ddd6fe; }
+body:not(.light) .studio-bulk-count strong{ color: #fff; }
+body:not(.light) .studio-bulk-btn {
+  background: rgba(40, 24, 70, 0.6);
+  color: #ddd6fe;
+  border-color: rgba(167, 139, 250, 0.35);
+}
+body:not(.light) .studio-bulk-btn:hover { background: rgba(60, 40, 100, 0.85); color: #fff; }
+body:not(.light) .studio-bulk-btn-delete       { color: #fca5a5; border-color: rgba(239, 68, 68, 0.45); }
+body:not(.light) .studio-bulk-btn-delete:hover { background: rgba(127, 29, 29, 0.55); color: #fecaca; }
+body:not(.light) .studio-bulk-btn-clear        { color: #c4b5fd; }
+body:not(.light) .studio-bulk-btn-clear:hover  { background: rgba(139, 92, 246, 0.18); }
+
+/* ─── Checkbox column ─── */
+.studio-col-select        { width: 38px; text-align: center; padding-left: 0.4rem; }
+.studio-col-select-cell   { width: 38px; text-align: center; padding-left: 0.4rem; }
+.studio-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: #7c3aed;
+  margin: 0;
+}
+/* Soft purple wash on selected rows so the bulk-bar count is visually
+   anchored to the actual rows in the table. */
+.studio-table tbody tr.is-selected {
+  background: rgba(139, 92, 246, 0.06);
+}
+body:not(.light) .studio-table tbody tr.is-selected {
+  background: rgba(139, 92, 246, 0.12);
+}
+
+/* Row-number column — narrow, centered to match the other data
+   columns, muted. Tabular figures keep 2-, 3-, and 4-digit numbers
+   vertically aligned. */
+.studio-table th.studio-col-num,
+.studio-col-num {
+  width: 48px;
+  text-align: center;
+}
+.studio-col-num-cell {
+  text-align: center;
+  color: #9ca3af;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+body:not(.light) .studio-col-num-cell {
+  color: #6b7280;
+}
+/* Video column — tightened May 2026 so Visibility/Date/Views/Likes/Actions
+   get more breathing room. Title + description can ellipsis-truncate
+   inside the cell (handled by .studio-row-title / .studio-row-desc). */
+/* Column widths — calm, evenly proportioned, content-fitted.
+   The width rules below apply to BOTH the th (header) and the td
+   (cells) since the row template now tags each td with its column
+   class — that's what keeps headers and values on the same vertical
+   axis. Pairs with `table-layout: fixed` on `.studio-table` so the
+   browser honors these widths instead of auto-sizing. */
+/* Video column — `auto` with a 430px floor so it absorbs any leftover
+   horizontal width on wide viewports instead of letting the leftover
+   inflate other columns (which made Comments/Likes look stretched).
+   On narrow viewports it stays at the 430px floor for readability. */
+.studio-col-video  { width: auto; min-width: 430px; }
+/* Status / Date / Views / Likes — all centered. Specificity bumped
+   with `.studio-table th.` so the rule beats the table-wide
+   `.studio-table th { text-align: left }` declaration. The td side
+   doesn't need the bump (there's no left-align declaration on td). */
+.studio-table th.studio-col-status,
+.studio-col-status { width: 120px; text-align: center; }
+.studio-table th.studio-col-date,
+.studio-col-date   { width: 120px; text-align: center; }
+.studio-table th.studio-col-views,
+.studio-col-views,
+.studio-table th.studio-col-likes,
+.studio-col-likes,
+.studio-table th.studio-col-comments,
+.studio-col-comments { width: 90px; text-align: center; font-variant-numeric: tabular-nums; }
+/* Cell font sizes — Date, Views, Likes, Comments trimmed 1px from
+   the table-wide td default (0.9rem → 0.84rem) so secondary metric
+   data reads as quieter than the title column. Targets cells only
+   (td selector) — headers stay at the small uppercase header type. */
+.studio-table td.studio-col-date,
+.studio-table td.studio-col-views,
+.studio-table td.studio-col-likes,
+.studio-table td.studio-col-comments {
+  font-size: 0.84rem;
+}
+/* Earnings column — slightly wider for "₱1,234.56" formatting, plus
+   green tint so the money cue carries through from the Revenue stat
+   card and the row-level monetize toggle. */
+.studio-table th.studio-col-earnings,
+.studio-col-earnings { width: 120px; text-align: center; font-variant-numeric: tabular-nums; }
+.studio-cell-earnings { color: #15803d; font-weight: 600; }
+body:not(.light) .studio-cell-earnings { color: #4ade80; }
+/* Actions column — centered header text matches the centered button
+   cluster (.studio-actions uses justify-content: center). Same
+   specificity bump on the th selector so the rule beats the
+   table-wide left-align. */
+.studio-table th.studio-col-actions,
+.studio-col-actions {
+  width: 145px;
+  text-align: center;
+  /* Extra left padding shifts the column content rightward so it
+     doesn't crowd the Comments value on its left. Gives the
+     numeric "0" / "1,234" room to breathe before the button cluster. */
+  padding-left: 24px;
+}
 
 .studio-cell-muted {
   color: #6b7280;
@@ -5375,7 +6240,11 @@ body.light .vu-btn-secondary {
 .studio-row-video {
   display: flex;
   gap: 0.9rem;
-  align-items: flex-start;
+  /* Center thumbnail + text within the row so it sits on the same
+     vertical axis as the other cells (which use vertical-align:
+     middle). Previously flex-start, which pushed the text up against
+     the row top and made the row look top-heavy. */
+  align-items: center;
 }
 
 .studio-thumb {
@@ -5417,7 +6286,9 @@ body.light .vu-btn-secondary {
 .studio-row-text {
   min-width: 0;
   flex: 1;
-  padding-top: 0.15rem;
+  /* Padding-top removed — alignment now comes from the parent
+     flex's align-items: center, so we don't need to nudge the text
+     down to fake-center it against the thumbnail. */
 }
 
 .studio-row-title {
@@ -5425,7 +6296,9 @@ body.light .vu-btn-secondary {
   color: #111827;
   margin-bottom: 0.3rem;
   line-height: 1.35;
-  font-size: 0.95rem;
+  /* Title trimmed 2px (0.95rem → 0.83rem) so longer titles fit on
+     two lines without truncating prematurely in the 450px column. */
+  font-size: 0.83rem;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -5433,7 +6306,10 @@ body.light .vu-btn-secondary {
 }
 
 .studio-row-desc {
-  font-size: 0.82rem;
+  /* Description trimmed another 1px (0.76rem → 0.70rem, total -2px
+     from original 0.82rem) so it sits clearly below the title in
+     visual weight and fits more text per line. */
+  font-size: 0.70rem;
   color: #6b7280;
   line-height: 1.4;
   display: -webkit-box;
@@ -5454,7 +6330,10 @@ body.light .vu-btn-secondary {
   white-space: nowrap;
 }
 
-.studio-badge-ready {
+/* Visibility pill palette — mirrors mobile CreatorVideoCard so the
+   same row reads the same label/color on every platform. */
+.studio-badge-ready,        /* legacy alias — keep so older render paths still style */
+.studio-badge-published {
   background: rgba(34, 197, 94, 0.1);
   color: #15803d;
 }
@@ -5464,6 +6343,17 @@ body.light .vu-btn-secondary {
   color: #a16207;
 }
 
+.studio-badge-scheduled {
+  background: rgba(139, 92, 246, 0.12);
+  color: #6d28d9;
+}
+
+.studio-badge-private,
+.studio-badge-failed {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
 .studio-dot {
   width: 6px;
   height: 6px;
@@ -5471,14 +6361,24 @@ body.light .vu-btn-secondary {
   flex-shrink: 0;
 }
 
-.studio-dot-green { background: #22c55e; }
+.studio-dot-green  { background: #22c55e; }
 .studio-dot-yellow { background: #eab308; }
+.studio-dot-purple { background: #8b5cf6; }
+.studio-dot-red    { background: #ef4444; }
 
 /* ─── Action buttons ─── */
 .studio-actions {
   display: flex;
-  gap: 0.35rem;
-  justify-content: flex-end;
+  gap: 0.5rem;
+  /* Center the cluster horizontally to match the centered header. */
+  justify-content: center;
+  /* Center the button cluster vertically within the row so the peso,
+     edit, and trash icons sit on the same horizontal axis as the
+     thumbnail center and the values in adjacent columns. */
+  align-items: center;
+  /* Match the row height for stable hit targets — every action cell
+     is the same size regardless of which buttons render inside. */
+  height: 100%;
 }
 
 .studio-btn {
@@ -5506,15 +6406,39 @@ body.light .vu-btn-secondary {
   color: #dc2626;
 }
 
-/* Monetize toggle — gold-tinted when active, neutral grey when off */
+/* Peso glyph used inside the monetize toggle. Pure typographic icon
+   (no SVG) — the button itself supplies the circular background, this
+   span just paints the ₱ centered with the right optical weight. */
+.studio-btn-peso {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 0.86rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+/* Monetize toggle — green-tinted when active (mirrors the universal
+   "money / earning / on" color cue used everywhere else in the
+   product), neutral grey when off. Sized down to a small circle so
+   it reads as a "coin" rather than a generic 34px action square. */
+.studio-btn-monetize {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+}
 .studio-btn-monetize:hover {
-  background: rgba(217, 119, 6, 0.12);
-  color: #d97706;
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d;
 }
 .studio-btn-monetize.is-on {
-  background: linear-gradient(135deg, #fbbf24, #f59e0b);
+  background: linear-gradient(135deg, #4ade80, #16a34a);
   color: #fff;
-  box-shadow: 0 3px 10px rgba(217, 119, 6, 0.30);
+  box-shadow: 0 3px 10px rgba(22, 163, 74, 0.30);
 }
 .studio-btn-monetize.is-on:hover {
   filter: brightness(1.05);
@@ -5522,12 +6446,144 @@ body.light .vu-btn-secondary {
   color: #fff;
 }
 body:not(.light) .studio-btn-monetize:hover {
-  background: rgba(251, 191, 36, 0.18);
-  color: #fcd34d;
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
 }
 body:not(.light) .studio-btn-monetize.is-on {
-  background: linear-gradient(135deg, #fcd34d, #fbbf24);
-  color: #1a1428;
+  background: linear-gradient(135deg, #86efac, #22c55e);
+  color: #052e16;
+}
+
+/* ─── Pagination bar (May 2026) ─── */
+.studio-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 0.6rem 0.85rem;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(248, 244, 255, 0.7), rgba(241, 234, 255, 0.55));
+  border: 1px solid rgba(139, 92, 246, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  font-size: 0.82rem;
+  color: #6b21a8;
+  flex-wrap: wrap;
+}
+.studio-pagination-pagesize {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.studio-pagination-label {
+  color: #7c3aed;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.studio-pagesize-group {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(139, 92, 246, 0.10);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+}
+.studio-pagesize-option {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 0.28rem 0.7rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: rgba(76, 29, 149, 0.7);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+  min-width: 36px;
+}
+.studio-pagesize-option:hover:not(.is-selected) {
+  background: rgba(139, 92, 246, 0.12);
+  color: #6d28d9;
+}
+.studio-pagesize-option:active { transform: scale(0.97); }
+.studio-pagesize-option.is-selected {
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.95), rgba(124, 58, 237, 0.95));
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(60, 20, 120, 0.25),
+    0 3px 10px rgba(124, 58, 237, 0.35);
+}
+.studio-pagination-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.studio-pagination-info {
+  color: #6b21a8;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  min-width: 100px;
+  text-align: right;
+}
+.studio-pagination-btn {
+  appearance: none;
+  border: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(139, 92, 246, 0.12);
+  color: #6d28d9;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.studio-pagination-btn:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.22);
+  color: #5b21b6;
+  transform: scale(1.05);
+}
+.studio-pagination-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Dark-mode variants */
+body:not(.light) .studio-pagination {
+  background: linear-gradient(180deg, rgba(40, 24, 70, 0.55), rgba(28, 16, 50, 0.45));
+  border-color: rgba(139, 92, 246, 0.22);
+  color: #d8b4fe;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+body:not(.light) .studio-pagination-label,
+body:not(.light) .studio-pagination-info {
+  color: #c4b5fd;
+}
+body:not(.light) .studio-pagesize-group {
+  background: rgba(139, 92, 246, 0.14);
+  border-color: rgba(139, 92, 246, 0.28);
+}
+body:not(.light) .studio-pagesize-option {
+  color: rgba(196, 181, 253, 0.7);
+}
+body:not(.light) .studio-pagesize-option:hover:not(.is-selected) {
+  background: rgba(139, 92, 246, 0.20);
+  color: #ddd6fe;
+}
+body:not(.light) .studio-pagesize-option.is-selected {
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.95), rgba(124, 58, 237, 0.95));
+  color: #fff;
+}
+body:not(.light) .studio-pagination-btn {
+  background: rgba(139, 92, 246, 0.18);
+  color: #c4b5fd;
+}
+body:not(.light) .studio-pagination-btn:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.30);
+  color: #e9d5ff;
 }
 
 /* ─── Empty state ─── */
@@ -5651,7 +6707,7 @@ body:not(.light) .studio-table th {
 
 body:not(.light) .studio-table td {
   color: #e5e7eb;
-  border-bottom-color: rgba(255, 255, 255, 0.04);
+  /* No row/column borders in dark mode either. Border-less aesthetic. */
 }
 
 body:not(.light) .studio-table tbody tr:hover {
@@ -5670,7 +6726,8 @@ body:not(.light) .studio-cell-muted {
   color: #9ca3af;
 }
 
-body:not(.light) .studio-badge-ready {
+body:not(.light) .studio-badge-ready,
+body:not(.light) .studio-badge-published {
   background: rgba(34, 197, 94, 0.15);
   color: #4ade80;
 }
@@ -5678,6 +6735,17 @@ body:not(.light) .studio-badge-ready {
 body:not(.light) .studio-badge-processing {
   background: rgba(234, 179, 8, 0.15);
   color: #facc15;
+}
+
+body:not(.light) .studio-badge-scheduled {
+  background: rgba(139, 92, 246, 0.18);
+  color: #c4b5fd;
+}
+
+body:not(.light) .studio-badge-private,
+body:not(.light) .studio-badge-failed {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
 }
 
 body:not(.light) .studio-btn {
@@ -6647,13 +7715,31 @@ body:not(.light) .skeleton-row {
   background-size: 800px 100%;
 }
 
-/* ── Earned badges (Creator / Writer / Pioneer / Verified / Staff) ── */
+/* Plain-text role label — single word next to the username (Moderator
+   / Pioneer / Creator / Writer). No pill, no icon, no background — same
+   minimal treatment the mobile app uses. Tightened from earlier:
+   smaller, snugger spacing so it reads as a quiet subtitle next to
+   the name rather than a separate visual element. */
+.profile-role-text {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text3);
+  margin-left: 0.15rem;
+  letter-spacing: 0.005em;
+  line-height: 1;
+  vertical-align: middle;
+}
+body.light .profile-role-text { color: var(--text3); }
+
+/* ── Earned badges row (legacy container, now wraps the single
+   role-text label too) — tightened so the text sits snug next to
+   the username + seal rather than floating awkwardly to the right. */
 .profile-badges-extra {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 0.35rem;
+  gap: 0.2rem;
   align-items: center;
-  margin-left: 0.25rem;
+  margin-left: 0;
 }
 .earned-badge {
   display: inline-flex;
@@ -8464,6 +9550,46 @@ body:not(.light) .dm-internal-arrow { color: #c4b5fd; }
   pointer-events: none;
 }
 
+/* Multi-image gallery — 2-column grid with square cells. Up to 4 visible;
+   the 4th cell shows a "+N" overlay when there are more. Layout matches
+   the mobile MessageBubble grid so threads look consistent across platforms. */
+.dm-bubble-gallery {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  margin: -0.55rem -0.85rem 0.4rem;
+  border-radius: 14px;
+  overflow: hidden;
+  max-width: 280px;
+}
+.dm-bubble-gallery-cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  cursor: zoom-in;
+  background: rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+.dm-bubble-gallery-cell img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.18s ease;
+}
+.dm-bubble-gallery-cell:hover img { transform: scale(1.04); }
+.dm-bubble-gallery-overflow {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 1.5rem;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
 /* Image-only bubble: tighter padding, transparent gradient (just the image) */
 .dm-bubble.is-image-only {
   background: transparent !important;
@@ -9356,20 +10482,41 @@ body:not(.light) .cp-action-btn-primary { background: linear-gradient(135deg, #7
 }
 .topbar-coin-pill:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(180, 83, 9, 0.20); }
 .topbar-coin-pill:active { transform: translateY(0); }
-.topbar-coin-icon { display: inline-flex; width: 22px; height: 22px; }
-.topbar-coin-icon svg { width: 100%; height: 100%; display: block; }
+/* Icon-only wallet pill — collapses around the logo, no padding for
+   the now-hidden balance numbers. Used when the pill renders just
+   the Goals-Store mark with no inline balances. The balance spans
+   stay in the DOM (so existing JS that writes to #topbarCoinBalance
+   / #topbarStarBalance keeps working) but are forced hidden here,
+   overriding their `display: inline-flex` defaults. */
+.topbar-coin-pill.icon-only {
+  gap: 0;
+  padding: 0.28rem;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+.topbar-coin-pill.icon-only:hover {
+  background: rgba(168, 85, 247, 0.08);
+}
+.topbar-coin-pill.icon-only .topbar-coin-balance,
+.topbar-coin-pill.icon-only .topbar-star-tip {
+  display: none !important;
+}
+.topbar-coin-icon { display: inline-flex; width: 38px; height: 38px; }
+.topbar-coin-icon svg,
+.topbar-coin-icon img { width: 100%; height: 100%; display: block; object-fit: contain; }
 .topbar-coin-balance { font-size: 0.92rem; min-width: 1ch; }
 .topbar-star-tip {
   display: inline-flex;
   align-items: center;
   gap: 0.2rem;
-  padding: 0.16rem 0.45rem 0.16rem 0.35rem;
-  margin-left: 0.25rem;
-  background: rgba(168, 85, 247, 0.12);
-  border-radius: 999px;
+  padding-left: 0.45rem;
+  margin-left: 0.35rem;
+  border-left: 1px solid rgba(180, 83, 9, 0.28);
   color: #6b21a8;
-  font-size: 0.78rem;
+  font-size: 0.82rem;
   font-weight: 700;
+  background: transparent;
 }
 .topbar-star-tip svg { display: block; }
 
@@ -9379,8 +10526,9 @@ body:not(.light) .topbar-coin-pill {
   color: #fde68a;
 }
 body:not(.light) .topbar-star-tip {
-  background: rgba(168, 85, 247, 0.18);
+  background: transparent;
   color: #d8b4fe;
+  border-left-color: rgba(251, 191, 36, 0.32);
 }
 
 /* ── Lock controls (chapter editor + Studio video edit) ──────────────────── */
@@ -9913,6 +11061,530 @@ body:not(.light) .unlock-modal-close:hover { background: rgba(255,255,255,0.08);
   color: var(--text);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
+}
+
+/* Clickable balance card variant (May 2026) — both Coins and Stars
+   cards become buttons that open the wallet-history modal filtered to
+   the matching currency. Cursor + hover lift + "View history →" CTA
+   for affordance. */
+.store-balance-card-clickable {
+  cursor: pointer;
+  appearance: none;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+.store-balance-card-clickable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(124, 58, 237, 0.10);
+  border-color: rgba(139, 92, 246, 0.28);
+}
+.store-balance-card-clickable:active { transform: translateY(0); }
+.store-balance-card-clickable:focus-visible {
+  outline: 2px solid #7c3aed;
+  outline-offset: 2px;
+}
+.store-balance-cta {
+  margin-top: 0.18rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #7c3aed;
+  letter-spacing: 0.01em;
+}
+.store-balance-card-clickable:hover .store-balance-cta { color: #5b21b6; }
+body:not(.light) .store-balance-cta { color: #c4b5fd; }
+body:not(.light) .store-balance-card-clickable:hover .store-balance-cta { color: #ddd6fe; }
+
+/* ──────────────────────────────────────────────────────────────────
+   Wallet history modal — premium redesign (May 2026)
+   ──────────────────────────────────────────────────────────────────
+   Three visual zones:
+     1. Header band — soft gradient backdrop, currency-tinted accent bar
+        on top edge, refined close button.
+     2. Summary hero — three large stats with glyph-suffixed numbers,
+        thin dividers between items, sits flush under the header.
+     3. List — date-grouped, card-styled rows with subtle elevation on
+        hover and staggered fade-in. Bulk rows lifted via accent strip.
+*/
+.wallet-history-modal {
+  max-width: 600px;
+  width: 92vw;
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 18px;
+  background: var(--card-soft, #fff);
+  box-shadow:
+    0 25px 50px -12px rgba(76, 29, 149, 0.25),
+    0 0 0 1px rgba(139, 92, 246, 0.08);
+}
+
+/* Header — flat gradient strip with a 2px accent line so the dialog
+   feels weighted at the top edge. Title icon sits in a soft tinted
+   square (currency-aware). */
+.wallet-history-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.1rem 1.4rem 1rem;
+  background: linear-gradient(180deg, rgba(245, 243, 255, 0.95), rgba(255, 255, 255, 0));
+  border-bottom: 1px solid rgba(139, 92, 246, 0.08);
+}
+.wallet-history-header::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: linear-gradient(90deg, #a78bfa, #7c3aed, #6d28d9);
+  border-radius: 18px 18px 0 0;
+}
+.wallet-history-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.wallet-history-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(124, 58, 237, 0.10));
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.15);
+}
+.wallet-history-modal .modal-close {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.10);
+  color: #6b21a8;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.18s, transform 0.18s, color 0.18s;
+}
+.wallet-history-modal .modal-close:hover {
+  background: rgba(139, 92, 246, 0.14);
+  color: #5b21b6;
+  transform: rotate(90deg);
+}
+
+/* Summary hero — three big stats. Soft gradient backdrop, thin
+   vertical separators between items, big tabular numbers, glyph
+   appended as a faded suffix so the eye registers the currency. */
+.wallet-history-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+  padding: 1.1rem 1.4rem 1.25rem;
+  background: linear-gradient(180deg, rgba(244, 240, 255, 0.55), rgba(232, 220, 255, 0.20));
+  border-bottom: 1px solid rgba(139, 92, 246, 0.08);
+}
+.wallet-history-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+  padding: 0 0.85rem;
+  position: relative;
+}
+.wallet-history-summary-item + .wallet-history-summary-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 12%;
+  bottom: 12%;
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(139, 92, 246, 0.18), transparent);
+}
+.wallet-history-summary-item:first-child { padding-left: 0; }
+.wallet-history-summary-item:last-child  { padding-right: 0; }
+.wallet-history-summary-label {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6b21a8;
+  opacity: 0.82;
+}
+.wallet-history-summary-value {
+  font-size: 1.55rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  line-height: 1.05;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+.wallet-history-summary-glyph {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: -2px;
+  opacity: 0.85;
+  margin-left: 0.18rem;
+}
+.wallet-history-summary-glyph svg {
+  display: block;
+}
+
+/* Tiny coin/star glyph inline with the "Bal 514" line on each row. */
+.wallet-history-bal-glyph {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: -1px;
+  margin-left: 0.18rem;
+  opacity: 0.82;
+}
+.wallet-history-bal-glyph svg {
+  display: block;
+}
+.wallet-history-summary-positive { color: #15803d; }
+.wallet-history-summary-negative { color: #b91c1c; }
+
+/* List container */
+.wallet-history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.6rem 0.85rem 1rem;
+  background: var(--card-soft, #fff);
+  scroll-behavior: smooth;
+}
+.wallet-history-list::-webkit-scrollbar { width: 8px; }
+.wallet-history-list::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.25);
+  border-radius: 4px;
+}
+.wallet-history-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.40);
+}
+
+/* Loading + empty states */
+.wallet-history-loading,
+.wallet-history-empty {
+  text-align: center;
+  padding: 2.8rem 1.5rem;
+  color: var(--text3);
+}
+.wallet-history-loading-spinner {
+  width: 32px;
+  height: 32px;
+  margin: 0 auto 0.75rem;
+  border: 3px solid rgba(139, 92, 246, 0.15);
+  border-top-color: #7c3aed;
+  border-radius: 50%;
+  animation: wallet-history-spin 0.7s linear infinite;
+}
+@keyframes wallet-history-spin { to { transform: rotate(360deg); } }
+.wallet-history-loading-text { font-size: 0.85rem; color: var(--text3); }
+
+.wallet-history-empty-illustration {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 22px;
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.16), rgba(124, 58, 237, 0.08));
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.14);
+  margin: 0 auto 0.85rem;
+  opacity: 0.92;
+}
+.wallet-history-empty-illustration svg {
+  display: block;
+}
+body:not(.light) .wallet-history-empty-illustration {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.26), rgba(124, 58, 237, 0.14));
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.20);
+}
+.wallet-history-empty-title { font-size: 1rem; font-weight: 700; color: var(--text2); margin-bottom: 0.35rem; }
+.wallet-history-empty-sub   { font-size: 0.85rem; color: var(--text3); max-width: 320px; margin: 0 auto; line-height: 1.4; }
+
+/* Date section divider — small uppercase chip-like header */
+.wallet-history-date-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 0.5rem 0.4rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #6b21a8;
+  opacity: 0.7;
+}
+.wallet-history-date-divider span {
+  flex-shrink: 0;
+}
+.wallet-history-date-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.18), transparent);
+}
+.wallet-history-date-divider:first-child { padding-top: 0.4rem; }
+
+/* Row card — slight elevation, soft border, generous padding. Each
+   row reads as a discrete card with a left icon column and a right
+   amount/balance column. */
+.wallet-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--card-soft, #fff);
+  border: 1px solid rgba(139, 92, 246, 0.06);
+  border-radius: 12px;
+  margin-bottom: 0.35rem;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  opacity: 0;
+  animation: wallet-history-row-in 0.32s ease-out forwards;
+}
+@keyframes wallet-history-row-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.wallet-history-row:hover {
+  transform: translateY(-1px);
+  border-color: rgba(139, 92, 246, 0.18);
+  box-shadow: 0 6px 16px -6px rgba(124, 58, 237, 0.18);
+}
+
+/* Left-side kind icon — 36px rounded square, currency/direction tint. */
+.wallet-history-row-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(139, 92, 246, 0.10);
+  color: #7c3aed;
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.06);
+}
+.wallet-history-row-credit .wallet-history-row-icon {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.16), rgba(22, 163, 74, 0.10));
+  color: #15803d;
+  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.18);
+}
+body:not(.light) .wallet-history-row-icon {
+  background: rgba(139, 92, 246, 0.20);
+  color: #c4b5fd;
+}
+body:not(.light) .wallet-history-row-credit .wallet-history-row-icon {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.24), rgba(22, 163, 74, 0.16));
+  color: #4ade80;
+}
+
+/* Bulk-unlock variant — premium purple gradient bg, left accent strip,
+   weighty icon tile. */
+.wallet-history-row-bulk {
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.10), rgba(139, 92, 246, 0.02));
+  border-color: rgba(139, 92, 246, 0.22);
+  border-left: 3px solid transparent;
+  border-image: linear-gradient(180deg, #a78bfa, #7c3aed) 1;
+  position: relative;
+}
+.wallet-history-row-bulk::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at top left, rgba(167, 139, 250, 0.10), transparent 60%);
+}
+.wallet-history-row-bulk .wallet-history-row-icon {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.40), rgba(124, 58, 237, 0.28));
+  color: #5b21b6;
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.35), 0 2px 6px rgba(124, 58, 237, 0.18);
+}
+body:not(.light) .wallet-history-row-bulk {
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.20), rgba(139, 92, 246, 0.06));
+  border-color: rgba(167, 139, 250, 0.30);
+}
+body:not(.light) .wallet-history-row-bulk .wallet-history-row-icon {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.38), rgba(124, 58, 237, 0.32));
+  color: #ddd6fe;
+}
+
+/* Row meta column */
+.wallet-history-row-meta { flex: 1; min-width: 0; }
+.wallet-history-row-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  letter-spacing: -0.005em;
+}
+.wallet-history-row-title-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* BULK pill — purple gradient with inner sheen + subtle drop shadow.
+   Slight scale-up on row hover to feel responsive. */
+.wallet-history-pill {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0.16rem 0.5rem;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  border-radius: 999px;
+  line-height: 1;
+  transition: transform 0.18s, box-shadow 0.18s;
+}
+.wallet-history-pill-bulk {
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  color: #fff;
+  box-shadow:
+    0 1px 4px rgba(124, 58, 237, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  text-shadow: 0 1px 0 rgba(76, 29, 149, 0.25);
+}
+.wallet-history-row:hover .wallet-history-pill-bulk {
+  transform: scale(1.05);
+  box-shadow:
+    0 3px 8px rgba(124, 58, 237, 0.48),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+/* Sub-line — small grey row beneath the title with category + time. */
+.wallet-history-row-sub {
+  font-size: 0.74rem;
+  color: var(--text3);
+  margin-top: 0.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wallet-history-row-sub-dot {
+  color: var(--text3);
+  opacity: 0.45;
+}
+.wallet-history-row-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text3);
+  opacity: 0.85;
+}
+
+/* Right column — stacked amount + balance-after. Amount is the focal
+   point, balance is a muted ledger reference. */
+.wallet-history-row-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.18rem;
+  flex-shrink: 0;
+}
+.wallet-history-row-amount {
+  font-size: 1.05rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.wallet-history-row-balance {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text3);
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.wallet-history-row-credit .wallet-history-row-amount { color: #15803d; }
+.wallet-history-row-debit  .wallet-history-row-amount { color: #b91c1c; }
+
+/* Dark mode tuning */
+body:not(.light) .wallet-history-modal {
+  background: linear-gradient(180deg, #1f1438, #181028);
+  box-shadow:
+    0 25px 50px -12px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(139, 92, 246, 0.18);
+}
+body:not(.light) .wallet-history-header {
+  background: linear-gradient(180deg, rgba(60, 35, 100, 0.50), rgba(40, 22, 80, 0));
+  border-bottom-color: rgba(139, 92, 246, 0.18);
+}
+body:not(.light) .wallet-history-icon {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.30), rgba(124, 58, 237, 0.20));
+  box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.22);
+}
+body:not(.light) .wallet-history-modal .modal-close {
+  background: rgba(139, 92, 246, 0.18);
+  border-color: rgba(167, 139, 250, 0.22);
+  color: #ddd6fe;
+}
+body:not(.light) .wallet-history-modal .modal-close:hover {
+  background: rgba(139, 92, 246, 0.30);
+  color: #fff;
+}
+body:not(.light) .wallet-history-summary {
+  background: linear-gradient(180deg, rgba(60, 35, 100, 0.55), rgba(40, 22, 80, 0.30));
+  border-bottom-color: rgba(139, 92, 246, 0.20);
+}
+body:not(.light) .wallet-history-summary-item + .wallet-history-summary-item::before {
+  background: linear-gradient(180deg, transparent, rgba(196, 181, 253, 0.22), transparent);
+}
+body:not(.light) .wallet-history-summary-label { color: #c4b5fd; }
+body:not(.light) .wallet-history-summary-positive { color: #4ade80; }
+body:not(.light) .wallet-history-summary-negative { color: #fca5a5; }
+body:not(.light) .wallet-history-date-divider { color: #c4b5fd; }
+body:not(.light) .wallet-history-date-divider::after {
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.25), transparent);
+}
+body:not(.light) .wallet-history-list { background: transparent; }
+body:not(.light) .wallet-history-row {
+  background: rgba(46, 28, 78, 0.55);
+  border-color: rgba(139, 92, 246, 0.16);
+}
+body:not(.light) .wallet-history-row:hover {
+  border-color: rgba(167, 139, 250, 0.32);
+  box-shadow: 0 6px 18px -6px rgba(0, 0, 0, 0.55);
+}
+body:not(.light) .wallet-history-row-credit .wallet-history-row-amount { color: #4ade80; }
+body:not(.light) .wallet-history-row-debit  .wallet-history-row-amount { color: #fca5a5; }
+body:not(.light) .wallet-history-row-balance { color: #c4b5fd; opacity: 0.6; }
+
+/* Narrow-viewport shrinks — keep the modal usable on 360dp screens
+   without sacrificing the premium feel. Drop summary numbers, tighten
+   row padding, hide balance-after for space. */
+@media (max-width: 420px) {
+  .wallet-history-summary { padding: 0.9rem 1rem 1rem; }
+  .wallet-history-summary-item { padding: 0 0.55rem; }
+  .wallet-history-summary-value { font-size: 1.25rem; }
+  .wallet-history-summary-glyph { font-size: 0.8rem; }
+  .wallet-history-header { padding: 0.95rem 1rem 0.85rem; }
+  .wallet-history-list { padding: 0.5rem 0.6rem 0.9rem; }
+  .wallet-history-row { padding: 0.7rem 0.75rem; gap: 0.65rem; }
+  .wallet-history-row-icon { width: 32px; height: 32px; }
+  .wallet-history-row-title { font-size: 0.88rem; }
+  .wallet-history-row-amount { font-size: 0.98rem; }
+  .wallet-history-row-balance { display: none; }
 }
 
 /* Earn-a-star block */
@@ -10877,6 +12549,422 @@ body:not(.light) .video-monet-option-mode { background: rgba(255,255,255,0.10); 
   color: var(--text2);
   margin: 1.5rem 0 0.6rem;
 }
+/* Withdrawals-under-maintenance banner — sits above the Available /
+   Pending balance cards on the Earnings tab so writers see the
+   reassurance copy before scanning their numbers. Same intent as the
+   mobile banner in earnings.jsx (and same purple-soft chassis as
+   BalanceRecoveryBanner). Soft purple wash + purple-tinted border so
+   it reads informational, not alarming. */
+.author-earnings-maintenance-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin: 0 0 1rem;
+  border-radius: 14px;
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.28);
+}
+.author-earnings-maintenance-icon {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(139, 92, 246, 0.16);
+  color: #7c3aed;
+}
+.author-earnings-maintenance-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.author-earnings-maintenance-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.01em;
+  margin-bottom: 4px;
+}
+.author-earnings-maintenance-body {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text2);
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Earnings breakdown drill-down (Pass C — May 2026 mobile parity).
+   Triggered by clicking a per-source tile on the Earnings page.
+   Replaces the tab content + tabs while open. Header has a back
+   button, the body has a colored summary card + transaction rows.
+   ────────────────────────────────────────────────────────────── */
+.earnings-breakdown-view { padding-top: 0.25rem; }
+.earnings-breakdown-view-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+.earnings-breakdown-back {
+  appearance: none;
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  background: rgba(139, 92, 246, 0.08);
+  color: #6b21a8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, transform 0.1s;
+}
+.earnings-breakdown-back:hover { background: rgba(139, 92, 246, 0.18); color: #5b21b6; }
+.earnings-breakdown-back:active { transform: scale(0.95); }
+.earnings-breakdown-view-title {
+  margin: 0;
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #1f2937;
+}
+.earnings-breakdown-view-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  color: #7c3aed;
+}
+.earnings-breakdown-view-spacer { width: 36px; flex-shrink: 0; }
+
+/* Summary card — accent-tinted backdrop matches the source family. */
+.earnings-breakdown-summary {
+  padding: 1rem 1.1rem;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(245, 240, 255, 0.95), rgba(232, 220, 255, 0.7));
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 4px 14px rgba(124, 58, 237, 0.08);
+  margin-bottom: 1rem;
+}
+.earnings-breakdown-summary-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #6b21a8;
+}
+.earnings-breakdown-summary-amount {
+  margin-top: 0.3rem;
+  font-size: 1.65rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #1f2937;
+  font-variant-numeric: tabular-nums;
+}
+.earnings-breakdown-summary-stats {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.7rem;
+  align-items: center;
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+.earnings-breakdown-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-variant-numeric: tabular-nums;
+}
+.earnings-breakdown-stat svg { color: #b45309; }
+.earnings-breakdown-stat:nth-child(3) svg { color: #a855f7; } /* stars row */
+.earnings-breakdown-stat-sep { color: #cbd5e1; }
+
+/* Transaction list */
+.earnings-breakdown-list { display: flex; flex-direction: column; gap: 0.55rem; }
+.earnings-breakdown-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.85rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid rgba(139, 92, 246, 0.14);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+.earnings-breakdown-row-text { flex: 1; min-width: 0; }
+.earnings-breakdown-row-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #111827;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.earnings-breakdown-row-date {
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
+  color: #6b7280;
+}
+.earnings-breakdown-row-amount {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.earnings-breakdown-row-num { font-size: 0.95rem; font-weight: 700; color: #111827; }
+.earnings-breakdown-row-suffix { font-size: 0.74rem; color: #6b7280; }
+
+/* Empty + loading states */
+.earnings-breakdown-loading {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: #6b7280;
+  font-size: 0.85rem;
+}
+.earnings-breakdown-empty {
+  padding: 3rem 1rem 2rem;
+  text-align: center;
+  color: #6b7280;
+}
+.earnings-breakdown-empty-icon { color: rgba(139, 92, 246, 0.45); margin-bottom: 0.5rem; }
+.earnings-breakdown-empty-title { font-size: 0.95rem; font-weight: 600; color: #4b5563; }
+.earnings-breakdown-empty-sub { font-size: 0.8rem; color: #9ca3af; margin-top: 0.3rem; }
+
+/* Pager */
+.earnings-breakdown-pager { display: flex; justify-content: center; margin-top: 1.25rem; }
+
+/* Make breakdown tiles look clickable — cursor + chevron + hover lift */
+.earnings-breakdown-card-clickable {
+  appearance: none;
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  background: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+.earnings-breakdown-card-clickable:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 18px rgba(124, 58, 237, 0.12);
+  border-color: rgba(139, 92, 246, 0.34);
+}
+.earnings-breakdown-card-clickable:active { transform: translateY(0); }
+.earnings-breakdown-card-clickable:focus-visible { outline: 2px solid #7c3aed; outline-offset: 2px; }
+.earnings-breakdown-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(139, 92, 246, 0.55);
+  flex-shrink: 0;
+  transition: color 0.15s, transform 0.15s;
+}
+.earnings-breakdown-card-clickable:hover .earnings-breakdown-chevron {
+  color: #7c3aed;
+  transform: translateX(2px);
+}
+
+/* Dark-mode variants */
+body:not(.light) .earnings-breakdown-back {
+  background: rgba(139, 92, 246, 0.20);
+  border-color: rgba(167, 139, 250, 0.35);
+  color: #ddd6fe;
+}
+body:not(.light) .earnings-breakdown-back:hover { background: rgba(139, 92, 246, 0.30); color: #fff; }
+body:not(.light) .earnings-breakdown-view-title { color: #f3f4f6; }
+body:not(.light) .earnings-breakdown-summary {
+  background: linear-gradient(180deg, rgba(60, 35, 100, 0.65), rgba(40, 22, 80, 0.55));
+  border-color: rgba(167, 139, 250, 0.40);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+body:not(.light) .earnings-breakdown-summary-label  { color: #c4b5fd; }
+body:not(.light) .earnings-breakdown-summary-amount { color: #f3f4f6; }
+body:not(.light) .earnings-breakdown-summary-stats  { color: #9ca3af; }
+body:not(.light) .earnings-breakdown-row {
+  background: rgba(40, 24, 70, 0.55);
+  border-color: rgba(139, 92, 246, 0.26);
+}
+body:not(.light) .earnings-breakdown-row-title  { color: #f3f4f6; }
+body:not(.light) .earnings-breakdown-row-date   { color: #9ca3af; }
+body:not(.light) .earnings-breakdown-row-num    { color: #f3f4f6; }
+body:not(.light) .earnings-breakdown-row-suffix { color: #9ca3af; }
+body:not(.light) .earnings-breakdown-loading,
+body:not(.light) .earnings-breakdown-empty       { color: #9ca3af; }
+body:not(.light) .earnings-breakdown-empty-title { color: #d1d5db; }
+body:not(.light) .earnings-breakdown-card-clickable {
+  background: rgba(40, 24, 70, 0.45);
+  border-color: rgba(139, 92, 246, 0.26);
+}
+body:not(.light) .earnings-breakdown-card-clickable:hover {
+  border-color: rgba(167, 139, 250, 0.45);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+}
+
+/* Minimalist Earnings page header — replaces the old purple hero
+   banner. Just typographic — no card, no border, no decoration. */
+.earnings-header {
+  /* Top margin trimmed 20px — pulls the header up tight against the
+     topbar so the Total earnings / This month tiles surface higher on
+     the viewport. Net effect on most desktop widths: header sits ~20px
+     closer to the topbar's bottom edge. */
+  margin: -20px 0 1rem;
+}
+.earnings-header-title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #111827;
+}
+.earnings-header-caption {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+body:not(.light) .earnings-header-title   { color: #f3f4f6; }
+body:not(.light) .earnings-header-caption { color: #9ca3af; }
+
+/* Lifetime totals row — sits ABOVE the Available / Under-review
+   cards. Two large tiles: "Total earnings" + "This month" with a
+   month picker. Mirrors mobile's primary hero. */
+.author-earnings-totals {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.author-earnings-total-tile {
+  padding: 1.1rem 1.25rem;
+  border-radius: 16px;
+  border: 1px solid rgba(139, 92, 246, 0.16);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(244, 240, 255, 0.65));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 4px 12px rgba(124, 58, 237, 0.06);
+}
+.author-earnings-total-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.author-earnings-total-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #6b21a8;
+  text-transform: uppercase;
+}
+.author-earnings-total-php {
+  margin-top: 0.4rem;
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #1f2937;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.author-earnings-total-foot {
+  margin-top: 0.35rem;
+  font-size: 0.74rem;
+  color: #6b7280;
+}
+/* Total-Lifetime tile gets a slight purple accent so it reads as the
+   primary indicator on the page. */
+.author-earnings-total-lifetime {
+  background: linear-gradient(180deg, rgba(245, 240, 255, 0.95), rgba(232, 220, 255, 0.7));
+  border-color: rgba(139, 92, 246, 0.28);
+}
+.author-earnings-total-lifetime .author-earnings-total-label { color: #5b21b6; }
+/* Month picker — minimal inline select that matches the tile. */
+.author-earnings-month-picker {
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(139, 92, 246, 0.10);
+  border: 1px solid rgba(139, 92, 246, 0.22);
+  color: #5b21b6;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.25rem 1.6rem 0.25rem 0.6rem;
+  border-radius: 8px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237c3aed' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.4rem center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.author-earnings-month-picker:hover {
+  background-color: rgba(139, 92, 246, 0.18);
+  border-color: rgba(139, 92, 246, 0.4);
+}
+.author-earnings-month-picker:focus-visible {
+  outline: 2px solid #7c3aed;
+  outline-offset: 1px;
+}
+
+/* Latest-withdrawal status callout — sits under Available amount.
+   Dot color + status copy reflect the state. */
+.author-earnings-withdrawal-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.45rem 0 0.25rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.08);
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: #6b21a8;
+}
+.author-earnings-withdrawal-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.author-earnings-withdrawal-status.is-pending  { color: #b45309; background: rgba(245, 158, 11, 0.12); }
+.author-earnings-withdrawal-status.is-approved { color: #1d4ed8; background: rgba(59, 130, 246, 0.12); }
+.author-earnings-withdrawal-status.is-paid     { color: #15803d; background: rgba(34, 197, 94, 0.12); }
+
+/* Dark-mode variants */
+body:not(.light) .author-earnings-total-tile {
+  background: linear-gradient(180deg, rgba(40, 24, 70, 0.55), rgba(28, 16, 50, 0.45));
+  border-color: rgba(139, 92, 246, 0.26);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+body:not(.light) .author-earnings-total-lifetime {
+  background: linear-gradient(180deg, rgba(60, 35, 100, 0.65), rgba(40, 22, 80, 0.55));
+  border-color: rgba(167, 139, 250, 0.40);
+}
+body:not(.light) .author-earnings-total-label   { color: #c4b5fd; }
+body:not(.light) .author-earnings-total-lifetime .author-earnings-total-label { color: #ddd6fe; }
+body:not(.light) .author-earnings-total-php     { color: #f3f4f6; }
+body:not(.light) .author-earnings-total-foot    { color: #9ca3af; }
+body:not(.light) .author-earnings-month-picker {
+  background-color: rgba(139, 92, 246, 0.20);
+  border-color: rgba(167, 139, 250, 0.35);
+  color: #ddd6fe;
+}
+body:not(.light) .author-earnings-month-picker:hover {
+  background-color: rgba(139, 92, 246, 0.30);
+}
+body:not(.light) .author-earnings-withdrawal-status            { background: rgba(139, 92, 246, 0.18); color: #c4b5fd; }
+body:not(.light) .author-earnings-withdrawal-status.is-pending  { color: #fbbf24; background: rgba(245, 158, 11, 0.18); }
+body:not(.light) .author-earnings-withdrawal-status.is-approved { color: #93c5fd; background: rgba(59, 130, 246, 0.18); }
+body:not(.light) .author-earnings-withdrawal-status.is-paid     { color: #4ade80; background: rgba(34, 197, 94, 0.20); }
+
 .author-earnings-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -10943,6 +13031,24 @@ body:not(.light) .video-monet-option-mode { background: rgba(255,255,255,0.10); 
 .author-earnings-payout-btn {
   align-self: flex-start;
   margin-top: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* Disabled state — used while withdrawals are under maintenance.
+   Same purple base so the button still reads as the primary action,
+   but at ~45% opacity with a not-allowed cursor so users see it's
+   intentionally inactive (not just slow to respond). The lock icon
+   reinforces the meaning. */
+.author-earnings-payout-btn:disabled,
+.author-earnings-payout-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.author-earnings-payout-btn-icon {
+  display: inline-flex;
+  align-items: center;
 }
 .author-earnings-foot {
   font-size: 0.74rem;
@@ -11014,6 +13120,7 @@ body:not(.light) .video-monet-option-mode { background: rgba(255,255,255,0.10); 
 
 @media (max-width: 640px) {
   .author-earnings-cards { grid-template-columns: 1fr; }
+  .author-earnings-totals { grid-template-columns: 1fr; }
   .earnings-row { grid-template-columns: 1fr auto; gap: 0.4rem 0.8rem; }
   .earnings-row-php { display: none; }
   .author-kyc-banner { flex-wrap: wrap; }
@@ -11380,6 +13487,149 @@ body:not(.light) .earnings-breakdown-icon { background: rgba(167,139,250,0.12); 
 }
 .payout-amount-coins { font-weight: 700; font-size: 1rem; color: #92400e; }
 .payout-amount-php { font-size: 0.84rem; color: var(--admin-text-2, #6b7280); margin-top: 0.1rem; }
+/* Highlighted peso amount — used in the new admin payout cards where
+   "0 coins" was removed and the peso figure is the primary number a
+   moderator scans for. Larger, bolder, brand purple. */
+.payout-amount-php-lg {
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: #7c3aed;
+  letter-spacing: -0.02em;
+  margin-top: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status tabs (Pending / Approved / Paid / Rejected / All). Replaced
+   the legacy <select> dropdown so a moderator can flip between
+   buckets at a glance. Pill-shaped tabs with a count badge per
+   status; active tab gets the brand purple. */
+.payouts-status-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0.75rem 0 1rem;
+  padding: 4px;
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  border-radius: 999px;
+  width: fit-content;
+}
+.payouts-status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--admin-text-2, #6b7280);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.payouts-status-tab:hover { background: rgba(139, 92, 246, 0.08); color: #7c3aed; }
+.payouts-status-tab.active {
+  background: #7c3aed;
+  color: #ffffff;
+  font-weight: 800;
+}
+.payouts-status-tab.active .payouts-status-count { color: rgba(255, 255, 255, 0.8); }
+.payouts-status-count {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Verification grid + media previews — what the moderator scans
+   before approving / paying out. KYC-fed account name, the user-
+   provided email + home address, plus thumbnail previews of the
+   GCash QR and signature so a moderator can match against the
+   destination account at a glance. Click any image to open the
+   full-size signed URL in a new tab. */
+.payout-verify {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 1.25rem;
+  padding: 1rem 1.1rem;
+  border-top: 1px solid rgba(139, 92, 246, 0.12);
+  background: rgba(139, 92, 246, 0.03);
+}
+.payout-verify-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 18px;
+  align-content: start;
+}
+.payout-verify-row {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.payout-verify-row-wide { grid-column: span 2; }
+.payout-verify-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-2, #6b7280);
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.payout-verify-val {
+  font-size: 0.86rem;
+  color: var(--admin-text, #111827);
+  font-weight: 500;
+  word-break: break-word;
+}
+.payout-verify-media {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.payout-verify-media-card {
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.payout-verify-media-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--admin-text-2, #6b7280);
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-align: center;
+}
+.payout-verify-img {
+  width: 100%;
+  height: 140px;
+  object-fit: contain;
+  background: #f7f5ff;
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+.payout-verify-media-empty {
+  font-size: 0.78rem;
+  color: var(--admin-text-2, #6b7280);
+  text-align: center;
+  padding: 32px 8px;
+  background: #f7f5ff;
+  border-radius: 6px;
+  font-style: italic;
+}
+
+/* Stack the verification grid + media on narrow viewports so the
+   thumbnails don't squeeze the data column. */
+@media (max-width: 760px) {
+  .payout-verify { grid-template-columns: 1fr; }
+  .payout-verify-grid { grid-template-columns: 1fr; }
+  .payout-verify-row-wide { grid-column: auto; }
+}
 .payout-status-badge {
   font-size: 0.7rem; font-weight: 800;
   letter-spacing: 0.04em; text-transform: uppercase;
@@ -12326,6 +14576,1015 @@ body:not(.light) .rank-genre-chip.active {
   font: inherit;
   color: var(--text);
   width: 100%;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   HOME LANDING (May 2026 — mosaic layout)
+   ─────────────────────────────────────────────────────────────────────
+   Magazine-style information-dense home view. Layout follows the
+   wireframe Charles sketched: a top 3-column region (videos main /
+   videos side / featured post) plus a 5-cover book row below.
+
+     .home-top
+        ├── .home-video-main   col 1 — hero + 3 medium videos
+        │       ├── .home-video-hero       (big featured video)
+        │       └── .home-video-medium-row (3 medium video cards)
+        ├── .home-video-side   col 2 — 3 small videos stacked
+        │       └── .home-video-small × 3
+        └── .home-featured-post col 3 — large post, spans full top height
+     .home-books               row of 5 portrait book covers
+
+   The single grid keeps the columns row-aligned: col 1's hero + medium
+   row equals col 2's three stacked smalls equals col 3's full-height
+   post. Each child opts into a grid-area that spans the right rows so
+   the geometry "just works" without manual height matching.
+
+   Selebox purple is preserved throughout — the wireframe used red/blue/
+   yellow to distinguish content types, but visually each card is a
+   purple-glass frosted panel matching the rest of the app.
+   ───────────────────────────────────────────────────────────────────── */
+
+.home-landing {
+  padding: 1rem 0 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ── Top region ──────────────────────────────────────────────────────
+   Single grid with three columns and two rows. The hero video sits in
+   (col 1, row 1); the medium video row sits in (col 1, row 2); the
+   side stack spans both rows in col 2; the featured post spans both
+   rows in col 3. Result: column heights align naturally.
+   ───────────────────────────────────────────────────────────────── */
+.home-top {
+  display: grid;
+  /* Col 1 (hero): 2.5 → 2.375fr (-5%). The freed 0.125fr distributed
+     equally to trending (0.92 → 0.98) and post (1.33 → 1.39). */
+  grid-template-columns: minmax(0, 2.375fr) minmax(0, 0.98fr) minmax(0, 1.39fr);
+  /* 2-row layout (May 2026 — books wrapped in a stack inside home-top
+     so they overlay (share vertical space with) the tall featured
+     post on the right, instead of pushing everything below them):
+       Row 1  Col 1: Hero video
+              Col 2: Trending video stack
+              Col 3: Featured post (spans both rows)
+       Row 2  Cols 1-2: Books stack (Trending + Recent Update grouped) */
+  grid-template-rows: auto auto;
+  /* Column gap tightened progressively: 1rem → 0.5rem → 5px. */
+  gap: 5px;
+  align-items: stretch;
+}
+
+/* Col 1 — videos main: just the hero video. Width restored to 100%
+   of col 1 (was 95% briefly to shrink the hero) so the trending
+   column sits flush right next to it with only the grid's 5px column
+   gap between them. If hero needs to shrink again, easier path is to
+   adjust the fr-value on col 1 — that way trending and post follow
+   automatically instead of leaving a gap. */
+.home-video-main {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+/* Col 2 — 4 Trending video cards stacked, matched to the hero's
+   height. CSS Grid's default align-items:stretch makes this column
+   the same height as col 1 (the hero). The cards inside use flex:1
+   so they distribute that available height equally — the column
+   ends up visually balanced with the hero, no empty trailing gap. */
+.home-video-side {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  /* Gap progressively tightened — 0.75rem → 0.45rem → 0.25rem.
+     ~8px total reduction between each of the 4 trending cards. */
+  gap: 0.25rem;
+  /* May 2026 — 20px horizontal breathing room on both sides of the
+     trending column so cards don't sit flush against the hero on the
+     left or the featured post on the right. */
+  padding-left: 20px;
+  padding-right: 20px;
+  /* Shift the entire trending column 10px to the left so it sits
+     closer to the hero. The post column compensates with its own
+     -10 margin-left. */
+  margin-left: -10px;
+  min-width: 0;
+  min-height: 0;
+  align-self: stretch;
+}
+
+/* Col 3 — featured post, full top-section height */
+.home-featured-post {
+  grid-column: 3;
+  /* Span both rows so the post sits beside both the videos row AND
+     the books stack below it — books "overlay" the post visually
+     because they share the same vertical strip on the page. */
+  grid-row: 1 / span 2;
+  min-width: 0;
+  /* May 2026 — pull the panel 10px toward the trending column so the
+     gap between trending (with its new 20px right-padding) and the
+     featured post reads as one tight visual break instead of two. */
+  margin-left: -10px;
+  /* Fixed 1200px height (was 900). _syncHomeTopHeights() no longer
+     stamps an inline height on this element, so this CSS rule wins.
+     Internal scroll handles any overflow within the 1200px window. */
+  height: 1200px;
+}
+
+/* ── Shared card primitives ────────────────────────────────────────── */
+
+.home-skeleton-card {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.18s ease;
+}
+
+.home-skeleton-card:hover { transform: translateY(-2px); }
+.home-skeleton-card:active { transform: translateY(0) scale(0.995); }
+
+.home-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 14px;
+  overflow: hidden;
+  background:
+    radial-gradient(100% 80% at 50% 50%, rgba(139, 92, 246, 0.18) 0%, transparent 60%),
+    linear-gradient(135deg, #1a1543 0%, #0e0b2c 100%);
+  border: 1px solid rgba(139, 92, 246, 0.20);
+  box-shadow: 0 8px 28px -12px rgba(124, 58, 237, 0.40);
+}
+
+/* Real <img> thumbnail — covers the whole .home-thumb container so
+   the gradient placeholder + the chips sit on top. */
+.home-thumb-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+body.light .home-thumb {
+  background: linear-gradient(135deg, #e8eaf2 0%, #f1f2f7 100%);
+  border-color: rgba(124, 58, 237, 0.16);
+  box-shadow: 0 8px 28px -12px rgba(124, 58, 237, 0.18);
+}
+
+/* Featured (hero) thumb — strict 16:9.
+   Previously this had aspect-ratio:auto + height:100% so it stretched
+   to fill the grid row's 1fr height; that made the hero look much taller
+   than wide. Now it sizes purely from its width via the 16:9 ratio
+   (matching the medium + trending thumbs), and the parent grid is set
+   to auto rows so it doesn't get force-stretched. */
+.home-thumb-wide {
+  aspect-ratio: 16 / 9;
+}
+
+.home-thumb-dur {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.6rem;
+  z-index: 1;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(10, 10, 31, 0.80);
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  backdrop-filter: blur(4px);
+}
+
+.home-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  padding: 0.55rem 0.25rem 0;
+}
+
+.home-card-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.home-card-sub {
+  font-size: 0.8rem;
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Hero video — biggest card on the page ─────────────────────────── */
+.home-video-hero {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* May 2026 — 10px left padding so the featured/hero video card has
+     breathing room from the page's left edge (parent .home-landing
+     has no horizontal padding). */
+  padding-left: 10px;
+}
+
+.home-video-hero .home-card-title { font-size: 1.05rem; -webkit-line-clamp: 2; }
+
+/* ── Medium video card — three in a row under the hero ─────────────── */
+.home-video-medium .home-card-title { font-size: 0.88rem; }
+
+/* ── Trending list — horizontal cards (thumb left, meta right) ──────
+   Minimal "Up Next" style: thumbnail on the left, title + creator +
+   duration stacked on the right. Each card uses flex:1 so the 5
+   cards distribute the column's height equally — that's what makes
+   the side column visually balance with the hero in col 1 (which
+   CSS Grid stretches to match). */
+.home-video-trending {
+  /* May 2026 — card height matches the thumbnail's intrinsic 16:9
+     height. Previously `flex: 1 1 0` distributed the column's full
+     height equally across 4 cards, leaving empty space below each
+     thumb because the thumb only takes 16:9 of its width. Switching
+     to `flex: 0 0 auto` makes each card size to its content (the
+     thumb), so card-bottom = thumb-bottom with no extra gap. */
+  flex: 0 0 auto;
+  /* Thumbnail-only — block layout because there's only one child. */
+  display: block;
+  padding: 0;
+  border-radius: 12px;
+  background: rgba(15, 8, 36, 0.35);
+  border: 1px solid rgba(167, 139, 250, 0.12);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
+  min-width: 0;
+  min-height: 0;
+  /* overflow hidden so the card's border-radius clips the thumb's
+     edges into the rounded corners. */
+  overflow: hidden;
+}
+.home-video-trending:hover {
+  background: rgba(139, 92, 246, 0.14);
+  border-color: rgba(167, 139, 250, 0.30);
+  transform: translateY(-1px);
+}
+.home-video-trending:active { transform: translateY(0) scale(0.99); }
+body.light .home-video-trending {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(124, 58, 237, 0.10);
+}
+body.light .home-video-trending:hover {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(124, 58, 237, 0.25);
+}
+
+.home-video-trending .home-thumb {
+  /* Thumb-only redesign — fill the full card width, 16:9 derives the height. */
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  height: auto;
+  /* Card's own border-radius + overflow:hidden does the corner
+     clipping now, so the thumb itself doesn't need rounded corners. */
+  border-radius: 0;
+}
+.home-video-trending .home-card-meta {
+  /* Padding moved here from the card so the thumb can sit flush at
+     top/bottom while the text still has reading breathing room. */
+  padding: 0.4rem 0.5rem 0.4rem 0;
+  gap: 0.15rem;
+  min-width: 0;
+  align-self: center;
+}
+.home-video-trending .home-card-title {
+  /* Font size shrunk ~2px (0.92rem → 0.8rem) and clamped to a single
+     line. With the title shorter and on one line, the meta block
+     reads tighter and the creator + views lines underneath stay
+     unambiguous secondary info. */
+  font-size: 0.8rem;
+  font-weight: 600;
+  -webkit-line-clamp: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.home-video-trending .home-card-sub {
+  font-size: 0.78rem;
+  color: var(--text3);
+  /* Single line — creator only on this row. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Third line of the trending meta block: views count. Slightly
+   smaller + dimmer than the creator line so the visual hierarchy
+   reads as title → creator → views. */
+.home-video-trending .home-card-views {
+  font-size: 0.72rem;
+  color: var(--text3);
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Featured post — col 3, spans full top height ──────────────────────
+   Slot container only. The inner content is a real .post-card rendered
+   by the regular renderPost() function (same DOM the Post tab uses), so
+   we deliberately strip the panel's own background/border/glow. Without
+   that strip we'd get a double-card look (post-card nested inside a
+   second purple-glow card).
+   Skeleton state keeps a soft glow so the slot doesn't look empty
+   before data lands. */
+.home-featured-post {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  transition: transform 0.18s ease;
+}
+
+.home-featured-post.home-skeleton-card {
+  /* Pre-load look — soft purple glow + gradient. Vanishes once the
+     real post-card is appended (we remove the skeleton class then). */
+  border: 1px solid rgba(139, 92, 246, 0.32);
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.20) 0%, rgba(20, 20, 51, 0.55) 100%);
+  box-shadow:
+    0 0 0 1px rgba(139, 92, 246, 0.12),
+    0 18px 60px -20px rgba(124, 58, 237, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+body.light .home-featured-post.home-skeleton-card {
+  border-color: rgba(124, 58, 237, 0.22);
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.08) 0%, rgba(241, 242, 247, 0.85) 100%);
+  box-shadow:
+    0 0 0 1px rgba(124, 58, 237, 0.10),
+    0 18px 60px -20px rgba(124, 58, 237, 0.30);
+}
+
+/* The panel matches the hero card's height edge-to-edge — same trick
+   the Trending column uses. CSS Grid's default align-items:stretch
+   plus min-height:0 + overflow-y:auto lets this column shrink down
+   to the row height (set by the hero) and scroll the 10 posts
+   internally. Result: all three top-row columns end at the same
+   horizontal line, no visual imbalance. */
+.home-featured-post {
+  display: flex;
+  flex-direction: column;
+  /* Gap progressively tightened — 0.75rem → 0.45rem → 0.25rem.
+     ~8px total reduction between each post card to match the
+     trending column's tighter rhythm. */
+  gap: 0.25rem;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139, 92, 246, 0.30) transparent;
+  padding: 0.4rem;
+}
+.home-featured-post::-webkit-scrollbar { width: 6px; }
+.home-featured-post::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.30);
+  border-radius: 999px;
+}
+.home-featured-post::-webkit-scrollbar-track { background: transparent; }
+
+/* Each post card inside the slot — natural height, no inner scroll.
+   The panel itself scrolls. */
+.home-featured-post .post-card {
+  width: 100%;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+/* ── Compression overrides for the mini featured-post slot ──────────
+   The home column is much narrower than the Discover feed, so the
+   default .post-card layout reads as cluttered. We collapse the card
+   to: header (avatar + author + time) → clamped body → media. The
+   action bar, share menu, comments toggle, reaction counters, and
+   3-dot menu are all hidden — they're full-Post-tab affordances, not
+   mini-slot ones. Click anywhere on the card opens the full post and
+   the user gets the full controls there. */
+.home-featured-post .post-card {
+  padding: 0.75rem 0.85rem;
+  border-radius: 12px;
+}
+
+/* Hide the action bar (Like/Comments/Repost/Share) entirely. */
+.home-featured-post .post-card .post-actions,
+.home-featured-post .post-card .post-stats,
+.home-featured-post .post-card .comments-section,
+.home-featured-post .post-card .post-menu-btn {
+  display: none !important;
+}
+
+/* Tighter header — smaller avatar + slimmer name/time. */
+.home-featured-post .post-card .post-header {
+  margin-bottom: 0.4rem;
+}
+.home-featured-post .post-card .post-header .avatar {
+  width: 32px;
+  height: 32px;
+}
+.home-featured-post .post-card .post-header .avatar img {
+  width: 100%;
+  height: 100%;
+}
+.home-featured-post .post-card .post-author {
+  font-size: 0.86rem;
+}
+.home-featured-post .post-card .post-time {
+  font-size: 0.72rem;
+}
+
+/* Body — line-clamped to 4 lines so long Tagalog drama hooks fit
+   without forcing the card to be huge. Slight font shrink for the
+   mini context. */
+.home-featured-post .post-card .post-body {
+  font-size: 0.86rem;
+  line-height: 1.4;
+  margin: 0.25rem 0 0.4rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Media (image + video) — round corners + cap max-height so a
+   portrait image doesn't dominate the panel. */
+.home-featured-post .post-card .post-image,
+.home-featured-post .post-card .post-video {
+  margin-top: 0.4rem;
+  border-radius: 10px;
+  overflow: hidden;
+  max-height: 220px;
+}
+.home-featured-post .post-card .post-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Reposted-card nested inside a featured post — collapse its
+   nested-card padding too so the mini doesn't get a double frame. */
+.home-featured-post .post-card .reposted-card {
+  padding: 0.5rem;
+  margin-top: 0.4rem;
+}
+.home-featured-post .post-card .reposted-card .post-body {
+  font-size: 0.8rem;
+  -webkit-line-clamp: 2;
+}
+.home-featured-post .post-card .reposted-banner {
+  font-size: 0.7rem;
+  margin: 0.2rem 0;
+}
+
+/* Link previews + pinned tags are also Post-tab-only affordances. */
+.home-featured-post .post-card .link-preview,
+.home-featured-post .post-card .post-pinned-tag {
+  display: none !important;
+}
+
+.home-featured-post-media {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(140% 100% at 70% 0%, rgba(167, 139, 250, 0.30) 0%, transparent 55%),
+    radial-gradient(120% 100% at 0% 100%, rgba(124, 58, 237, 0.30) 0%, transparent 50%),
+    linear-gradient(135deg, #1a1543 0%, #0e0b2c 100%);
+  z-index: 0;
+}
+
+body.light .home-featured-post-media {
+  background:
+    radial-gradient(140% 100% at 70% 0%, rgba(167, 139, 250, 0.22) 0%, transparent 55%),
+    linear-gradient(135deg, #eef0ff 0%, #f7f8fc 100%);
+}
+
+.home-featured-post-placeholder {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.16);
+  font-weight: 700;
+}
+
+body.light .home-featured-post-placeholder { color: rgba(124, 58, 237, 0.30); }
+
+.home-featured-post-overlay {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  min-height: 360px;
+  padding: 1.5rem 1.5rem 1.4rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  background: linear-gradient(180deg, transparent 0%, transparent 40%, rgba(10, 10, 31, 0.78) 100%);
+}
+
+body.light .home-featured-post-overlay {
+  background: linear-gradient(180deg, transparent 0%, transparent 40%, rgba(247, 248, 252, 0.88) 100%);
+}
+
+.home-featured-post-overline {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--purple-lt);
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.16);
+  border: 1px solid rgba(139, 92, 246, 0.32);
+}
+
+body.light .home-featured-post-overline {
+  color: var(--purple-dk);
+  background: rgba(124, 58, 237, 0.08);
+  border-color: rgba(124, 58, 237, 0.22);
+}
+
+.home-featured-post-title {
+  font-size: 1.45rem;
+  font-weight: 800;
+  line-height: 1.18;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+  /* Clamp very long Tagalog drama hooks to 4 lines so the panel's
+     height stays predictable — viewers can click through to read the
+     rest. The ellipsis fade is implicit in the line-clamp. */
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.home-featured-post-byline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text2);
+}
+
+.home-featured-post-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #7c3aed 0%, #4c1d95 100%);
+  border: 2px solid rgba(167, 139, 250, 0.5);
+  flex-shrink: 0;
+}
+
+.home-featured-post-author { font-weight: 600; color: var(--text); }
+.home-featured-post-dot { color: var(--text3); }
+.home-featured-post-when { color: var(--text3); }
+
+/* ── Book shelves — two labeled rows (Trending + Recent Update) ──────
+   Each shelf is a .home-books-section with a header + a 7-up grid.
+   The header is intentionally minimal — just the section title — so
+   the shelf reads as a piece of page content rather than a separate
+   widget. */
+
+.home-books-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  /* May 2026 — book shelf padding tuned in passes:
+       · all-around 60px → squeezed the cover grid uncomfortably
+       · top-only 60px   → fine vertically, but cards sat flush against
+                           the page edges
+     Final: 70px on top (60 + 10), 10px on left + right. Applies to
+     both Trending and Recent Update shelves via this shared class. */
+  padding-top: 70px;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+/* May 2026 — Books grouped into a single .home-books-stack inside
+   .home-top. The stack occupies row 2 of cols 1-2; featured post in
+   col 3 spans both rows. Within the stack, shelves stack vertically
+   with a gap. Width 100% of the stack's grid cell (which is itself
+   cols 1-2 of home-top). */
+.home-books-stack {
+  grid-column: 1 / span 2;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+#homeBooksTrending,
+#homeBooksRecent {
+  /* +20px top padding (May 2026) so each shelf header gets a bit of
+     breathing room above its title — first inside the books-stack
+     container, second between the two shelves. */
+  padding-top: 20px;
+  margin-top: 0;
+  /* Each shelf takes its grid cell's full width — the stack's flex
+     handles the vertical gap between the two shelves. */
+  width: 100%;
+}
+
+.home-books-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+/* "See all" link — sits at the right end of the shelf header opposite
+   the title. Clicking it navigates to the Books page (same surface as
+   the Books sidebar item). Visual: subtle purple-tinted text + chevron,
+   not a primary button. Hover firms up the color + nudges the chevron. */
+.home-books-seeall {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--purple-lt);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
+}
+.home-books-seeall:hover {
+  background: rgba(139, 92, 246, 0.10);
+  border-color: rgba(139, 92, 246, 0.30);
+  color: var(--text);
+}
+.home-books-seeall:hover svg {
+  transform: translateX(2px);
+}
+.home-books-seeall svg {
+  transition: transform 0.15s ease;
+}
+.home-books-seeall:active { transform: scale(0.97); }
+body.light .home-books-seeall {
+  color: var(--purple-dk);
+}
+body.light .home-books-seeall:hover {
+  background: rgba(124, 58, 237, 0.08);
+  border-color: rgba(124, 58, 237, 0.22);
+  color: #4c1d95;
+}
+
+.home-books-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  color: var(--text);
+  margin: 0;
+}
+
+/* Books row wrapper — relative-positioned so the right-arrow can
+   anchor to the row's right edge and vertically center on the books
+   inside it. The arrow lives next to the row, not in the header. */
+.home-books-row {
+  position: relative;
+}
+
+/* Next-page arrow — sits at the right edge of the books row,
+   vertically centered with the cover area. Purple-glass styling
+   matches the topbar icon buttons so the whole page feels like one
+   material. Sits slightly outside the rightmost book so it doesn't
+   overlap the cover. */
+.home-books-next {
+  position: absolute;
+  /* Anchor at the right edge of the row, then nudge a little outside
+     so the button doesn't visually compete with the last book cover. */
+  right: -22px;
+  /* Center on the cover (book cards are cover + title + author stacked
+     vertically; the cover is roughly the top ~75% of the card, so we
+     anchor a bit above the card midpoint). */
+  top: 38%;
+  transform: translateY(-50%);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background:
+    radial-gradient(80% 80% at 30% 30%, rgba(167, 139, 250, 0.25) 0%, transparent 70%),
+    rgba(15, 8, 36, 0.85);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(167, 139, 250, 0.40);
+  color: #fff;
+  cursor: pointer;
+  box-shadow:
+    0 8px 22px -6px rgba(124, 58, 237, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.15s ease, box-shadow 0.18s ease;
+}
+.home-books-next:hover {
+  border-color: rgba(196, 181, 253, 0.85);
+  transform: translateY(-50%) translateX(3px);
+  box-shadow:
+    0 12px 28px -6px rgba(167, 139, 250, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.home-books-next:active { transform: translateY(-50%) translateX(1px) scale(0.95); }
+.home-books-next:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: translateY(-50%);
+  box-shadow: 0 4px 12px -6px rgba(124, 58, 237, 0.30);
+}
+body.light .home-books-next {
+  background:
+    radial-gradient(80% 80% at 30% 30%, rgba(167, 139, 250, 0.20) 0%, transparent 70%),
+    rgba(255, 255, 255, 0.88);
+  border-color: rgba(124, 58, 237, 0.35);
+  color: var(--purple-dk);
+  box-shadow:
+    0 8px 22px -6px rgba(124, 58, 237, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+body.light .home-books-next:hover {
+  border-color: rgba(76, 29, 149, 0.65);
+  box-shadow:
+    0 12px 28px -6px rgba(124, 58, 237, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.home-books {
+  display: grid;
+  /* 6 covers per shelf (May 2026 — was 7). Each cell is 1fr so covers
+     evenly distribute the shelf width and grow/shrink with the column. */
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.home-book-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.home-book-cover {
+  position: relative;
+  width: 100%;
+  /* 2:3 — print-book-shelf ratio. Standard book cover proportions,
+     matches the rest of the app. Currently paired with object-fit:fill
+     on the image so 9:16 source covers stretch to fill the container
+     vertically (image becomes slightly taller than native). */
+  aspect-ratio: 2 / 3;
+  border-radius: 12px;
+  overflow: hidden;
+  background:
+    radial-gradient(100% 80% at 50% 30%, rgba(167, 139, 250, 0.22) 0%, transparent 55%),
+    linear-gradient(160deg, #2a1b62 0%, #0e0b2c 100%);
+  /* Removed the 1px violet border — it was acting as a thin inset
+     frame that visually pushed the cover image inward. The box-shadow
+     below still gives the card its lifted feel without intruding on
+     the artwork. */
+  box-shadow: 0 12px 30px -10px rgba(124, 58, 237, 0.45);
+}
+
+/* Real cover — fills the 2:3 container edge-to-edge. The image
+   arriving from Supabase is ALREADY at perfect 2:3 thanks to the
+   server-side resize=cover transform applied in _supabaseRatioCrop
+   (same approach mobile uses in lib/utils/image-source.js). So we
+   just object-fit:cover and the slot fills cleanly with no letterbox,
+   no zoom-in, no stretch — the cropping decision happens server-side
+   and is centered on the source artwork. */
+.home-book-cover-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+  display: block;
+}
+
+/* Cover chip — pill in the top-left corner. Same purple-gradient
+   treatment as the video card TRENDING pill so the visual vocabulary
+   stays consistent across shelves. Two variants:
+     · home-book-chip-trending → "TRENDING" on Trending shelf
+     · home-book-chip-new      → "NEW · CH. {N}" on Recent Update shelf
+   Same swatch on both — they communicate the same "fresh attention"
+   energy, just for different reasons. */
+.home-book-chip {
+  position: absolute;
+  top: 0.45rem;
+  left: 0.45rem;
+  z-index: 2;
+  display: inline-block;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #fff;
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.95) 0%, rgba(124, 58, 237, 0.95) 100%);
+  padding: 0.22rem 0.5rem;
+  border-radius: 6px;
+  box-shadow: 0 4px 10px -2px rgba(124, 58, 237, 0.55);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  white-space: nowrap;
+  max-width: calc(100% - 0.9rem); /* don't bleed past the cover */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Admin-only inline edit pencil — top-right corner of each book
+   cover. Fades in on hover over the parent .home-book-card so it
+   doesn't compete with the cover artwork when not in use. Click
+   triggers the replace flow without opening the book detail page.
+   Higher z-index than the cover chips so it stays clickable when
+   overlapping at narrow widths. */
+.home-book-edit {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 3;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: rgba(15, 8, 36, 0.85);
+  border: 1px solid rgba(167, 139, 250, 0.55);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 12px -4px rgba(124, 58, 237, 0.55);
+}
+.home-book-card:hover .home-book-edit {
+  opacity: 1;
+  transform: translateY(0);
+}
+.home-book-edit:hover {
+  background: rgba(124, 58, 237, 0.85);
+  border-color: rgba(196, 181, 253, 0.95);
+  box-shadow: 0 8px 20px -4px rgba(167, 139, 250, 0.7);
+}
+.home-book-edit:active { transform: translateY(0) scale(0.94); }
+body.light .home-book-edit {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(124, 58, 237, 0.45);
+  color: var(--purple-dk);
+}
+body.light .home-book-edit:hover {
+  background: var(--purple);
+  border-color: var(--purple-dk);
+  color: #fff;
+}
+
+/* Reads chip — bottom-right of cover, dark fill with white text.
+   Trending only. Same shape as the video duration chip. */
+.home-book-reads {
+  position: absolute;
+  right: 0.45rem;
+  bottom: 0.45rem;
+  z-index: 2;
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(10, 10, 31, 0.80);
+  padding: 0.18rem 0.45rem;
+  border-radius: 6px;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+body.light .home-book-cover {
+  background: linear-gradient(160deg, #e0d4ff 0%, #f1f2f7 100%);
+  border-color: rgba(124, 58, 237, 0.18);
+  box-shadow: 0 12px 30px -10px rgba(124, 58, 237, 0.18);
+}
+
+/* Title always reserves exactly 2 lines of space. Short titles
+   ("Owned by the Suarez") get blank space below; long titles
+   ("THEIR SHARED OBSESSION") fill both lines. Either way, the
+   author row below sits at the same y-offset on every card so the
+   whole row aligns into a clean grid. */
+.home-book-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* Two lines × 1.3 line-height = 2.6em. Setting both min- and
+     max- to the same value pins the box at exactly that height. */
+  min-height: 2.6em;
+  max-height: 2.6em;
+}
+
+/* Author always one line — already nowrap+ellipsis, so card heights
+   stay deterministic. */
+.home-book-author {
+  font-size: 0.78rem;
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+  min-height: 1.3em;
+}
+
+/* ── Responsive — collapse the mosaic on narrower viewports ─────────── */
+
+@media (max-width: 1280px) {
+  .home-top {
+    grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr) minmax(0, 1.4fr);
+  }
+}
+
+/* Books cascade — 7 covers at the wide default, dropping by one as
+   the viewport narrows so each cover stays at a readable size:
+     ≥1280px → 7 across (default)
+     ≤1280px → 6 across (hide cover 7)
+     ≤1100px → 5 across (hide covers 6, 7) — also the layout-collapse breakpoint
+     ≤  900px → 4 across (hide covers 5, 6, 7)
+     ≤  760px → 3 across (hide covers 4–7) */
+@media (max-width: 1280px) {
+  /* 6 covers stay the same at 1280px since base is already 6 (the
+     7th-card hide-rule from when we had 7 covers is no longer
+     needed). */
+  .home-books { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+
+@media (max-width: 1100px) {
+  /* Tablet: stack the post under the videos so the videos can use full
+     width for the hero + medium row, and the post sits below.
+     The side stack moves underneath the medium row. */
+  .home-top {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+  }
+  .home-video-main { grid-column: 1; grid-row: 1; }
+  .home-video-side { grid-column: 2; grid-row: 1; }
+  .home-featured-post { grid-column: 1 / 3; grid-row: 2; }
+  .home-featured-post-overlay { min-height: 280px; }
+
+  .home-books { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .home-books .home-book-card:nth-child(6),
+  .home-books .home-book-card:nth-child(7) { display: none; }
+}
+
+@media (max-width: 900px) {
+  .home-books { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .home-books .home-book-card:nth-child(5),
+  .home-books .home-book-card:nth-child(6),
+  .home-books .home-book-card:nth-child(7) { display: none; }
+}
+
+@media (max-width: 760px) {
+  /* Phone: single column for everything. The medium row keeps its
+     3-up grid but books drop to 3 visible at a time. */
+  .home-top {
+    grid-template-columns: 1fr;
+  }
+  .home-video-main { grid-column: 1; grid-row: 1; }
+  .home-video-side {
+    grid-column: 1;
+    grid-row: 2;
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
+  .home-featured-post { grid-column: 1; grid-row: 3; }
+  .home-thumb-wide { min-height: 200px; }
+
+  .home-books { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .home-books .home-book-card:nth-child(4),
+  .home-books .home-book-card:nth-child(5),
+  .home-books .home-book-card:nth-child(6),
+  .home-books .home-book-card:nth-child(7) { display: none; }
 }
 .rank-card:hover {
   transform: translateY(-1px);

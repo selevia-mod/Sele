@@ -49,6 +49,9 @@
       <button class="admin-tab" data-tab="bans">Bans</button>
       <button class="admin-tab" data-tab="wallet">Wallet</button>
       <button class="admin-tab" data-tab="payouts">Payouts</button>
+      <button class="admin-tab" data-tab="recovery">
+        Recovery <span class="admin-tab-count" id="recoveryCount">0</span>
+      </button>
       <button class="admin-tab" data-tab="activity">Activity</button>
       <button class="admin-tab" data-tab="settings">Settings</button>
     </nav>
@@ -206,19 +209,41 @@
           <div class="admin-toolbar">
             <div class="admin-toolbar-left">
               <h2>Author withdrawals</h2>
-              <span class="admin-toolbar-sub" id="payoutsSub">Pending and approved requests at the top</span>
-            </div>
-            <div class="admin-toolbar-right">
-              <select id="payoutsFilter" class="admin-select">
-                <option value="open">Pending + approved</option>
-                <option value="pending">Pending only</option>
-                <option value="approved">Approved only</option>
-                <option value="paid">Paid</option>
-                <option value="rejected">Rejected</option>
-                <option value="all">All</option>
-              </select>
+              <span class="admin-toolbar-sub" id="payoutsSub">Verify KYC details before approving payouts</span>
             </div>
           </div>
+          <!-- Status tabs — replaced the legacy `<select id="payoutsFilter">`
+               so a moderator can flip between Pending / Approved / Paid /
+               Rejected without hunting for a dropdown. The data-filter
+               attr is what loadPayouts reads to scope the SELECT. -->
+          <div class="payouts-status-tabs" role="tablist" aria-label="Withdrawal status">
+            <button class="payouts-status-tab active" data-filter="pending" role="tab" aria-selected="true">
+              Pending <span class="payouts-status-count" id="payoutsCountPending">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="approved" role="tab" aria-selected="false">
+              Approved <span class="payouts-status-count" id="payoutsCountApproved">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="paid" role="tab" aria-selected="false">
+              Paid <span class="payouts-status-count" id="payoutsCountPaid">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="rejected" role="tab" aria-selected="false">
+              Rejected <span class="payouts-status-count" id="payoutsCountRejected">·</span>
+            </button>
+            <button class="payouts-status-tab" data-filter="all" role="tab" aria-selected="false">
+              All
+            </button>
+          </div>
+          <!-- Hidden legacy filter element kept as the source of truth
+               for loadPayouts; tab clicks update its value then call
+               loadPayouts(). Lets the existing JS keep working without
+               a refactor. -->
+          <select id="payoutsFilter" class="admin-select" hidden>
+            <option value="pending" selected>Pending</option>
+            <option value="approved">Approved</option>
+            <option value="paid">Paid</option>
+            <option value="rejected">Rejected</option>
+            <option value="all">All</option>
+          </select>
           <div id="payoutsList" class="admin-list">
             <div class="admin-empty">Loading…</div>
           </div>
@@ -262,6 +287,61 @@
           <div id="changeRequestsList" class="admin-list">
             <div class="admin-empty">Loading…</div>
           </div>
+        </div>
+      </section>
+
+      <!-- RECOVERY (balance_recovery_requests) -->
+      <section class="admin-tab-content" data-tab-content="recovery" style="display:none">
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>Balance recovery</h2>
+            <span class="admin-toolbar-sub" id="recoverySub">Reports of missing coins, stars, earnings, or account access</span>
+          </div>
+          <div class="admin-toolbar-right">
+            <!-- Kind filter stays as a dropdown (orthogonal to status). -->
+            <select id="recoveryKind" class="admin-select">
+              <option value="all">All kinds</option>
+              <option value="coin">Coins</option>
+              <option value="star">Stars</option>
+              <option value="earnings">Earnings</option>
+              <option value="account">Account</option>
+            </select>
+          </div>
+        </div>
+        <!-- 4-stage workflow tabs (replaced the legacy status dropdown).
+             For Review → admin reviews the claim.
+             Approved   → admin verified, will manually credit.
+             Resolved   → admin confirmed credit landed (read-only).
+             Rejected   → claim denied (read-only). -->
+        <div class="payouts-status-tabs" role="tablist" aria-label="Recovery status">
+          <button class="payouts-status-tab active" data-filter="pending" role="tab" aria-selected="true">
+            For Review <span class="payouts-status-count" id="recoveryCountPending">·</span>
+          </button>
+          <button class="payouts-status-tab" data-filter="approved" role="tab" aria-selected="false">
+            Approved <span class="payouts-status-count" id="recoveryCountApproved">·</span>
+          </button>
+          <button class="payouts-status-tab" data-filter="resolved" role="tab" aria-selected="false">
+            Resolved <span class="payouts-status-count" id="recoveryCountResolved">·</span>
+          </button>
+          <button class="payouts-status-tab" data-filter="rejected" role="tab" aria-selected="false">
+            Rejected <span class="payouts-status-count" id="recoveryCountRejected">·</span>
+          </button>
+          <button class="payouts-status-tab" data-filter="all" role="tab" aria-selected="false">
+            All
+          </button>
+        </div>
+        <!-- Hidden legacy filter — kept as the source of truth for
+             loadRecovery; tab clicks update its value then call
+             loadRecovery() directly. -->
+        <select id="recoveryFilter" class="admin-select" hidden>
+          <option value="pending" selected>Pending</option>
+          <option value="approved">Approved</option>
+          <option value="resolved">Resolved</option>
+          <option value="rejected">Rejected</option>
+          <option value="all">All</option>
+        </select>
+        <div id="recoveryList" class="admin-list">
+          <div class="admin-empty">Loading…</div>
         </div>
       </section>
 
