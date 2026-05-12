@@ -5792,9 +5792,16 @@ async function openProfile(userId) {
   const followingP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId);
   const postsP     = supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId);
 
-  let videosQ = supabase.from('videos').select('*', { count: 'exact', head: true }).eq('uploader_id', userId);
-  if (!isOwn) videosQ = videosQ.eq('status', 'ready');
-  const videosP = videosQ;
+  // Filter to status='ready' for EVERYONE — including the owner.
+  // Pre-fix the owner's count included processing/uploading rows,
+  // which made the "Videos N" tab count on their own profile
+  // disagree with the grid below (which only renders ready ones
+  // once we tighten the next query). Creator Studio (the studio
+  // grid) is the surface that shows non-ready uploads with proper
+  // lifecycle chips; the public profile shouldn't surface them.
+  const videosP = supabase.from('videos').select('*', { count: 'exact', head: true })
+    .eq('uploader_id', userId)
+    .eq('status', 'ready');
 
   let booksQ = supabase.from('books').select('*', { count: 'exact', head: true }).eq('author_id', userId);
   if (!isOwn) booksQ = booksQ.eq('is_public', true).in('status', ['ongoing', 'completed']);
@@ -6341,8 +6348,14 @@ async function loadProfileVideos(userId) {
     .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
     .eq('uploader_id', userId)
     .order('created_at', { ascending: false });
-  // Non-owners only see ready videos
-  if (!isOwn) q = q.eq('status', 'ready');
+  // Filter to status='ready' for EVERYONE — owner included. The
+  // earlier `if (!isOwn)` carve-out let processing/uploading rows
+  // leak into the owner's own profile grid, where they rendered as
+  // black-thumbnail cards (Bunny hadn't generated the still image
+  // yet). The creator's "see my pending uploads" need is owned by
+  // the Studio surface (studioGrid in this file), which loads
+  // without a status filter and renders proper lifecycle chips.
+  q = q.eq('status', 'ready');
 
   const { data, error } = await q.limit(60);
 
@@ -18010,9 +18023,18 @@ async function _fireTickGoalRpc(period, deltas) {
   if (error) console.warn('[goals] tick rpc', period, error.message);
 }
 
-// Atomic claim. Returns { ok, alreadyClaimed }.
+// Atomic claim. Returns the full RPC envelope so callers can surface
+// server-side rejections (goals_threshold_not_met,
+// required_goal_incomplete, no_progress, …) instead of treating every
+// failure as a generic ok:false. Pre-fix this collapsed every non-ok
+// to {ok:false} with no reason, which is what made the "I clicked
+// claim and nothing happens" reports invisible to us — the optimistic
+// pool.claimed=true flip stuck around just long enough for the user
+// to see the green ✓ Claimed pill, then loadWalletState/cron refresh
+// reverted it (no user_goal_claims row was ever written), making the
+// button reappear.
 async function _fireClaimGoalPoolRpc(period, reward = { stars: 0, coins: 0 }) {
-  if (!currentUser?.id) return { ok: true };
+  if (!currentUser?.id) return { ok: false, error: 'not_signed_in' };
   const { data, error } = await supabase.rpc('claim_user_goal_pool', {
     p_actor_id: currentUser.id,
     p_period: period,
@@ -18022,9 +18044,39 @@ async function _fireClaimGoalPoolRpc(period, reward = { stars: 0, coins: 0 }) {
   });
   if (error) {
     console.warn('[goals] claim rpc', period, error.message);
-    return { ok: false };
+    return { ok: false, error: error.message || 'network_error' };
   }
-  return { ok: !!data?.ok, alreadyClaimed: !!data?.already_claimed };
+  return {
+    ok: !!data?.ok,
+    alreadyClaimed: !!data?.already_claimed,
+    error: data?.ok ? undefined : data?.error,
+    stars: data?.stars,
+    coins: data?.coins,
+    coinBalance: data?.coin_balance,
+    starBalance: data?.star_balance,
+    completed: data?.completed,
+    required: data?.required,
+  };
+}
+
+// Human-readable mapping for the server error codes returned by
+// claim_user_goal_pool. Anything unrecognized falls through to a
+// generic "try again" — better to be vague than to render a code
+// like 'goals_threshold_not_met' to an end user.
+function _friendlyGoalClaimError(code) {
+  switch (code) {
+    case 'no_progress':
+      return "We couldn't find your progress for this period yet. Refresh and try again.";
+    case 'goals_threshold_not_met':
+      return "Server doesn't see enough goals completed yet. Refresh and try again.";
+    case 'required_goal_incomplete':
+      return 'You still have a required goal to finish before claiming.';
+    case 'missing_actor':
+    case 'not_signed_in':
+      return 'You need to be signed in to claim. Try signing in again.';
+    default:
+      return "We couldn't credit your reward right now. Please try again.";
+  }
 }
 
 let _dailyQuestsPanelOpen = false;
@@ -18257,22 +18309,57 @@ function renderDailyQuests() {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const pool = _dailyQuestsState[poolKey];
-      if (!pool || pool.claimed) return;
-      // Optimistic flip first so the UI reflects the claim immediately,
-      // then settle server-side. UNIQUE on user_goal_claims rejects a
-      // concurrent claim from another device — the second attempt
-      // returns already_claimed=true (still ok=true), no error.
-      pool.claimed = true;
+      if (!pool || pool.claimed || pool._claiming) return;
+
+      // Disable the button + show "Claiming…" while the RPC is in
+      // flight. Without this, an unresolved RPC can leave the user
+      // tapping the button repeatedly (each tap pre-fix flipped
+      // pool.claimed=true → re-rendered → second tap saw `claimed`
+      // and bailed silently, looking exactly like "nothing happens").
+      pool._claiming = true;
+      const originalLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Claiming…';
+
       const stars = pool.reward?.stars || 0;
       const coins = pool.reward?.coins || 0;
+
+      let result;
+      try {
+        result = await _fireClaimGoalPoolRpc(
+          POOL_PERIOD_BY_KEY[poolKey] || 'daily',
+          pool.reward || {}
+        );
+      } catch (err) {
+        result = { ok: false, error: err?.message || 'network_error' };
+      }
+
+      if (!result?.ok) {
+        // Roll back the disabled/loading state so the user can retry
+        // and so they can SEE the error message we're about to toast.
+        pool._claiming = false;
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        toast(_friendlyGoalClaimError(result?.error), 'error');
+        return;
+      }
+
+      // Server confirmed — only NOW flip the claim flag, persist,
+      // animate the rewards, and refresh the topbar balance pill so
+      // the user can see their stars + coins jump immediately.
+      pool.claimed = true;
+      pool._claiming = false;
       if (stars > 0) _flyRewardToBalance(btn, stars, 'star');
       if (coins > 0) setTimeout(() => _flyRewardToBalance(btn, coins, 'coin'), 180);
       _saveDailyQuestsToStorage();
+      // loadWalletState pulls coin_balance / star_balance fresh from
+      // the wallets row and re-renders the topbar pill. Without this
+      // the user has to wait for the Realtime UPDATE event on
+      // wallets, which can lag on flakier networks and made the
+      // "I claimed but my balance didn't change" complaint feel
+      // identical to the no-credit bug we're fixing here.
+      try { await loadWalletState(); } catch (_) { /* non-fatal */ }
       renderDailyQuests();
-      // Fire-and-forget the server claim. If it fails (offline /
-      // network blip), the local cache still shows ✓ Claimed; the
-      // next refresh from server will reconcile if needed.
-      _fireClaimGoalPoolRpc(POOL_PERIOD_BY_KEY[poolKey] || 'daily', pool.reward || {});
     });
   };
   wirePoolClaim('dailyPoolClaimBtn', 'dailyPool');
