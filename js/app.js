@@ -1,4 +1,8 @@
 import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supabase.js';
+// Anti-fraud telemetry — fire-and-forget event logging used by the
+// Phase 4 detection job. All four helpers are safe to call any time;
+// signed-out callers short-circuit, network errors get swallowed.
+import { registerSessionDevice, logRead, logView, getDeviceId } from './event-log.js';
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
@@ -119,6 +123,117 @@ function closeAllModals(selector = '.modal-backdrop') {
 }
 
 let currentUser = null;
+
+// ── Anti-fraud telemetry state for the book reader ───────────────────────
+// Tracks the currently-open chapter so the close event can include
+// real dwell_ms + max scroll_pct. _readChapterOpenTs is 0 when no
+// chapter is open. flushReadClose() drains + resets the state and
+// emits the matching close record_read_event. Called from anywhere
+// that exits a chapter (next/prev nav, back button, route change).
+let _readChapterOpenTs = 0;
+let _readChapterOpenId = null;
+let _readChapterOpenBookId = null;
+let _readMaxScrollPct = 0;
+
+function flushReadClose(completed = null) {
+  if (!_readChapterOpenTs || !_readChapterOpenId) return;
+  const dwellMs = Date.now() - _readChapterOpenTs;
+  logRead({
+    chapterId: _readChapterOpenId,
+    bookId:    _readChapterOpenBookId,
+    dwellMs,
+    scrollPct: _readMaxScrollPct,
+    completed,
+  });
+  _readChapterOpenTs = 0;
+  _readChapterOpenId = null;
+  _readChapterOpenBookId = null;
+  _readMaxScrollPct = 0;
+}
+
+// ── Anti-fraud telemetry state for the video player ───────────────────────
+// Tracks the currently-playing video so we can emit play / pause / end
+// events. The shared <video id="videoPlayer"> element handles every
+// video, so we attach native event listeners ONCE on first init and
+// read the live video id from the URL hash (#video/<id>) inside each
+// handler. _videoEventsInit is the one-time flag.
+let _videoEventsInit = false;
+let _videoLastWatchedSec = 0;
+
+function _currentLoggedVideoId() {
+  // Reuses the same hash-route extractor the rest of the code uses
+  // for #video/<id> deep links. Returns the bare UUID (no 'sb_' prefix).
+  const id = (typeof _currentVideoIdForRoute === 'function')
+    ? _currentVideoIdForRoute()
+    : null;
+  if (!id) return null;
+  return id.startsWith('sb_') ? id.slice(3) : id;
+}
+
+function flushViewEnd() {
+  const id = _currentLoggedVideoId();
+  if (!id) return;
+  logView({
+    videoId:        id,
+    kind:           'end',
+    watchedSeconds: _videoLastWatchedSec,
+  });
+  _videoLastWatchedSec = 0;
+}
+
+function _initVideoEventLogging() {
+  if (_videoEventsInit) return;
+  const player = document.getElementById('videoPlayer');
+  if (!player) return;
+  _videoEventsInit = true;
+
+  // play — fired on initial start AND on resume after pause.
+  // Phase 4 detection cares about play-starts as a denominator for
+  // threshold-crossed events (e.g. "what % of plays cross paywall?").
+  player.addEventListener('play', () => {
+    const id = _currentLoggedVideoId();
+    if (!id) return;
+    logView({
+      videoId:        id,
+      kind:           'play',
+      watchedSeconds: Math.floor(player.currentTime || 0),
+    });
+  });
+
+  // pause — fired on explicit pause + on navigation away (most
+  // browsers fire pause before unload). Useful for partial-watch
+  // dwell distributions in Phase 4.
+  player.addEventListener('pause', () => {
+    const id = _currentLoggedVideoId();
+    if (!id) return;
+    const ws = Math.floor(player.currentTime || 0);
+    _videoLastWatchedSec = ws;
+    // Don't emit 'pause' on the natural end — 'ended' will fire
+    // separately and that's the more meaningful signal.
+    if (player.ended) return;
+    logView({ videoId: id, kind: 'pause', watchedSeconds: ws });
+  });
+
+  // ended — fired when playback reaches the natural end of the
+  // video. Combined with the 'end' event in flushViewEnd (fired on
+  // nav-away), this gives us both "watched to completion" and
+  // "abandoned mid-stream" as distinct signals.
+  player.addEventListener('ended', () => {
+    const id = _currentLoggedVideoId();
+    if (!id) return;
+    const ws = Math.floor(player.currentTime || player.duration || 0);
+    _videoLastWatchedSec = ws;
+    logView({ videoId: id, kind: 'end', watchedSeconds: ws });
+  });
+
+  // timeupdate — fires ~4x/sec while playing. We DON'T log on every
+  // tick (that'd be hundreds of events per video). Instead, just keep
+  // _videoLastWatchedSec fresh so flushViewEnd has accurate dwell on
+  // nav-away or hideAllMainPages.
+  player.addEventListener('timeupdate', () => {
+    _videoLastWatchedSec = Math.floor(player.currentTime || 0);
+  });
+}
 let currentProfile = null;
 let posts = [];
 
@@ -218,6 +333,12 @@ async function initAuth() {
 
 async function onSignedIn(user) {
   currentUser = user;
+  // Anti-fraud telemetry — register this device + IP on every sign-in
+  // (including same-tab session re-init). Fire-and-forget. UPSERTs on
+  // (user_id, device_id) so multiple registrations just refresh
+  // last_seen; cost is one RPC ~100ms, doesn't block anything below.
+  // See js/event-log.js for the full registerSessionDevice contract.
+  registerSessionDevice();
   // Books page: invalidate the user-scoped tab cache (Reading List) so a
   // fresh sign-in re-fetches it instead of reusing the previous user's
   // (or the signed-out) state.
@@ -7521,15 +7642,20 @@ document.getElementById('cancelVideoUpload')?.addEventListener('click', closeVid
 // ════════════════════════════════════════════════════════════════════════════
 
 let vuStep = 1;
+// 5-step wizard (May 2026): File → Thumbnail → Details → Visibility → Upload.
+// Thumbnail used to live inside Details; it was promoted to its own step so
+// authors see 5 auto-extracted frames + an Upload-your-own tile rather than
+// a buried picker. The mobile app uses the same 5-step shape.
 const VU_STEP_TITLES = {
-  1: { title: 'Upload video',         sub: 'Pick the file you want to share.' },
-  2: { title: 'Tell us about it',     sub: 'A great title helps people find your video.' },
-  3: { title: 'Visibility & schedule',sub: 'Choose when it goes public.' },
-  4: { title: 'Uploading…',           sub: 'Stay on this screen until it finishes.' },
+  1: { title: 'Upload video',          sub: 'Pick the file you want to share.' },
+  2: { title: 'Pick a thumbnail',      sub: 'Choose a cover frame — or upload your own.' },
+  3: { title: 'Tell us about it',      sub: 'A great title helps people find your video.' },
+  4: { title: 'Visibility & schedule', sub: 'Choose when it goes public.' },
+  5: { title: 'Uploading…',            sub: 'Stay on this screen until it finishes.' },
 };
 
 function vuGotoStep(n) {
-  if (n < 1 || n > 4) return;
+  if (n < 1 || n > 5) return;
   vuStep = n;
   // Panels
   document.querySelectorAll('.vu-panel').forEach(p => {
@@ -7556,23 +7682,29 @@ function vuRefreshFooter() {
   const back = document.getElementById('vuFooterBack');
   const next = document.getElementById('vuFooterNext');
   const cancel = document.getElementById('cancelVideoUpload');
-  // Back: hidden on step 1; hidden during upload (step 4)
-  back.style.display = (vuStep === 1 || vuStep === 4) ? 'none' : '';
-  // Cancel: visible on steps 1-3, hidden during upload
-  cancel.style.display = (vuStep === 4) ? 'none' : '';
+  // Back: hidden on step 1 and during the upload progress step (5).
+  back.style.display = (vuStep === 1 || vuStep === 5) ? 'none' : '';
+  // Cancel: visible on steps 1-4, hidden during upload.
+  cancel.style.display = (vuStep === 5) ? 'none' : '';
 
   if (vuStep === 1) {
     next.textContent = 'Continue';
     next.disabled = !pendingVideoFile;
   } else if (vuStep === 2) {
+    // Thumbnail step. Skippable — Bunny's auto-generated frame is the
+    // fallback. Label changes to clarify the user's choice doesn't
+    // force a stop.
+    next.textContent = pendingVideoThumbnailUrl ? 'Continue' : 'Skip & continue';
+    next.disabled = false;
+  } else if (vuStep === 3) {
     const title = document.getElementById('videoUploadTitle').value.trim();
     next.textContent = 'Continue';
     next.disabled = !title;
-  } else if (vuStep === 3) {
+  } else if (vuStep === 4) {
     next.textContent = 'Upload';
     next.disabled = false;
-  } else if (vuStep === 4) {
-    // During upload, the "next" slot becomes a Done/Close (filled in after success)
+  } else if (vuStep === 5) {
+    // During upload, the "next" slot becomes a Done/Close (filled in after success).
     next.textContent = 'Uploading…';
     next.disabled = true;
   }
@@ -7586,7 +7718,20 @@ function closeVideoUploadModal() {
 function resetVideoUploadModal() {
   pendingVideoFile = null;
   document.getElementById('videoUploadFile').value = '';
-  document.getElementById('vuFileSummary').style.display = 'none';
+
+  // Step 1: re-show the dropzone, hide the file-selected hero, revoke
+  // the preview blob URL so we don't leak it.
+  const dropzone = document.getElementById('videoFilePicker');
+  const summary  = document.getElementById('vuFileSummary');
+  if (dropzone) dropzone.style.display = '';
+  if (summary)  summary.style.display  = 'none';
+  if (_vuPreviewObjectUrl) {
+    URL.revokeObjectURL(_vuPreviewObjectUrl);
+    _vuPreviewObjectUrl = null;
+  }
+  const previewVid = document.getElementById('videoUploadPreview');
+  if (previewVid) previewVid.removeAttribute('src');
+
   document.getElementById('vuFileName').textContent = '';
   document.getElementById('vuFileSize').textContent = '';
   document.getElementById('videoUploadTitle').value = '';
@@ -7600,15 +7745,49 @@ function resetVideoUploadModal() {
   document.getElementById('vuUploadBytes').style.display = 'none';
   document.getElementById('vuUploadHeroTitle').textContent = 'Uploading your video';
   document.getElementById('vuUploadHeroSub').textContent = "Hang tight — we're sending it to our servers.";
+
   // Reset visibility radio
   document.querySelectorAll('input[name="vuVisibility"]').forEach(r => { r.checked = (r.value === 'now'); });
   document.querySelectorAll('.vu-radio').forEach(r => r.classList.toggle('active', r.dataset.vis === 'now'));
   document.getElementById('vuScheduleInput').style.display = 'none';
   document.getElementById('vuScheduleDatetime').value = '';
+
+  // Thumbnail state. Cancel any in-flight upload + frame extraction
+  // (bumping both tokens makes their .then-handlers no-op), revoke
+  // each frame's object URL, and reset the grid tiles to loading.
+  pendingVideoThumbnailUrl = null;
+  _vuThumbUploadToken++;
+  _vuAutoThumbToken++;
+  _vuAutoThumbBlobs = [null, null, null, null, null];
+  _vuAutoThumbBlobUrls.forEach((u) => { if (u) URL.revokeObjectURL(u); });
+  _vuAutoThumbBlobUrls = [null, null, null, null, null];
+  _vuSelectedThumbSlot = -1;
+  document.querySelectorAll('.vu-thumb-frame-tile').forEach((tile) => {
+    tile.classList.add('is-loading');
+    tile.classList.remove('is-selected');
+    const img = tile.querySelector('img');
+    if (img) img.remove();
+    const stamp = tile.querySelector('.vu-thumb-frame-time');
+    if (stamp) stamp.textContent = '';
+  });
+  const uploadTile = document.getElementById('vuThumbUploadTile');
+  if (uploadTile) {
+    uploadTile.classList.remove('is-selected', 'has-image');
+    const img = uploadTile.querySelector('img');
+    if (img) img.remove();
+  }
+  _vuRenderThumbStage();
+
   vuGotoStep(1);
 }
 
 // ── Phase 1: File picker ─────────────────────────────────────────────────
+// We track the active preview's object URL so we can revoke it when the
+// user replaces the file (and again on close). Without revocation, every
+// re-pick leaks the previous blob into the page's memory for the rest
+// of the session — meaningful on 2 GB videos.
+let _vuPreviewObjectUrl = null;
+
 function vuHandleFile(file) {
   if (!file) return;
   if (file.size > 2 * 1024 * 1024 * 1024) {
@@ -7616,20 +7795,46 @@ function vuHandleFile(file) {
     return;
   }
   pendingVideoFile = file;
+
+  // Swap the dropzone for the file-selected hero. The two states are
+  // mutually exclusive — having both visible at once (as the previous
+  // layout did) wasted vertical space and made it ambiguous whether
+  // the file had actually been accepted.
+  const dropzone = document.getElementById('videoFilePicker');
+  const summary  = document.getElementById('vuFileSummary');
+  if (dropzone) dropzone.style.display = 'none';
+  if (summary)  summary.style.display  = '';
+
   const preview = document.getElementById('videoUploadPreview');
-  preview.src = URL.createObjectURL(file);
+  if (_vuPreviewObjectUrl) URL.revokeObjectURL(_vuPreviewObjectUrl);
+  _vuPreviewObjectUrl = URL.createObjectURL(file);
+  preview.src = _vuPreviewObjectUrl;
+
   document.getElementById('vuFileName').textContent = file.name;
   document.getElementById('vuFileSize').textContent = formatBytes(file.size);
-  document.getElementById('vuFileSummary').style.display = '';
+
   // Auto-fill title with filename (no extension)
   const titleInput = document.getElementById('videoUploadTitle');
   titleInput.value = file.name.replace(/\.[^.]+$/, '').slice(0, 100);
   document.getElementById('titleCharCount').textContent = titleInput.value.length;
+
+  // Reset any previously extracted frames + chosen thumbnail — the new
+  // file means the auto-thumbnails are stale and the user should pick
+  // again. Replace-file UX should feel like starting over for the
+  // thumbnail step, not silently carrying forward a frame from a
+  // different video.
+  pendingVideoThumbnailUrl = null;
+  _vuAutoThumbBlobs = [null, null, null, null, null];
+  _vuAutoThumbBlobUrls.forEach((u) => { if (u) URL.revokeObjectURL(u); });
+  _vuAutoThumbBlobUrls = [null, null, null, null, null];
+  _vuRenderThumbStage();
+
   vuRefreshFooter();
 
   // Read the video's duration via the preview element so we can gate the
-  // monetize toggle on step 3. <video> fires 'loadedmetadata' once .duration
-  // is available. We snapshot the value into pendingVideoDurationSec.
+  // monetize toggle on step 4 AND know which timecodes to seek to for
+  // auto-thumbnail extraction. <video> fires 'loadedmetadata' once
+  // .duration is available.
   preview.addEventListener('loadedmetadata', () => {
     pendingVideoDurationSec = Number.isFinite(preview.duration) ? preview.duration : 0;
     syncVuMonetizeGate();
@@ -7638,6 +7843,317 @@ function vuHandleFile(file) {
 
 // Pending file's duration (filled in by vuHandleFile via loadedmetadata)
 let pendingVideoDurationSec = 0;
+
+// ─── Custom thumbnail state (upload wizard, May 2026) ──────────────────
+// Authors can now pick a custom thumbnail on the Details step. We upload
+// the file to Supabase Storage as soon as it's picked (so the slow part
+// of the upload is parallelized with the form-filling), and persist just
+// the public URL for the eventual videos-row write. `null` means "use
+// Bunny's auto-generated frame" — the existing fallback the webhook
+// already handles correctly.
+let pendingVideoThumbnailUrl = null;
+// Mirror of the in-flight upload — used to guard against double-uploads
+// when the user picks a new file before the previous one finishes.
+let _vuThumbUploadToken = 0;
+
+async function _vuUploadThumbnailFile(file) {
+  if (!file) return null;
+  if (!file.type?.startsWith?.('image/')) {
+    toast('Please pick an image (JPG, PNG, or WebP)', 'error');
+    return null;
+  }
+  // 5 MB matches the legacy uploadImage() cap. Thumbnails at 1280x720
+  // with reasonable JPEG quality come in around 100-200 KB, so even
+  // creators pasting screenshots from photo apps land well under this.
+  if (file.size > 5 * 1024 * 1024) {
+    toast('Image must be smaller than 5 MB', 'error');
+    return null;
+  }
+  if (!currentUser?.id) {
+    toast('You must be signed in to upload a thumbnail', 'error');
+    return null;
+  }
+  const safeName = file.name?.replace(/[^a-zA-Z0-9._-]+/g, '_') || 'thumb';
+  const ext = (safeName.split('.').pop() || 'jpg').toLowerCase();
+  const filename = `video-thumbnails/${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error } = await supabase.storage.from('images').upload(filename, file, {
+    contentType: file.type || `image/${ext}`,
+    cacheControl: '31536000', // immutable filename → cache aggressively
+    upsert: false,
+  });
+  if (error) {
+    toast('Thumbnail upload failed: ' + error.message, 'error');
+    return null;
+  }
+  const { data } = supabase.storage.from('images').getPublicUrl(filename);
+  return data?.publicUrl || null;
+}
+
+// ─── Thumbnail stage state (May 2026: 6-tile grid) ────────────────────
+// The grid renders 6 tiles: tile[0] = "Upload your own", tiles[1..5] =
+// 5 auto-extracted frames at evenly-spaced timecodes. State per slot:
+//   _vuAutoThumbBlobs[i]   — the Blob produced by canvas.toBlob, kept
+//                            so we can upload it to Storage on selection
+//                            without re-extracting
+//   _vuAutoThumbBlobUrls[i] — object URL for the <img> preview in the
+//                            tile. Revoked on file replace / modal reset.
+// _vuSelectedThumbSlot:
+//   -1 → nothing picked, will fall back to Bunny auto
+//   0  → "Upload your own" tile
+//   1..5 → corresponding auto frame
+let _vuAutoThumbBlobs    = [null, null, null, null, null];
+let _vuAutoThumbBlobUrls = [null, null, null, null, null];
+let _vuSelectedThumbSlot = -1;
+
+// Auto-frame extraction runs in a single-flight loop: we increment this
+// token on every new file pick so a still-running extraction for an old
+// file knows to bail and not paint its results into the current grid.
+let _vuAutoThumbToken = 0;
+
+/**
+ * Extract 5 frames from the picked video at 10/30/50/70/90% of duration
+ * and paint them into the tiles in #vuThumbGrid. Runs purely client-side
+ * via a hidden <video> + <canvas>; never sends bytes to the server until
+ * the user picks one and we upload that single blob.
+ *
+ * Why a hidden video element instead of reusing the preview in step 1:
+ * seeking the visible preview would jump the playhead while the user is
+ * watching it. A second offscreen element lets us seek freely without
+ * disturbing the UI.
+ *
+ * Seek-and-capture pattern: set currentTime → wait for `seeked` event →
+ * draw to canvas → toBlob. Some Android Chrome builds fire `seeked`
+ * before the new frame is actually painted; the 60ms RAF wait absorbs
+ * the slip.
+ */
+async function vuExtractAutoThumbnails(file) {
+  if (!file) return;
+  const myToken = ++_vuAutoThumbToken;
+
+  const video = document.createElement('video');
+  video.preload = 'metadata';
+  video.muted = true;
+  video.playsInline = true;
+  video.crossOrigin = 'anonymous';
+  const objectUrl = URL.createObjectURL(file);
+  video.src = objectUrl;
+
+  try {
+    await new Promise((resolve, reject) => {
+      video.addEventListener('loadedmetadata', resolve, { once: true });
+      video.addEventListener('error', () => reject(new Error('video metadata load failed')), { once: true });
+      setTimeout(() => reject(new Error('metadata timeout')), 15000);
+    });
+
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    if (!duration) {
+      // Couldn't read duration — leave the spinners in place rather
+      // than render broken tiles. User can still "Upload your own".
+      return;
+    }
+
+    // 10/30/50/70/90% — endpoints avoided because the very first and
+    // very last frames of a video are often black (transitions/fades).
+    const pcts = [0.10, 0.30, 0.50, 0.70, 0.90];
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    for (let i = 0; i < pcts.length; i++) {
+      if (myToken !== _vuAutoThumbToken) return; // user picked a new file
+
+      const targetTime = duration * pcts[i];
+      try {
+        await new Promise((resolve, reject) => {
+          const onSeeked = () => { video.removeEventListener('seeked', onSeeked); resolve(); };
+          video.addEventListener('seeked', onSeeked, { once: true });
+          video.currentTime = targetTime;
+          setTimeout(() => reject(new Error('seek timeout')), 8000);
+        });
+      } catch (err) {
+        // Skip this frame, leave its spinner up. Other frames may still succeed.
+        if (__DEV__) console.warn('[vuExtractAutoThumbnails] seek failed at', targetTime, err);
+        continue;
+      }
+
+      // RAF wait absorbs the gap between `seeked` firing and the
+      // browser actually painting the new frame to the video element.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      if (myToken !== _vuAutoThumbToken) return;
+
+      // 1280x720 cap matches Bunny's auto-thumbnail size. Scale down
+      // if the source is smaller (we don't want to upscale and blur).
+      const vw = video.videoWidth || 1280;
+      const vh = video.videoHeight || 720;
+      const targetW = Math.min(vw, 1280);
+      const targetH = Math.round(targetW * (vh / vw));
+      canvas.width = targetW;
+      canvas.height = targetH;
+      try {
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+      } catch (err) {
+        if (__DEV__) console.warn('[vuExtractAutoThumbnails] draw failed', err);
+        continue;
+      }
+
+      const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.82));
+      if (!blob) continue;
+      if (myToken !== _vuAutoThumbToken) return;
+
+      // Stash the blob (we'll upload it to Storage when the user picks
+      // this slot) and a local object URL for the tile preview.
+      _vuAutoThumbBlobs[i] = blob;
+      if (_vuAutoThumbBlobUrls[i]) URL.revokeObjectURL(_vuAutoThumbBlobUrls[i]);
+      _vuAutoThumbBlobUrls[i] = URL.createObjectURL(blob);
+
+      // Paint into tile i+1 (tile 0 is the "Upload your own" slot).
+      _vuRenderAutoThumbTile(i, targetTime);
+    }
+  } catch (err) {
+    if (__DEV__) console.warn('[vuExtractAutoThumbnails] failed:', err?.message || err);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function _vuFormatSeekTime(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
+function _vuRenderAutoThumbTile(frameIndex, timeSeconds) {
+  const tile = document.querySelector(`.vu-thumb-frame-tile[data-frame-index="${frameIndex}"]`);
+  if (!tile) return;
+  tile.classList.remove('is-loading');
+  // Insert / update the <img>. Re-using the same node when present
+  // avoids a brief flicker between frames.
+  let img = tile.querySelector('img');
+  if (!img) {
+    img = document.createElement('img');
+    img.alt = '';
+    tile.insertBefore(img, tile.firstChild);
+  }
+  img.src = _vuAutoThumbBlobUrls[frameIndex];
+  const stamp = tile.querySelector('.vu-thumb-frame-time');
+  if (stamp) stamp.textContent = _vuFormatSeekTime(timeSeconds);
+}
+
+/**
+ * Repaint the whole thumbnail stage based on _vuSelectedThumbSlot.
+ * Mostly toggles `.is-selected` on tiles and the "Thumbnail selected"
+ * pill in the header. Loading spinners are driven independently by
+ * vuExtractAutoThumbnails as frames land.
+ */
+function _vuRenderThumbStage() {
+  // Selected ring on whichever slot is active.
+  document.querySelectorAll('.vu-thumb-grid-tile').forEach((tile) => {
+    tile.classList.remove('is-selected');
+  });
+  const uploadTile = document.getElementById('vuThumbUploadTile');
+  if (_vuSelectedThumbSlot === 0 && uploadTile) {
+    uploadTile.classList.add('is-selected');
+    uploadTile.classList.add('has-image');
+  } else if (uploadTile) {
+    uploadTile.classList.remove('has-image');
+    // If the user previously uploaded an image and is now switching
+    // back to a frame, the upload-tile preview <img> can stay — they
+    // might re-select it. We just hide the icon overlay via the
+    // has-image class.
+  }
+  if (_vuSelectedThumbSlot >= 1 && _vuSelectedThumbSlot <= 5) {
+    const tile = document.querySelector(`.vu-thumb-frame-tile[data-frame-index="${_vuSelectedThumbSlot - 1}"]`);
+    if (tile) tile.classList.add('is-selected');
+  }
+
+  // Header pill.
+  const pill = document.getElementById('vuThumbSelectedPill');
+  if (pill) pill.style.display = _vuSelectedThumbSlot >= 0 ? '' : 'none';
+}
+
+// Upload-your-own tile — uses the hidden file input. We pre-render the
+// chosen image into the upload tile so the user sees what they picked
+// inside the same slot.
+async function _vuHandleUploadOwnThumbnail(file) {
+  if (!file) return;
+  const myToken = ++_vuThumbUploadToken;
+  // Optimistic preview — render the file into the upload tile right
+  // away, even before the Storage upload finishes. If the upload
+  // fails the toast surfaces the error and we leave the tile blank.
+  const uploadTile = document.getElementById('vuThumbUploadTile');
+  let img = uploadTile?.querySelector('img');
+  if (!img && uploadTile) {
+    img = document.createElement('img');
+    img.alt = '';
+    uploadTile.insertBefore(img, uploadTile.firstChild);
+    Object.assign(img.style, { position: 'absolute', inset: '0', width: '100%', height: '100%', objectFit: 'cover' });
+  }
+  const previewUrl = URL.createObjectURL(file);
+  if (img) img.src = previewUrl;
+  _vuSelectedThumbSlot = 0;
+  _vuRenderThumbStage();
+
+  try {
+    const url = await _vuUploadThumbnailFile(file);
+    if (myToken !== _vuThumbUploadToken) return; // newer pick superseded
+    if (!url) {
+      // Upload failed — undo the selection.
+      _vuSelectedThumbSlot = -1;
+      _vuRenderThumbStage();
+      return;
+    }
+    pendingVideoThumbnailUrl = url;
+    toast('Thumbnail ready', 'success');
+    vuRefreshFooter(); // updates Continue → Skip & continue label
+  } finally {
+    URL.revokeObjectURL(previewUrl);
+  }
+}
+
+// Frame tile clicks — upload the stashed Blob to Storage as the
+// user's thumbnail. Cheaper than the Upload-your-own path since the
+// frame is already in memory; no FilePicker round-trip.
+async function _vuHandleAutoThumbnailPick(frameIndex) {
+  const blob = _vuAutoThumbBlobs[frameIndex];
+  if (!blob) return; // tile is still loading
+  const myToken = ++_vuThumbUploadToken;
+  _vuSelectedThumbSlot = frameIndex + 1;
+  _vuRenderThumbStage();
+
+  // Wrap the Blob into a File-like object so _vuUploadThumbnailFile's
+  // MIME + size guards behave identically to the user-picked path.
+  const namedFile = new File([blob], `auto-frame-${frameIndex + 1}.jpg`, { type: 'image/jpeg' });
+
+  try {
+    const url = await _vuUploadThumbnailFile(namedFile);
+    if (myToken !== _vuThumbUploadToken) return;
+    if (!url) {
+      _vuSelectedThumbSlot = -1;
+      _vuRenderThumbStage();
+      return;
+    }
+    pendingVideoThumbnailUrl = url;
+    toast('Thumbnail ready', 'success');
+    vuRefreshFooter();
+  } catch (err) {
+    if (__DEV__) console.warn('[vuHandleAutoThumbnailPick] upload failed', err);
+    _vuSelectedThumbSlot = -1;
+    _vuRenderThumbStage();
+  }
+}
+
+// Wire the grid: clicks on frame tiles + change on the upload input.
+document.querySelectorAll('.vu-thumb-frame-tile').forEach((tile) => {
+  tile.addEventListener('click', () => {
+    const idx = Number(tile.dataset.frameIndex);
+    if (Number.isFinite(idx)) _vuHandleAutoThumbnailPick(idx);
+  });
+});
+document.getElementById('vuThumbFile')?.addEventListener('change', (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = ''; // allow re-picking the same file later
+  _vuHandleUploadOwnThumbnail(file);
+});
 
 // Disable monetize toggle for videos shorter than the first unlock threshold.
 function syncVuMonetizeGate() {
@@ -7706,18 +8222,29 @@ document.querySelectorAll('input[name="vuVisibility"]').forEach(input => {
 
 // ── Footer button wiring (Back / Continue / Upload) ──────────────────────
 document.getElementById('vuFooterBack')?.addEventListener('click', () => {
-  if (vuStep > 1 && vuStep < 4) vuGotoStep(vuStep - 1);
+  // Back works on steps 2-4; step 5 is the upload progress screen (no back).
+  if (vuStep > 1 && vuStep < 5) vuGotoStep(vuStep - 1);
 });
 document.getElementById('vuFooterNext')?.addEventListener('click', async () => {
   if (vuStep === 1) {
     if (!pendingVideoFile) return;
+    // Kick off frame extraction now so the Thumbnail step has tiles
+    // populated by the time the user lands on it. Fire-and-forget —
+    // each frame fills its slot independently as ffmpeg-on-canvas
+    // finishes seeking.
+    vuExtractAutoThumbnails(pendingVideoFile);
     vuGotoStep(2);
   } else if (vuStep === 2) {
-    const title = document.getElementById('videoUploadTitle').value.trim();
-    if (!title) { toast('Please add a title', 'error'); return; }
+    // Thumbnail step is fully optional. Whatever the user picked (or
+    // didn't) flows through; pendingVideoThumbnailUrl drives the
+    // final videos row write.
     vuGotoStep(3);
   } else if (vuStep === 3) {
+    const title = document.getElementById('videoUploadTitle').value.trim();
+    if (!title) { toast('Please add a title', 'error'); return; }
     vuGotoStep(4);
+  } else if (vuStep === 4) {
+    vuGotoStep(5);
     await vuStartUpload();
   }
 });
@@ -7840,6 +8367,13 @@ async function vuStartUpload() {
     // Bunny at this point; we don't want to fail the user-visible
     // "Done" state if the DB write hiccups — log loudly so we can
     // diagnose orphans rather than silently lose them.
+    // Custom thumbnail override (May 2026). When the author picked a
+    // cover on the Details step we've already uploaded it to Supabase
+    // Storage (pendingVideoThumbnailUrl), so prefer that URL over the
+    // Bunny auto-generated frame. Falls back to uploadInfo.thumbnailUrl
+    // (Bunny auto) when no custom thumbnail was provided.
+    const finalThumbnailUrl = pendingVideoThumbnailUrl || uploadInfo.thumbnailUrl;
+
     try {
       const { error: insertErr } = await supabase
         .from('videos')
@@ -7851,7 +8385,7 @@ async function vuStartUpload() {
             description,
             tags,
             video_url: uploadInfo.videoUrl,
-            thumbnail_url: uploadInfo.thumbnailUrl,
+            thumbnail_url: finalThumbnailUrl,
             uploader_id: currentUser.id,
             status: 'processing',
             is_monetized: isMonetized,
@@ -7869,6 +8403,28 @@ async function vuStartUpload() {
       console.warn('[vuStartUpload] client-side videos upsert exception:', e?.message || e);
     }
 
+    // Custom-thumbnail race fix: if the bunny-video-ready webhook beat
+    // our client-side upsert (rare — webhook normally fires minutes
+    // later, after Bunny finishes encoding), the row already exists
+    // with Bunny's auto thumbnail and our upsert no-op'd (because
+    // ignoreDuplicates:true). Fire an explicit UPDATE so the author's
+    // chosen cover wins regardless of insert ordering. No-op when the
+    // user didn't pick a custom thumbnail (the upsert already set the
+    // Bunny URL in that case).
+    if (pendingVideoThumbnailUrl) {
+      try {
+        const { error: thumbUpdateErr } = await supabase
+          .from('videos')
+          .update({ thumbnail_url: pendingVideoThumbnailUrl })
+          .eq('bunny_video_id', uploadInfo.videoId);
+        if (thumbUpdateErr) {
+          console.warn('[vuStartUpload] custom-thumbnail follow-up update failed:', thumbUpdateErr.message);
+        }
+      } catch (e) {
+        console.warn('[vuStartUpload] custom-thumbnail follow-up update exception:', e?.message || e);
+      }
+    }
+
     fill.style.width = '100%';
     pctEl.textContent = '100%';
     status.textContent = 'Upload complete';
@@ -7881,7 +8437,12 @@ async function vuStartUpload() {
       ? `It'll go live on ${new Date(scheduledPublishAt).toLocaleString()} once processing finishes.`
       : 'Your video will appear publicly the moment Selebox finishes encoding it.';
 
-    // Footer becomes "Done"
+    // Footer "Done" stays as a fallback (in case someone closes the
+    // success modal and lands back on the upload progress screen) but
+    // the primary celebration is now the dedicated success modal —
+    // see _vuShowSuccessModal below. The previous flow relied solely on
+    // this small footer button, which buried the success state and
+    // gave users no clear next action.
     next.disabled = false;
     next.textContent = 'Done';
     next.onclick = () => {
@@ -7890,6 +8451,11 @@ async function vuStartUpload() {
       if (feedEl.style.display !== 'none') window.loadFeed?.();
     };
 
+    _vuShowSuccessModal({
+      thumbnailUrl: pendingVideoThumbnailUrl || uploadInfo.thumbnailUrl,
+      scheduledPublishAt,
+    });
+
     toast(scheduledPublishAt ? 'Scheduled — processing now' : 'Uploaded — processing now', 'success');
   } catch (err) {
     console.error('Upload failed:', err);
@@ -7897,13 +8463,99 @@ async function vuStartUpload() {
     speedEl.textContent = '';
     heroIcon.outerHTML = `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="vuUploadIcon"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
     heroTitle.textContent = 'Upload failed';
+    // Step 4 (Visibility) used to be step 3 — the retry navigation
+    // jumps back to Visibility so the user can re-confirm scheduling
+    // before re-uploading.
     heroSub.textContent = err.message || 'Something went wrong. Try again.';
     next.disabled = false;
     next.textContent = 'Try again';
-    next.onclick = () => { vuGotoStep(3); next.onclick = null; vuRefreshFooter(); };
+    next.onclick = () => { vuGotoStep(4); next.onclick = null; vuRefreshFooter(); };
     toast('Upload failed: ' + err.message, 'error');
   }
 }
+
+// ─── Upload success modal (May 2026) ──────────────────────────────────
+// Centered confirmation dialog that pops on top of the upload wizard
+// once the bytes are safely on Bunny. Replaces the previous "small green
+// Done button" pattern, which buried the success state and made the
+// upload feel unfinished from the user's POV.
+//
+// CTAs:
+//   • View in Studio    — close the wizard, jump straight to the Studio
+//                         tab where the new video is already visible
+//                         (status: processing → ready in 5-30s).
+//   • Upload another    — close the wizard and reopen it fresh, ready
+//                         for a back-to-back upload.
+function _vuShowSuccessModal({ thumbnailUrl, scheduledPublishAt }) {
+  const modal     = document.getElementById('vuSuccessModal');
+  const titleEl   = document.getElementById('vuSuccessTitle');
+  const bodyEl    = document.getElementById('vuSuccessBody');
+  const thumbWrap = document.getElementById('vuSuccessThumbWrap');
+  const thumbImg  = document.getElementById('vuSuccessThumb');
+  if (!modal) return;
+
+  if (scheduledPublishAt) {
+    titleEl.textContent = 'Scheduled!';
+    bodyEl.textContent  = `Your video will go live on ${new Date(scheduledPublishAt).toLocaleString()} once Selebox finishes encoding it.`;
+  } else {
+    titleEl.textContent = 'Upload complete!';
+    bodyEl.textContent  = 'Your video will appear publicly the moment Selebox finishes encoding it.';
+  }
+
+  if (thumbnailUrl) {
+    thumbImg.src = thumbnailUrl;
+    thumbWrap.style.display = '';
+  } else {
+    thumbImg.removeAttribute('src');
+    thumbWrap.style.display = 'none';
+  }
+
+  modal.style.display = 'flex';
+}
+
+function _vuHideSuccessModal() {
+  const modal = document.getElementById('vuSuccessModal');
+  if (modal) modal.style.display = 'none';
+}
+
+document.getElementById('vuSuccessViewStudio')?.addEventListener('click', () => {
+  _vuHideSuccessModal();
+  closeVideoUploadModal();
+  // Best-effort navigation to Studio. The Studio nav button id and
+  // function names vary across this file's history; try the most
+  // common entry points in order and stop at the first one that
+  // actually exists.
+  if (typeof showStudio === 'function') {
+    try { showStudio(); return; } catch {}
+  }
+  const studioBtn = document.querySelector('[data-nav="studio"], #navStudio, #studioNavBtn');
+  if (studioBtn && typeof studioBtn.click === 'function') {
+    studioBtn.click();
+    return;
+  }
+  // Last resort — at least refresh the Videos list so the new row shows up.
+  if (videosPage?.style.display === 'block') {
+    allVideosCache = [];
+    loadVideos();
+  }
+});
+
+document.getElementById('vuSuccessUploadAnother')?.addEventListener('click', () => {
+  _vuHideSuccessModal();
+  resetVideoUploadModal();
+  // Modal already open — resetVideoUploadModal puts us back on step 1
+  // with a clean slate, ready to pick the next file.
+});
+
+// Backdrop click on the success overlay dismisses it (matches the
+// rest of the modal layer's behavior). Clicks on the inner card are
+// intercepted by the card itself.
+document.getElementById('vuSuccessModal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'vuSuccessModal') {
+    _vuHideSuccessModal();
+    closeVideoUploadModal();
+  }
+});
 
 // Helper: Upload file to Bunny with progress
 function uploadFileToBunny(file, info, onProgress) {
@@ -8120,6 +8772,17 @@ const earningsPage = document.getElementById('earningsPage');
 
 // Hide every main content page; show functions call this first then set their own page to block.
 function hideAllMainPages() {
+  // Flush any in-progress chapter dwell before the reader page goes
+  // away. Catches all nav-out paths (back button, sidebar tab change,
+  // deep-link, etc.) since they all funnel through here. flushReadClose
+  // is a no-op when no chapter is open.
+  if (chapterReaderPage && chapterReaderPage.style.display !== 'none') {
+    try { flushReadClose(); } catch {}
+  }
+  // Same for video — flush an in-flight watched-seconds 'end' event.
+  if (videoPlayerPage && videoPlayerPage.style.display !== 'none') {
+    try { flushViewEnd(); } catch {}
+  }
   // Drop layout-mode body classes — each show* opts back in if it needs a
   // wider canvas. (Currently used by the videos and books pages.)
   document.body.classList.remove('on-videos', 'on-books', 'on-home-landing', 'on-studio');
@@ -10018,6 +10681,10 @@ document.getElementById('btnBackBooks')?.addEventListener('click', () => showBoo
 // ── Chapter reader ──
 async function openChapterReader(chapterIndex) {
   if (!currentBookDetail || !currentBookDetail.chapters[chapterIndex]) return;
+  // Flush any in-progress chapter dwell BEFORE we mutate the
+  // module-scoped open-state below. Without this, navigating
+  // chapter-to-chapter would lose the previous chapter's close event.
+  flushReadClose();
   currentChapterIndex = chapterIndex;
   const chapter = currentBookDetail.chapters[chapterIndex];
 
@@ -10033,6 +10700,26 @@ async function openChapterReader(chapterIndex) {
     const ckey = String(chapter.id || '').replace(/^sb_/, '');
     if (ckey) tickGoalUnique('read_chapters', ckey);
   } catch {}
+
+  // Anti-fraud telemetry — log chapter open (dwell_ms=0, scroll_pct=0).
+  // The matching close event fires from the "previous chapter" / "next
+  // chapter" / back-out handlers a few hundred lines down with the
+  // actual dwell + scroll values. Two-event pattern lets Phase 4's
+  // detection job compute dwell distributions and flag bot-like reads
+  // (open → immediate close with no scroll).
+  const realChapterIdForLog = String(chapter.id || '').replace(/^sb_/, '');
+  if (realChapterIdForLog) {
+    _readChapterOpenTs = Date.now();
+    _readChapterOpenId = realChapterIdForLog;
+    _readChapterOpenBookId = currentBookDetail?.book?.id || null;
+    _readMaxScrollPct = 0;
+    logRead({
+      chapterId: realChapterIdForLog,
+      bookId:    _readChapterOpenBookId,
+      dwellMs:   0,
+      scrollPct: 0,
+    });
+  }
 
   document.getElementById('readerBookTitle').textContent = currentBookDetail.book.title || 'Book';
   document.getElementById('readerChapterTitle').textContent = chapter.title || `Chapter ${chapter.chapter_number}`;
@@ -11122,7 +11809,11 @@ async function loadAuthorEarnings() {
   const [balanceRes, earningsRes, withdrawalsRes, kycRes] = await Promise.all([
     supabase.rpc('author_balance_for', { p_author_id: currentUser.id }),
     supabase.from('author_earnings')
-      .select('id, source_type, source_id, gross_coins, share_pct, net_coins, net_php_minor, currency_used, status, available_at, created_at')
+      // adjusted_net_php_minor + adjusted_net_coins added for the
+      // earnings moderation state machine (Phase 1 — May 2026). When
+      // status='adjusted' the adjusted_* fields hold the effective
+      // amount; original net_* stays for audit.
+      .select('id, source_type, source_id, gross_coins, share_pct, net_coins, net_php_minor, adjusted_net_coins, adjusted_net_php_minor, currency_used, status, available_at, created_at')
       .eq('author_id', currentUser.id)
       .order('created_at', { ascending: false })
       .limit(500),
@@ -11224,10 +11915,39 @@ function _populateMonthPicker() {
 // Re-render the month-scoped pieces: This Month tile + breakdown.
 // Lifetime total + balance cards are NOT month-sensitive.
 function _renderMonthScopedBreakdown() {
-  const filtered = _filterEarningsByMonthYear(_allEarningsCache, _selectedMonthYear);
-  renderEarningsBreakdown(filtered);
+  // Finalized-only rule (Phase 1.3 — May 14 earnings moderation):
+  // Only verified or adjusted rows count toward Monthly Earnings +
+  // breakdown. Pending (under review) and rejected are excluded.
+  // Adjusted rows count at adjusted_net_php_minor.
+  //
+  // Phase 1.3 switched the gate from `available_at <= now()` to
+  // `status IN ('verified','adjusted')`. The cron auto-promotes
+  // pending → verified after the 7-day hold, so the two are
+  // equivalent for normal flow. The status filter additionally
+  // excludes admin-rejected rows even when their available_at has
+  // passed.
+  //
+  // Legacy 'available' status is treated as verified (alias kept on
+  // the CHECK constraint to avoid breaking older live RPCs).
+  const monthFiltered = _filterEarningsByMonthYear(_allEarningsCache, _selectedMonthYear);
+  const finalized = monthFiltered.filter((r) =>
+    r.status === 'verified' || r.status === 'available' || r.status === 'adjusted'
+  );
+  // Project rows to use adjusted amounts when status='adjusted' so
+  // the breakdown sums the effective (post-adjustment) value, not
+  // the original. renderEarningsBreakdown reads `net_php_minor` and
+  // `net_coins` directly, so we substitute those fields per-row.
+  const projected = finalized.map((r) => {
+    if (r.status !== 'adjusted') return r;
+    return {
+      ...r,
+      net_php_minor: Number(r.adjusted_net_php_minor) >= 0 ? Number(r.adjusted_net_php_minor) : r.net_php_minor,
+      net_coins:     Number(r.adjusted_net_coins)     >= 0 ? Number(r.adjusted_net_coins)     : r.net_coins,
+    };
+  });
+  renderEarningsBreakdown(projected);
   // Also update the "This Month" tile total.
-  const monthMinor = filtered.reduce((sum, r) => sum + (r.net_php_minor || 0), 0);
+  const monthMinor = projected.reduce((sum, r) => sum + (r.net_php_minor || 0), 0);
   const monthEl = document.getElementById('earningsMonthPhp');
   if (monthEl) monthEl.textContent = formatPhpFromMinor(monthMinor);
   // Label updates to match the selected month for clarity.
@@ -11767,8 +12487,21 @@ function _humanizeMonthYear(monthYear) {
 // withdrawals so the lifetime total doesn't artificially drop when an
 // author requests a payout (Charles flagged this exact bug in mobile).
 function renderEarningsTotals() {
+  // Charles 2026-05-15 spec — Total Earnings = finalized lifetime
+  // earnings only. Under-review (pending_php_minor) earnings are
+  // NOT yet earnings; they may be reversed in the 7-day hold
+  // window. Pending is surfaced in the dedicated tile on this same
+  // page so creators can see the pipeline without it inflating the
+  // lifetime headline.
+  //
+  // Withdrawals (pending / approved / paid) still count because they
+  // moved already-finalized money out of `available` into the
+  // withdrawal pipeline — excluding them would make Total Earnings
+  // mysteriously drop the moment a creator requested a payout.
+  // Rejected / failed withdrawals are excluded (the money is back
+  // in `available` and already counted there).
   const b = _authorBalance || {};
-  const balanceMinor = (b.available_php_minor || 0) + (b.pending_php_minor || 0);
+  const balanceMinor = b.available_php_minor || 0;
   const paidOutMinor = (_allWithdrawalsCache || [])
     .filter((w) => w.status === 'pending' || w.status === 'approved' || w.status === 'paid')
     .reduce((sum, w) => sum + (w.amount_php_minor || 0), 0);
@@ -11816,9 +12549,15 @@ function renderAuthorEarningsBalance() {
   const holdDays = Number(_walletConfigDefaults.author_earnings_hold_days) || 7;
   const foot = document.getElementById('earningsHoldFootnote');
   if (foot) {
+    // Phase 5.3 — surface the review possibility alongside the hold
+    // window so creators understand a small fraction of earnings may
+    // be reduced or rejected after admin review. Paired with the
+    // notification trigger from 5.1: any actual rejection/adjustment
+    // produces an in-app notification with the reason, so creators
+    // never have to guess why their balance moved (or didn't).
     foot.textContent = holdDays === 1
-      ? "Earnings become available 1 day after they're earned."
-      : `Earnings become available ${holdDays} days after they're earned.`;
+      ? "Verified earnings become available 1 day after they're earned. We may review unusual activity for accuracy."
+      : `Verified earnings become available ${holdDays} days after they're earned. We may review unusual activity for accuracy.`;
   }
 
   // Minimum payout hint — show admin-configured floor, or ₱100 by default
@@ -13300,6 +14039,137 @@ async function openAuthorChapterEditor(bookId, chapterId) {
         },
       },
     });
+    // ─── Paste normalizer: preserve paragraphs from Word / Google Docs ──
+    // Authors report (user feedback, May 2026) that pasting manuscript
+    // text from Word or Google Docs collapses paragraph spacing into one
+    // wall of text. Two common shapes cause it:
+    //
+    //   1. Google Docs wraps the entire copied selection in a single
+    //      <b id="docs-internal-guid-..."> tag — a clipboard-fidelity
+    //      hack on Google's end. Downstream HTML→Delta matchers see the
+    //      outer <b> and treat the inner <p> blocks as inline children,
+    //      so paragraph boundaries vanish.
+    //   2. MS Word emits each paragraph as <p class="MsoNormal" style=
+    //      "margin-top: 14pt"> with <o:p> namespaced tags inside.
+    //      Stripping the style strips the visual spacing AND, depending
+    //      on how the matcher walks the tree, sometimes drops the <p>
+    //      boundary along with it.
+    //
+    // We intercept the native paste event BEFORE Quill's clipboard
+    // module runs, sanitize the HTML into a known-good shape
+    // (<p>…</p><p>…</p>), and hand it back via dangerouslyPasteHTML at
+    // the current selection. Plain-text fallback (clipboard has no
+    // text/html) splits blank-line-separated chunks into paragraphs to
+    // match normalizeChapterContent's reader-side behaviour, so what
+    // the author sees in the editor matches what readers will see.
+    function _normalizePastedManuscriptHtml(rawHtml) {
+      let html = String(rawHtml || '');
+      if (!html.trim()) return '';
+
+      // Strip MS Office namespaced tags, conditional comments, and any
+      // <style>/<script>/<meta>/<link> the source HTML brought along.
+      // <style> in particular needs to go — Word emits hundreds of
+      // mso-* selectors that don't affect Quill but leave noise that
+      // can break the regex-based <p> detection below.
+      html = html
+        .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, '')
+        .replace(/<\/?o:p\b[^>]*>/gi, '')
+        .replace(/<\/?w:[^>]*>/gi, '')
+        .replace(/<\/?meta\b[^>]*>/gi, '')
+        .replace(/<\/?link\b[^>]*>/gi, '')
+        .replace(/<style\b[\s\S]*?<\/style>/gi, '')
+        .replace(/<script\b[\s\S]*?<\/script>/gi, '');
+
+      // Parse the cleaned HTML through DOMParser. When the source is a
+      // full document (<html><body>...</body></html>) the parser puts
+      // everything sensible into doc.body — exactly what we want.
+      let doc;
+      try {
+        doc = new DOMParser().parseFromString(`<!doctype html><body>${html}</body>`, 'text/html');
+      } catch {
+        return html; // unparseable; fall back to handing Quill the raw HTML
+      }
+      const root = doc.body;
+      if (!root) return html;
+
+      // Unwrap the Google Docs <b id="docs-internal-guid-..."> wrapper.
+      // Inner children are real <p>s — promote them to siblings of <b>,
+      // then remove <b>. After this pass the structure looks like a
+      // normal HTML fragment.
+      root.querySelectorAll('b[id^="docs-internal-guid-"]').forEach(node => {
+        while (node.firstChild) node.parentNode.insertBefore(node.firstChild, node);
+        node.remove();
+      });
+
+      // Strip class/style/lang/dir/id from every node. Quill's matchers
+      // discard most of this on their own, but pre-cleaning avoids the
+      // edge case where Word's `margin-top: 14pt` on a <p> confuses the
+      // block-formatter into emitting an empty soft break instead of a
+      // hard paragraph break — the exact failure mode users reported.
+      root.querySelectorAll('*').forEach(el => {
+        el.removeAttribute('class');
+        el.removeAttribute('style');
+        el.removeAttribute('lang');
+        el.removeAttribute('dir');
+        el.removeAttribute('id');
+      });
+
+      // Convert <div> wrappers into <p>. Some sources (browser-default
+      // contenteditable, a few rich-text web apps) emit <div>line</div>
+      // per paragraph; Quill flattens consecutive <div>s into soft
+      // breaks. Promoting to <p> forces real block boundaries.
+      root.querySelectorAll('div').forEach(div => {
+        const p = doc.createElement('p');
+        while (div.firstChild) p.appendChild(div.firstChild);
+        div.replaceWith(p);
+      });
+
+      return root.innerHTML;
+    }
+
+    chapterQuill.root.addEventListener('paste', (e) => {
+      if (!e.clipboardData) return;
+      const html = e.clipboardData.getData('text/html');
+      const text = e.clipboardData.getData('text/plain');
+      if (!html && !text) return;
+
+      let normalized = '';
+      if (html) {
+        normalized = _normalizePastedManuscriptHtml(html);
+      } else {
+        // Plain-text fallback: blank-line-separated chunks → <p>, single
+        // newlines inside a chunk → <br>. Mirrors the reader-side
+        // normalizeChapterContent() so authors and readers agree.
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        normalized = text
+          .split(/\n\s*\n/)
+          .filter(chunk => chunk.trim().length > 0)
+          .map(chunk => `<p>${esc(chunk).replace(/\n/g, '<br>')}</p>`)
+          .join('');
+      }
+
+      // Empty after normalization (e.g. user pasted only whitespace or
+      // only a <style> block) — fall through to Quill's default handler.
+      if (!normalized || !normalized.trim()) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        const range = chapterQuill.getSelection(true);
+        if (range && typeof range.index === 'number') {
+          // Replace the active selection (if any), then insert at the
+          // resulting caret. dangerouslyPasteHTML in Quill 2 advances
+          // the selection to the end of the inserted content for us.
+          if (range.length > 0) chapterQuill.deleteText(range.index, range.length, 'user');
+          chapterQuill.clipboard.dangerouslyPasteHTML(range.index, normalized, 'user');
+        } else {
+          chapterQuill.clipboard.dangerouslyPasteHTML(normalized, 'user');
+        }
+      } catch (err) {
+        console.error('chapter paste normalizer failed:', err);
+      }
+    }, { capture: true });
+
     chapterQuill.on('text-change', () => {
       chapterDirty = true;
       updateChapterWordCount();
@@ -14877,25 +15747,93 @@ function renderStudioRow(v, rowNumber, isSelected = false) {
   `;
 }
 
+// Custom thumbnail state for the studio edit modal (May 2026). When
+// the author picks a new image we upload it immediately so by the time
+// they hit Save, the only DB write needed is the videos row update.
+// `null` means "no pending change" — the existing thumbnail_url stays.
+let studioEditPendingThumbnailUrl = null;
+let _studioEditThumbUploadToken = 0;
+
+function _renderStudioEditThumb(currentUrl) {
+  const tile    = document.getElementById('studioEditThumbTile');
+  const picker  = document.getElementById('studioEditThumbPicker');
+  const img     = document.getElementById('studioEditThumb');
+  const empty   = document.getElementById('studioEditThumbEmpty');
+  const overlay = document.getElementById('studioEditThumbOverlay');
+  const title   = document.getElementById('studioEditThumbMetaTitle');
+  const sub     = document.getElementById('studioEditThumbMetaSub');
+  const replace = document.getElementById('studioEditThumbReplace');
+  if (!tile || !img || !empty) return;
+  const url = studioEditPendingThumbnailUrl || currentUrl || null;
+  if (url) {
+    img.src = url;
+    img.style.display = '';
+    empty.style.display = 'none';
+    if (overlay) overlay.style.display = '';
+    if (title) title.textContent = studioEditPendingThumbnailUrl ? 'New thumbnail (unsaved)' : 'Current thumbnail';
+    if (sub)   sub.textContent   = 'Click the tile to upload a new cover. JPG/PNG/WebP, up to 5 MB.';
+    if (replace) replace.textContent = studioEditPendingThumbnailUrl ? 'Replace image' : 'Change image';
+  } else {
+    img.src = '';
+    img.style.display = 'none';
+    empty.style.display = '';
+    if (overlay) overlay.style.display = 'none';
+    if (title) title.textContent = 'No thumbnail set';
+    if (sub)   sub.textContent   = 'Add a cover so your video stands out on the home feed.';
+    if (replace) replace.textContent = 'Choose image';
+  }
+  if (picker) picker.classList.remove('is-uploading');
+}
+
+async function _studioEditHandleThumbPick(file) {
+  if (!file) return;
+  const myToken = ++_studioEditThumbUploadToken;
+  const picker = document.getElementById('studioEditThumbPicker');
+  const sub    = document.getElementById('studioEditThumbMetaSub');
+  picker?.classList.add('is-uploading');
+  if (sub) sub.textContent = 'Uploading thumbnail…';
+  try {
+    const url = await _vuUploadThumbnailFile(file);
+    if (myToken !== _studioEditThumbUploadToken) return;
+    if (url) {
+      studioEditPendingThumbnailUrl = url;
+      toast('Thumbnail uploaded — click Save to apply', 'success');
+    }
+  } finally {
+    if (myToken === _studioEditThumbUploadToken) {
+      const v = studioVideosCache.find(x => x.id === studioEditingVideoId);
+      _renderStudioEditThumb(v?.thumbnail_url || null);
+    }
+  }
+}
+
+document.getElementById('studioEditThumbFile')?.addEventListener('change', (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  _studioEditHandleThumbPick(file);
+});
+document.getElementById('studioEditThumbReplace')?.addEventListener('click', () => {
+  document.getElementById('studioEditThumbFile')?.click();
+});
+
 function openStudioEditModal(videoId) {
   const v = studioVideosCache.find(x => x.id === videoId);
   if (!v) return;
-  
+
   studioEditingVideoId = videoId;
-  
+  // Clear any leftover pending thumbnail from a previous edit session.
+  studioEditPendingThumbnailUrl = null;
+  _studioEditThumbUploadToken++;
+
   document.getElementById('studioEditTitle').value = v.title || '';
   document.getElementById('studioEditDescription').value = v.description || '';
   document.getElementById('studioEditTags').value = (v.tags || []).join(', ');
   // Category dropdown removed — see videoUploadCategory comment above.
 
-  const preview = document.getElementById('studioEditPreview');
-  const thumb = document.getElementById('studioEditThumb');
-  if (v.thumbnail_url) {
-    thumb.src = v.thumbnail_url;
-    preview.style.display = '';
-  } else {
-    preview.style.display = 'none';
-  }
+  // Render the thumbnail tile in its starting state. The new
+  // .vu-thumb-picker component (defined alongside the upload-wizard
+  // picker) replaces the static .vu-preview-box that used to sit here.
+  _renderStudioEditThumb(v.thumbnail_url || null);
 
   document.getElementById('studioEditTitleCount').textContent = `${(v.title || '').length} / 100`;
   document.getElementById('studioEditDescCount').textContent = `${(v.description || '').length} / 2000`;
@@ -14961,6 +15899,11 @@ function openStudioEditModal(videoId) {
 function closeStudioEditModal() {
   document.getElementById('studioEditModal').style.display = 'none';
   studioEditingVideoId = null;
+  // Drop any unsaved thumbnail upload — the file already lives in
+  // Supabase Storage but isn't pointed at by any row, so it'll be
+  // garbage-collected by the bucket-cleanup job.
+  studioEditPendingThumbnailUrl = null;
+  _studioEditThumbUploadToken++;
 }
 
 async function saveStudioEdit() {
@@ -14998,13 +15941,23 @@ async function saveStudioEdit() {
   // Monetization toggle (Phase 6 replaces is_locked for new videos)
   const isMonetized = document.getElementById('studioEditMonetized')?.checked || false;
 
+  // Only write thumbnail_url when the author actually picked a new
+  // image. Including it unconditionally would overwrite the current
+  // value with the same string — harmless but pointless DB write — and
+  // would conflict with any in-flight bunny-video-ready webhook that's
+  // updating other columns on the same row.
+  const updatePayload = {
+    title, description, tags,
+    is_monetized: isMonetized,
+    updated_at: new Date().toISOString(),
+  };
+  if (studioEditPendingThumbnailUrl) {
+    updatePayload.thumbnail_url = studioEditPendingThumbnailUrl;
+  }
+
   const { error } = await supabase
     .from('videos')
-    .update({
-      title, description, tags,
-      is_monetized: isMonetized,
-      updated_at: new Date().toISOString(),
-    })
+    .update(updatePayload)
     .eq('id', studioEditingVideoId);
 
   setSaving(false);
@@ -15093,6 +16046,10 @@ function showVideoPlayer() {
   // navigating from a user's wall (skipping showVideos), leaving big empty
   // gutters left/right of the video.
   document.body.classList.add('on-videos');
+  // Idempotent — attaches native play/pause/ended/timeupdate listeners
+  // ONCE on first show. Subsequent calls are no-ops thanks to the
+  // _videoEventsInit flag inside the helper.
+  _initVideoEventLogging();
 }
 
 document.getElementById('btnVideos').addEventListener('click', () => {

@@ -36,6 +36,15 @@
       </div>
       <div class="admin-header-right">
         <span class="admin-user-name" id="adminUserName"></span>
+        <!-- Theme toggle — light ↔ dark. Icon swapped + persisted by
+             admin.js via the theme preference in localStorage. -->
+        <button
+          id="adminThemeToggle"
+          class="admin-theme-toggle"
+          type="button"
+          aria-label="Toggle theme"
+          title="Toggle theme"
+        >☀</button>
       </div>
     </header>
 
@@ -48,6 +57,9 @@
       <button class="admin-tab" data-tab="content">Content</button>
       <button class="admin-tab" data-tab="bans">Bans</button>
       <button class="admin-tab" data-tab="wallet">Wallet</button>
+      <button class="admin-tab" data-tab="earnings">
+        Earnings <span class="admin-tab-count" id="earningsFlagCount">0</span>
+      </button>
       <button class="admin-tab" data-tab="payouts">Payouts</button>
       <button class="admin-tab" data-tab="recovery">
         Recovery <span class="admin-tab-count" id="recoveryCount">0</span>
@@ -195,6 +207,103 @@
         <!-- The legacy Defaults sub-tab was removed. All platform-wide
              unlock prices, limits, and tunables live in the top-level
              Settings tab now (single source of truth for app_config). -->
+      </section>
+
+      <!-- EARNINGS (May 2026 — moderation + monitoring system) -->
+      <!-- Three sub-views: Creators rollup (all creators with metrics),
+           Creator detail (drill-down with actions), Moderation queue
+           (stub for now; Phase 5 fills it with detection signals).
+           Detail view is rendered into #earningsCreatorDetail by JS,
+           hidden by default; toggling on/off happens via JS, not via
+           sub-tab to keep the URL/UI simple. -->
+      <section class="admin-tab-content" data-tab-content="earnings" style="display:none">
+        <nav class="admin-subtabs">
+          <button class="admin-subtab active" data-subtab="creators">Creators</button>
+          <button class="admin-subtab" data-subtab="queue">
+            Moderation queue <span class="admin-subtab-count" id="earningsQueueCount">0</span>
+          </button>
+        </nav>
+
+        <!-- CREATORS ROLLUP — paginated table, one row per creator -->
+        <div class="admin-subtab-content" data-subtab-content="creators">
+          <!-- Detail view shell. Hidden by default; populated when an
+               admin clicks a creator row in the list. Rendered as a
+               full-bleed section that REPLACES the list when active,
+               with a back button to return. Phase 2.2 fills in the
+               actual content. -->
+          <div id="earningsCreatorDetail" class="admin-earnings-detail" style="display:none"></div>
+
+          <!-- List view (creators rollup). Hidden when detail is open. -->
+          <div id="earningsCreatorsListWrap">
+            <div class="admin-toolbar">
+              <div class="admin-toolbar-left">
+                <h2>Creator earnings</h2>
+                <span class="admin-toolbar-sub" id="earningsCreatorsSub">Loading…</span>
+              </div>
+              <div class="admin-toolbar-right">
+                <input
+                  type="search"
+                  id="earningsCreatorsSearch"
+                  class="admin-input"
+                  placeholder="Search by username or display name…"
+                  autocomplete="off"
+                />
+              </div>
+            </div>
+            <div id="earningsCreatorsList" class="admin-list">
+              <div class="admin-empty">Loading creators…</div>
+            </div>
+            <!-- Pagination footer — appears only when there's a next/prev page -->
+            <div id="earningsCreatorsPager" class="admin-pager" style="display:none">
+              <button id="earningsCreatorsPrev" class="admin-btn admin-btn-secondary" disabled>← Previous</button>
+              <span class="admin-pager-status" id="earningsCreatorsPagerStatus">Page 1</span>
+              <button id="earningsCreatorsNext" class="admin-btn admin-btn-secondary" disabled>Next →</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- MODERATION QUEUE — Phase 4.4. Flag rows populated by the hourly
+             fraud detection cron (Phase 4.2) + admin manual flags (Phase 4.3).
+             Each card shows the signal evidence + creator + earning info,
+             with one-click Verify / Reject / Resolve actions that reuse
+             the modals built in Phase 2.2. -->
+        <div class="admin-subtab-content" data-subtab-content="queue" style="display:none">
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>Moderation queue</h2>
+              <span class="admin-toolbar-sub" id="earningsQueueSub">Loading…</span>
+            </div>
+            <div class="admin-toolbar-right">
+              <select id="earningsQueueSeverity" class="admin-select">
+                <option value="">All severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+              </select>
+              <select id="earningsQueueSignal" class="admin-select">
+                <option value="">All signals</option>
+                <option value="low_dwell_unlock">Low-dwell unlock</option>
+                <option value="same_ip_cluster">Same-IP cluster</option>
+                <option value="unlock_spike">Unlock spike</option>
+                <option value="multi_account_device">Multi-account device</option>
+                <option value="rapid_chapter_switch">Rapid chapter switch</option>
+                <option value="suspicious_topup">Suspicious top-up</option>
+                <option value="user_report">User report (manual)</option>
+                <option value="manual_admin">Manual admin</option>
+                <option value="external_complaint">External complaint</option>
+              </select>
+            </div>
+          </div>
+          <div id="earningsQueueList" class="admin-list">
+            <div class="admin-empty">Loading queue…</div>
+          </div>
+          <div id="earningsQueuePager" class="admin-pager" style="display:none">
+            <button id="earningsQueuePrev" class="admin-btn admin-btn-secondary" disabled>← Previous</button>
+            <span class="admin-pager-status" id="earningsQueuePagerStatus">Page 1</span>
+            <button id="earningsQueueNext" class="admin-btn admin-btn-secondary" disabled>Next →</button>
+          </div>
+        </div>
       </section>
 
       <!-- PAYOUTS (Phase 7 — author withdrawals + KYC) -->

@@ -35,6 +35,74 @@ const _formatBirthdate = (raw) => {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 };
 
+// ─── Theme toggle (light ↔ dark) ──────────────────────────────────────
+// Premium polish overhaul 2026-05-14. CSS tokens flip via the
+// data-theme attribute on <body>; this module just reads/writes the
+// preference + swaps the toggle button icon. Persisted in localStorage
+// so the choice survives refreshes.
+//
+// Why we set the attribute BEFORE gateAccess runs (in the IIFE below):
+// without it, the page paints in light theme for a frame on every
+// refresh of a dark-mode session. Reading localStorage + applying the
+// attribute synchronously at file-load time eliminates the flash.
+const ADMIN_THEME_KEY = 'selebox_admin_theme';
+
+function _getStoredAdminTheme() {
+  try {
+    const stored = localStorage.getItem(ADMIN_THEME_KEY);
+    if (stored === 'dark' || stored === 'light') return stored;
+  } catch {}
+  // No stored preference — honor the OS default.
+  if (typeof matchMedia === 'function'
+      && matchMedia('(prefers-color-scheme: dark)').matches) {
+    return 'dark';
+  }
+  return 'light';
+}
+
+function _applyAdminTheme(theme) {
+  document.body.setAttribute('data-theme', theme);
+  // Mirror in the toggle icon so the user can see at a glance what
+  // they're about to switch to (sun shown in dark mode means "switch
+  // to light", moon shown in light mode means "switch to dark").
+  const btn = document.getElementById('adminThemeToggle');
+  if (btn) {
+    btn.textContent = theme === 'dark' ? '☀' : '☾';
+    btn.setAttribute('aria-label', theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+    btn.setAttribute('title',      theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+  }
+}
+
+function _toggleAdminTheme() {
+  const current = document.body.getAttribute('data-theme') || 'light';
+  const next = current === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem(ADMIN_THEME_KEY, next); } catch {}
+  _applyAdminTheme(next);
+}
+
+// Apply IMMEDIATELY at module load so the first paint is correct.
+// gateAccess runs after this so the loading state already has the
+// right theme. No flash-of-wrong-theme on dark-mode sessions.
+(function _initAdminTheme() {
+  _applyAdminTheme(_getStoredAdminTheme());
+  // Bind the click handler once. If the button isn't in the DOM yet
+  // (rare — script could load before HTML), retry on DOMContentLoaded.
+  const bind = () => {
+    const btn = document.getElementById('adminThemeToggle');
+    if (btn && !btn.dataset.bound) {
+      btn.addEventListener('click', _toggleAdminTheme);
+      btn.dataset.bound = '1';
+      // Re-apply to refresh the icon now that the button exists.
+      _applyAdminTheme(_getStoredAdminTheme());
+    }
+  };
+  bind();
+  if (!document.getElementById('adminThemeToggle')) {
+    document.addEventListener('DOMContentLoaded', bind);
+  }
+})();
+
+
 // ─── auth + role check ───────────────────────────────────────────────────────
 let currentMod = null;
 
@@ -64,11 +132,34 @@ async function gateAccess() {
 }
 
 // ─── tab switching ───────────────────────────────────────────────────────────
+// Valid tabs (used by hash-restoration on page load to validate the
+// incoming hash before passing it to switchTab).
+const VALID_ADMIN_TABS = new Set([
+  'inbox', 'users', 'content', 'bans', 'wallet',
+  'earnings', 'payouts', 'recovery', 'activity', 'settings',
+]);
+
 function switchTab(name) {
   document.querySelectorAll('.admin-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.admin-tab-content').forEach(s => {
     s.style.display = s.dataset.tabContent === name ? 'block' : 'none';
   });
+
+  // Persist the active tab in the URL hash so:
+  //   • Page refresh keeps you on the same tab (annoyance fix —
+  //     Charles flagged 2026-05-14 that every refresh dumped you back
+  //     to Inbox regardless of where you were).
+  //   • You can deep-link to a specific tab (`/admin.html#earnings`).
+  //   • Browser back/forward navigates between tabs.
+  // We use replaceState rather than location.hash assignment so the
+  // change doesn't push a new history entry on every tab click (which
+  // would mean N back-presses to escape the admin page).
+  if (VALID_ADMIN_TABS.has(name)) {
+    const newHash = `#${name}`;
+    if (window.location.hash !== newHash) {
+      history.replaceState(null, '', window.location.pathname + window.location.search + newHash);
+    }
+  }
   // Tag the body with the active tab so CSS can apply tab-specific layout
   // tweaks without touching the other tabs. Currently only `is-settings` uses
   // this — the Settings tab unlocks a wider main column + denser row styling.
@@ -101,6 +192,18 @@ function switchTab(name) {
   if (name === 'payouts') {
     lazyInit('payoutsFilter', typeof initPayoutsTab === 'function' ? initPayoutsTab : null, null);
     if (typeof switchPayoutsSubtab === 'function') switchPayoutsSubtab('withdrawals');
+  }
+  // Earnings tab (May 2026 — moderation system). Two sub-views:
+  // 'creators' (rollup table) and 'queue' (flagged earnings stub).
+  // Init binds the search input + sub-tab clicks once; load fetches
+  // page 1 of the rollup.
+  if (name === 'earnings') {
+    lazyInit(
+      'earningsCreatorsSearch',
+      typeof initEarningsTab === 'function' ? initEarningsTab : null,
+      null,
+    );
+    if (typeof switchEarningsSubtab === 'function') switchEarningsSubtab('creators');
   }
   if (name === 'recovery') {
     lazyInit('recoveryFilter', typeof initRecoveryTab === 'function' ? initRecoveryTab : null, typeof loadRecovery === 'function' ? loadRecovery : null);
@@ -1413,6 +1516,1308 @@ function openAdjustModal(user, currency) {
 // PAYOUTS TAB (Phase 7) — author withdrawal requests + KYC review
 // ════════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════════
+// EARNINGS TAB (May 2026 — moderation + monitoring system)
+// ════════════════════════════════════════════════════════════════════════════
+// Phase 2.1: Creators rollup (this section).
+// Phase 2.2: Creator detail drill-down + action modals (deferred).
+// Phase 2.3: Moderation queue stub UI (deferred — Phase 4 populates flags).
+//
+// Data flow:
+//   • _loadEarningsCreators() calls public.admin_earnings_creators_rollup
+//     with limit/offset/search, gets one row per creator with all the
+//     aggregate metrics already computed server-side.
+//   • _renderEarningsCreators() drops them into #earningsCreatorsList.
+//   • Pagination is offset-based; state lives in the module-scoped
+//     `_earningsCreatorsPage` so Prev/Next can stay in sync.
+//   • Search debounces to 300ms to avoid one RPC per keystroke.
+// ════════════════════════════════════════════════════════════════════════════
+
+const EARNINGS_CREATORS_PAGE_SIZE = 50;
+let _earningsCreatorsPage = 0;       // zero-indexed; 0 = first page
+let _earningsCreatorsSearch = '';
+let _earningsCreatorsSearchTimer = null;
+let _earningsCreatorsHasMore = false;
+
+function initEarningsTab() {
+  // Sub-tab clicks (Creators / Moderation queue).
+  document.querySelectorAll('[data-tab-content="earnings"] .admin-subtab').forEach((t) => {
+    t.addEventListener('click', () => switchEarningsSubtab(t.dataset.subtab));
+  });
+
+  // Search input — debounce + reset to page 0 on every keystroke.
+  const searchEl = document.getElementById('earningsCreatorsSearch');
+  if (searchEl) {
+    searchEl.addEventListener('input', () => {
+      clearTimeout(_earningsCreatorsSearchTimer);
+      _earningsCreatorsSearchTimer = setTimeout(() => {
+        _earningsCreatorsSearch = searchEl.value.trim();
+        _earningsCreatorsPage = 0;
+        loadEarningsCreators();
+      }, 300);
+    });
+  }
+
+  // Pagination buttons.
+  document.getElementById('earningsCreatorsPrev')?.addEventListener('click', () => {
+    if (_earningsCreatorsPage > 0) {
+      _earningsCreatorsPage -= 1;
+      loadEarningsCreators();
+    }
+  });
+  document.getElementById('earningsCreatorsNext')?.addEventListener('click', () => {
+    if (_earningsCreatorsHasMore) {
+      _earningsCreatorsPage += 1;
+      loadEarningsCreators();
+    }
+  });
+
+  // ── Queue sub-tab filters + pagination (Phase 4.4) ──────────────────
+  document.getElementById('earningsQueueSeverity')?.addEventListener('change', () => {
+    _earningsQueuePage = 0;
+    loadEarningsQueue();
+  });
+  document.getElementById('earningsQueueSignal')?.addEventListener('change', () => {
+    _earningsQueuePage = 0;
+    loadEarningsQueue();
+  });
+  document.getElementById('earningsQueuePrev')?.addEventListener('click', () => {
+    if (_earningsQueuePage > 0) {
+      _earningsQueuePage -= 1;
+      loadEarningsQueue();
+    }
+  });
+  document.getElementById('earningsQueueNext')?.addEventListener('click', () => {
+    if (_earningsQueueHasMore) {
+      _earningsQueuePage += 1;
+      loadEarningsQueue();
+    }
+  });
+}
+
+function switchEarningsSubtab(name) {
+  document.querySelectorAll('[data-tab-content="earnings"] .admin-subtab').forEach((t) => {
+    t.classList.toggle('active', t.dataset.subtab === name);
+  });
+  document.querySelectorAll('[data-tab-content="earnings"] .admin-subtab-content').forEach((s) => {
+    s.style.display = s.dataset.subtabContent === name ? 'block' : 'none';
+  });
+  if (name === 'creators') {
+    // Always exit detail view when (re)entering the Creators tab.
+    _exitEarningsCreatorDetail();
+    loadEarningsCreators();
+  }
+  if (name === 'queue') {
+    // Phase 4.4 — moderation queue. Loads flagged earnings from the
+    // admin_earnings_queue_list RPC + applies any active filters.
+    _earningsQueuePage = 0;
+    loadEarningsQueue();
+  }
+}
+
+// "2026-05" → "May 2026". Used by the month picker fallback when the
+// server's available_months list doesn't already include the currently
+// selected month (e.g. on a fresh deploy with no monthly data yet).
+function _formatMonthLabel(yyyyMm) {
+  if (!yyyyMm) return '';
+  const [y, m] = String(yyyyMm).split('-');
+  const month = parseInt(m, 10);
+  const names = ['January','February','March','April','May','June',
+                 'July','August','September','October','November','December'];
+  if (!names[month - 1]) return yyyyMm;
+  return `${names[month - 1]} ${y}`;
+}
+
+// Hide the detail view and re-show the list view. Called whenever
+// admin clicks the back button OR re-enters the Earnings tab. Idempotent.
+// Also stops the real-time polling loop so we don't keep hitting the
+// RPC after the admin has navigated away.
+function _exitEarningsCreatorDetail() {
+  const detail = document.getElementById('earningsCreatorDetail');
+  const listWrap = document.getElementById('earningsCreatorsListWrap');
+  if (detail) detail.style.display = 'none';
+  if (detail) detail.innerHTML = '';
+  if (listWrap) listWrap.style.display = 'block';
+  if (_earningsDetailPollTimer) {
+    clearInterval(_earningsDetailPollTimer);
+    _earningsDetailPollTimer = null;
+  }
+}
+
+async function loadEarningsCreators() {
+  const listEl = document.getElementById('earningsCreatorsList');
+  const subEl  = document.getElementById('earningsCreatorsSub');
+  const pager  = document.getElementById('earningsCreatorsPager');
+  const pagerStatus = document.getElementById('earningsCreatorsPagerStatus');
+  const prevBtn = document.getElementById('earningsCreatorsPrev');
+  const nextBtn = document.getElementById('earningsCreatorsNext');
+  if (!listEl) return;
+
+  listEl.innerHTML = '<div class="admin-empty">Loading creators…</div>';
+  if (pager) pager.style.display = 'none';
+
+  const { data, error } = await supabase.rpc('admin_earnings_creators_rollup', {
+    p_limit:  EARNINGS_CREATORS_PAGE_SIZE,
+    p_offset: _earningsCreatorsPage * EARNINGS_CREATORS_PAGE_SIZE,
+    p_search: _earningsCreatorsSearch || null,
+  });
+
+  if (error) {
+    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
+    if (subEl) subEl.textContent = 'Failed to load';
+    return;
+  }
+  if (!data?.ok) {
+    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(data?.error || 'Unknown error')}</div>`;
+    if (subEl) subEl.textContent = 'Failed to load';
+    return;
+  }
+
+  const items = data.items || [];
+  const totalCount = data.total_count || 0;
+  _earningsCreatorsHasMore = !!data.has_more;
+
+  if (subEl) {
+    const matchCopy = _earningsCreatorsSearch ? ` matching "${esc(_earningsCreatorsSearch)}"` : '';
+    subEl.textContent = `${totalCount} creator${totalCount === 1 ? '' : 's'}${matchCopy}`;
+  }
+
+  if (items.length === 0) {
+    listEl.innerHTML = `<div class="admin-empty">No creators with earnings${
+      _earningsCreatorsSearch ? ` match "${esc(_earningsCreatorsSearch)}".` : ' yet.'
+    }</div>`;
+    return;
+  }
+
+  _renderEarningsCreators(items);
+
+  // Show pager only when there's more than one page worth of data.
+  const showPager = _earningsCreatorsPage > 0 || _earningsCreatorsHasMore;
+  if (pager) pager.style.display = showPager ? 'flex' : 'none';
+  if (prevBtn) prevBtn.disabled = _earningsCreatorsPage === 0;
+  if (nextBtn) nextBtn.disabled = !_earningsCreatorsHasMore;
+  if (pagerStatus) {
+    const from = _earningsCreatorsPage * EARNINGS_CREATORS_PAGE_SIZE + 1;
+    const to   = from + items.length - 1;
+    pagerStatus.textContent = `Showing ${from}–${to} of ${totalCount}`;
+  }
+}
+
+// Render the creators rollup as a table. Each row is clickable —
+// click → drill down to creator detail (Phase 2.2). For now the
+// click handler shows a placeholder; Phase 2.2 replaces the body.
+function _renderEarningsCreators(items) {
+  const listEl = document.getElementById('earningsCreatorsList');
+  if (!listEl) return;
+
+  // Format pesos from minor units (cents → ₱). Returns a string
+  // like "₱1,234.50" or "—" for zero.
+  const fmtPhp = (minor) => {
+    const n = Number(minor) || 0;
+    if (n === 0) return '—';
+    return `₱${(n / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  // Time-ago string for the "last activity" column. Falls back to "—".
+  const fmtAgo = (iso) => {
+    if (!iso) return '—';
+    try {
+      return timeAgo(iso);
+    } catch {
+      return '—';
+    }
+  };
+
+  const rows = items.map((row) => {
+    const name = esc(row.display_name || row.username || 'Unknown');
+    const handle = row.username ? `@${esc(row.username)}` : '';
+    const avatar = row.avatar_url
+      ? `<img src="${esc(row.avatar_url)}" alt="" class="admin-avatar" />`
+      : `<div class="admin-avatar admin-avatar-fallback">${esc(initials(row.display_name || row.username || '?'))}</div>`;
+
+    // Risk badges — payouts_frozen takes precedence over flagged_count.
+    let riskBadge = '';
+    if (row.payouts_frozen) {
+      const reason = row.payouts_frozen_reason ? `: ${esc(row.payouts_frozen_reason)}` : '';
+      riskBadge = `<span class="admin-badge admin-badge-danger" title="Payouts frozen${reason}">Frozen</span>`;
+    } else if (row.flagged_count > 0) {
+      riskBadge = `<span class="admin-badge admin-badge-warn">${row.flagged_count} flag${row.flagged_count === 1 ? '' : 's'}</span>`;
+    }
+
+    // Pioneer / role badge for context (Pioneer creators are fee-exempt
+    // for withdrawals so admins reviewing payouts want to see this).
+    const roleBadge = row.role && row.role !== 'user'
+      ? `<span class="admin-badge admin-badge-neutral">${esc(row.role)}</span>`
+      : '';
+
+    return `
+      <div class="admin-earnings-row" data-author-id="${esc(row.author_id)}" role="button" tabindex="0">
+        <div class="admin-earnings-row-identity">
+          ${avatar}
+          <div class="admin-earnings-row-name">
+            <div class="admin-earnings-row-display">${name} ${roleBadge}</div>
+            <div class="admin-earnings-row-handle">${handle}</div>
+          </div>
+          ${riskBadge}
+        </div>
+        <div class="admin-earnings-row-metrics">
+          <div class="admin-earnings-metric">
+            <div class="admin-earnings-metric-label">Verified</div>
+            <div class="admin-earnings-metric-value admin-earnings-metric-verified">${fmtPhp(row.verified_php_minor)}</div>
+          </div>
+          <div class="admin-earnings-metric">
+            <div class="admin-earnings-metric-label">Pending</div>
+            <div class="admin-earnings-metric-value admin-earnings-metric-pending">${fmtPhp(row.pending_php_minor)}</div>
+          </div>
+          <div class="admin-earnings-metric">
+            <div class="admin-earnings-metric-label">Rejected</div>
+            <div class="admin-earnings-metric-value admin-earnings-metric-rejected">${fmtPhp(row.rejected_php_minor)}</div>
+          </div>
+          <div class="admin-earnings-metric">
+            <div class="admin-earnings-metric-label">Withdrawn</div>
+            <div class="admin-earnings-metric-value">${fmtPhp(row.total_withdrawn_php_minor)}</div>
+          </div>
+          <div class="admin-earnings-metric">
+            <div class="admin-earnings-metric-label">Content</div>
+            <div class="admin-earnings-metric-value">${row.content_count || 0}</div>
+          </div>
+          <div class="admin-earnings-metric">
+            <div class="admin-earnings-metric-label">Last unlock</div>
+            <div class="admin-earnings-metric-value admin-earnings-metric-time">${fmtAgo(row.latest_unlock_at)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.innerHTML = rows;
+
+  // Click + keyboard handler — drills into the creator detail view.
+  // Phase 2.2 wires up the actual detail rendering; for now we show
+  // a placeholder so the click feels responsive.
+  listEl.querySelectorAll('.admin-earnings-row').forEach((rowEl) => {
+    const open = () => {
+      const authorId = rowEl.dataset.authorId;
+      if (authorId) _openEarningsCreatorDetail(authorId);
+    };
+    rowEl.addEventListener('click', open);
+    rowEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PHASE 4.4 — Moderation queue (flagged earnings list)
+// ════════════════════════════════════════════════════════════════════════════
+// Pulls open flags from admin_earnings_queue_list. Each card shows the
+// signal evidence + creator + earning context, with one-click actions:
+//   Resolve — clears just this flag, doesn't touch the earning
+//   Verify  — verifies the earning (auto-resolves all its flags)
+//   Reject  — rejects the earning (auto-resolves all its flags)
+//   View    — drills into the Creator detail view (Phase 2.2)
+// Verify / Reject reuse the modals from Phase 2.2 since the underlying
+// RPCs are the same.
+
+const EARNINGS_QUEUE_PAGE_SIZE = 50;
+let _earningsQueuePage = 0;
+let _earningsQueueHasMore = false;
+
+async function loadEarningsQueue() {
+  const listEl = document.getElementById('earningsQueueList');
+  const subEl  = document.getElementById('earningsQueueSub');
+  const pager  = document.getElementById('earningsQueuePager');
+  const prevBtn = document.getElementById('earningsQueuePrev');
+  const nextBtn = document.getElementById('earningsQueueNext');
+  if (!listEl) return;
+
+  listEl.innerHTML = '<div class="admin-empty">Loading queue…</div>';
+  if (pager) pager.style.display = 'none';
+
+  const severity = document.getElementById('earningsQueueSeverity')?.value || null;
+  const signal   = document.getElementById('earningsQueueSignal')?.value || null;
+
+  const { data, error } = await supabase.rpc('admin_earnings_queue_list', {
+    p_severity:    severity || null,
+    p_signal_type: signal || null,
+    p_limit:       EARNINGS_QUEUE_PAGE_SIZE,
+    p_offset:      _earningsQueuePage * EARNINGS_QUEUE_PAGE_SIZE,
+  });
+
+  if (error) {
+    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
+    if (subEl) subEl.textContent = 'Failed to load';
+    return;
+  }
+  if (!data?.ok) {
+    listEl.innerHTML = `<div class="admin-empty admin-error">${esc(data?.error || 'Unknown error')}</div>`;
+    if (subEl) subEl.textContent = 'Failed to load';
+    return;
+  }
+
+  const items = data.items || [];
+  const totalCount = data.total_count || 0;
+  const sevCounts = data.severity_counts || {};
+  _earningsQueueHasMore = !!data.has_more;
+
+  // Update the tab + sub-tab count badges so the moderator can see
+  // queue depth at a glance from anywhere in the admin shell.
+  _updateEarningsQueueBadges(totalCount);
+
+  if (subEl) {
+    const parts = [];
+    if (sevCounts.critical) parts.push(`${sevCounts.critical} critical`);
+    if (sevCounts.high)     parts.push(`${sevCounts.high} high`);
+    if (sevCounts.normal)   parts.push(`${sevCounts.normal} normal`);
+    if (sevCounts.low)      parts.push(`${sevCounts.low} low`);
+    subEl.textContent = totalCount === 0
+      ? 'No flagged earnings.'
+      : `${totalCount} open flag${totalCount === 1 ? '' : 's'}${parts.length ? ' · ' + parts.join(', ') : ''}`;
+  }
+
+  if (items.length === 0) {
+    listEl.innerHTML = `
+      <div class="admin-empty">
+        <p><strong>${severity || signal ? 'No flagged earnings match the current filter.' : 'No flagged earnings.'}</strong></p>
+        ${severity || signal
+          ? `<p>Try clearing the filter to see all open flags.</p>`
+          : `<p>The hourly detection job runs at *:05 — flags appear here when it finds suspicious activity. Admins can also add manual flags from the Creators tab.</p>`}
+      </div>`;
+    return;
+  }
+
+  _renderEarningsQueue(items);
+
+  const fromIdx = _earningsQueuePage * EARNINGS_QUEUE_PAGE_SIZE + 1;
+  const toIdx   = fromIdx + items.length - 1;
+  const showPager = _earningsQueuePage > 0 || _earningsQueueHasMore;
+  if (pager) pager.style.display = showPager ? 'flex' : 'none';
+  if (prevBtn) prevBtn.disabled = _earningsQueuePage === 0;
+  if (nextBtn) nextBtn.disabled = !_earningsQueueHasMore;
+  const pagerStatus = document.getElementById('earningsQueuePagerStatus');
+  if (pagerStatus) pagerStatus.textContent = `Showing ${fromIdx}–${toIdx} of ${totalCount}`;
+}
+
+// Update both the top-level Earnings tab badge AND the Moderation queue
+// sub-tab badge with the current open-flag count. Hides the badge at 0
+// (CSS rule on :empty selector).
+function _updateEarningsQueueBadges(count) {
+  const tabBadge    = document.getElementById('earningsFlagCount');
+  const subBadge    = document.getElementById('earningsQueueCount');
+  const value       = count > 0 ? String(count) : '';
+  if (tabBadge) tabBadge.textContent = value;
+  if (subBadge) subBadge.textContent = value;
+}
+
+// Friendly labels for signal_type — keeps the cards readable instead
+// of showing snake_case to admins. Falls back to the raw value for
+// unknown signals (e.g. admin-defined custom flag types).
+const _SIGNAL_LABELS = {
+  low_dwell_unlock:      'Low-dwell unlock',
+  same_ip_cluster:       'Same-IP cluster',
+  unlock_spike:          'Unlock spike',
+  multi_account_device:  'Multi-account device',
+  rapid_chapter_switch:  'Rapid chapter switching',
+  suspicious_topup:      'Suspicious top-up',
+  manual_admin:          'Manual admin flag',
+  user_report:           'User report',
+  external_complaint:    'External complaint',
+};
+
+// Render an evidence object as a list of "key: value" strings. The
+// evidence shape varies by signal (low_dwell has watched_seconds,
+// same_ip_cluster has ip_hash_short, etc) so we just iterate the
+// jsonb. Skips internal fields the admin doesn't care about.
+const _EVIDENCE_SKIP_KEYS = new Set(['detected_at', 'flagged_by', 'admin_notes', 'flagged_at']);
+function _formatEvidence(evidence) {
+  if (!evidence || typeof evidence !== 'object') return '';
+  const lines = [];
+  for (const [k, v] of Object.entries(evidence)) {
+    if (_EVIDENCE_SKIP_KEYS.has(k)) continue;
+    if (v == null || v === '') continue;
+    let valStr;
+    if (typeof v === 'object') {
+      valStr = JSON.stringify(v);
+    } else if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v)) {
+      // ISO timestamp — humanize.
+      try { valStr = timeAgo(v); } catch { valStr = v; }
+    } else {
+      valStr = String(v);
+    }
+    if (valStr.length > 80) valStr = valStr.slice(0, 77) + '…';
+    lines.push(`<span class="admin-queue-evidence-pair"><strong>${esc(k.replace(/_/g, ' '))}:</strong> ${esc(valStr)}</span>`);
+  }
+  return lines.join(' · ');
+}
+
+function _renderEarningsQueue(items) {
+  const listEl = document.getElementById('earningsQueueList');
+  if (!listEl) return;
+
+  const fmtPhp = (minor) => {
+    const n = Number(minor) || 0;
+    if (n === 0) return '₱0.00';
+    return `₱${(n / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  // Use adjusted_net_php_minor when status='adjusted'; otherwise the
+  // original net amount. Same rule as the rest of the earnings reads.
+  const effectiveMinor = (it) =>
+    it.earning_status === 'adjusted' && Number(it.earning_adjusted_net_php_minor) >= 0
+      ? Number(it.earning_adjusted_net_php_minor)
+      : Number(it.earning_net_php_minor);
+
+  const cards = items.map((it) => {
+    const signalLabel = _SIGNAL_LABELS[it.signal_type] || it.signal_type;
+    const sevClass = `admin-queue-sev-${esc(it.severity)}`;
+
+    const creatorName = esc(it.author_display_name || it.author_username || 'Unknown');
+    const creatorHandle = it.author_username ? `@${esc(it.author_username)}` : '';
+    const avatar = it.author_avatar_url
+      ? `<img src="${esc(it.author_avatar_url)}" alt="" class="admin-avatar" />`
+      : `<div class="admin-avatar admin-avatar-fallback">${esc(initials(it.author_display_name || it.author_username || '?'))}</div>`;
+
+    const frozenBadge = it.author_payouts_frozen
+      ? `<span class="admin-badge admin-badge-danger">Frozen</span>`
+      : '';
+
+    const sourceTitle = it.earning_source_title
+      ? esc(it.earning_source_title)
+      : `<em>Unknown ${esc(it.earning_source_type || 'item')}</em>`;
+
+    const statusPill = `<span class="admin-earnings-status admin-earnings-status-${esc(it.earning_status)}">${esc(it.earning_status)}</span>`;
+    const evidenceLine = _formatEvidence(it.evidence);
+
+    // Disable Verify/Reject when the earning is in a terminal state
+    // the action RPCs wouldn't accept. Resolve always works.
+    const isTerminal = ['rejected', 'adjusted', 'withdrawn', 'reversed'].includes(it.earning_status);
+    const actionButtons = isTerminal
+      ? `<button class="admin-btn admin-btn-secondary admin-queue-action" data-act="resolve" data-flag-id="${esc(it.flag_id)}">Resolve flag</button>
+         <button class="admin-btn admin-btn-secondary admin-queue-action" data-act="view" data-author-id="${esc(it.author_id)}">View creator</button>`
+      : `<button class="admin-btn admin-btn-primary admin-queue-action" data-act="verify" data-earning-id="${esc(it.earning_id)}">Verify</button>
+         <button class="admin-btn admin-btn-danger-ghost admin-queue-action" data-act="reject" data-earning-id="${esc(it.earning_id)}">Reject</button>
+         <button class="admin-btn admin-btn-ghost admin-queue-action" data-act="resolve" data-flag-id="${esc(it.flag_id)}">Resolve flag</button>
+         <button class="admin-btn admin-btn-secondary admin-queue-action" data-act="view" data-author-id="${esc(it.author_id)}">View creator</button>`;
+
+    return `
+      <div class="admin-queue-card ${sevClass}">
+        <div class="admin-queue-card-header">
+          <div class="admin-queue-signal">
+            <span class="admin-queue-signal-label">${esc(signalLabel)}</span>
+            <span class="admin-queue-severity">${esc(it.severity)} · +${it.score_delta}pts</span>
+          </div>
+          <div class="admin-queue-creator">
+            ${avatar}
+            <div class="admin-queue-creator-name">
+              <div class="admin-queue-creator-display">${creatorName} ${frozenBadge}</div>
+              <div class="admin-queue-creator-handle">${creatorHandle}</div>
+            </div>
+          </div>
+        </div>
+        <div class="admin-queue-card-body">
+          <div class="admin-queue-earning">
+            <span class="admin-queue-earning-title">${sourceTitle}</span>
+            ${statusPill}
+            <span class="admin-queue-earning-amount">${fmtPhp(effectiveMinor(it))}</span>
+            <span class="admin-queue-earning-risk">Risk: <strong>${it.earning_risk_score || 0}</strong></span>
+          </div>
+          ${evidenceLine ? `<div class="admin-queue-evidence">${evidenceLine}</div>` : ''}
+        </div>
+        <div class="admin-queue-card-actions">
+          ${actionButtons}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.innerHTML = cards;
+
+  // Wire up the action buttons. Verify/Reject reuse the Phase 2.2
+  // modals via the same RPC paths; Resolve calls admin_resolve_flag
+  // directly. View navigates into the Creator detail.
+  listEl.querySelectorAll('.admin-queue-action').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const act = btn.dataset.act;
+      if (act === 'verify') {
+        const earningId = btn.dataset.earningId;
+        const item = items.find((it) => it.earning_id === earningId);
+        if (item) {
+          // Build a stub "earning" object that matches the shape
+          // _openVerifyConfirm expects (just needs .id).
+          _openVerifyConfirm({ id: earningId });
+        }
+      } else if (act === 'reject') {
+        const earningId = btn.dataset.earningId;
+        const item = items.find((it) => it.earning_id === earningId);
+        if (item) {
+          _openRejectModal({
+            id:            earningId,
+            currency_used: item.earning_currency_used,
+            gross_coins:   item.earning_gross_coins,
+          });
+        }
+      } else if (act === 'resolve') {
+        const flagId = btn.dataset.flagId;
+        if (flagId) await _resolveQueueFlag(flagId);
+      } else if (act === 'view') {
+        const authorId = btn.dataset.authorId;
+        if (authorId) {
+          // Jump to the Creators sub-tab + open the detail view.
+          switchEarningsSubtab('creators');
+          _openEarningsCreatorDetail(authorId);
+        }
+      }
+    });
+  });
+}
+
+// Resolve a single flag from the queue. Confirms via modal since
+// resolving without admin notes is allowed but discouraged.
+async function _resolveQueueFlag(flagId) {
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>Resolve flag</h3>
+      <p class="admin-modal-sub">
+        Clear this flag from the queue WITHOUT taking action on the
+        earning. The earning's risk score will be recomputed. If this
+        was the only open flag, the earning becomes eligible for
+        auto-promote again.
+      </p>
+      <div class="admin-form">
+        <label>Resolution note (optional)
+          <textarea id="resolveNotes" rows="3" placeholder="Why clearing this flag — e.g. false positive, investigated and benign."></textarea>
+        </label>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-primary" data-act="confirm">Resolve flag</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="confirm"]').onclick = async () => {
+    const notes = modal.querySelector('#resolveNotes').value.trim() || null;
+    const { data, error } = await supabase.rpc('admin_resolve_flag', {
+      p_flag_id: flagId,
+      p_notes:   notes,
+    });
+    if (error) { toast(error.message); return; }
+    if (!data?.ok) { toast(data?.error || 'Resolve failed'); return; }
+    toast('Flag resolved');
+    close();
+    loadEarningsQueue();
+  };
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// PHASE 2.2 — Creator detail drill-down + action modals
+// ════════════════════════════════════════════════════════════════════════════
+// State: which creator is open, current status filter, current page.
+// Refreshes triggered by any action so the UI stays consistent with
+// the server after Verify / Reject / Adjust / Freeze / Unfreeze.
+
+const EARNINGS_DETAIL_PAGE_SIZE = 25;
+// Charles UX overhaul 2026-05-14 — match creator-facing tile semantics
+// (Remaining Balance / Under Review / This Month + per-source breakdown)
+// and refresh live so admin numbers don't go stale during a session.
+const EARNINGS_DETAIL_POLL_MS = 30000;  // 30s real-time refresh
+let _earningsDetailAuthorId = null;
+let _earningsDetailStatusFilter = null;  // null = all
+let _earningsDetailPage = 0;
+let _earningsDetailMonth = null;  // 'YYYY-MM' or null = current month
+let _earningsDetailPollTimer = null;
+
+async function _openEarningsCreatorDetail(authorId) {
+  _earningsDetailAuthorId = authorId;
+  _earningsDetailStatusFilter = null;
+  _earningsDetailPage = 0;
+  _earningsDetailMonth = null;  // reset to current month on each open
+  // Stop any previous poll loop before starting fresh.
+  if (_earningsDetailPollTimer) {
+    clearInterval(_earningsDetailPollTimer);
+    _earningsDetailPollTimer = null;
+  }
+  await _loadEarningsCreatorDetail();
+  // Start polling for real-time updates while the detail view is open.
+  // _exitEarningsCreatorDetail clears the timer.
+  _earningsDetailPollTimer = setInterval(() => {
+    // Silent refresh — same loader path; doesn't show the "Loading…"
+    // empty state because we pass silent=true.
+    _loadEarningsCreatorDetail({ silent: true }).catch(() => {});
+  }, EARNINGS_DETAIL_POLL_MS);
+}
+
+async function _loadEarningsCreatorDetail(opts = {}) {
+  const { silent = false } = opts;
+  if (!_earningsDetailAuthorId) return;
+  const detail = document.getElementById('earningsCreatorDetail');
+  const listWrap = document.getElementById('earningsCreatorsListWrap');
+  if (!detail || !listWrap) return;
+
+  listWrap.style.display = 'none';
+  detail.style.display = 'block';
+  if (!silent) {
+    detail.innerHTML = '<div class="admin-empty">Loading creator details…</div>';
+  }
+
+  const { data, error } = await supabase.rpc('admin_earnings_creator_detail', {
+    p_author_id:     _earningsDetailAuthorId,
+    p_status_filter: _earningsDetailStatusFilter,
+    p_limit:         EARNINGS_DETAIL_PAGE_SIZE,
+    p_offset:        _earningsDetailPage * EARNINGS_DETAIL_PAGE_SIZE,
+    p_month_year:    _earningsDetailMonth,
+  });
+
+  if (error) {
+    if (!silent) {
+      detail.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`;
+    }
+    return;
+  }
+  if (!data?.ok) {
+    if (!silent) {
+      detail.innerHTML = `<div class="admin-empty admin-error">${esc(data?.error || 'Failed to load')}</div>`;
+    }
+    return;
+  }
+  _renderEarningsCreatorDetail(data);
+}
+
+function _renderEarningsCreatorDetail(data) {
+  const detail = document.getElementById('earningsCreatorDetail');
+  if (!detail) return;
+
+  const p = data.profile || {};
+  const s = data.summary || {};
+  const earnings = data.earnings || [];
+  const withdrawals = data.withdrawals || [];
+
+  const fmtPhp = (minor) => {
+    const n = Number(minor) || 0;
+    return `₱${(n / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+  const fmtAgo = (iso) => { try { return iso ? timeAgo(iso) : '—'; } catch { return '—'; } };
+  const fmtDateTime = (iso) => {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString('en-US', {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      });
+    } catch { return '—'; }
+  };
+
+  // ── Header (identity + freeze button) ────────────────────────────────
+  const displayName = esc(p.display_name || p.username || 'Unknown');
+  const handle = p.username ? `@${esc(p.username)}` : '';
+  const avatar = p.avatar_url
+    ? `<img src="${esc(p.avatar_url)}" alt="" class="admin-avatar admin-avatar-lg" />`
+    : `<div class="admin-avatar admin-avatar-lg admin-avatar-fallback">${esc(initials(p.display_name || p.username || '?'))}</div>`;
+
+  const roleBadge = p.role && p.role !== 'user'
+    ? `<span class="admin-badge admin-badge-neutral">${esc(p.role)}</span>`
+    : '';
+
+  const frozenBadge = p.payouts_frozen
+    ? `<span class="admin-badge admin-badge-danger">Payouts frozen</span>`
+    : '';
+
+  const freezeBtn = p.payouts_frozen
+    ? `<button class="admin-btn admin-btn-ghost" data-act="unfreeze">Unfreeze payouts</button>`
+    : `<button class="admin-btn admin-btn-danger-ghost" data-act="freeze">Freeze payouts</button>`;
+
+  const frozenReasonRow = p.payouts_frozen && p.payouts_frozen_reason
+    ? `<div class="admin-earnings-detail-frozen">
+         <strong>Frozen reason:</strong> ${esc(p.payouts_frozen_reason)}
+         ${p.payouts_frozen_at ? `<span class="admin-earnings-detail-frozen-when">· ${fmtAgo(p.payouts_frozen_at)}</span>` : ''}
+       </div>`
+    : '';
+
+  // ── Summary tiles — creator-facing layout ────────────────────────────
+  // Charles UX 2026-05-14: match the Payments → Earnings screen the
+  // creator sees on their own account, plus admin-only context tiles.
+  //
+  // Row 1: Remaining Balance / Under Review / This Month (with month picker)
+  // Row 2: Books / Posts / Videos breakdown for the selected month
+  // Row 3 (admin-only context): Rejected / Withdrawn / Total Payouts
+  //
+  // Numbers come from the server RPC's `summary` jsonb which has been
+  // extended with remaining_balance_php_minor, under_review_php_minor,
+  // this_month_total_php_minor, this_month_breakdown, available_months,
+  // selected_month_year.
+  const monthBreakdown = s.this_month_breakdown || {};
+  const availableMonths = Array.isArray(s.available_months) ? s.available_months : [];
+  const selectedMonth = s.selected_month_year || '';
+
+  // Build month-picker options. Always include the selected month at
+  // the top even if no rows exist for it (so the picker doesn't go
+  // empty after navigating to an unused month).
+  const hasSelectedInList = availableMonths.some((m) => m.value === selectedMonth);
+  const monthOptions = (hasSelectedInList
+    ? availableMonths
+    : [{ value: selectedMonth, label: _formatMonthLabel(selectedMonth) }, ...availableMonths]
+  ).map((m) =>
+    `<option value="${esc(m.value)}"${m.value === selectedMonth ? ' selected' : ''}>${esc(m.label)}</option>`
+  ).join('');
+
+  const tilesHtml = `
+    <div class="admin-earnings-tiles admin-earnings-tiles-primary">
+      <div class="admin-earnings-tile">
+        <div class="admin-earnings-tile-label">Total Earnings</div>
+        <div class="admin-earnings-tile-value">${fmtPhp(s.total_earnings_php_minor)}</div>
+        <div class="admin-earnings-tile-sub">Lifetime gross (remaining + withdrawn)</div>
+      </div>
+      <div class="admin-earnings-tile admin-earnings-tile-verified">
+        <div class="admin-earnings-tile-label">Remaining Balance</div>
+        <div class="admin-earnings-tile-value">${fmtPhp(s.remaining_balance_php_minor)}</div>
+        <div class="admin-earnings-tile-sub">Available to withdraw</div>
+      </div>
+      <div class="admin-earnings-tile admin-earnings-tile-pending">
+        <div class="admin-earnings-tile-label">Under Review</div>
+        <div class="admin-earnings-tile-value">${fmtPhp(s.under_review_php_minor)}</div>
+        <div class="admin-earnings-tile-sub">Pending finalization</div>
+      </div>
+      <div class="admin-earnings-tile">
+        <div class="admin-earnings-tile-label admin-earnings-tile-label-with-picker">
+          <span>This Month</span>
+          <select class="admin-select admin-select-inline" id="earningsDetailMonthPicker">
+            ${monthOptions}
+          </select>
+        </div>
+        <div class="admin-earnings-tile-value">${fmtPhp(s.this_month_total_php_minor)}</div>
+        <div class="admin-earnings-tile-sub">Finalized in selected month</div>
+      </div>
+    </div>
+
+    <div class="admin-earnings-tiles admin-earnings-tiles-breakdown">
+      <div class="admin-earnings-tile admin-earnings-tile-compact">
+        <div class="admin-earnings-tile-label">Books</div>
+        <div class="admin-earnings-tile-value">${fmtPhp(monthBreakdown.books)}</div>
+      </div>
+      <div class="admin-earnings-tile admin-earnings-tile-compact">
+        <div class="admin-earnings-tile-label">Posts</div>
+        <div class="admin-earnings-tile-value">${fmtPhp(monthBreakdown.posts)}</div>
+      </div>
+      <div class="admin-earnings-tile admin-earnings-tile-compact">
+        <div class="admin-earnings-tile-label">Videos</div>
+        <div class="admin-earnings-tile-value">${fmtPhp(monthBreakdown.videos)}</div>
+      </div>
+    </div>
+
+    <details class="admin-earnings-tiles-secondary">
+      <summary>Admin-only context (lifetime)</summary>
+      <div class="admin-earnings-tiles admin-earnings-tiles-context">
+        <div class="admin-earnings-tile admin-earnings-tile-compact">
+          <div class="admin-earnings-tile-label">Verified (all-time)</div>
+          <div class="admin-earnings-tile-value">${fmtPhp(s.verified_php_minor)}</div>
+        </div>
+        <div class="admin-earnings-tile admin-earnings-tile-compact admin-earnings-tile-adjusted">
+          <div class="admin-earnings-tile-label">Adjusted</div>
+          <div class="admin-earnings-tile-value">${fmtPhp(s.adjusted_php_minor)}</div>
+        </div>
+        <div class="admin-earnings-tile admin-earnings-tile-compact admin-earnings-tile-rejected">
+          <div class="admin-earnings-tile-label">Rejected</div>
+          <div class="admin-earnings-tile-value">${fmtPhp(s.rejected_php_minor)}</div>
+        </div>
+        <div class="admin-earnings-tile admin-earnings-tile-compact">
+          <div class="admin-earnings-tile-label">Withdrawn</div>
+          <div class="admin-earnings-tile-value">${fmtPhp(s.withdrawn_php_minor)}</div>
+        </div>
+        <div class="admin-earnings-tile admin-earnings-tile-compact">
+          <div class="admin-earnings-tile-label">Total Payouts</div>
+          <div class="admin-earnings-tile-value">${fmtPhp(s.total_withdrawn_php_minor)}</div>
+          ${s.in_flight_withdrawals_count > 0
+            ? `<div class="admin-earnings-tile-sub">${s.in_flight_withdrawals_count} in flight</div>`
+            : ''}
+        </div>
+      </div>
+    </details>
+  `;
+
+  // ── Status filter chips ──────────────────────────────────────────────
+  const filterChips = ['all', 'pending', 'verified', 'adjusted', 'rejected', 'withdrawn', 'reversed'].map((f) => {
+    const isActive = (f === 'all' && _earningsDetailStatusFilter === null) ||
+                     (f === _earningsDetailStatusFilter);
+    return `<button class="admin-chip${isActive ? ' active' : ''}" data-filter="${esc(f)}">${esc(f.charAt(0).toUpperCase() + f.slice(1))}</button>`;
+  }).join('');
+
+  // ── Earnings rows table ──────────────────────────────────────────────
+  const earningsRowsHtml = earnings.length === 0
+    ? `<div class="admin-empty">No earnings rows for this filter.</div>`
+    : earnings.map((e) => _renderEarningsDetailRow(e, fmtPhp, fmtDateTime)).join('');
+
+  // ── Withdrawal history ────────────────────────────────────────────────
+  const withdrawalsHtml = withdrawals.length === 0
+    ? `<div class="admin-empty admin-empty-tiny">No withdrawals yet.</div>`
+    : `<table class="admin-earnings-withdrawals-table">
+         <thead>
+           <tr>
+             <th>Requested</th>
+             <th>Amount</th>
+             <th>Net</th>
+             <th>Method</th>
+             <th>Status</th>
+           </tr>
+         </thead>
+         <tbody>
+           ${withdrawals.map((w) => `
+             <tr>
+               <td>${fmtDateTime(w.requested_at)}</td>
+               <td>${fmtPhp(w.amount_php_minor)}</td>
+               <td>${fmtPhp(w.net_php_minor)}</td>
+               <td>${esc(w.payout_method || '—')}</td>
+               <td><span class="admin-earnings-status admin-earnings-status-${esc(w.status || 'unknown')}">${esc(w.status || 'unknown')}</span></td>
+             </tr>
+           `).join('')}
+         </tbody>
+       </table>`;
+
+  // ── Pagination footer ─────────────────────────────────────────────────
+  const totalEarnings = data.earnings_count || 0;
+  const hasMore = !!data.earnings_has_more;
+  const showPager = _earningsDetailPage > 0 || hasMore;
+  const fromIdx = _earningsDetailPage * EARNINGS_DETAIL_PAGE_SIZE + 1;
+  const toIdx   = fromIdx + earnings.length - 1;
+  const pagerHtml = showPager
+    ? `<div class="admin-pager">
+         <button class="admin-btn admin-btn-secondary" data-act="prev"
+                 ${_earningsDetailPage === 0 ? 'disabled' : ''}>← Previous</button>
+         <span class="admin-pager-status">${earnings.length ? `Showing ${fromIdx}–${toIdx} of ${totalEarnings}` : ''}</span>
+         <button class="admin-btn admin-btn-secondary" data-act="next"
+                 ${!hasMore ? 'disabled' : ''}>Next →</button>
+       </div>`
+    : '';
+
+  // ── Compose detail view ───────────────────────────────────────────────
+  detail.innerHTML = `
+    <div class="admin-earnings-detail-header">
+      <div class="admin-toolbar-left">
+        <button class="admin-btn admin-btn-secondary" id="earningsDetailBackBtn">← Back to creators</button>
+      </div>
+    </div>
+
+    <div class="admin-earnings-detail-identity">
+      ${avatar}
+      <div class="admin-earnings-detail-name">
+        <div class="admin-earnings-detail-display">
+          ${displayName} ${roleBadge} ${frozenBadge}
+        </div>
+        <div class="admin-earnings-detail-handle">${handle}</div>
+        ${p.kyc_status ? `<div class="admin-earnings-detail-kyc">KYC: <strong>${esc(p.kyc_status)}</strong></div>` : ''}
+      </div>
+      <div class="admin-earnings-detail-actions">
+        ${freezeBtn}
+      </div>
+    </div>
+    ${frozenReasonRow}
+
+    ${tilesHtml}
+
+    <div class="admin-earnings-detail-section">
+      <div class="admin-toolbar">
+        <div class="admin-toolbar-left">
+          <h3>Earnings rows</h3>
+          <span class="admin-toolbar-sub">${totalEarnings} row${totalEarnings === 1 ? '' : 's'} matching filter</span>
+        </div>
+      </div>
+      <div class="admin-chips-row">${filterChips}</div>
+      <div class="admin-earnings-rows-list">${earningsRowsHtml}</div>
+      ${pagerHtml}
+    </div>
+
+    <div class="admin-earnings-detail-section">
+      <h3>Recent withdrawals</h3>
+      ${withdrawalsHtml}
+    </div>
+  `;
+
+  // ── Wire up event handlers ────────────────────────────────────────────
+  document.getElementById('earningsDetailBackBtn')?.addEventListener('click', _exitEarningsCreatorDetail);
+
+  // Month picker — change resets to page 0 of the earnings list and
+  // re-fetches with the new month. Polling continues with the new month.
+  document.getElementById('earningsDetailMonthPicker')?.addEventListener('change', (e) => {
+    _earningsDetailMonth = e.target.value || null;
+    _earningsDetailPage = 0;
+    _loadEarningsCreatorDetail();
+  });
+
+  // Freeze / Unfreeze.
+  detail.querySelectorAll('.admin-earnings-detail-actions [data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const act = btn.dataset.act;
+      if (act === 'freeze') _openFreezeModal(p);
+      else if (act === 'unfreeze') _openUnfreezeModal(p);
+    });
+  });
+
+  // Status filter chips.
+  detail.querySelectorAll('.admin-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const f = chip.dataset.filter;
+      _earningsDetailStatusFilter = f === 'all' ? null : f;
+      _earningsDetailPage = 0;
+      _loadEarningsCreatorDetail();
+    });
+  });
+
+  // Pagination.
+  detail.querySelectorAll('.admin-pager [data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.act === 'prev' && _earningsDetailPage > 0) {
+        _earningsDetailPage -= 1;
+        _loadEarningsCreatorDetail();
+      } else if (btn.dataset.act === 'next' && hasMore) {
+        _earningsDetailPage += 1;
+        _loadEarningsCreatorDetail();
+      }
+    });
+  });
+
+  // Per-row action buttons (verify / reject / adjust).
+  detail.querySelectorAll('.admin-earnings-row-action').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const earningId = btn.dataset.earningId;
+      const act = btn.dataset.act;
+      const earning = earnings.find((row) => row.id === earningId);
+      if (!earning) return;
+      if (act === 'verify')      _openVerifyConfirm(earning);
+      else if (act === 'reject') _openRejectModal(earning);
+      else if (act === 'adjust') _openAdjustModal(earning);
+    });
+  });
+}
+
+// Render one earnings row inside the detail view. Compact horizontal
+// card with metadata + per-row action buttons.
+function _renderEarningsDetailRow(e, fmtPhp, fmtDateTime) {
+  const isTerminal = e.status === 'rejected' || e.status === 'adjusted'
+                  || e.status === 'withdrawn' || e.status === 'reversed';
+
+  // Net amount with adjusted overlay when applicable.
+  const effectiveMinor = e.status === 'adjusted' && Number(e.adjusted_net_php_minor) >= 0
+    ? Number(e.adjusted_net_php_minor)
+    : Number(e.net_php_minor);
+
+  const adjustedNote = e.status === 'adjusted' && Number(e.adjusted_net_php_minor) !== Number(e.net_php_minor)
+    ? `<span class="admin-earnings-row-strike">${fmtPhp(e.net_php_minor)}</span>`
+    : '';
+
+  // Currency icon — coin or star.
+  const currIcon = e.currency_used === 'star' ? '⭐' : '🪙';
+
+  // Source title fallback.
+  const title = e.source_title
+    ? esc(e.source_title)
+    : `<em>Unknown ${esc(e.source_type)}</em>`;
+
+  // Status pill.
+  const statusPill = `<span class="admin-earnings-status admin-earnings-status-${esc(e.status)}">${esc(e.status)}</span>`;
+
+  // Refund indicator on rejected rows.
+  const refundFlag = e.refund_issued
+    ? `<span class="admin-badge admin-badge-neutral" title="Unlocker was refunded">Refunded</span>`
+    : '';
+
+  // Earmarked-to-withdrawal indicator.
+  const earmarkFlag = e.withdrawal_id
+    ? `<span class="admin-badge admin-badge-neutral" title="Earmarked to withdrawal ${e.withdrawal_id}">Earmarked</span>`
+    : '';
+
+  // Action buttons — only for non-terminal states.
+  const actions = isTerminal
+    ? `<div class="admin-earnings-row-actions">
+         ${e.reviewed_at
+           ? `<span class="admin-earnings-row-reviewed">Reviewed ${fmtDateTime(e.reviewed_at)}</span>`
+           : ''}
+       </div>`
+    : `<div class="admin-earnings-row-actions">
+         <button class="admin-earnings-row-action admin-btn admin-btn-primary"
+                 data-act="verify" data-earning-id="${esc(e.id)}">Verify</button>
+         <button class="admin-earnings-row-action admin-btn admin-btn-ghost"
+                 data-act="adjust" data-earning-id="${esc(e.id)}">Adjust</button>
+         <button class="admin-earnings-row-action admin-btn admin-btn-danger-ghost"
+                 data-act="reject" data-earning-id="${esc(e.id)}">Reject</button>
+       </div>`;
+
+  // Review notes shown on terminal rows so admins see why the decision was made.
+  const notesRow = e.review_notes
+    ? `<div class="admin-earnings-row-notes">📝 ${esc(e.review_notes)}</div>`
+    : '';
+
+  return `
+    <div class="admin-earnings-detail-row">
+      <div class="admin-earnings-detail-row-meta">
+        <div class="admin-earnings-detail-row-title">
+          ${currIcon} ${title}
+        </div>
+        <div class="admin-earnings-detail-row-sub">
+          ${statusPill} ${refundFlag} ${earmarkFlag}
+          <span class="admin-earnings-detail-row-time">· created ${fmtDateTime(e.created_at)}</span>
+          ${e.status === 'pending' && e.available_at
+            ? `<span class="admin-earnings-detail-row-time">· clears ${fmtDateTime(e.available_at)}</span>`
+            : ''}
+        </div>
+        ${notesRow}
+      </div>
+      <div class="admin-earnings-detail-row-amount">
+        <div class="admin-earnings-detail-row-amount-value">
+          ${adjustedNote} ${fmtPhp(effectiveMinor)}
+        </div>
+        <div class="admin-earnings-detail-row-amount-sub">
+          ${e.gross_coins} ${e.currency_used === 'star' ? 'star' : 'coin'}${e.gross_coins === 1 ? '' : 's'} gross
+        </div>
+      </div>
+      ${actions}
+    </div>
+  `;
+}
+
+// ─── Action modals ───────────────────────────────────────────────────────────
+
+// VERIFY — one-click action since it's the safe path. Confirms via
+// a minimal modal so the admin doesn't fat-finger it.
+function _openVerifyConfirm(earning) {
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>Verify earning</h3>
+      <p class="admin-modal-sub">
+        Mark this earning as verified and skip the 7-day hold. The amount
+        will become available to the creator's withdrawal balance immediately.
+      </p>
+      <div class="admin-form">
+        <label>Notes (optional)
+          <textarea id="verifyNotes" rows="2" placeholder="Why verifying early — e.g. high-confidence creator, manual review passed."></textarea>
+        </label>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-primary" data-act="confirm">Verify now</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="confirm"]').onclick = async () => {
+    const notes = modal.querySelector('#verifyNotes').value.trim() || null;
+    const { data, error } = await supabase.rpc('admin_verify_earning', {
+      p_earning_id: earning.id,
+      p_notes:      notes,
+    });
+    if (error) { toast(error.message); return; }
+    if (!data?.ok) { toast(data?.error || 'Verify failed'); return; }
+    toast(data.already_verified ? 'Already verified' : 'Earning verified');
+    close();
+    _loadEarningsCreatorDetail();
+  };
+}
+
+// REJECT — modal with required notes + refund toggle. The refund
+// option credits the unlocker's wallet for the original payment.
+function _openRejectModal(earning) {
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  const currencyLabel = earning.currency_used === 'star' ? 'stars' : 'coins';
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>Reject earning</h3>
+      <p class="admin-modal-sub">
+        Mark this earning as rejected. The creator will NOT receive the credit.
+        Optionally refund the unlocker — credits ${esc(earning.gross_coins?.toString() || '0')} ${currencyLabel} back to their wallet.
+      </p>
+      <div class="admin-form">
+        <label>Reason (required)
+          <textarea id="rejectNotes" rows="3" placeholder="Why rejecting — e.g. bot-like unlock pattern, same-IP cluster, manual fraud report." required></textarea>
+        </label>
+        <label class="admin-checkbox">
+          <input id="rejectRefund" type="checkbox"/>
+          Also refund the unlocker (${esc(earning.gross_coins?.toString() || '0')} ${currencyLabel})
+        </label>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-danger-ghost" data-act="confirm">Reject earning</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="confirm"]').onclick = async () => {
+    const notes = modal.querySelector('#rejectNotes').value.trim();
+    const refund = modal.querySelector('#rejectRefund').checked;
+    if (!notes) { toast('Reason is required'); return; }
+    const { data, error } = await supabase.rpc('admin_reject_earning', {
+      p_earning_id:      earning.id,
+      p_notes:           notes,
+      p_refund_unlocker: refund,
+    });
+    if (error) { toast(error.message); return; }
+    if (!data?.ok) { toast(data?.error || 'Reject failed'); return; }
+    toast(data.refund_issued ? 'Earning rejected + unlocker refunded' : 'Earning rejected');
+    close();
+    _loadEarningsCreatorDetail();
+  };
+}
+
+// ADJUST — modal accepting a new ₱ amount lower than the original.
+// Server validates the cap; we pre-validate client-side for UX.
+function _openAdjustModal(earning) {
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  const originalPesos = (Number(earning.net_php_minor) || 0) / 100;
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>Adjust earning</h3>
+      <p class="admin-modal-sub">
+        Reduce the credited amount. The creator's balance will reflect the new
+        value; the original amount stays for the audit trail. Cannot adjust upward —
+        use Reject + re-credit if the original was too low.
+      </p>
+      <div class="admin-form">
+        <div class="admin-form-row">
+          <label>Original
+            <input type="text" value="₱${originalPesos.toFixed(2)}" disabled/>
+          </label>
+          <label>New amount (₱)
+            <input id="adjustAmount" type="number" step="0.01" min="0" max="${originalPesos}" placeholder="0.00"/>
+          </label>
+        </div>
+        <label>Reason (required)
+          <textarea id="adjustNotes" rows="3" placeholder="Why adjusting — e.g. partial fraud confirmed, partial chargeback." required></textarea>
+        </label>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-primary" data-act="confirm">Adjust earning</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="confirm"]').onclick = async () => {
+    const newPesos = parseFloat(modal.querySelector('#adjustAmount').value);
+    const notes = modal.querySelector('#adjustNotes').value.trim();
+    if (!notes) { toast('Reason is required'); return; }
+    if (!Number.isFinite(newPesos) || newPesos < 0) { toast('Enter a valid amount'); return; }
+    if (newPesos > originalPesos) { toast(`Cannot adjust above original (₱${originalPesos.toFixed(2)})`); return; }
+    const newMinor = Math.round(newPesos * 100);
+    const { data, error } = await supabase.rpc('admin_adjust_earning', {
+      p_earning_id:        earning.id,
+      p_new_net_php_minor: newMinor,
+      p_notes:             notes,
+    });
+    if (error) { toast(error.message); return; }
+    if (!data?.ok) { toast(data?.error || 'Adjust failed'); return; }
+    toast(`Adjusted to ₱${(newMinor / 100).toFixed(2)}`);
+    close();
+    _loadEarningsCreatorDetail();
+  };
+}
+
+// FREEZE — modal asking for a reason. Mirrors the unfreeze flow but
+// requires a reason so the freeze is auditable.
+function _openFreezeModal(profile) {
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>Freeze payouts</h3>
+      <p class="admin-modal-sub">
+        Suspend withdrawals for <strong>${esc(profile.display_name || profile.username || 'this creator')}</strong>.
+        They'll see a "payouts on hold" error when attempting a withdrawal.
+        Existing approved/paid withdrawals are NOT affected — this is a
+        forward-looking gate only.
+      </p>
+      <div class="admin-form">
+        <label>Reason (required, shown to the creator)
+          <textarea id="freezeReason" rows="3" placeholder="e.g. Pending fraud review — please contact support."></textarea>
+        </label>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-danger-ghost" data-act="confirm">Freeze payouts</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="confirm"]').onclick = async () => {
+    const reason = modal.querySelector('#freezeReason').value.trim();
+    if (!reason) { toast('Reason is required'); return; }
+    const { data, error } = await supabase.rpc('admin_freeze_payouts', {
+      p_user_id: profile.id,
+      p_reason:  reason,
+    });
+    if (error) { toast(error.message); return; }
+    if (!data?.ok) { toast(data?.error || 'Freeze failed'); return; }
+    toast('Payouts frozen');
+    close();
+    _loadEarningsCreatorDetail();
+  };
+}
+
+// UNFREEZE — minimal modal. Note optional but recorded if entered.
+function _openUnfreezeModal(profile) {
+  const modal = document.createElement('div');
+  modal.className = 'admin-modal-backdrop';
+  modal.innerHTML = `
+    <div class="admin-modal">
+      <h3>Unfreeze payouts</h3>
+      <p class="admin-modal-sub">
+        Restore withdrawal access for <strong>${esc(profile.display_name || profile.username || 'this creator')}</strong>.
+      </p>
+      <div class="admin-form">
+        <label>Note (optional)
+          <textarea id="unfreezeNote" rows="2" placeholder="Why clearing the freeze — e.g. review concluded, no action needed."></textarea>
+        </label>
+      </div>
+      <div class="admin-modal-actions">
+        <button class="admin-btn admin-btn-ghost" data-act="cancel">Cancel</button>
+        <button class="admin-btn admin-btn-primary" data-act="confirm">Unfreeze payouts</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('[data-act="cancel"]').onclick = close;
+  modal.querySelector('[data-act="confirm"]').onclick = async () => {
+    const note = modal.querySelector('#unfreezeNote').value.trim() || null;
+    const { data, error } = await supabase.rpc('admin_unfreeze_payouts', {
+      p_user_id: profile.id,
+      p_note:    note,
+    });
+    if (error) { toast(error.message); return; }
+    if (!data?.ok) { toast(data?.error || 'Unfreeze failed'); return; }
+    toast('Payouts unfrozen');
+    close();
+    _loadEarningsCreatorDetail();
+  };
+}
+
+
 function initPayoutsTab() {
   document.querySelectorAll('[data-tab-content="payouts"] .admin-subtab').forEach(t => {
     t.addEventListener('click', () => switchPayoutsSubtab(t.dataset.subtab));
@@ -2600,7 +4005,26 @@ async function saveSettingValue(key, newValue) {
 
 
 // ─── boot ────────────────────────────────────────────────────────────────────
+// Tab restoration from URL hash. On refresh / direct deep-link load,
+// read `#tabname` from the URL and open that tab instead of always
+// dropping the admin onto Inbox.
+//
+// Falls back to 'inbox' when:
+//   • the URL has no hash
+//   • the hash isn't a known tab name
+// Both cases keep the historical default behavior intact.
+function _restoreTabFromHash() {
+  const raw = (window.location.hash || '').replace(/^#/, '').toLowerCase();
+  const target = VALID_ADMIN_TABS.has(raw) ? raw : 'inbox';
+  switchTab(target);
+}
+
+// Browser back/forward should also navigate between tabs. Without this
+// listener, hitting Back after switching from Inbox → Earnings would
+// update the URL but not actually re-render the tab.
+window.addEventListener('hashchange', _restoreTabFromHash);
+
 (async () => {
   const ok = await gateAccess();
-  if (ok) loadInbox();
+  if (ok) _restoreTabFromHash();
 })();

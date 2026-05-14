@@ -2049,22 +2049,38 @@
       </button>
     </div>
 
-    <!-- Stepper -->
+    <!-- Stepper — 5 phases (File → Thumbnail → Details → Visibility → Upload).
+         May 2026: inserted Thumbnail as a dedicated step between File and
+         Details so authors can pick from 5 auto-extracted frames OR
+         upload their own. Previously the picker lived inside Details
+         which both buried the affordance and didn't show what the
+         video actually looked like at different timecodes. -->
     <div class="vu-stepper" id="vuStepper">
       <div class="vu-step-pill active" data-step="1"><span class="vu-step-num">1</span><span class="vu-step-label">File</span></div>
       <div class="vu-step-line"></div>
-      <div class="vu-step-pill"        data-step="2"><span class="vu-step-num">2</span><span class="vu-step-label">Details</span></div>
+      <div class="vu-step-pill"        data-step="2"><span class="vu-step-num">2</span><span class="vu-step-label">Thumbnail</span></div>
       <div class="vu-step-line"></div>
-      <div class="vu-step-pill"        data-step="3"><span class="vu-step-num">3</span><span class="vu-step-label">Visibility</span></div>
+      <div class="vu-step-pill"        data-step="3"><span class="vu-step-num">3</span><span class="vu-step-label">Details</span></div>
       <div class="vu-step-line"></div>
-      <div class="vu-step-pill"        data-step="4"><span class="vu-step-num">4</span><span class="vu-step-label">Upload</span></div>
+      <div class="vu-step-pill"        data-step="4"><span class="vu-step-num">4</span><span class="vu-step-label">Visibility</span></div>
+      <div class="vu-step-line"></div>
+      <div class="vu-step-pill"        data-step="5"><span class="vu-step-num">5</span><span class="vu-step-label">Upload</span></div>
     </div>
 
     <!-- Body -->
     <div class="vu-body">
 
-      <!-- Phase 1: File picker -->
+      <!-- Phase 1: File picker.
+           Two states: empty (dropzone) → file-selected (large centered
+           preview). The empty state is the default; vuHandleFile() hides
+           it and shows the preview pane once a file is picked. The
+           preview pane is the focus — authors should immediately see
+           "yes, this is my video" before moving on. The previous layout
+           kept BOTH the dropzone AND a tiny preview side-by-side, which
+           wasted vertical space and made it ambiguous whether the
+           file had actually been accepted. -->
       <div class="vu-panel" data-panel="1">
+        <!-- Empty state — dropzone -->
         <label class="vu-dropzone" id="videoFilePicker">
           <div class="vu-dropzone-icon">
             <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -2078,21 +2094,95 @@
           <span class="vu-cta-pill">Select file</span>
           <input type="file" accept="video/*" id="videoUploadFile" style="display:none">
         </label>
-        <!-- Selected-file summary, shown after a file is picked -->
-        <div class="vu-file-summary" id="vuFileSummary" style="display:none">
-          <div class="vu-preview-box compact">
-            <video id="videoUploadPreview" muted playsinline></video>
+
+        <!-- Selected-file state — large centered preview replaces the dropzone. -->
+        <div class="vu-file-selected" id="vuFileSummary" style="display:none">
+          <div class="vu-preview-hero">
+            <video id="videoUploadPreview" muted playsinline controls></video>
           </div>
-          <div class="vu-file-meta">
-            <div class="vu-file-name" id="vuFileName">video.mp4</div>
-            <div class="vu-file-size" id="vuFileSize">0 MB</div>
-            <button type="button" class="vu-replace-btn" id="vuReplaceFile">Replace file</button>
+          <div class="vu-file-meta-row">
+            <div class="vu-file-meta-text">
+              <div class="vu-file-name" id="vuFileName">video.mp4</div>
+              <div class="vu-file-size" id="vuFileSize">0 MB</div>
+            </div>
+            <button type="button" class="vu-replace-btn" id="vuReplaceFile">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;vertical-align:-2px">
+                <polyline points="23 4 23 10 17 10"/>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+              Replace file
+            </button>
           </div>
         </div>
       </div>
 
-      <!-- Phase 2: Details -->
+      <!-- Phase 2: Thumbnail picker.
+           Added May 2026 as a dedicated wizard step. Surfaces 5 frames
+           auto-extracted from the uploaded video (at 10/30/50/70/90% of
+           duration — see js/app.js vuExtractAutoThumbnails) plus an
+           "Upload your own" tile. The author picks one and that image
+           becomes the video's thumbnail_url. Skipping the step is fine
+           too — Bunny's auto-generated frame is used as a fallback. -->
       <div class="vu-panel" data-panel="2" style="display:none">
+        <div class="vu-thumb-stage">
+          <div class="vu-thumb-stage-header">
+            <div>
+              <div class="vu-thumb-stage-title">Pick a thumbnail</div>
+              <div class="vu-thumb-stage-sub">Choose one of the frames below, or upload your own. Skipping this step uses an auto-generated frame.</div>
+            </div>
+            <div class="vu-thumb-selected-pill" id="vuThumbSelectedPill" style="display:none">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>Thumbnail selected</span>
+            </div>
+          </div>
+
+          <div class="vu-thumb-grid" id="vuThumbGrid">
+            <!-- "Upload your own" tile (always first) -->
+            <label class="vu-thumb-grid-tile vu-thumb-upload-tile" id="vuThumbUploadTile" for="vuThumbFile">
+              <div class="vu-thumb-upload-inner">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <span>Upload your own</span>
+                <em>JPG, PNG, or WebP · max 5 MB</em>
+              </div>
+            </label>
+
+            <!-- 5 auto-extracted frame tiles. Populated by vuExtractAutoThumbnails. -->
+            <button type="button" class="vu-thumb-grid-tile vu-thumb-frame-tile is-loading" data-frame-index="0">
+              <span class="vu-thumb-frame-time"></span>
+              <span class="vu-thumb-frame-spinner"></span>
+            </button>
+            <button type="button" class="vu-thumb-grid-tile vu-thumb-frame-tile is-loading" data-frame-index="1">
+              <span class="vu-thumb-frame-time"></span>
+              <span class="vu-thumb-frame-spinner"></span>
+            </button>
+            <button type="button" class="vu-thumb-grid-tile vu-thumb-frame-tile is-loading" data-frame-index="2">
+              <span class="vu-thumb-frame-time"></span>
+              <span class="vu-thumb-frame-spinner"></span>
+            </button>
+            <button type="button" class="vu-thumb-grid-tile vu-thumb-frame-tile is-loading" data-frame-index="3">
+              <span class="vu-thumb-frame-time"></span>
+              <span class="vu-thumb-frame-spinner"></span>
+            </button>
+            <button type="button" class="vu-thumb-grid-tile vu-thumb-frame-tile is-loading" data-frame-index="4">
+              <span class="vu-thumb-frame-time"></span>
+              <span class="vu-thumb-frame-spinner"></span>
+            </button>
+          </div>
+
+          <input type="file" id="vuThumbFile" accept="image/png,image/jpeg,image/webp" style="display:none"/>
+        </div>
+      </div>
+
+      <!-- Phase 3: Details.
+           The in-form thumbnail picker was promoted to its own step
+           (Phase 2 / vu-thumb-stage above) so the picker's 6 tiles
+           get the visual weight they deserve and the form is purely
+           title + description + tags. -->
+      <div class="vu-panel" data-panel="3" style="display:none">
         <div class="vu-form">
           <div class="vu-field">
             <div class="vu-field-header">
@@ -2125,8 +2215,8 @@
         </div>
       </div>
 
-      <!-- Phase 3: Monetization + Schedule -->
-      <div class="vu-panel" data-panel="3" style="display:none">
+      <!-- Phase 4: Monetization + Schedule -->
+      <div class="vu-panel" data-panel="4" style="display:none">
         <!-- Monetization (Phase 6: time-based, not gated-from-start) -->
         <div class="vu-card">
           <div class="vu-card-header">
@@ -2178,8 +2268,8 @@
         </p>
       </div>
 
-      <!-- Phase 4: Upload progress -->
-      <div class="vu-panel" data-panel="4" style="display:none">
+      <!-- Phase 5: Upload progress -->
+      <div class="vu-panel" data-panel="5" style="display:none">
         <div class="vu-upload-hero" id="vuUploadHero">
           <div class="vu-upload-icon-wrap">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" id="vuUploadIcon">
@@ -2220,6 +2310,31 @@
   </div>
 </div>
 
+<!-- ─── Upload success modal (May 2026) ─────────────────────────────────
+     The old completion UX dimmed the progress bar and turned the small
+     "Done" footer button into the only signal that something good
+     happened — easy to miss, especially on long uploads where the user
+     tabbed away. This modal pops on top with a checkmark, the chosen
+     thumbnail, and two clear next-step CTAs. -->
+<div class="modal-overlay vu-success-overlay" id="vuSuccessModal" style="display:none">
+  <div class="vu-success-card">
+    <div class="vu-success-icon-wrap" id="vuSuccessIconWrap">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    </div>
+    <h2 class="vu-success-title" id="vuSuccessTitle">Upload complete!</h2>
+    <p class="vu-success-body"  id="vuSuccessBody">Your video will appear publicly the moment Selebox finishes encoding it.</p>
+    <div class="vu-success-thumb" id="vuSuccessThumbWrap" style="display:none">
+      <img id="vuSuccessThumb" alt=""/>
+    </div>
+    <div class="vu-success-actions">
+      <button class="vu-btn vu-btn-ghost"    id="vuSuccessUploadAnother">Upload another</button>
+      <button class="vu-btn vu-btn-primary"  id="vuSuccessViewStudio">View in Studio</button>
+    </div>
+  </div>
+</div>
+
 <!-- Studio Edit Modal -->
 <div class="modal-overlay video-upload-overlay" id="studioEditModal" style="display:none">
   <div class="vu-modal">
@@ -2233,8 +2348,37 @@
       </button>
     </div>
     <div class="vu-body">
-      <div class="vu-preview-box" id="studioEditPreview" style="display:none">
-        <img id="studioEditThumb" alt=""/>
+      <!-- Thumbnail editor (added May 2026). Replaces the static preview
+           image with an editable picker so authors can swap the cover
+           without re-uploading the whole video. Same constraints as the
+           upload wizard: 5 MB cap, JPG/PNG/WebP. Sits at the top of the
+           form because it's the highest-impact field on click-through. -->
+      <div class="vu-thumb-picker" id="studioEditThumbPicker">
+        <label class="vu-thumb-tile" id="studioEditThumbTile" for="studioEditThumbFile">
+          <img id="studioEditThumb" alt=""/>
+          <div class="vu-thumb-empty" id="studioEditThumbEmpty" style="display:none">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+            <span>Choose image</span>
+          </div>
+          <div class="vu-thumb-overlay" id="studioEditThumbOverlay">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4Z"/>
+            </svg>
+            <span>Change thumbnail</span>
+          </div>
+        </label>
+        <div class="vu-thumb-meta">
+          <div class="vu-thumb-meta-title" id="studioEditThumbMetaTitle">Current thumbnail</div>
+          <div class="vu-thumb-meta-sub"   id="studioEditThumbMetaSub">Click the tile to upload a new cover. JPG/PNG/WebP, up to 5 MB.</div>
+          <div class="vu-thumb-actions">
+            <button type="button" class="vu-replace-btn" id="studioEditThumbReplace">Change image</button>
+          </div>
+        </div>
+        <input type="file" id="studioEditThumbFile" accept="image/png,image/jpeg,image/webp" style="display:none"/>
       </div>
       <div class="vu-form">
         <label class="vu-label">Title <span class="vu-required">*</span></label>

@@ -3216,17 +3216,30 @@ body:not(.light) .chapter-cover-empty small { color: #6b7280; }
   border-color: rgba(220, 38, 38, 0.95);
 }
 
-/* ─── Inline images inside chapter content (long screenshots OK) ─── */
+/* ─── Inline images inside chapter content ───
+   Bounded by BOTH width AND height (May 2026 fix). Without a height
+   cap, portrait or extra-tall images dominated the viewport — a single
+   image pushing 2-3 screens of body text below the fold. Cap at 80vh
+   in the reader and 60vh inside the Quill editor so writers see a
+   roughly representative layout while composing. `width: auto` +
+   `object-fit: contain` letterboxes tall images inside the box
+   instead of cropping (the editor's saved inline style does the same;
+   see lib/book-editor-helpers.js → INLINE_IMAGE_BASE_STYLE). */
 #chapterEditorQuill .ql-editor img,
 .chapter-content img {
   display: block;
+  width: auto;
   max-width: 100%;
-  height: auto;            /* preserves aspect ratio for tall images */
-  /* No max-height — long scrollable screenshots flow naturally */
+  height: auto;
+  max-height: 80vh;
   margin: 1rem auto;
   border-radius: 10px;
   box-shadow: 0 2px 12px rgba(15, 10, 28, 0.10);
   cursor: zoom-in;
+  object-fit: contain;
+}
+#chapterEditorQuill .ql-editor img {
+  max-height: 60vh; /* editor surface is shorter — give body text room */
 }
 body:not(.light) #chapterEditorQuill .ql-editor img,
 body:not(.light) .chapter-content img {
@@ -5046,6 +5059,438 @@ body.light .vu-close {
   display: block;
 }
 
+/* ─── Phase 1 file-selected hero (May 2026) ───
+   Once a video file is picked, the dropzone hides and this hero takes
+   over: a 16:9 video preview at the top of the modal body, file meta
+   strip below with the file name, size, and a Replace File button.
+   Mirrors the mobile app's selected-file affordance so authors who
+   know one know both. */
+.vu-file-selected {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.vu-preview-hero {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+}
+.vu-preview-hero video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+.vu-file-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.85rem;
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.18);
+  border-radius: 12px;
+}
+.vu-file-meta-text {
+  min-width: 0;
+  flex: 1;
+}
+.vu-file-meta-text .vu-file-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text, #1a1a2e);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vu-file-meta-text .vu-file-size {
+  font-size: 0.78rem;
+  color: var(--muted, #8b8b9a);
+  margin-top: 0.15rem;
+}
+
+/* ─── Phase 2 thumbnail stage (May 2026) ───
+   6 tiles in a responsive grid: "Upload your own" first, followed by
+   5 auto-extracted frames at evenly-spaced timecodes. Tiles are
+   16:9, click-selectable, with a clear selected-ring and a timestamp
+   badge on the frame tiles. Loading state shows a centered spinner
+   while ffmpeg-on-canvas extracts the frame. */
+.vu-thumb-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.vu-thumb-stage-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.vu-thumb-stage-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text, #1a1a2e);
+  margin-bottom: 0.2rem;
+}
+.vu-thumb-stage-sub {
+  font-size: 0.82rem;
+  color: var(--muted, #8b8b9a);
+  line-height: 1.45;
+}
+.vu-thumb-selected-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.7rem;
+  background: rgba(16, 185, 129, 0.14);
+  color: #059669;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.vu-thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+}
+@media (min-width: 720px) {
+  .vu-thumb-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .vu-thumb-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.vu-thumb-grid-tile {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.18);
+  border: 2px solid transparent;
+  cursor: pointer;
+  display: block;
+  padding: 0;
+  transition: border-color 0.14s ease, transform 0.1s ease, box-shadow 0.14s ease;
+}
+.vu-thumb-grid-tile:hover {
+  border-color: rgba(139, 92, 246, 0.55);
+}
+.vu-thumb-grid-tile:active {
+  transform: scale(0.98);
+}
+.vu-thumb-grid-tile.is-selected {
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.18);
+}
+.vu-thumb-grid-tile img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Selected-state check overlay */
+.vu-thumb-grid-tile.is-selected::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: #7c3aed url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E") center/14px no-repeat;
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4);
+}
+.vu-thumb-frame-time {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.vu-thumb-frame-spinner {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 2.5px solid rgba(139, 92, 246, 0.25);
+  border-top-color: #7c3aed;
+  animation: vu-thumb-spin 0.8s linear infinite;
+}
+.vu-thumb-frame-tile:not(.is-loading) .vu-thumb-frame-spinner {
+  display: none;
+}
+.vu-thumb-frame-tile.is-loading {
+  cursor: progress;
+}
+.vu-thumb-frame-tile.is-loading:hover {
+  border-color: transparent;
+}
+@keyframes vu-thumb-spin {
+  to { transform: rotate(360deg); }
+}
+/* "Upload your own" tile — dashed border, icon + label inside */
+.vu-thumb-upload-tile {
+  background: rgba(139, 92, 246, 0.06);
+  border: 2px dashed rgba(139, 92, 246, 0.45);
+  cursor: pointer;
+}
+.vu-thumb-upload-tile:hover {
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.85);
+}
+.vu-thumb-upload-tile.is-selected {
+  border-style: solid;
+}
+.vu-thumb-upload-inner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  color: rgba(124, 58, 237, 0.95);
+  padding: 0.5rem;
+  text-align: center;
+}
+.vu-thumb-upload-inner span {
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+.vu-thumb-upload-inner em {
+  font-style: normal;
+  font-size: 0.7rem;
+  color: var(--muted, #8b8b9a);
+  font-weight: 500;
+}
+.vu-thumb-upload-tile.is-selected .vu-thumb-upload-inner {
+  background: rgba(124, 58, 237, 0.08);
+}
+/* When upload tile has a preview image, hide the icon overlay */
+.vu-thumb-upload-tile.has-image .vu-thumb-upload-inner {
+  display: none;
+}
+
+/* ─── Upload success modal (May 2026) ───
+   Center-screen confirmation dialog that takes over from the small
+   "Done" footer button. Same overlay z-index as the parent upload
+   modal (it's a sibling overlay), but the card is more prominent and
+   uses a green-tinted icon halo. The two CTAs are equally weighted
+   — neither is destructive — so primary purple goes to the more
+   action-y "View in Studio" and ghost goes to "Upload another." */
+.vu-success-overlay {
+  z-index: 10010; /* one above the upload modal so it stacks correctly */
+}
+.vu-success-card {
+  background: var(--surface, #fff);
+  border-radius: 20px;
+  padding: 1.75rem 1.5rem 1.5rem;
+  width: 92%;
+  max-width: 440px;
+  box-shadow: 0 28px 64px rgba(0, 0, 0, 0.35);
+  text-align: center;
+  animation: vu-success-pop 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes vu-success-pop {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)    scale(1);    }
+}
+.vu-success-icon-wrap {
+  margin: 0 auto 0.9rem;
+  width: 72px;
+  height: 72px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  animation: vu-success-icon-bounce 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s both;
+}
+.vu-success-icon-wrap::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 999px;
+  border: 2px solid rgba(16, 185, 129, 0.25);
+  animation: vu-success-icon-ring 0.7s ease-out 0.25s both;
+}
+@keyframes vu-success-icon-bounce {
+  from { transform: scale(0.4); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+@keyframes vu-success-icon-ring {
+  from { transform: scale(0.85); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+.vu-success-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text, #1a1a2e);
+  margin: 0 0 0.4rem 0;
+}
+.vu-success-body {
+  font-size: 0.92rem;
+  color: var(--muted, #6b6b80);
+  margin: 0;
+  line-height: 1.5;
+}
+.vu-success-thumb {
+  margin: 1.1rem auto 0;
+  width: 100%;
+  max-width: 280px;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.18);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+}
+.vu-success-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.vu-success-actions {
+  margin-top: 1.35rem;
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+}
+.vu-success-actions .vu-btn {
+  flex: 1;
+  max-width: 180px;
+}
+
+/* ─── Thumbnail picker (video upload wizard + studio edit) ───
+   Two-column layout: 16:9 preview tile on the left, metadata + action
+   buttons on the right. Same shape in both modals so authors learn the
+   pattern once and find it familiar everywhere. Falls back to a single
+   column on narrow viewports so the tile doesn't get squeezed past
+   legibility. */
+.vu-thumb-picker {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 1rem;
+  align-items: stretch;
+  margin-bottom: 0.25rem;
+}
+.vu-thumb-tile {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px dashed rgba(139, 92, 246, 0.45);
+  cursor: pointer;
+  transition: border-color 0.16s ease, transform 0.12s ease;
+}
+.vu-thumb-tile:hover {
+  border-color: rgba(139, 92, 246, 0.85);
+}
+.vu-thumb-tile:active {
+  transform: scale(0.99);
+}
+.vu-thumb-tile img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.vu-thumb-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  color: rgba(139, 92, 246, 0.85);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.5rem;
+  text-align: center;
+}
+.vu-thumb-overlay {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 0.45rem 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.65) 100%);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+  pointer-events: none;
+}
+.vu-thumb-tile:hover .vu-thumb-overlay {
+  opacity: 1;
+}
+.vu-thumb-meta {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+}
+.vu-thumb-meta-title {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text, #111);
+  margin-bottom: 0.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vu-thumb-meta-sub {
+  font-size: 0.78rem;
+  color: var(--muted, #8b8b9a);
+  margin-bottom: 0.5rem;
+  line-height: 1.4;
+}
+.vu-thumb-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.vu-thumb-picker.is-uploading .vu-thumb-tile {
+  opacity: 0.6;
+  pointer-events: none;
+}
+@media (max-width: 540px) {
+  .vu-thumb-picker {
+    grid-template-columns: 1fr;
+  }
+  .vu-thumb-tile {
+    max-width: 280px;
+  }
+}
+
 /* Form */
 .vu-form {
   display: flex;
@@ -5489,23 +5934,16 @@ select.vu-input {
   font-variant-numeric: tabular-nums;
 }
 
-/* Studio edit thumbnail preview — refined frame */
-#studioEditModal .vu-preview-box {
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(139, 92, 246, 0.18);
-  border-radius: 16px;
-  overflow: hidden;
+/* Studio edit thumbnail preview — refined frame.
+   The old .vu-preview-box override was replaced May 2026 by the
+   .vu-thumb-picker component (defined alongside .vu-preview-box above)
+   which is shared with the video upload wizard's Details step. The
+   block remains as a no-op anchor so any third-party theme overlays
+   that targeted #studioEditModal .vu-preview-box still hit a defined
+   selector. Safe to remove entirely once you're sure nothing depends
+   on it. */
+#studioEditModal .vu-thumb-picker {
   margin-bottom: 1.25rem;
-  aspect-ratio: 16 / 9;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-#studioEditModal .vu-preview-box img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
 }
 
 /* Secondary button (Cancel) — used in studio edit modal footer */
