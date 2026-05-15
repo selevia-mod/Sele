@@ -3528,82 +3528,150 @@ async function loadKycList() {
   if (!listEl) return;
   listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
 
-  // Match the Withdrawals card's selection so KYC reviewers see the
-  // full verification context (phone, address, payment method + the
-  // three image attachments) before approving. Reviewing identity
-  // without the QR / signature / valid-ID side-by-side is essentially
-  // approving blind.
-  let q = supabase
-    .from('author_kyc')
-    .select('user_id, full_name, date_of_birth, id_type, id_number, id_document_url, selfie_url, payment_qr_url, signature_url, payment_method, phone, email, address, status, rejection_reason, submitted_at, reviewed_at')
-    .order('submitted_at', { ascending: false })
-    .limit(200);
-  if (filter !== 'all') q = q.eq('status', filter);
+  // Pull the bulk metadata via admin_kyc_list RPC (gated by
+  // is_earnings_admin server-side). This gives us role + freeze + ban
+  // flags + viewer_is_super_admin in one round-trip — exactly what
+  // the security-actions buttons need. We also read directly from
+  // author_kyc for the document URLs / phone / address that the
+  // pending-review card displays, since admin_kyc_list deliberately
+  // doesn't expose private images for non-pending rows. Both calls
+  // run in parallel.
+  const listPromise = supabase.rpc('admin_kyc_list', {
+    p_status: filter, p_search: null, p_limit: 200, p_offset: 0,
+  });
+  const docsPromise = (async () => {
+    let q = supabase.from('author_kyc')
+      .select('author_id, date_of_birth, id_type, id_number, id_document_url, selfie_url, payment_qr_url, signature_url, payment_method, phone, address, submitted_at')
+      .order('submitted_at', { ascending: false })
+      .limit(200);
+    if (filter !== 'all') q = q.eq('kyc_status', filter);
+    return q;
+  })();
 
-  const { data: rows, error } = await q;
+  const [{ data: rows, error }, { data: docs }] = await Promise.all([listPromise, docsPromise]);
   if (error) { listEl.innerHTML = `<div class="admin-empty admin-error">${esc(error.message)}</div>`; return; }
   if (!rows?.length) {
     listEl.innerHTML = `<div class="admin-empty">No ${filter} KYC submissions.</div>`;
     return;
   }
 
-  const userIds = [...new Set(rows.map(r => r.user_id))];
-  const { data: users } = await supabase.from('profiles')
-    .select('id, username, email, avatar_url')
+  // Index docs by author_id for O(1) lookup during the row loop.
+  // Fall back to an empty object if the secondary fetch failed —
+  // the row still renders with no document images.
+  const docsMap = Object.fromEntries((docs || []).map(d => [d.author_id, d]));
+
+  // Capture the viewer's super-admin flag once (it's the same on every
+  // row). Drives whether the "Change role" button renders. Server-side
+  // admin_set_user_role re-checks via is_super_admin, so DOM tampering
+  // by a moderator still hits 42501.
+  const viewerIsSuperAdmin = Boolean(rows[0]?.viewer_is_super_admin);
+
+  // No need for the per-author profiles fetch any more — admin_kyc_list
+  // already joins username/display_name/email/role/freeze/ban into the
+  // returned shape. Keep an avatar fetch since we still want avatars
+  // in the card head (admin_kyc_list doesn't return avatar_url).
+  const userIds = [...new Set(rows.map(r => r.author_id))];
+  const { data: avatars } = await supabase.from('profiles')
+    .select('id, avatar_url')
     .in('id', userIds);
-  const uMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+  const aMap = Object.fromEntries((avatars || []).map(a => [a.id, a.avatar_url]));
 
   // Pre-sign the three image URLs (QR / signature / valid-ID) in
   // parallel. Same pattern as loadPayouts so cards render with usable
   // <img src> in one paint instead of flickering after each card mounts.
+  // Doc URLs come from docsMap (the secondary author_kyc fetch).
   const signTasks = [];
   for (const r of rows) {
-    if (r.payment_qr_url && !/^https?:\/\//i.test(r.payment_qr_url)) {
-      signTasks.push(_signKycUrl(r.payment_qr_url).then((u) => { r.payment_qr_signed = u; }));
-    } else { r.payment_qr_signed = r.payment_qr_url || null; }
-    if (r.signature_url && !/^https?:\/\//i.test(r.signature_url)) {
-      signTasks.push(_signKycUrl(r.signature_url).then((u) => { r.signature_signed = u; }));
-    } else { r.signature_signed = r.signature_url || null; }
-    if (r.id_document_url && !/^https?:\/\//i.test(r.id_document_url)) {
-      signTasks.push(_signKycUrl(r.id_document_url).then((u) => { r.id_document_signed = u; }));
-    } else { r.id_document_signed = r.id_document_url || null; }
+    const d = docsMap[r.author_id] || {};
+    r._docs = d;
+    if (d.payment_qr_url && !/^https?:\/\//i.test(d.payment_qr_url)) {
+      signTasks.push(_signKycUrl(d.payment_qr_url).then((u) => { r.payment_qr_signed = u; }));
+    } else { r.payment_qr_signed = d.payment_qr_url || null; }
+    if (d.signature_url && !/^https?:\/\//i.test(d.signature_url)) {
+      signTasks.push(_signKycUrl(d.signature_url).then((u) => { r.signature_signed = u; }));
+    } else { r.signature_signed = d.signature_url || null; }
+    if (d.id_document_url && !/^https?:\/\//i.test(d.id_document_url)) {
+      signTasks.push(_signKycUrl(d.id_document_url).then((u) => { r.id_document_signed = u; }));
+    } else { r.id_document_signed = d.id_document_url || null; }
   }
   await Promise.all(signTasks);
 
   listEl.innerHTML = '';
   for (const r of rows) {
-    const u = uMap[r.user_id];
+    const username = r.username || '(unknown)';
+    const avatar   = aMap[r.author_id];
+    const d        = r._docs || {};
     const card = document.createElement('div');
-    card.className = `kyc-card kyc-status-${r.status}`;
+    card.className = `kyc-card kyc-status-${r.kyc_status}`;
+
+    // Build the security-actions row. Reused for every status; the
+    // available buttons depend on current state. `data-uid` carries
+    // the author_id for the click delegation below.
+    const uid = r.author_id;
+    const secBtns = [];
+    if (r.kyc_status === 'pending' || r.kyc_status === 'rejected') {
+      secBtns.push(`<button class="admin-btn admin-btn-primary" data-act="kyc-approve" data-uid="${uid}">Approve KYC</button>`);
+    }
+    if (r.kyc_status === 'pending' || r.kyc_status === 'approved') {
+      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-reject" data-uid="${uid}">Reject</button>`);
+    }
+    if (r.kyc_status === 'approved') {
+      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-revoke" data-uid="${uid}">Revoke</button>`);
+    }
+    if (r.payouts_frozen) {
+      secBtns.push(`<button class="admin-btn" data-act="kyc-unfreeze" data-uid="${uid}">Unfreeze payouts</button>`);
+    } else {
+      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-freeze" data-uid="${uid}">Freeze payouts</button>`);
+    }
+    if (r.is_banned) {
+      secBtns.push(`<button class="admin-btn" data-act="kyc-unban" data-uid="${uid}">Unban</button>`);
+    } else {
+      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-ban" data-uid="${uid}">Ban</button>`);
+    }
+    if (viewerIsSuperAdmin) {
+      secBtns.push(`<button class="admin-btn" data-act="kyc-setrole" data-uid="${uid}">Change role</button>`);
+    }
+
+    // Flag pills shown next to the status badge so reviewers see
+    // freeze/ban state without scrolling down to the action buttons.
+    const flagPills = [
+      r.payouts_frozen ? `<span class="payout-status-badge payout-status-badge-rejected" title="${esc(r.payouts_frozen_reason || '')}">Frozen</span>` : '',
+      r.is_banned     ? `<span class="payout-status-badge payout-status-badge-rejected" title="${esc(r.banned_reason || '')}">Banned</span>` : '',
+    ].join('');
+
     // Reuses the .payout-* CSS classes so both cards share the visual
     // language (verify grid + verify-media row of three image cards).
-    // Same structure as the loadPayouts card, minus the amount/currency
-    // header (KYC review isn't tied to a specific withdrawal amount).
     card.innerHTML = `
       <div class="payout-card-head">
         <div class="payout-author">
-          <div class="user-row-avatar">${u?.avatar_url ? `<img src="${esc(u.avatar_url)}"/>` : esc(initials(u?.username || 'U'))}</div>
+          <div class="user-row-avatar">${avatar ? `<img src="${esc(avatar)}"/>` : esc(initials(username))}</div>
           <div>
-            <div class="payout-author-name">${esc(u?.username || '(unknown)')}</div>
-            <div class="payout-author-email">${esc(u?.email || '')}</div>
+            <div class="payout-author-name">${esc(r.display_name || username)} <span style="color:var(--text2,#aaa);font-weight:400">@${esc(username)}</span></div>
+            <div class="payout-author-email">${esc(r.email || '')}</div>
           </div>
         </div>
-        <span class="payout-status-badge payout-status-badge-${r.status}">${esc(r.status)}</span>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span class="payout-status-badge" style="background:rgba(155,89,182,0.18);color:#b07ee8">${esc(r.user_role || 'user')}</span>
+          ${flagPills}
+          <span class="payout-status-badge payout-status-badge-${r.kyc_status}">${esc(r.kyc_status)}</span>
+        </div>
       </div>
 
       <div class="payout-verify">
         <div class="payout-verify-grid">
           <div class="payout-verify-row"><span class="payout-verify-label">Full name</span><span class="payout-verify-val">${esc(r.full_name || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Birthdate</span><span class="payout-verify-val">${esc(_formatBirthdate(r.date_of_birth) || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Phone</span><span class="payout-verify-val">${esc(r.phone || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Email (user)</span><span class="payout-verify-val">${esc(r.email || u?.email || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(r.payment_method || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">ID type</span><span class="payout-verify-val">${esc(r.id_type || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">ID number</span><span class="payout-verify-val">${esc(r.id_number || '—')}</span></div>
-          <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(r.address || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Submitted</span><span class="payout-verify-val">${timeAgo(r.submitted_at)}</span></div>
-          ${r.reviewed_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Reviewed</span><span class="payout-verify-val">${timeAgo(r.reviewed_at)}</span></div>` : ''}
+          <div class="payout-verify-row"><span class="payout-verify-label">Birthdate</span><span class="payout-verify-val">${esc(_formatBirthdate(d.date_of_birth) || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Phone</span><span class="payout-verify-val">${esc(d.phone || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Email</span><span class="payout-verify-val">${esc(r.email || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(d.payment_method || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">ID type</span><span class="payout-verify-val">${esc(d.id_type || '—')}</span></div>
+          <div class="payout-verify-row"><span class="payout-verify-label">ID number</span><span class="payout-verify-val">${esc(d.id_number || '—')}</span></div>
+          <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(d.address || '—')}</span></div>
+          ${d.submitted_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Submitted</span><span class="payout-verify-val">${timeAgo(d.submitted_at)}</span></div>` : ''}
+          ${r.approved_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Approved</span><span class="payout-verify-val">${timeAgo(r.approved_at)}</span></div>` : ''}
           ${r.rejection_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Rejection reason</span><span class="payout-verify-val">${esc(r.rejection_reason)}</span></div>` : ''}
+          ${r.payouts_frozen_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Freeze reason</span><span class="payout-verify-val">${esc(r.payouts_frozen_reason)}</span></div>` : ''}
+          ${r.banned_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Ban reason</span><span class="payout-verify-val">${esc(r.banned_reason)}</span></div>` : ''}
         </div>
 
         <div class="payout-verify-media">
@@ -3628,37 +3696,87 @@ async function loadKycList() {
         </div>
       </div>
 
-      <div class="payout-actions">
-        ${r.status === 'pending'
-          ? `<button class="admin-btn admin-btn-primary" data-act="kyc-approve">Approve</button>
-             <button class="admin-btn admin-btn-danger-ghost" data-act="kyc-reject">Reject</button>`
-          : r.status === 'rejected'
-            ? `<button class="admin-btn admin-btn-primary" data-act="kyc-approve">Approve anyway</button>`
-            : ''}
+      <div class="payout-actions" style="flex-wrap:wrap;gap:6px">
+        ${secBtns.join('')}
       </div>
     `;
-    card.querySelector('[data-act="kyc-approve"]')?.addEventListener('click', async () => {
-      if (!confirm(`Approve KYC for ${u?.username || 'this user'}?`)) return;
-      const { data, error } = await supabase.rpc('admin_set_kyc_status', {
-        p_user_id: r.user_id, p_status: 'approved', p_reason: null,
-      });
-      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
-      toast('KYC approved.');
-      loadKycList();
-    });
-    card.querySelector('[data-act="kyc-reject"]')?.addEventListener('click', async () => {
-      const reason = prompt('Reject reason (visible to user):');
-      if (!reason) return;
-      const { data, error } = await supabase.rpc('admin_set_kyc_status', {
-        p_user_id: r.user_id, p_status: 'rejected', p_reason: reason,
-      });
-      if (error || data?.ok === false) { toast(error?.message || data?.error || 'Failed'); return; }
-      toast('KYC rejected.');
-      loadKycList();
-    });
     listEl.appendChild(card);
   }
 }
+
+// Delegated click handler — one place to dispatch every per-row admin
+// action. Lives outside loadKycList so it isn't re-bound on every
+// reload (which would stack listeners and fire each action N times).
+// Looks at data-act + data-uid; prompts for reason where the RPC
+// requires one; calls the matching SECURITY DEFINER RPC; then re-loads
+// the list to reflect the new state.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('#kycList button[data-act^="kyc-"]');
+  if (!btn) return;
+  const act = btn.dataset.act;
+  const uid = btn.dataset.uid;
+  if (!act || !uid) return;
+
+  // Reason prompts. Only triggered for the destructive / state-change
+  // actions; approve/unfreeze/unban don't need a reason.
+  const needsReason = ['kyc-reject', 'kyc-revoke', 'kyc-freeze', 'kyc-ban'];
+  let reason = null;
+  if (needsReason.includes(act)) {
+    reason = prompt(`Reason for ${act.replace('kyc-', '')}? (visible in audit log)`);
+    if (reason === null) return;
+    if (!reason.trim()) { toast('Reason is required.'); return; }
+  }
+
+  // Belt-and-suspenders confirm for the most destructive ops.
+  if (act === 'kyc-ban' || act === 'kyc-revoke') {
+    if (!confirm(`Confirm ${act.replace('kyc-', '')} for this user?`)) return;
+  }
+
+  // Role-change is super-admin only. Server-side admin_set_user_role
+  // re-checks via is_super_admin so a moderator who tampers with the
+  // DOM still hits 42501.
+  let newRole = null;
+  if (act === 'kyc-setrole') {
+    newRole = prompt('New role? (user / moderator / admin)');
+    if (newRole === null) return;
+    newRole = newRole.trim().toLowerCase();
+    if (!['user', 'moderator', 'admin'].includes(newRole)) {
+      toast('Role must be: user, moderator, or admin.');
+      return;
+    }
+    if (newRole === 'admin' && !confirm('Promote this user to ADMIN? Admins can promote/demote other users.')) return;
+  }
+
+  // UI action → RPC name + arg shape. Each RPC returns { ok, ... } on
+  // success and raises on failure. admin_freeze_payouts / unfreeze
+  // are reused from the earlier 2026-05-14 earnings moderation
+  // migration; the rest are new in 2026-05-15.
+  const rpcMap = {
+    'kyc-approve':  ['admin_approve_kyc',      { p_user_id: uid, p_notes: null }],
+    'kyc-reject':   ['admin_reject_kyc',       { p_user_id: uid, p_reason: reason }],
+    'kyc-revoke':   ['admin_revoke_kyc',       { p_user_id: uid, p_reason: reason }],
+    'kyc-ban':      ['admin_ban_user',         { p_user_id: uid, p_reason: reason }],
+    'kyc-unban':    ['admin_unban_user',       { p_user_id: uid, p_reason: null }],
+    'kyc-freeze':   ['admin_freeze_payouts',   { p_user_id: uid, p_reason: reason }],
+    'kyc-unfreeze': ['admin_unfreeze_payouts', { p_user_id: uid }],
+    'kyc-setrole':  ['admin_set_user_role',    { p_user_id: uid, p_role: newRole }],
+  };
+  const [rpcName, rpcArgs] = rpcMap[act] || [];
+  if (!rpcName) { toast(`Unknown action: ${act}`); return; }
+
+  btn.disabled = true;
+  try {
+    const { data, error } = await supabase.rpc(rpcName, rpcArgs);
+    if (error) { toast(`${act}: ${error.message}`); return; }
+    if (data?.noop) toast(`${act}: no change (${data.reason || 'already in target state'}).`);
+    else            toast(`${act.replace('kyc-', '')} applied.`);
+    await loadKycList();
+  } catch (err) {
+    toast(`${act} threw: ${err?.message || err}`);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 // SETTINGS — app_config maintenance
