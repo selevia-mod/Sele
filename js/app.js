@@ -2251,15 +2251,26 @@ let composeImageFile = null;
 // handler below.
 let composeScheduledAt = null;   // Date | null
 
-// Wire the Schedule button → opens the hidden datetime-local picker.
-// On change, validate that the time is in the future, then store the
-// Date on composeScheduledAt and show the chip. Cleared via the × on
-// the chip or by submitting/posting.
-const _btnOpenSchedule = document.getElementById('btnOpenSchedule');
-const _composeScheduleAtInput = document.getElementById('composeScheduleAt');
-const _composeScheduleChip   = document.getElementById('composeScheduleChip');
-const _composeScheduleLabel  = document.getElementById('composeScheduleLabel');
-const _composeScheduleClear  = document.getElementById('composeScheduleClear');
+// Schedule UI — 2026-05-15: rewritten to use a custom popover with
+// separate <input type="date"> + <input type="time"> instead of the
+// native <input type="datetime-local">. The combined control had broken
+// UX on Safari (no calendar, no obvious close button, no proper time
+// picker). The split inputs render decent native pickers in both
+// Safari and Chrome, and the explicit Set/Cancel buttons remove the
+// silent fallthrough we had before — you can no longer "schedule" by
+// clicking the button and accidentally posting immediately because no
+// time got picked. If composeScheduledAt is null at submit time, the
+// post button label still reads "Post" (not "Schedule"), so the user
+// always knows whether they're scheduling or posting live.
+const _btnOpenSchedule        = document.getElementById('btnOpenSchedule');
+const _composeSchedulePopover = document.getElementById('composeSchedulePopover');
+const _composeScheduleDate    = document.getElementById('composeScheduleDate');
+const _composeScheduleTime    = document.getElementById('composeScheduleTime');
+const _composeScheduleSetBtn  = document.getElementById('composeScheduleSet');
+const _composeScheduleCancelBtn = document.getElementById('composeScheduleCancel');
+const _composeScheduleChip    = document.getElementById('composeScheduleChip');
+const _composeScheduleLabel   = document.getElementById('composeScheduleLabel');
+const _composeScheduleClear   = document.getElementById('composeScheduleClear');
 
 function _updateComposeScheduleUI() {
   const btn = document.getElementById('btnPostSubmit');
@@ -2273,37 +2284,93 @@ function _updateComposeScheduleUI() {
   }
 }
 
-_btnOpenSchedule?.addEventListener('click', () => {
-  if (!_composeScheduleAtInput) return;
-  // Default the picker to 1 hour from now, rounded to the minute.
-  const oneHourLater = new Date(Date.now() + 60 * 60 * 1000);
-  oneHourLater.setSeconds(0, 0);
-  const tzOffMs = oneHourLater.getTimezoneOffset() * 60 * 1000;
-  _composeScheduleAtInput.value = new Date(oneHourLater.getTime() - tzOffMs).toISOString().slice(0, 16);
-  _composeScheduleAtInput.min = new Date(Date.now() - tzOffMs).toISOString().slice(0, 16);
-  // Native browser picker. Falls back to focus for older browsers
-  // that don't implement showPicker().
-  if (typeof _composeScheduleAtInput.showPicker === 'function') {
-    _composeScheduleAtInput.showPicker();
+// Helpers for the local-time formatting that <input type="date"> and
+// <input type="time"> expect. We deliberately avoid toISOString() here
+// because that converts to UTC and would shift the date across midnight
+// for evening-time users in non-zero UTC offsets.
+function _localYmd(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function _localHm(d) {
+  const h = String(d.getHours()).padStart(2, '0');
+  const m = String(d.getMinutes()).padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+function _openComposeSchedulePopover() {
+  if (!_composeSchedulePopover) return;
+  // Default to 1 hour from now, rounded down to the minute. If a value
+  // is already set (user re-opening to adjust), preserve it.
+  const seed = composeScheduledAt || (() => {
+    const d = new Date(Date.now() + 60 * 60 * 1000);
+    d.setSeconds(0, 0);
+    return d;
+  })();
+  _composeScheduleDate.value = _localYmd(seed);
+  _composeScheduleTime.value = _localHm(seed);
+  _composeScheduleDate.min = _localYmd(new Date());
+  _composeSchedulePopover.style.display = 'block';
+}
+
+function _closeComposeSchedulePopover() {
+  if (_composeSchedulePopover) _composeSchedulePopover.style.display = 'none';
+}
+
+_btnOpenSchedule?.addEventListener('click', (e) => {
+  e.stopPropagation();   // don't trip the outside-click handler below
+  // Toggle: clicking the button again while the popover is open closes it.
+  if (_composeSchedulePopover?.style.display === 'block') {
+    _closeComposeSchedulePopover();
   } else {
-    _composeScheduleAtInput.focus();
-    _composeScheduleAtInput.click();
+    _openComposeSchedulePopover();
   }
 });
 
-_composeScheduleAtInput?.addEventListener('change', () => {
-  const v = _composeScheduleAtInput.value;
-  if (!v) { composeScheduledAt = null; _updateComposeScheduleUI(); return; }
-  const d = new Date(v);
+_composeScheduleSetBtn?.addEventListener('click', () => {
+  const dateStr = _composeScheduleDate?.value;
+  const timeStr = _composeScheduleTime?.value;
+  if (!dateStr || !timeStr) {
+    toast('Pick both a date and a time', 'error');
+    return;
+  }
+  // `${YYYY-MM-DD}T${HH:MM}` parses as local time in every browser we
+  // care about. (datetime-local strings without a Z are local.)
+  const d = new Date(`${dateStr}T${timeStr}`);
   if (Number.isNaN(d.getTime())) { toast('Invalid date/time', 'error'); return; }
   if (d.getTime() <= Date.now()) { toast('Schedule time must be in the future', 'error'); return; }
   composeScheduledAt = d;
   _updateComposeScheduleUI();
+  _closeComposeSchedulePopover();
 });
 
+_composeScheduleCancelBtn?.addEventListener('click', () => {
+  _closeComposeSchedulePopover();
+});
+
+// Click outside the popover closes it (without committing).
+document.addEventListener('click', (e) => {
+  if (!_composeSchedulePopover || _composeSchedulePopover.style.display !== 'block') return;
+  // Click is inside the popover OR on the Schedule toggle button → ignore.
+  if (e.target.closest('#composeSchedulePopover')) return;
+  if (e.target.closest('#btnOpenSchedule')) return;
+  _closeComposeSchedulePopover();
+});
+
+// Escape closes the popover.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (_composeSchedulePopover?.style.display === 'block') {
+    _closeComposeSchedulePopover();
+  }
+});
+
+// "Scheduled for X" chip × button — clears the schedule + flips the
+// submit button label back to "Post".
 _composeScheduleClear?.addEventListener('click', () => {
   composeScheduledAt = null;
-  if (_composeScheduleAtInput) _composeScheduleAtInput.value = '';
   _updateComposeScheduleUI();
 });
 
@@ -2390,9 +2457,18 @@ document.getElementById('btnPostSubmit').addEventListener('click', async () => {
   // don't get the inserted row back with joins like the legacy
   // .insert().select(FEED_SELECT) did. Re-fetch via posts table after
   // for the local prepend, mirroring what mobile's createNewPost does.
+  //
+  // 9-param call: production has submit_post extended to accept
+  // p_is_hidden + p_scheduled_publish_at (migration_scheduled_post_
+  // notifications.sql, referenced but not in repo — applied via
+  // Supabase SQL editor). This atomic-scheduled-insert path is what
+  // mobile uses (selebox-mobile-main/lib/posts.js::createNewPost).
+  // The matching AFTER INSERT notification trigger is gated on
+  // is_hidden=false so scheduled posts don't fire "shared a post"
+  // notifications to followers until the cron flips them live.
   const { data: rpcResult, error: rpcErr } = await supabase.rpc('submit_post', {
     p_actor_id:             currentUser.id,
-    p_body:                 body || '',
+    p_body:                 body || null,
     p_image_url:            imageUrl,
     p_video_id:             null,
     p_book_id:              null,
@@ -2406,6 +2482,7 @@ document.getElementById('btnPostSubmit').addEventListener('click', async () => {
   if (rpcErr)              { toast(rpcErr.message, 'error'); _updateComposeScheduleUI(); return; }
   if (rpcResult?.error)    { toast(rpcResult.error, 'error'); _updateComposeScheduleUI(); return; }
   const newPostId = rpcResult?.id;
+  if (!newPostId)          { toast('Post creation failed (no id returned)', 'error'); _updateComposeScheduleUI(); return; }
 
   // Re-fetch the row with joins so we can prepend it locally
   // (same shape the legacy .insert().select(FEED_SELECT) returned).
@@ -2426,7 +2503,10 @@ document.getElementById('btnPostSubmit').addEventListener('click', async () => {
   composeImageInput.value = '';
   charCount.textContent = '0 / 5000';
   composeScheduledAt = null;
-  if (_composeScheduleAtInput) _composeScheduleAtInput.value = '';
+  // The old datetime-local input is gone (replaced by the popover with
+  // separate date/time inputs in 2026-05-15). The popover inputs reset
+  // themselves the next time _openComposeSchedulePopover() runs, so we
+  // don't need to clear them here.
   _updateComposeScheduleUI();   // also resets btn text to "Post"
 
   if (isScheduled) {
