@@ -1430,6 +1430,12 @@
       <nav class="earnings-tabs">
         <button class="earnings-tab active" data-etab="earnings">Earnings</button>
         <button class="earnings-tab" data-etab="payments">Payments Info</button>
+        <!-- Admin-only KYC + security actions tab. Hidden by default;
+             shown when the current user passes is_earnings_admin().
+             See app.js → maybeShowAdminKycTab(). -->
+        <button class="earnings-tab earnings-tab-admin" data-etab="kyc" id="btnEarningsTabKyc" style="display:none">
+          KYC <span class="earnings-tab-admin-pill">admin</span>
+        </button>
       </nav>
 
       <!-- Drill-down view (May 2026 — mirrors mobile's
@@ -1763,6 +1769,138 @@
         </button>
 
         <p class="pi-disclaimer">Approval typically takes 1–2 business days after submission. We'll email you when reviewed.</p>
+      </div>
+
+      <!-- ════════════════════════════════════════════════════════════
+           Admin KYC tab — paginated list of KYC submissions with
+           per-row security actions (freeze / unfreeze payouts, ban /
+           unban, revoke approval). Visible only when the current user
+           passes is_earnings_admin(). All actions go through SECURITY
+           DEFINER RPCs that re-check the admin gate server-side, so
+           hiding the tab is purely a UI courtesy — not a security
+           control. See migration 2026-05-15_admin_kyc_security_rpcs.sql.
+           ════════════════════════════════════════════════════════════ -->
+      <div class="earnings-tab-content" data-etab-content="kyc" style="display:none">
+        <style>
+          .kyc-admin-toolbar {
+            display: flex; gap: 8px; align-items: center;
+            flex-wrap: wrap; margin-bottom: 12px;
+          }
+          .kyc-admin-toolbar select,
+          .kyc-admin-toolbar input[type="search"] {
+            background: var(--surface, #1a1a24);
+            color: var(--text, #fff);
+            border: 1px solid var(--border, #2a2a3a);
+            border-radius: 8px; padding: 8px 12px; font-size: 14px;
+          }
+          .kyc-admin-toolbar input[type="search"] { flex: 1; min-width: 180px; }
+          .kyc-admin-table-wrap {
+            border: 1px solid var(--border, #2a2a3a); border-radius: 12px;
+            overflow: auto; max-height: 70vh;
+          }
+          .kyc-admin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+          .kyc-admin-table th, .kyc-admin-table td {
+            padding: 10px 12px; text-align: left;
+            border-bottom: 1px solid var(--border, #2a2a3a);
+            vertical-align: top;
+          }
+          .kyc-admin-table th {
+            background: var(--surface-2, #14141c); color: var(--text2, #aaa);
+            font-weight: 600; font-size: 12px; text-transform: uppercase;
+            letter-spacing: 0.05em; position: sticky; top: 0; z-index: 1;
+          }
+          .kyc-admin-table tr:last-child td { border-bottom: none; }
+          .kyc-admin-table tr:hover { background: rgba(121, 117, 212, 0.04); }
+          .kyc-creator-cell { display: flex; flex-direction: column; gap: 2px; }
+          .kyc-creator-handle { color: var(--text2, #aaa); font-size: 12px; }
+          .kyc-status-pill {
+            display: inline-block; padding: 2px 8px; border-radius: 999px;
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .kyc-status-approved { background: rgba(46, 204, 113, 0.15); color: #2ecc71; }
+          .kyc-status-pending  { background: rgba(241, 196, 15, 0.15); color: #f1c40f; }
+          .kyc-status-rejected { background: rgba(231, 76, 60, 0.15);  color: #e74c3c; }
+          .kyc-role-pill {
+            display: inline-block; padding: 2px 8px; border-radius: 999px;
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .kyc-role-user      { background: rgba(160, 160, 180, 0.15); color: #a0a0b4; }
+          .kyc-role-moderator { background: rgba(52, 152, 219, 0.18);  color: #3498db; }
+          .kyc-role-admin     { background: rgba(155, 89, 182, 0.20);  color: #b07ee8; }
+          .kyc-flag-pill {
+            display: inline-block; padding: 2px 6px; border-radius: 6px;
+            font-size: 11px; font-weight: 600; margin-right: 4px;
+            background: rgba(231, 76, 60, 0.15); color: #e74c3c;
+          }
+          .kyc-flag-frozen { background: rgba(52, 152, 219, 0.15); color: #3498db; }
+          .kyc-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+          .kyc-actions button {
+            background: var(--surface-2, #14141c);
+            color: var(--text, #fff);
+            border: 1px solid var(--border, #2a2a3a);
+            border-radius: 6px; padding: 5px 10px; font-size: 12px;
+            cursor: pointer; transition: all 0.15s;
+          }
+          .kyc-actions button:hover { background: var(--accent, #7975D4); border-color: var(--accent, #7975D4); }
+          .kyc-actions button.danger:hover { background: #e74c3c; border-color: #e74c3c; }
+          .kyc-admin-pager {
+            display: flex; gap: 12px; align-items: center; justify-content: center;
+            margin-top: 12px; color: var(--text2, #aaa); font-size: 13px;
+          }
+          .kyc-admin-pager button[disabled] { opacity: 0.4; cursor: not-allowed; }
+          .kyc-admin-empty {
+            text-align: center; padding: 40px 20px; color: var(--text2, #aaa);
+            font-size: 14px;
+          }
+          .kyc-tab-admin-pill,
+          .earnings-tab-admin-pill {
+            display: inline-block; padding: 1px 6px; margin-left: 6px;
+            background: rgba(121, 117, 212, 0.2); color: var(--accent, #7975D4);
+            border-radius: 4px; font-size: 10px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.05em;
+            vertical-align: middle;
+          }
+        </style>
+
+        <div class="kyc-admin-toolbar">
+          <select id="kycAdminStatusFilter" aria-label="Filter by status">
+            <option value="approved" selected>Approved</option>
+            <option value="pending">Pending</option>
+            <option value="rejected">Rejected</option>
+            <option value="all">All</option>
+          </select>
+          <input type="search" id="kycAdminSearch" placeholder="Search by username, email, or full name…" aria-label="Search KYCs"/>
+          <button class="btn btn-purple" id="kycAdminRefresh">Refresh</button>
+        </div>
+
+        <div class="kyc-admin-table-wrap">
+          <table class="kyc-admin-table">
+            <thead>
+              <tr>
+                <th>Creator</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>KYC</th>
+                <th>Approved</th>
+                <th>Flags</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="kycAdminTableBody">
+              <tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text2,#aaa)">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="kyc-admin-empty" id="kycAdminEmpty" style="display:none">No KYCs match your filter.</div>
+
+        <div class="kyc-admin-pager">
+          <button class="btn" id="kycAdminPrev">Previous</button>
+          <span id="kycAdminPageInfo">—</span>
+          <button class="btn" id="kycAdminNext">Next</button>
+        </div>
       </div>
     </div>
 
