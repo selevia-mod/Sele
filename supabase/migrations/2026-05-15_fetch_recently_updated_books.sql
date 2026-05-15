@@ -1,0 +1,28 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- 2026-05-15 — fetch_recently_updated_books RPC (UNUSED, DO NOT DEPLOY)
+--
+-- This migration was drafted then superseded by a mobile-only 2-query
+-- approach in BookService.fetchRecentlyUpdatedBooks (see
+-- lib/books-supabase.js). The mobile path:
+--   1. SELECTs chapters in the window, ordered by created_at desc
+--   2. dedupes book_ids client-side
+--   3. SELECTs books via BOOK_SELECT (which already includes the
+--      profiles join needed for the BookCard author label)
+--
+-- The RPC originally drafted here would have returned `setof public.books`,
+-- which is the books TABLE shape — no profile join. Mobile would have
+-- had to make a second query anyway to hydrate the author info. Net:
+-- same number of round-trips, more SQL surface area to maintain. Not
+-- worth deploying.
+--
+-- Leaving this file in place (as a no-op comment) so future engineers
+-- searching for "recently_updated_books" find the rationale instead of
+-- thinking the RPC was forgotten or accidentally dropped.
+--
+-- If you ever need this server-side (e.g., to power a "Recent Updates"
+-- widget from the web app without two round-trips), bring it back as
+-- a JSONB-returning function that nests the profile data, similar to
+-- fetch_book_carousel.
+-- ════════════════════════════════════════════════════════════════════════════
+
+-- (intentionally empty — no-op migration)

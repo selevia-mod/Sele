@@ -364,6 +364,10 @@ async function onSignedIn(user) {
   // Notifications — fetch initial batch + start realtime subscription
   initNotifications();
 
+  // Refresh the "X scheduled" pill near the composer's Post button so
+  // returning users see their queued posts on load. Fire-and-forget.
+  refreshScheduledPostsBadge();
+
   // Daily-goal: tick "Log in today". Dedupe key is the date so
   // multiple signed-in sessions in one calendar day count ONCE.
   // Mirrors mobile at context/global-provider.js:325. Wrapped in
@@ -2218,6 +2222,220 @@ const charCount = document.getElementById('charCount');
 const composeImageInput = document.getElementById('composeImageInput');
 const composeImagePreview = document.getElementById('composeImagePreview');
 let composeImageFile = null;
+// Compose scheduling state — set when user picks a future datetime via
+// the Schedule button. When non-null, the submit handler routes through
+// the submit_post RPC with is_hidden=true + scheduled_publish_at, so a
+// server cron job flips the post live at that moment. Mirrors mobile's
+// "Schedule for later" flow. See btnOpenSchedule wiring + the submit
+// handler below.
+let composeScheduledAt = null;   // Date | null
+
+// Wire the Schedule button → opens the hidden datetime-local picker.
+// On change, validate that the time is in the future, then store the
+// Date on composeScheduledAt and show the chip. Cleared via the × on
+// the chip or by submitting/posting.
+const _btnOpenSchedule = document.getElementById('btnOpenSchedule');
+const _composeScheduleAtInput = document.getElementById('composeScheduleAt');
+const _composeScheduleChip   = document.getElementById('composeScheduleChip');
+const _composeScheduleLabel  = document.getElementById('composeScheduleLabel');
+const _composeScheduleClear  = document.getElementById('composeScheduleClear');
+
+function _updateComposeScheduleUI() {
+  const btn = document.getElementById('btnPostSubmit');
+  if (composeScheduledAt) {
+    _composeScheduleChip.style.display = 'inline-flex';
+    _composeScheduleLabel.textContent = `Scheduled for ${composeScheduledAt.toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })}`;
+    if (btn) btn.textContent = 'Schedule';
+  } else {
+    _composeScheduleChip.style.display = 'none';
+    if (btn) btn.textContent = 'Post';
+  }
+}
+
+_btnOpenSchedule?.addEventListener('click', () => {
+  if (!_composeScheduleAtInput) return;
+  // Default the picker to 1 hour from now, rounded to the minute.
+  const oneHourLater = new Date(Date.now() + 60 * 60 * 1000);
+  oneHourLater.setSeconds(0, 0);
+  const tzOffMs = oneHourLater.getTimezoneOffset() * 60 * 1000;
+  _composeScheduleAtInput.value = new Date(oneHourLater.getTime() - tzOffMs).toISOString().slice(0, 16);
+  _composeScheduleAtInput.min = new Date(Date.now() - tzOffMs).toISOString().slice(0, 16);
+  // Native browser picker. Falls back to focus for older browsers
+  // that don't implement showPicker().
+  if (typeof _composeScheduleAtInput.showPicker === 'function') {
+    _composeScheduleAtInput.showPicker();
+  } else {
+    _composeScheduleAtInput.focus();
+    _composeScheduleAtInput.click();
+  }
+});
+
+_composeScheduleAtInput?.addEventListener('change', () => {
+  const v = _composeScheduleAtInput.value;
+  if (!v) { composeScheduledAt = null; _updateComposeScheduleUI(); return; }
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) { toast('Invalid date/time', 'error'); return; }
+  if (d.getTime() <= Date.now()) { toast('Schedule time must be in the future', 'error'); return; }
+  composeScheduledAt = d;
+  _updateComposeScheduleUI();
+});
+
+_composeScheduleClear?.addEventListener('click', () => {
+  composeScheduledAt = null;
+  if (_composeScheduleAtInput) _composeScheduleAtInput.value = '';
+  _updateComposeScheduleUI();
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// Scheduled posts management — the "Scheduled" pill next to the
+// composer's Post button shows a count of the user's queued posts and
+// opens a modal where each row can be published-now or canceled. Lives
+// here next to the composer scheduling state so all post-scheduling
+// surfaces share one mental model.
+//
+// Pill is shown only when the count > 0 to avoid clutter for casual
+// users who never schedule. Count refreshes after every schedule (in
+// the submit handler) and after every action inside the modal.
+// ════════════════════════════════════════════════════════════════════════
+async function refreshScheduledPostsBadge() {
+  const btn = document.getElementById('btnScheduledPosts');
+  const label = document.getElementById('scheduledPostsBadgeLabel');
+  if (!btn || !currentUser?.id) return;
+  // Count of my future-scheduled, still-hidden posts.
+  const { count, error } = await supabase
+    .from('posts')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', currentUser.id)
+    .eq('is_hidden', true)
+    .gt('scheduled_publish_at', new Date().toISOString());
+  if (error) { console.warn('[scheduled-posts] badge count failed:', error.message); return; }
+  if ((count || 0) > 0) {
+    btn.style.display = 'inline-flex';
+    if (label) label.textContent = `${count} scheduled`;
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+async function openScheduledPostsModal() {
+  const backdrop = document.getElementById('scheduledPostsBackdrop');
+  const listEl   = document.getElementById('scheduledPostsList');
+  if (!backdrop || !listEl) return;
+  if (!currentUser?.id) { toast('Please sign in first', 'error'); return; }
+
+  listEl.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text2,#aaa)">Loading…</div>`;
+  backdrop.style.display = 'grid';
+
+  const { data, error } = await supabase
+    .from('posts')
+    .select('id, body, image_url, scheduled_publish_at, video_id, videos(id, title, thumbnail_url)')
+    .eq('user_id', currentUser.id)
+    .eq('is_hidden', true)
+    .gt('scheduled_publish_at', new Date().toISOString())
+    .order('scheduled_publish_at', { ascending: true })
+    .limit(100);
+
+  if (error) {
+    listEl.innerHTML = `<div style="text-align:center;padding:2rem;color:#e74c3c">${escHTML(error.message)}</div>`;
+    return;
+  }
+  if (!data?.length) {
+    listEl.innerHTML = `<div style="text-align:center;padding:2.5rem 1rem;color:var(--text2,#aaa);font-size:14px">No scheduled posts. Use the Schedule button on the composer to queue one.</div>`;
+    return;
+  }
+
+  // Per-row card. `data-post-id` carries the row id so the delegated
+  // click handler below knows which post to act on without rebinding
+  // per-row listeners.
+  listEl.innerHTML = data.map(p => {
+    const when = new Date(p.scheduled_publish_at);
+    const whenStr = when.toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' });
+    const bodySnip = p.body ? escHTML(p.body.length > 140 ? p.body.slice(0, 140) + '…' : p.body) : '<em style="color:var(--text2,#aaa)">(no caption)</em>';
+    // Media preview — image OR attached video thumbnail.
+    let media = '';
+    if (p.image_url) {
+      media = `<img src="${escHTML(p.image_url)}" alt="" style="width:64px;height:64px;border-radius:8px;object-fit:cover;flex-shrink:0"/>`;
+    } else if (p.videos?.thumbnail_url) {
+      media = `<div style="position:relative;flex-shrink:0">
+        <img src="${escHTML(p.videos.thumbnail_url)}" alt="" style="width:64px;height:64px;border-radius:8px;object-fit:cover"/>
+        <svg viewBox="0 0 24 24" width="20" height="20" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);fill:white;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5))"><polygon points="8 5 19 12 8 19 8 5"/></svg>
+      </div>`;
+    }
+    return `
+      <div style="display:flex;gap:0.85rem;padding:0.85rem;border:1px solid var(--admin-border,#2a2a3a);border-radius:10px;margin-bottom:0.6rem;align-items:flex-start">
+        ${media || ''}
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;color:var(--accent,#7975D4);font-weight:600;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">${escHTML(whenStr)}</div>
+          <div style="font-size:14px;color:var(--text,#fff);line-height:1.4;margin-bottom:8px;overflow-wrap:break-word">${bodySnip}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button type="button" data-sp-act="publish-now" data-post-id="${p.id}"
+                    style="background:var(--accent,#7975D4);color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600">Publish now</button>
+            <button type="button" data-sp-act="cancel" data-post-id="${p.id}"
+                    style="background:transparent;color:#e74c3c;border:1px solid rgba(231,76,60,0.4);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600">Cancel</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function closeScheduledPostsModal() {
+  const bd = document.getElementById('scheduledPostsBackdrop');
+  if (bd) bd.style.display = 'none';
+}
+
+// Wire the pill + modal close button + backdrop click + Escape.
+document.getElementById('btnScheduledPosts')?.addEventListener('click', openScheduledPostsModal);
+document.getElementById('scheduledPostsClose')?.addEventListener('click', closeScheduledPostsModal);
+document.getElementById('scheduledPostsBackdrop')?.addEventListener('click', (e) => {
+  if (e.target.id === 'scheduledPostsBackdrop') closeScheduledPostsModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const bd = document.getElementById('scheduledPostsBackdrop');
+  if (bd && bd.style.display !== 'none') closeScheduledPostsModal();
+});
+
+// Delegated row actions — Publish now + Cancel. Both update the row
+// server-side, then refresh the modal + the composer badge.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('#scheduledPostsList button[data-sp-act]');
+  if (!btn) return;
+  const act = btn.dataset.spAct;
+  const id  = btn.dataset.postId;
+  if (!act || !id) return;
+
+  if (act === 'cancel' && !confirm('Cancel this scheduled post? It will be deleted permanently.')) return;
+
+  btn.disabled = true;
+  try {
+    if (act === 'publish-now') {
+      // Flip is_hidden=false + clear schedule. The AFTER UPDATE
+      // trigger doesn't fanout (that's gated to AFTER INSERT), but
+      // the post becomes visible in the feed immediately.
+      const { error } = await supabase
+        .from('posts')
+        .update({ is_hidden: false, scheduled_publish_at: null })
+        .eq('id', id)
+        .eq('user_id', currentUser.id);              // belt + suspenders — RLS already restricts
+      if (error) { toast(`Publish failed: ${error.message}`, 'error'); return; }
+      toast('Published.', 'success');
+    } else if (act === 'cancel') {
+      const { error } = await supabase
+        .from('posts')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', currentUser.id);
+      if (error) { toast(`Cancel failed: ${error.message}`, 'error'); return; }
+      toast('Scheduled post deleted.', 'success');
+    }
+    // Refresh the modal contents + the composer badge in parallel.
+    await Promise.all([openScheduledPostsModal(), refreshScheduledPostsBadge()]);
+  } catch (err) {
+    toast(`${act} threw: ${err?.message || err}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 composeText.addEventListener('input', () => {
   const len = composeText.value.length;
@@ -2247,42 +2465,97 @@ composeImageInput.addEventListener('change', (e) => {
   reader.readAsDataURL(file);
 });
 
-document.getElementById('btnPost').addEventListener('click', async () => {
+// Composer submit. Selector matches the renamed id="btnPostSubmit"
+// in index.html. Was id="btnPost" originally, but that collided with
+// the sidebar Post nav button (also id="btnPost") — getElementById
+// returned the sidebar one and this listener silently never fired.
+//
+// Routes through the submit_post RPC mobile uses, which supports the
+// is_hidden + scheduled_publish_at parameters needed for scheduling.
+// The legacy raw insert path (still present in git history) didn't
+// give us scheduling; mobile users could schedule, web users couldn't.
+// The RPC handles the insert + the AFTER INSERT follower-fanout trigger
+// (which is gated on is_hidden=false so scheduled posts don't pre-spam
+// notifications).
+document.getElementById('btnPostSubmit').addEventListener('click', async () => {
   const body = composeText.value.trim();
   if (!body && !composeImageFile) return;
   if (!currentUser) return toast('Please sign in first', 'error');
 
-  const btn = document.getElementById('btnPost');
+  const isScheduled = !!composeScheduledAt;
+  const scheduledIso = isScheduled ? composeScheduledAt.toISOString() : null;
+
+  const btn = document.getElementById('btnPostSubmit');
   btn.disabled = true;
-  btn.textContent = composeImageFile ? 'Uploading...' : 'Posting...';
+  btn.textContent = composeImageFile ? 'Uploading...' : (isScheduled ? 'Scheduling...' : 'Posting...');
 
   let imageUrl = null;
   if (composeImageFile) {
     imageUrl = await uploadImage(composeImageFile);
-    if (!imageUrl) { btn.disabled = false; btn.textContent = 'Post'; return; }
+    if (!imageUrl) {
+      btn.disabled = false;
+      _updateComposeScheduleUI();
+      return;
+    }
   }
 
-  btn.textContent = 'Posting...';
-  // Facebook-pattern: ask for the inserted row WITH joins so we can
-  // prepend it locally instead of re-running loadFeed (which would
-  // call feed_for_you, and that RPC excludes the viewer's own posts —
-  // the new post would vanish from the feed immediately even though
-  // it landed in the DB). Returning the row also gives us the canonical
-  // id + created_at for the local prepend.
-  const { data: created, error } = await supabase
-    .from('posts')
-    .insert({ user_id: currentUser.id, body: body || '', image_url: imageUrl })
-    .select(FEED_SELECT)
-    .single();
-  btn.disabled = false;
-  btn.textContent = 'Post';
+  btn.textContent = isScheduled ? 'Scheduling...' : 'Posting...';
 
-  if (error) { toast(error.message, 'error'); return; }
+  // submit_post returns { id, status, error } (per the RPC contract).
+  // It performs the insert server-side under SECURITY DEFINER, so we
+  // don't get the inserted row back with joins like the legacy
+  // .insert().select(FEED_SELECT) did. Re-fetch via posts table after
+  // for the local prepend, mirroring what mobile's createNewPost does.
+  const { data: rpcResult, error: rpcErr } = await supabase.rpc('submit_post', {
+    p_actor_id:             currentUser.id,
+    p_body:                 body || '',
+    p_image_url:            imageUrl,
+    p_video_id:             null,
+    p_book_id:              null,
+    p_reposted_from:        null,
+    p_legacy_appwrite_id:   null,
+    p_is_hidden:            isScheduled,
+    p_scheduled_publish_at: scheduledIso,
+  });
+
+  btn.disabled = false;
+  if (rpcErr)              { toast(rpcErr.message, 'error'); _updateComposeScheduleUI(); return; }
+  if (rpcResult?.error)    { toast(rpcResult.error, 'error'); _updateComposeScheduleUI(); return; }
+  const newPostId = rpcResult?.id;
+
+  // Re-fetch the row with joins so we can prepend it locally
+  // (same shape the legacy .insert().select(FEED_SELECT) returned).
+  let created = null;
+  if (newPostId) {
+    const { data: row } = await supabase
+      .from('posts')
+      .select(FEED_SELECT)
+      .eq('id', newPostId)
+      .maybeSingle();
+    created = row;
+  }
+
+  // Reset composer state — caption, image, schedule.
   composeText.value = '';
   composeImageFile = null;
   composeImagePreview.innerHTML = '';
   composeImageInput.value = '';
   charCount.textContent = '0 / 5000';
+  composeScheduledAt = null;
+  if (_composeScheduleAtInput) _composeScheduleAtInput.value = '';
+  _updateComposeScheduleUI();   // also resets btn text to "Post"
+
+  if (isScheduled) {
+    // Scheduled posts shouldn't appear in the feed yet — the AFTER
+    // INSERT trigger skipped fanout because is_hidden=true. Toast the
+    // confirmation with the scheduled time so the user has feedback.
+    toast(`Scheduled for ${new Date(scheduledIso).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })}`, 'success');
+    // Refresh the "X scheduled" pill so it reflects the new total
+    // (and reveals itself if this was the user's first scheduled post).
+    refreshScheduledPostsBadge();
+    return;
+  }
+
   toast('Posted!', 'success');
 
   // Prepend the new post locally so the user sees it at the top of the
@@ -2348,7 +2621,11 @@ let _feedScrollObserver = null;
 let _feedVideoObserver = null;
 let _feedPostObserver = null;
 
-const FEED_SELECT = `*, profiles!user_id(id, username, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration))`;
+// Sprint 2 #2 (2026-05-15): added `display_name` to both profile
+// joins so the feed renders by the creator's chosen display name with
+// @handle as a secondary fallback. Mirrors mobile's POST_SELECT.
+// Renderers should use:  profile.display_name || profile.username || 'Unknown'.
+const FEED_SELECT = `*, profiles!user_id(id, username, display_name, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, display_name, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration))`;
 
 // Feed mode — 'foryou' (default), 'following', or 'discover'
 let _feedMode = 'foryou';
@@ -2611,7 +2888,22 @@ async function _buildAndExecFeedQuery({ offset }) {
     return { data: data || [], scoreClientSide: false, followIds, fetchLimit };
   }
 
-  // foryou / discover: RPC path
+  // For You — Sprint 2 #1 (2026-05-15): switched to fetch_hybrid_feed,
+  // the same RPC mobile uses. Returns mixed items (post / book_carousel
+  // / video_card) on a 6:1 cadence so the feed gets discovery items
+  // injected like mobile. Falls through to legacy feed_for_you on RPC
+  // error so a server hiccup doesn't black-screen the home tab.
+  if (_feedMode === 'foryou') {
+    try {
+      const result = await _fetchHybridFeedPage({ offset });
+      return { ...result, followIds, scoreClientSide: false, isHybrid: true };
+    } catch (err) {
+      console.warn('[feed] hybrid feed RPC failed, falling back to legacy:', err?.message);
+      // intentional fall-through to the legacy path below
+    }
+  }
+
+  // discover (and foryou — legacy path): RPC path
   const rpcName = _feedMode === 'discover' ? 'feed_discover' : 'feed_for_you';
   try {
     const fetchLimit = _feedFetchLimitWithFilters(FEED_PAGE_SIZE);
@@ -2653,6 +2945,473 @@ async function _buildAndExecFeedQuery({ offset }) {
     if (error) throw error;
     return { data: data || [], scoreClientSide: true, followIds, fetchLimit };
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Hybrid feed (Sprint 2 #1, 2026-05-15) — calls the fetch_hybrid_feed
+// RPC mobile uses. Returns mixed items on a 6:1 cadence so the For You
+// feed gets discovery items (book carousels, video cards) injected
+// alongside posts. Pagination is cursor-based: the RPC returns a
+// next_cursor jsonb that we pass back on the next call.
+//
+// Result shape (consumed by loadFeed/loadMoreFeed):
+//   {
+//     items: [
+//       { kind: 'post',           data: <hydrated post> },
+//       { kind: 'book_carousel',  data: { books: [...] } },
+//       { kind: 'video_card',     data: { ... } },
+//     ],
+//     data: <flat list of just posts — for view tracking + buffer dedup>,
+//     fetchLimit: <number>,
+//     hasMore: <boolean>,
+//   }
+//
+// _feedHybridCursor is the cursor returned from the previous page;
+// loadFeed resets it to {} on every fresh load.
+// ════════════════════════════════════════════════════════════════════════
+let _feedHybridCursor = {};
+let _feedHybridSessionSeed = null;
+
+async function _fetchHybridFeedPage({ offset }) {
+  // offset === 0 means "fresh load" — reset cursor + roll a new
+  // session seed so the bucket ordering shuffles between sessions.
+  if (offset === 0) {
+    _feedHybridCursor = {};
+    _feedHybridSessionSeed = String(Math.floor(Math.random() * 0xffffffff));
+  }
+  const limit = FEED_PAGE_SIZE;
+  const { data, error } = await supabase.rpc('fetch_hybrid_feed', {
+    p_user_id:      currentUser.id,
+    p_cursor:       _feedHybridCursor || {},
+    p_limit:        limit,
+    p_session_seed: _feedHybridSessionSeed,
+  });
+  if (error) throw error;
+
+  const rawItems = Array.isArray(data?.items) ? data.items : [];
+  _feedHybridCursor = data?.next_cursor || {};
+
+  // Hydrate posts (FEED_SELECT joins) in one batch. Carousel + video
+  // card items pass through as-is (their data payloads are server-built).
+  const postIds = rawItems.filter(it => it?.type === 'post' && it.post_id).map(it => it.post_id);
+  let postById = new Map();
+  if (postIds.length) {
+    const { data: hydrated, error: hydErr } = await supabase
+      .from('posts').select(FEED_SELECT).in('id', postIds);
+    if (hydErr) throw hydErr;
+    postById = new Map((hydrated || []).map(p => [p.id, p]));
+  }
+
+  // Walk in server order. Drop posts that fail RLS / hide-list / hydration;
+  // pass injected items through unchanged.
+  const items = [];
+  const flatPosts = [];
+  for (const it of rawItems) {
+    if (it?.type === 'post' && it.post_id) {
+      const p = postById.get(it.post_id);
+      if (!p) continue;
+      if (shouldHidePost(p)) continue;
+      items.push({ kind: 'post', data: p });
+      flatPosts.push(p);
+    } else if (it?.type === 'book_carousel') {
+      items.push({ kind: 'book_carousel', data: it.data || it });
+    } else if (it?.type === 'video_card') {
+      items.push({ kind: 'video_card', data: it.data || it });
+    }
+  }
+
+  // hasMore — server returns next_cursor with `done: true` when exhausted,
+  // OR the items array length is below the requested limit.
+  const hasMore = !data?.next_cursor?.done && items.length > 0;
+
+  return {
+    items,
+    data: flatPosts,           // legacy `data` slot used by view tracking + bumpLastSeenAt
+    fetchLimit: limit,
+    hasMore,
+  };
+}
+
+// Session-cached pool of trending books to PAD each hybrid feed
+// carousel out to ~30 books on web. The server-side fetch_book_carousel
+// RPC returns only 5 (with role labels: trending / newly_updated /
+// community_pick / wild_card), which is the right size for mobile but
+// way too thin for the wider desktop carousel. Solution: one extra
+// SELECT * FROM books query per session that fetches the next ~30
+// trending books, cached as a Promise so concurrent carousels share
+// the same in-flight request. When each carousel mounts, it appends
+// pool entries (deduped against the role-labeled set) to its track.
+// Doesn't touch the server-side RPC or mobile.
+let _webBookPoolPromise = null;
+function _getWebBookPool() {
+  if (!_webBookPoolPromise) {
+    _webBookPoolPromise = supabase
+      .from('books')
+      .select('id, title, cover_url, author_id, ratings_avg, ratings_count, profiles!author_id(username, display_name, avatar_url)')
+      .eq('is_public', true)
+      .eq('is_hidden', false)
+      .in('status', ['ongoing', 'completed'])
+      .order('trending_score', { ascending: false, nullsFirst: false })
+      .limit(40)
+      .then(({ data, error }) => {
+        if (error) { console.warn('[book-pool] fetch failed:', error.message); return []; }
+        // Adapt to the shape _renderHybridBookCarousel expects.
+        return (data || []).map(b => ({
+          id: b.id,
+          title: b.title,
+          cover_url: b.cover_url,
+          author_id: b.author_id,
+          author_display_name: b.profiles?.display_name || null,
+          author_username: b.profiles?.username || null,
+          rating: b.ratings_avg,
+          rating_count: b.ratings_count,
+          role: 'discover',
+        }));
+      })
+      .catch((err) => { console.warn('[book-pool] threw:', err?.message); return []; });
+  }
+  return _webBookPoolPromise;
+}
+
+// ── Render helpers for injected hybrid-feed items ─────────────────────
+//
+// Book carousel — premium desktop card carousel with prev/next arrows.
+// Server returns data.books as an array of { id, title, cover_url,
+// author_display_name, ... }. Tap a cover → open book detail. Mobile
+// has its own touch-scroll version (BookCarousel.jsx); this is the
+// web-only desktop pattern (arrow paginated, no horizontal scrollbar).
+//
+// Prefixed with `_renderHybrid` to avoid colliding with any existing
+// renderBookCarousel/renderVideoCard in the codebase (the video one
+// already collided once and black-screened the site).
+function _renderHybridBookCarousel(payload) {
+  const books = Array.isArray(payload?.books) ? payload.books : [];
+  if (!books.length) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'feed-hybrid-carousel feed-hybrid-book-carousel';
+  // Inline CSS is here intentionally so this carousel ships as a
+  // self-contained unit — we don't have to touch css/styles.css to
+  // get the look right. The :hover effects are wired via a one-time
+  // injected <style> below (idempotent — `data-hbc-style` guard).
+  wrap.style.cssText = [
+    'margin:12px 0',
+    'padding:18px 0 18px',
+    'background:linear-gradient(135deg, rgba(121,117,212,0.06) 0%, rgba(121,117,212,0.02) 100%)',
+    'border-radius:16px',
+    'border:1px solid rgba(121,117,212,0.20)',
+    'position:relative',
+    'overflow:hidden',
+  ].join(';');
+
+  const headerHtml = `
+    <div class="hbc-header" style="display:flex;align-items:center;justify-content:space-between;padding:0 20px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">📚</span>
+        <span style="font-size:13px;font-weight:700;color:var(--accent,#7975D4);text-transform:uppercase;letter-spacing:0.08em">Books worth reading</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="hbc-arrow hbc-prev" aria-label="Previous">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button type="button" class="hbc-arrow hbc-next" aria-label="Next">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+    </div>`;
+
+  // Each tile is a fixed 144px wide so we can math the page size off
+  // the viewport width below. Cover is 2:3 aspect. Title clamped to a
+  // single line + ellipsis (Charles's preference for desktop — keeps
+  // every row in the carousel the exact same height). Author single
+  // line. Rating row shows ★ + numeric only when a rating field is
+  // present + non-zero. Hover lifts the tile with a shadow.
+  const tilesHtml = books.map(b => {
+    const cover  = b.cover_url || b.thumbnail_url || '';
+    const title  = escHTML(b.title || 'Untitled');
+    const author = escHTML(b.author_display_name || b.author_name || b.author_username || '');
+    // Rating — server may put it on any of these fields depending on
+    // which fetch path emitted the card. Fall through gracefully.
+    const ratingRaw = Number(b.rating ?? b.average_rating ?? b.avg_rating ?? 0);
+    const hasRating = ratingRaw > 0;
+    const ratingStr = hasRating ? ratingRaw.toFixed(1) : '';
+    const ratingCount = Number(b.rating_count ?? b.ratings_count ?? 0);
+    return `
+      <div class="hbc-tile" data-book-id="${escHTML(b.id || '')}">
+        <div class="hbc-cover">
+          ${cover ? `<img src="${escHTML(cover)}" alt="" loading="lazy"/>` : ''}
+          <div class="hbc-cover-overlay"></div>
+        </div>
+        <div class="hbc-title" title="${title}">${title}</div>
+        ${author ? `<div class="hbc-author">${author}</div>` : ''}
+        ${hasRating
+          ? `<div class="hbc-rating">
+               <svg viewBox="0 0 24 24" width="11" height="11" style="fill:#f5b50a"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
+               <span class="hbc-rating-val">${ratingStr}</span>
+               ${ratingCount > 0 ? `<span class="hbc-rating-count">(${ratingCount.toLocaleString()})</span>` : ''}
+             </div>`
+          : ''}
+      </div>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    ${headerHtml}
+    <div class="hbc-viewport" style="overflow:hidden;padding:4px 20px">
+      <div class="hbc-track" style="display:flex;gap:16px;transition:transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);will-change:transform">
+        ${tilesHtml}
+      </div>
+    </div>`;
+
+  // Inject the supporting styles once. Idempotent guard: a data attr
+  // on <head> means subsequent carousels skip the duplicate <style>
+  // injection. Doing it this way avoids touching css/styles.css.
+  if (!document.documentElement.dataset.hbcStyle) {
+    const s = document.createElement('style');
+    s.textContent = `
+      /* Glass-style navigation arrows — frosted background with
+         backdrop blur. Picks up whatever colour is behind them so the
+         arrows are visible against light AND dark page backgrounds.
+         The icon uses the accent purple so it's never washed out. */
+      .feed-hybrid-book-carousel .hbc-arrow {
+        width: 38px; height: 38px;
+        border-radius: 50%;
+        border: 1px solid rgba(121, 117, 212, 0.35);
+        background: rgba(255, 255, 255, 0.55);
+        -webkit-backdrop-filter: blur(14px) saturate(180%);
+        backdrop-filter: blur(14px) saturate(180%);
+        color: var(--accent, #7975D4);
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        transition: all 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
+        box-shadow: 0 2px 10px rgba(121, 117, 212, 0.12),
+                    inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+      }
+      body[data-theme="dark"] .feed-hybrid-book-carousel .hbc-arrow {
+        background: rgba(30, 30, 45, 0.55);
+        border-color: rgba(121, 117, 212, 0.45);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3),
+                    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+      }
+      .feed-hybrid-book-carousel .hbc-arrow:hover:not([disabled]) {
+        background: var(--accent, #7975D4);
+        border-color: var(--accent, #7975D4);
+        color: #fff;
+        transform: translateY(-1px) scale(1.04);
+        box-shadow: 0 6px 18px rgba(121, 117, 212, 0.40);
+      }
+      .feed-hybrid-book-carousel .hbc-arrow:active:not([disabled]) {
+        transform: translateY(0) scale(0.98);
+      }
+      .feed-hybrid-book-carousel .hbc-arrow[disabled] {
+        opacity: 0.35; cursor: not-allowed;
+        transform: none !important;
+        box-shadow: none !important;
+      }
+
+      /* Tile — 144px wide, hover lifts it up with a deeper shadow */
+      .feed-hybrid-book-carousel .hbc-tile {
+        flex: 0 0 144px;
+        cursor: pointer;
+        transition: transform 0.22s ease;
+      }
+      .feed-hybrid-book-carousel .hbc-tile:hover {
+        transform: translateY(-3px);
+      }
+      .feed-hybrid-book-carousel .hbc-tile:hover .hbc-cover {
+        box-shadow: 0 10px 28px rgba(121, 117, 212, 0.28),
+                    0 2px 6px rgba(0, 0, 0, 0.18);
+      }
+      .feed-hybrid-book-carousel .hbc-cover {
+        aspect-ratio: 2/3;
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--surface-2, #222);
+        position: relative;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        transition: box-shadow 0.22s ease;
+      }
+      .feed-hybrid-book-carousel .hbc-cover img {
+        width: 100%; height: 100%; object-fit: cover; display: block;
+      }
+      .feed-hybrid-book-carousel .hbc-cover-overlay {
+        position: absolute; inset: 0;
+        background: linear-gradient(180deg, transparent 60%, rgba(0, 0, 0, 0.35) 100%);
+        pointer-events: none;
+      }
+
+      /* Text rows — single-line title + author + rating */
+      .feed-hybrid-book-carousel .hbc-title {
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.35;
+        color: var(--text, #fff);
+        margin-top: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .feed-hybrid-book-carousel .hbc-author {
+        font-size: 11.5px;
+        color: var(--text2, #aaa);
+        margin-top: 3px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .feed-hybrid-book-carousel .hbc-rating {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-top: 5px;
+        font-size: 11px;
+        color: var(--text, #fff);
+      }
+      .feed-hybrid-book-carousel .hbc-rating-val {
+        font-weight: 600;
+      }
+      .feed-hybrid-book-carousel .hbc-rating-count {
+        color: var(--text2, #aaa);
+        font-weight: 400;
+      }
+    `;
+    document.head.appendChild(s);
+    document.documentElement.dataset.hbcStyle = '1';
+  }
+
+  // Pagination — translate the track by N tiles per click. Tile width
+  // (144px) + gap (16px) = 160px per slot. Page size = floor(viewport
+  // width / 160), measured after the carousel mounts so the count
+  // adapts to the actual rendered width (sidebar collapsed vs not).
+  const track = wrap.querySelector('.hbc-track');
+  const viewport = wrap.querySelector('.hbc-viewport');
+  const prevBtn = wrap.querySelector('.hbc-prev');
+  const nextBtn = wrap.querySelector('.hbc-next');
+  const SLOT = 160;             // 144px tile + 16px gap
+  let offset = 0;
+
+  function _updateArrows() {
+    const maxOffset = Math.max(0, books.length * SLOT - viewport.clientWidth);
+    prevBtn.disabled = offset <= 0;
+    nextBtn.disabled = offset >= maxOffset - 1;
+  }
+  function _stepBy(direction) {
+    const pageSize = Math.max(1, Math.floor((viewport.clientWidth - 40) / SLOT));
+    const maxOffset = Math.max(0, books.length * SLOT - viewport.clientWidth);
+    offset = Math.max(0, Math.min(maxOffset, offset + direction * pageSize * SLOT));
+    track.style.transform = `translateX(-${offset}px)`;
+    _updateArrows();
+  }
+  prevBtn.addEventListener('click', () => _stepBy(-1));
+  nextBtn.addEventListener('click', () => _stepBy(1));
+
+  // Initial arrow state — needs viewport.clientWidth, which is 0 until
+  // the element is attached to the DOM. Defer the first update to next
+  // tick (microtask) when loadFeed has appended the wrap into #feed.
+  Promise.resolve().then(_updateArrows);
+
+  // Tile click → openBookDetail (delegated so it survives re-renders).
+  track.addEventListener('click', (e) => {
+    const tile = e.target.closest('.hbc-tile[data-book-id]');
+    if (tile && typeof openBookDetail === 'function') openBookDetail(tile.dataset.bookId);
+  });
+
+  // Pad up to 30 books from the session-cached trending pool. The
+  // initial 5 books (with role labels) render immediately; the rest
+  // arrive after the pool fetch resolves and get appended to the track.
+  // Re-runs _updateArrows so prev/next correctly reflect the new
+  // length. Deduped by id against the books already rendered.
+  const TARGET_COUNT = 30;
+  if (books.length < TARGET_COUNT) {
+    const existingIds = new Set(books.map(b => b.id).filter(Boolean));
+    _getWebBookPool().then((pool) => {
+      const extras = pool.filter(b => b.id && !existingIds.has(b.id)).slice(0, TARGET_COUNT - books.length);
+      if (!extras.length) return;
+      // Build the HTML for the new tiles using the same template as
+      // the inline tilesHtml block above. Extracted to a tiny helper
+      // here so we don't duplicate the markup.
+      const extraHtml = extras.map(b => {
+        const cover  = b.cover_url || b.thumbnail_url || '';
+        const title  = escHTML(b.title || 'Untitled');
+        const author = escHTML(b.author_display_name || b.author_name || b.author_username || '');
+        const ratingRaw = Number(b.rating ?? b.average_rating ?? b.avg_rating ?? 0);
+        const hasRating = ratingRaw > 0;
+        const ratingStr = hasRating ? ratingRaw.toFixed(1) : '';
+        const ratingCount = Number(b.rating_count ?? b.ratings_count ?? 0);
+        return `
+          <div class="hbc-tile" data-book-id="${escHTML(b.id || '')}">
+            <div class="hbc-cover">
+              ${cover ? `<img src="${escHTML(cover)}" alt="" loading="lazy"/>` : ''}
+              <div class="hbc-cover-overlay"></div>
+            </div>
+            <div class="hbc-title" title="${title}">${title}</div>
+            ${author ? `<div class="hbc-author">${author}</div>` : ''}
+            ${hasRating
+              ? `<div class="hbc-rating">
+                   <svg viewBox="0 0 24 24" width="11" height="11" style="fill:#f5b50a"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
+                   <span class="hbc-rating-val">${ratingStr}</span>
+                   ${ratingCount > 0 ? `<span class="hbc-rating-count">(${ratingCount.toLocaleString()})</span>` : ''}
+                 </div>`
+              : ''}
+          </div>`;
+      }).join('');
+      track.insertAdjacentHTML('beforeend', extraHtml);
+      // Recompute arrow state since track is wider now.
+      _updateArrows();
+    });
+  }
+
+  return wrap;
+}
+
+// Video card — single featured video tile, larger than a thumbnail.
+// Server returns one video per card with id, title, thumbnail_url,
+// duration, creator info. Tap → open the video player.
+//
+// Named with the `_renderHybridVideoCard` prefix to avoid colliding
+// with the legacy `renderVideoCard(video, uploader)` at line ~17370
+// which renders a different surface (videos tab tile). The naming
+// collision broke the whole script with "Identifier already declared".
+function _renderHybridVideoCard(payload) {
+  const v = payload?.video || payload || {};
+  if (!v.id) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'feed-video-card';
+  wrap.style.cssText = 'margin:12px 0;border-radius:12px;overflow:hidden;background:var(--surface,#1a1a24);border:1px solid var(--border,#2a2a3a);cursor:pointer';
+  const thumb = v.thumbnail_url || '';
+  const title = escHTML(v.title || 'Untitled video');
+  const creator = escHTML(v.creator_display_name || v.creator_name || v.creator_username || '');
+  const dur = v.duration ? _formatDuration(v.duration) : '';
+  wrap.innerHTML = `
+    <div style="position:relative;aspect-ratio:16/9;background:#000">
+      ${thumb ? `<img src="${escHTML(thumb)}" alt="" style="width:100%;height:100%;object-fit:cover" loading="lazy"/>` : ''}
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">
+        <div style="background:rgba(0,0,0,0.55);border-radius:50%;width:64px;height:64px;display:flex;align-items:center;justify-content:center">
+          <svg viewBox="0 0 24 24" width="28" height="28" style="fill:white;margin-left:3px"><polygon points="8 5 19 12 8 19 8 5"/></svg>
+        </div>
+      </div>
+      ${dur ? `<div style="position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,0.75);color:white;font-size:12px;font-weight:600;padding:2px 6px;border-radius:4px">${dur}</div>` : ''}
+      <div style="position:absolute;top:10px;left:10px;background:var(--accent,#7975D4);color:white;font-size:11px;font-weight:700;padding:3px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">▶ Featured video</div>
+    </div>
+    <div style="padding:12px 14px">
+      <div style="font-size:14px;font-weight:600;color:var(--text,#fff);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${title}</div>
+      ${creator ? `<div style="font-size:12px;color:var(--text2,#aaa)">${creator}</div>` : ''}
+    </div>`;
+  wrap.addEventListener('click', () => {
+    if (typeof playVideo === 'function') playVideo('sb_' + v.id);
+  });
+  return wrap;
+}
+
+// Best-effort duration formatter for video card tile. Mobile's helper
+// lives in lib/utils — we don't have an obvious shared util on web,
+// so format inline (M:SS or H:MM:SS).
+function _formatDuration(seconds) {
+  const s = Math.floor(Number(seconds) || 0);
+  if (!s) return '';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, '0');
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${sec}`;
+  return `${m}:${sec}`;
 }
 
 // Apply hide-list filter, scoring (For You / Discover), and diversity penalty.
@@ -2779,29 +3538,60 @@ window.loadFeed = async function() {
     return;
   }
 
-  const result = _processFeedRows(queryResult);
-  posts = result;
+  // Hybrid feed (For You) — items array contains mixed kinds. Skip
+  // _processFeedRows (no client-side scoring; server handles ordering).
+  // Walk items in server order and dispatch to the right renderer.
+  // Posts still go into the `posts` array so view tracking + the
+  // background poller + the buffer-pill all keep working.
+  let result;
+  if (queryResult.isHybrid) {
+    result = queryResult.data;                      // already filtered + post-only
+    posts = result;
+    _hasMoreFeedPosts = !!queryResult.hasMore;
+    _feedOffset = result.length;                    // soft-tracked; cursor is the real pagination key
+    if (!queryResult.items?.length) {
+      feed.innerHTML = `<div class="empty"><h3>No posts yet</h3><p>Check back soon — new content drops daily.</p></div>`;
+      return;
+    }
+    feed.innerHTML = '';
+    let postIdx = 0;
+    queryResult.items.forEach((it, i) => {
+      let el = null;
+      if (it.kind === 'post') {
+        el = renderPost(it.data);
+        if (el) el.style.animationDelay = `${(postIdx * 0.04).toFixed(3)}s`;
+        postIdx += 1;
+      } else if (it.kind === 'book_carousel') {
+        el = _renderHybridBookCarousel(it.data);
+      } else if (it.kind === 'video_card') {
+        el = _renderHybridVideoCard(it.data);
+      }
+      if (el) feed.appendChild(el);
+    });
+  } else {
+    result = _processFeedRows(queryResult);
+    posts = result;
+    // Pagination state — for scored modes, _feedOffset advances by the WIDER
+    // fetch so we don't refetch the same rows we just trimmed away.
+    const advance = queryResult.data.length;
+    if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
+    _feedOffset = advance;
 
-  // Pagination state — for scored modes, _feedOffset advances by the WIDER
-  // fetch so we don't refetch the same rows we just trimmed away.
-  const advance = queryResult.data.length;
-  if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
-  _feedOffset = advance;
+    if (!posts.length) {
+      const emptyMsg = _feedMode === 'discover'
+        ? '<h3>No fresh posts to discover</h3><p>Check back soon — new content drops daily.</p>'
+        : '<h3>No posts yet</h3><p>Be the first to share something!</p>';
+      feed.innerHTML = `<div class="empty">${emptyMsg}</div>`;
+      return;
+    }
 
-  if (!posts.length) {
-    const emptyMsg = _feedMode === 'discover'
-      ? '<h3>No fresh posts to discover</h3><p>Check back soon — new content drops daily.</p>'
-      : '<h3>No posts yet</h3><p>Be the first to share something!</p>';
-    feed.innerHTML = `<div class="empty">${emptyMsg}</div>`;
-    return;
+    feed.innerHTML = '';
+    posts.forEach((post, i) => {
+      const el = renderPost(post);
+      el.style.animationDelay = `${(i * 0.04).toFixed(3)}s`;
+      feed.appendChild(el);
+    });
   }
-
-  feed.innerHTML = '';
-  posts.forEach((post, i) => {
-    const el = renderPost(post);
-    el.style.animationDelay = `${(i * 0.04).toFixed(3)}s`;
-    feed.appendChild(el);
-  });
 
   // Facebook-pattern feed: track the newest created_at across this initial
   // page so refreshFeedAdditive / the background poller can fetch only
@@ -3058,26 +3848,61 @@ async function loadMoreFeed() {
 
     if (seq !== _feedSeq) return; // user switched tabs while we were waiting
 
-    const rawMore = queryResult.data;
-    const more = _processFeedRows(queryResult);
-    const advance = rawMore.length;
-    if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
-    _feedOffset += advance;
-
-    if (more.length) {
+    if (queryResult.isHybrid) {
+      // Hybrid feed pagination — server returns mixed items; walk in
+      // order and dispatch to the right renderer. Pagination key is
+      // _feedHybridCursor (mutated inside _fetchHybridFeedPage), not
+      // _feedOffset, so don't bump _feedOffset here.
+      _hasMoreFeedPosts = !!queryResult.hasMore;
       const feed = document.getElementById('feed');
       const presentIds = new Set(Array.from(feed.querySelectorAll('.post-card')).map(c => c.dataset.postid));
-      const fresh = more.filter(p => !presentIds.has(p.id));
-      fresh.forEach((post, i) => {
-        const el = renderPost(post);
-        el.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
-        feed.appendChild(el);
-        // Hand off to the existing observers so the new cards lazy-load too
-        if (_feedPostObserver) _feedPostObserver.observe(el);
-        el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
+      const freshPosts = [];
+      let postIdx = 0;
+      (queryResult.items || []).forEach((it) => {
+        let el = null;
+        if (it.kind === 'post') {
+          if (presentIds.has(it.data?.id)) return;     // dedup against already-rendered posts
+          el = renderPost(it.data);
+          if (el) {
+            el.style.animationDelay = `${(postIdx * 0.03).toFixed(3)}s`;
+            postIdx += 1;
+            freshPosts.push(it.data);
+            if (_feedPostObserver) _feedPostObserver.observe(el);
+            el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
+          }
+        } else if (it.kind === 'book_carousel') {
+          el = _renderHybridBookCarousel(it.data);
+        } else if (it.kind === 'video_card') {
+          el = _renderHybridVideoCard(it.data);
+        }
+        if (el) feed.appendChild(el);
       });
-      setupCollapsibleBodies(feed);
-      posts = posts.concat(fresh);
+      if (freshPosts.length) {
+        setupCollapsibleBodies(feed);
+        posts = posts.concat(freshPosts);
+      }
+    } else {
+      const rawMore = queryResult.data;
+      const more = _processFeedRows(queryResult);
+      const advance = rawMore.length;
+      if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
+      _feedOffset += advance;
+
+      if (more.length) {
+        const feed = document.getElementById('feed');
+        const presentIds = new Set(Array.from(feed.querySelectorAll('.post-card')).map(c => c.dataset.postid));
+        const fresh = more.filter(p => !presentIds.has(p.id));
+        fresh.forEach((post, i) => {
+          const el = renderPost(post);
+          el.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
+          feed.appendChild(el);
+          // Hand off to the existing observers so the new cards lazy-load too
+          if (_feedPostObserver) _feedPostObserver.observe(el);
+          el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
+        });
+        setupCollapsibleBodies(feed);
+        posts = posts.concat(fresh);
+      }
     }
 
     if (sentinel) {
@@ -3234,7 +4059,10 @@ function renderPost(post) {
   if (post.pinned_at) div.dataset.pinned = '1';
 
   const profile = post.profiles || {};
-  const name = profile.username || 'Unknown';
+  // Display name (Sprint 2 #2). Show the creator's chosen display
+  // name if they set one; otherwise fall back to @username; otherwise
+  // 'Unknown' for orphaned posts whose author row went missing.
+  const name = profile.display_name || profile.username || 'Unknown';
   const isGuest = profile.is_guest;
   const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}" alt="${name}"/>` : initials(name);
   const isOwn = currentUser && currentUser.id === post.user_id;
@@ -4573,7 +5401,8 @@ async function renderComment(comment, postId, isReply = false, topLevelId = null
   const div = document.createElement('div');
   div.className = isReply ? 'reply-item' : 'comment-item';
   const profile = comment.profiles || {};
-  const name = profile.username || 'Unknown';
+  // display_name preferred; falls back to @handle. Sprint 2 #2.
+  const name = profile.display_name || profile.username || 'Unknown';
   const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
   const replyTargetId = isReply ? topLevelId : comment.id;
   const replyToName = isReply ? name : null;
@@ -4860,7 +5689,8 @@ window.repostPost = (postId) => {
   if (!post) return;
   repostTargetId = postId;
   const profile = post.profiles || {};
-  const name = profile.username || 'Unknown';
+  // display_name preferred; falls back to @handle. Sprint 2 #2.
+  const name = profile.display_name || profile.username || 'Unknown';
   const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
   document.getElementById('repostPreview').innerHTML = `
     <div class="post-header">
@@ -5925,9 +6755,13 @@ async function openProfile(userId) {
   // once we tighten the next query). Creator Studio (the studio
   // grid) is the surface that shows non-ready uploads with proper
   // lifecycle chips; the public profile shouldn't surface them.
+  // Match the loadProfileVideos filter — both 'ready' and 'published'
+  // count as visible. The previous .eq('status','ready') under-counted
+  // the videos badge on profile tabs because fresh uploads land with
+  // status='published'.
   const videosP = supabase.from('videos').select('*', { count: 'exact', head: true })
     .eq('uploader_id', userId)
-    .eq('status', 'ready');
+    .in('status', ['ready', 'published']);
 
   let booksQ = supabase.from('books').select('*', { count: 'exact', head: true }).eq('author_id', userId);
   if (!isOwn) booksQ = booksQ.eq('is_public', true).in('status', ['ongoing', 'completed']);
@@ -6481,7 +7315,15 @@ async function loadProfileVideos(userId) {
   // yet). The creator's "see my pending uploads" need is owned by
   // the Studio surface (studioGrid in this file), which loads
   // without a status filter and renders proper lifecycle chips.
-  q = q.eq('status', 'ready');
+  //
+  // Accept BOTH 'ready' and 'published' — the canonical
+  // post-upload status. Server-side fetch_video_card uses
+  // coalesce(status, 'published')='published' and recent uploads
+  // are landing with status='published' directly. Filtering only
+  // 'ready' made fresh uploads invisible on profile pages even
+  // though they showed as Published in the Studio. Same defensive
+  // filter the mobile fetchVideos uses.
+  q = q.in('status', ['ready', 'published']);
 
   const { data, error } = await q.limit(60);
 
@@ -15598,6 +16440,7 @@ function renderStudio() {
       if (action === 'edit')          openStudioEditModal(id);
       else if (action === 'delete')   deleteStudioVideo(id);
       else if (action === 'monetize') toggleStudioMonetize(id, btn);
+      else if (action === 'share')    openStudioShareModal(id);
     });
   });
 }
@@ -15742,6 +16585,13 @@ function renderStudioRow(v, rowNumber, isSelected = false) {
           </button>
           <button class="studio-btn" data-studio-action="edit" data-id="${v.id}" title="Edit details">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          </button>
+          <!-- Share to feed — drafts a post (with or without schedule)
+               that embeds this video. Useful for announcing scheduled
+               videos: pick the same publish time for the post and the
+               video, both go live together. See openStudioShareModal(). -->
+          <button class="studio-btn" data-studio-action="share" data-id="${v.id}" title="Share to feed / schedule a post">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
           </button>
           <button class="studio-btn studio-btn-danger" data-studio-action="delete" data-id="${v.id}" title="Delete forever">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -15978,6 +16828,162 @@ async function saveStudioEdit() {
   // Invalidate caches and reload
   allVideosCache = [];
   loadStudio();
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Share-to-feed modal — opened from the Creator Studio actions column.
+// Lets the creator post a feed announcement with the video attached as
+// an embedded card. The post can be scheduled for the same time as the
+// video (Charles's typical workflow: schedule the video, then schedule
+// the announcement post to drop at the same moment).
+//
+// Uses the existing submit_post RPC mobile uses, so the feed rendering
+// stays consistent across web + mobile. Attaching the video via
+// p_video_id makes the feed card show the video thumbnail + title
+// rather than a bare URL.
+// ════════════════════════════════════════════════════════════════════════
+function openStudioShareModal(videoId) {
+  const v = studioVideosCache.find(x => x.id === videoId);
+  if (!v) { toast('Video not found in cache', 'error'); return; }
+  if (!currentUser?.id) { toast('Please sign in first', 'error'); return; }
+
+  // Build the public URL using the same format the in-app share menu uses
+  // (see line ~17271): /#video/sb_<uuid>. Kept here only for display in
+  // the modal — the actual post attaches the video via p_video_id so
+  // the feed renders a rich embed, not a bare URL.
+  const shareUrl = `${window.location.origin}/#video/sb_${v.id}`;
+  const thumbUrl = v.thumbnail_url || '';
+  const title    = v.title || '(untitled video)';
+
+  // Default schedule input: 1 hour from now, rounded down to the
+  // minute. <input type="datetime-local"> wants 'YYYY-MM-DDTHH:mm' in
+  // LOCAL time (no timezone suffix); we convert back to UTC at submit.
+  const oneHourLater = new Date(Date.now() + 60 * 60 * 1000);
+  oneHourLater.setSeconds(0, 0);
+  const tzOffMs   = oneHourLater.getTimezoneOffset() * 60 * 1000;
+  const defaultLocal = new Date(oneHourLater.getTime() - tzOffMs).toISOString().slice(0, 16);
+
+  // Build modal DOM. Reuses .admin-modal-* classes from admin.css for
+  // visual parity with the rest of the polished admin shell.
+  const backdrop = document.createElement('div');
+  backdrop.className = 'admin-modal-backdrop';
+  backdrop.style.zIndex = '1100';                      // above other modals
+  backdrop.innerHTML = `
+    <div class="admin-modal" role="dialog" aria-modal="true" style="max-width:560px;padding:1.4rem 1.6rem 1.5rem;position:relative">
+      <button type="button" aria-label="Close" id="studioShareClose"
+              style="position:absolute;top:0.9rem;right:1rem;background:transparent;border:none;cursor:pointer;color:var(--admin-text-2);font-size:1.4rem;line-height:1;padding:0.25rem 0.5rem;border-radius:6px">×</button>
+      <h3 style="margin:0 0 0.4rem;font-size:1.1rem;font-weight:600;color:var(--admin-text)">Share to feed</h3>
+      <p class="admin-modal-sub" style="margin:0 0 1rem;color:var(--admin-text-2);font-size:0.875rem">Draft a post that links to this video. Publish now or schedule it.</p>
+
+      <!-- Video preview tile -->
+      <div style="display:flex;gap:0.85rem;align-items:flex-start;padding:0.85rem;border:1px solid var(--admin-border);border-radius:10px;background:var(--admin-card);margin-bottom:1rem">
+        ${thumbUrl
+          ? `<img src="${esc(thumbUrl)}" alt="" style="width:88px;height:88px;border-radius:8px;object-fit:cover;flex-shrink:0"/>`
+          : `<div style="width:88px;height:88px;border-radius:8px;background:var(--admin-surface-2,#222);flex-shrink:0"></div>`}
+        <div style="min-width:0;flex:1">
+          <div style="font-weight:600;color:var(--admin-text);margin-bottom:0.25rem;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${esc(title)}</div>
+          <div style="font-size:0.78rem;color:var(--admin-text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(shareUrl)}">${esc(shareUrl)}</div>
+        </div>
+      </div>
+
+      <!-- Caption -->
+      <label style="display:block;font-size:0.78rem;font-weight:500;color:var(--admin-text-2);margin-bottom:0.4rem">Caption (optional)</label>
+      <textarea id="studioShareCaption" class="admin-input" rows="3"
+                placeholder="What should the post say?"
+                maxlength="2000"
+                style="width:100%;resize:vertical;font-family:inherit"></textarea>
+
+      <!-- When to publish -->
+      <div style="margin-top:1rem">
+        <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;color:var(--admin-text);margin-bottom:0.5rem;cursor:pointer">
+          <input type="radio" name="studioSharePublishWhen" value="now" checked/>
+          Publish now
+        </label>
+        <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;color:var(--admin-text);cursor:pointer">
+          <input type="radio" name="studioSharePublishWhen" value="schedule"/>
+          Schedule for later
+        </label>
+        <div id="studioShareScheduleRow" style="display:none;margin-top:0.55rem;padding-left:1.5rem">
+          <input type="datetime-local" id="studioShareScheduleAt" class="admin-input"
+                 value="${defaultLocal}" min="${defaultLocal}"
+                 style="font-family:inherit"/>
+          <div style="font-size:0.72rem;color:var(--admin-text-2);margin-top:0.3rem">Post will go live at the chosen time. Pair with your video's schedule for a coordinated drop.</div>
+        </div>
+      </div>
+
+      <div class="admin-modal-actions" style="display:flex;justify-content:flex-end;gap:0.5rem;margin-top:1.3rem;padding-top:1rem;border-top:1px solid var(--admin-border)">
+        <button type="button" class="admin-btn" id="studioShareCancel">Cancel</button>
+        <button type="button" class="admin-btn admin-btn-primary" id="studioShareSubmit">Share</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const close = () => backdrop.remove();
+  backdrop.querySelector('#studioShareClose').addEventListener('click', close);
+  backdrop.querySelector('#studioShareCancel').addEventListener('click', close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  // ESC handler scoped to this modal — remove on close.
+  const onEsc = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onEsc); } };
+  document.addEventListener('keydown', onEsc);
+
+  // Toggle the datetime row when the radio changes.
+  backdrop.querySelectorAll('input[name="studioSharePublishWhen"]').forEach(r => {
+    r.addEventListener('change', () => {
+      const isScheduled = backdrop.querySelector('input[name="studioSharePublishWhen"]:checked').value === 'schedule';
+      backdrop.querySelector('#studioShareScheduleRow').style.display = isScheduled ? '' : 'none';
+    });
+  });
+
+  // Submit handler.
+  backdrop.querySelector('#studioShareSubmit').addEventListener('click', async () => {
+    const submitBtn = backdrop.querySelector('#studioShareSubmit');
+    const caption   = backdrop.querySelector('#studioShareCaption').value.trim();
+    const when      = backdrop.querySelector('input[name="studioSharePublishWhen"]:checked').value;
+    const schedAt   = backdrop.querySelector('#studioShareScheduleAt').value;
+
+    let scheduledIso = null;
+    if (when === 'schedule') {
+      if (!schedAt) { toast('Pick a date/time to schedule', 'error'); return; }
+      // datetime-local input gives 'YYYY-MM-DDTHH:mm' in local time;
+      // new Date(...) interprets that as local, then toISOString() emits UTC.
+      const d = new Date(schedAt);
+      if (Number.isNaN(d.getTime())) { toast('Invalid date/time', 'error'); return; }
+      if (d.getTime() <= Date.now()) { toast('Schedule time must be in the future', 'error'); return; }
+      scheduledIso = d.toISOString();
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = when === 'schedule' ? 'Scheduling…' : 'Posting…';
+
+    // Call the same RPC the mobile composer uses. p_video_id attaches
+    // the video so the feed renders a rich card (thumbnail + title)
+    // rather than a bare URL in the body. p_is_hidden + p_scheduled_publish_at
+    // implement the scheduled-publish flow — a pg_cron job flips
+    // is_hidden=false at scheduled_publish_at time.
+    try {
+      const { data, error } = await supabase.rpc('submit_post', {
+        p_actor_id:            currentUser.id,
+        p_body:                caption,
+        p_image_url:           null,
+        p_video_id:            v.id,
+        p_book_id:             null,
+        p_reposted_from:       null,
+        p_legacy_appwrite_id:  null,
+        p_is_hidden:           when === 'schedule',
+        p_scheduled_publish_at: scheduledIso,
+      });
+      if (error) { toast(`Share failed: ${error.message}`, 'error'); return; }
+      if (data?.error) { toast(`Share failed: ${data.error}`, 'error'); return; }
+      toast(when === 'schedule' ? 'Post scheduled' : 'Posted!', 'success');
+      close();
+    } catch (err) {
+      toast(`Share threw: ${err?.message || err}`, 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Share';
+    }
+  });
 }
 
 async function deleteStudioVideo(videoId) {
@@ -17565,6 +18571,13 @@ async function initNotifications() {
         if (_notifications.length > 100) _notifications.length = 100;
         _notifUnreadCount += 1;
         updateNotifBadge();
+        // Re-run grouping so the new row buckets with existing ones
+        // (e.g. follow:any bucket merges all "started following you"
+        // notifications). Without this, every realtime INSERT
+        // rendered as its own row, breaking the Facebook-style
+        // "Alice and 4 others started following you" UX. Grouping is
+        // idempotent — safe to re-run over an already-grouped set.
+        _notifications = groupNotifications(_notifications);
         renderNotifications();
         // New incoming notification → audible + visual cue. Chime
         // muted via the per-user toggle; title flash only when tab
@@ -17597,6 +18610,9 @@ async function initNotifications() {
         }
         // Re-sort by created_at desc so the bumped row floats to the top
         _notifications.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        // Re-group so the bumped row buckets correctly (same reasoning
+        // as the INSERT handler above). Idempotent.
+        _notifications = groupNotifications(_notifications);
         renderNotifications();
       })
       .subscribe();
@@ -18244,6 +19260,27 @@ function notificationLabel(n, knownUsername) {
     case 'follow_new_book':        return `${actorTag} published a new book${titleHint}`;
     case 'follow_repost':          return `${actorTag} shared a post`;
 
+    // ── Direct content publish events (Supabase triggers fire these
+    //    with type='video'/'book'/'chapter' when a scheduled post
+    //    goes live or a creator publishes directly. The video title
+    //    arrives in the `message` column from the trigger.) Different
+    //    from the follow_new_* fanout above which targets followers
+    //    specifically; these can also arrive on the bell.
+    case 'video': {
+      const titleSnip = n.message
+        ? ` <em style="color:var(--text2)">"${escHTML(String(n.message).slice(0, 80))}${String(n.message).length > 80 ? '…' : ''}"</em>`
+        : '';
+      return `${actorTag} uploaded a new video${titleSnip}`;
+    }
+    case 'book':
+    case 'chapter': {
+      const titleSnip = n.message
+        ? ` <em style="color:var(--text2)">"${escHTML(String(n.message).slice(0, 80))}${String(n.message).length > 80 ? '…' : ''}"</em>`
+        : '';
+      const verb = n.type === 'chapter' ? 'published a new chapter' : 'published a new book';
+      return `${actorTag} ${verb}${titleSnip}`;
+    }
+
     // ── Mentions ──
     case 'mention_comment':        return `${actorTag} mentioned you in a comment`;
     case 'mention_chapter_comment':return `${actorTag} mentioned you in a chapter comment`;
@@ -18384,12 +19421,14 @@ async function onNotificationClick(notifId) {
     // Withdrawal-status announcements (2026-05-15). The trigger writes
     // target_type='withdrawal' + target_id=<author_withdrawals.id>.
     // There's no per-withdrawal detail surface on web — land the
-    // creator on the Earnings page with the Payments tab active so
-    // they see their withdrawal history and the status that just
-    // changed. forceReload=true so the table reflects the very change
-    // they were just notified about (default 30s cache would show
-    // stale data after admin approval).
-    withdrawal:     ()          => { showEarnings(true); switchEarningsTab('payments'); },
+    // creator on the Earnings page (the dashboard with balances +
+    // withdrawal history). showEarnings() already switches to the
+    // 'earnings' tab by default; we DON'T want to flip to 'payments'
+    // because that's the KYC/Payments-Info form, not the withdrawal
+    // status view. forceReload=true so the table reflects the very
+    // change they were just notified about (default 30s cache would
+    // show stale data after admin approval).
+    withdrawal:     ()          => { showEarnings(true); },
   };
 
   const opener = kind ? ROUTES[kind] : null;
