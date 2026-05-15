@@ -12654,6 +12654,25 @@ body:not(.light) .book-lock-warning { color: #fcd34d; background: rgba(251,191,3
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
+/* 2026-05-15 — mobile-parity layout. When the threshold dialog is
+   mounted INSIDE .video-player-wrap (Charles's preferred UX: overlay
+   the player, not the whole viewport), switch off the fixed-positioning
+   the base .unlock-modal-backdrop applies. The wrap is already
+   `position: relative` (declared elsewhere in this file), so absolute
+   inset:0 fills exactly the player rectangle. The rest of the page
+   stays interactive. */
+.video-monet-backdrop.video-monet-inline {
+  position: absolute;
+  inset: 0;
+  z-index: 30;             /* above the <video> but below the page-level
+                              auth/toast layers (z-index 10000+). */
+  padding: 0.75rem;
+  border-radius: inherit;  /* match the player wrap's rounded corners */
+}
+.video-monet-backdrop.video-monet-inline .video-monet-modal {
+  max-width: min(360px, calc(100% - 1.5rem));
+  padding: 1.1rem 1.1rem 0.9rem;
+}
 .video-monet-modal {
   max-width: 380px;
   padding: 1.5rem 1.5rem 1.2rem;

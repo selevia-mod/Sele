@@ -12,6 +12,12 @@ import {
   getUploader, getUploaderCache, setUploader, invalidateAllVideosCache,
   getActiveSearchQuery, setActiveSearchQuery,
   getActiveTagFilter, setActiveTagFilter,
+  // Stage 7B — player + helpers
+  playVideo, showVideoPlayer, stopVideoPlayer,
+  getResumeTime, saveResumeTime,
+  setupVideoMonetGate, teardownVideoMonetGate,
+  vcInitControls, _initVideoEventLogging, loadUpNext,
+  getCurrentVideoCtx,
 } from './videos.js';
 // Anti-fraud telemetry — fire-and-forget event logging used by the
 // Phase 4 detection job. All four helpers are safe to call any time;
@@ -175,83 +181,9 @@ function flushReadClose(completed = null) {
 // video, so we attach native event listeners ONCE on first init and
 // read the live video id from the URL hash (#video/<id>) inside each
 // handler. _videoEventsInit is the one-time flag.
-let _videoEventsInit = false;
-let _videoLastWatchedSec = 0;
 
-function _currentLoggedVideoId() {
-  // Reuses the same hash-route extractor the rest of the code uses
-  // for #video/<id> deep links. Returns the bare UUID (no 'sb_' prefix).
-  const id = (typeof _currentVideoIdForRoute === 'function')
-    ? _currentVideoIdForRoute()
-    : null;
-  if (!id) return null;
-  return id.startsWith('sb_') ? id.slice(3) : id;
-}
 
-function flushViewEnd() {
-  const id = _currentLoggedVideoId();
-  if (!id) return;
-  logView({
-    videoId:        id,
-    kind:           'end',
-    watchedSeconds: _videoLastWatchedSec,
-  });
-  _videoLastWatchedSec = 0;
-}
 
-function _initVideoEventLogging() {
-  if (_videoEventsInit) return;
-  const player = document.getElementById('videoPlayer');
-  if (!player) return;
-  _videoEventsInit = true;
-
-  // play — fired on initial start AND on resume after pause.
-  // Phase 4 detection cares about play-starts as a denominator for
-  // threshold-crossed events (e.g. "what % of plays cross paywall?").
-  player.addEventListener('play', () => {
-    const id = _currentLoggedVideoId();
-    if (!id) return;
-    logView({
-      videoId:        id,
-      kind:           'play',
-      watchedSeconds: Math.floor(player.currentTime || 0),
-    });
-  });
-
-  // pause — fired on explicit pause + on navigation away (most
-  // browsers fire pause before unload). Useful for partial-watch
-  // dwell distributions in Phase 4.
-  player.addEventListener('pause', () => {
-    const id = _currentLoggedVideoId();
-    if (!id) return;
-    const ws = Math.floor(player.currentTime || 0);
-    _videoLastWatchedSec = ws;
-    // Don't emit 'pause' on the natural end — 'ended' will fire
-    // separately and that's the more meaningful signal.
-    if (player.ended) return;
-    logView({ videoId: id, kind: 'pause', watchedSeconds: ws });
-  });
-
-  // ended — fired when playback reaches the natural end of the
-  // video. Combined with the 'end' event in flushViewEnd (fired on
-  // nav-away), this gives us both "watched to completion" and
-  // "abandoned mid-stream" as distinct signals.
-  player.addEventListener('ended', () => {
-    const id = _currentLoggedVideoId();
-    if (!id) return;
-    const ws = Math.floor(player.currentTime || player.duration || 0);
-    _videoLastWatchedSec = ws;
-    logView({ videoId: id, kind: 'end', watchedSeconds: ws });
-  });
-
-  // timeupdate — fires ~4x/sec while playing. We DON'T log on every
-  // tick (that'd be hundreds of events per video). Instead, just keep
-  // _videoLastWatchedSec fresh so flushViewEnd has accurate dwell on
-  // nav-away or hideAllMainPages.
-  player.addEventListener('timeupdate', () => {
-    _videoLastWatchedSec = Math.floor(player.currentTime || 0);
-  });
-}
 let currentProfile = null;
 let posts = [];
 
@@ -461,17 +393,42 @@ async function onSignedIn(user) {
 
 // ─── videos.js (Stage 7A) ──────────────────────────────
 initVideos({
-  getCurrentUser:      () => currentUser,
+  getCurrentUser:                () => currentUser,
+  getCurrentProfile:             () => currentProfile,
   hideAllMainPages,
-  stopVideoPlayer,
-  playVideo,
   openProfile,
-  getResumeTime,
   formatDuration,
   formatCompact,
   normalizeForSearch,
   sanitizeSearchQuery,
   escapeIlike,
+  // Stage 7B — paywall / monet / goals / comments / reactions / bookmarks /
+  // repost / nav / wallet — everything the player surface reaches outside
+  // its own module.
+  isUnlocked,
+  resolveUnlockCost,
+  openUnlockDialog,
+  openVideoMonetThresholdDialog,
+  loadWalletState,
+  renderTopbarCoinPill,
+  tickGoal,
+  loadComments,
+  loadCommentCount,
+  loadReactions,
+  loadVideoBookmarkState,
+  repostPost,
+  flushReadClose,
+  openAuthorBookEditor,
+  openAuthorChapterEditor,
+  openBookDetail,
+  showAuthor,
+  showBook,
+  setSidebarActive,
+  confirmDialog,
+  closeAllModals,
+  attachHlsToPostVideo,
+  getWalletConfig: () => _walletConfigDefaults,
+  addUnlock: (key) => _userUnlocks.add(key),
 });
 
   // Composer module — wires the textbox / image preview / schedule
@@ -921,84 +878,8 @@ function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
 // listener's nextThreshold is set to Infinity so it never fires again. Star
 // path → bumps nextThreshold by `recurring_window` and waits for the next
 // crossing. Re-watching below paid_through_seconds is always free.
-let _videoMonetGate = null;  // { videoId, listener }
 
-async function setupVideoMonetGate(player, sbId, video) {
-  // Tear down any previous listener
-  teardownVideoMonetGate(player);
 
-  const initialSec   = _walletConfigDefaults.video_initial_unlock_seconds   || 180;
-  const recurringSec = _walletConfigDefaults.video_recurring_unlock_seconds || 600;
-
-  // Fetch the user's progress for this video. Legacy aw_/sb_ prefixed ids
-  // don't have a UUID and aren't tracked in video_progress (the FK target),
-  // so we fall back to "no prior progress" — every threshold is fresh.
-  let paidThrough = 0;
-  const isLegacy = sbId.startsWith('aw_') || sbId.startsWith('sb_');
-  if (!isLegacy && currentUser) {
-    const { data: prog } = await supabase
-      .from('video_progress')
-      .select('paid_through_seconds')
-      .eq('user_id', currentUser.id)
-      .eq('video_id', sbId)
-      .maybeSingle();
-    paidThrough = prog?.paid_through_seconds || 0;
-  }
-
-  const computeNext = (paid) => {
-    if (paid < initialSec) return initialSec;
-    return initialSec + Math.ceil((paid - initialSec + 1) / recurringSec) * recurringSec;
-  };
-  let nextThreshold = computeNext(paidThrough);
-  let modalOpen = false;
-
-  const listener = () => {
-    // Stale listener guard — if user navigated to a different video, no-op
-    if (!_videoMonetGate || _videoMonetGate.videoId !== sbId) return;
-    if (modalOpen) return;
-    if (player.currentTime < nextThreshold) return;
-
-    modalOpen = true;
-    // Note: video keeps playing during the prompt. The 5s auto-coin fallback
-    // means most users won't even notice an interruption — they get a brief
-    // glance at the choice, then it auto-deducts and dismisses.
-    openVideoMonetThresholdDialog({
-      videoTitle: video.title,
-      videoId:    sbId,
-      threshold:  nextThreshold,
-      onSuccess: (result) => {
-        modalOpen = false;
-        if (result.mode === 'permanent') {
-          // Coin path — never prompt again for this video
-          _userUnlocks.add(`video:${sbId}`);
-          nextThreshold = Infinity;
-        } else if (result.mode === 'window') {
-          // Star path — paid through end of this window; advance to next
-          paidThrough = nextThreshold + recurringSec - 1;
-          nextThreshold = computeNext(paidThrough);
-        }
-        renderTopbarCoinPill();
-        // No need to call play — we never paused
-      },
-      onCancel: () => {
-        // Modal closed without payment. Pause now so the user has to
-        // re-engage; on next play, listener re-fires and re-prompts.
-        modalOpen = false;
-        try { player.pause(); } catch {}
-      },
-    });
-  };
-
-  player.addEventListener('timeupdate', listener);
-  _videoMonetGate = { videoId: sbId, listener };
-}
-
-function teardownVideoMonetGate(player) {
-  if (_videoMonetGate?.listener && player) {
-    player.removeEventListener('timeupdate', _videoMonetGate.listener);
-  }
-  _videoMonetGate = null;
-}
 
 // Threshold-crossing dialog — visually distinct from the one-time unlock
 // modal because the choice has different consequences (one-time forever vs
@@ -1012,7 +893,13 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
 
   document.querySelector('.unlock-modal-backdrop')?.remove();
   const modal = document.createElement('div');
-  modal.className = 'unlock-modal-backdrop video-monet-backdrop';
+  // 2026-05-15: dialog scopes to the video player rather than the whole
+  // viewport. Mobile pattern — the "Keep watching" prompt overlays just
+  // the player, so the rest of the page stays visible / scrollable.
+  // Falls back to body if the player wrap isn't on screen (defensive).
+  const playerWrap = document.querySelector('.video-player-wrap');
+  modal.className = 'unlock-modal-backdrop video-monet-backdrop'
+    + (playerWrap ? ' video-monet-inline' : '');
   modal.innerHTML = `
     <div class="unlock-modal video-monet-modal" role="dialog" aria-modal="true">
       <button class="unlock-modal-close" aria-label="Close">×</button>
@@ -1045,7 +932,11 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
         </div>`}
     </div>
   `;
-  document.body.appendChild(modal);
+  // Mount inside the player wrap (mobile parity) when available so the
+  // overlay sits on top of the video instead of the whole viewport.
+  // Body fallback keeps the dialog working in edge cases (deep links
+  // that haven't shown the player page yet, etc.).
+  (playerWrap || document.body).appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('open'));
 
   // ── 5-second auto-coin countdown ──────────────────────────────────
@@ -8170,124 +8061,7 @@ function uploadFileToBunny(file, info, onProgress) {
 initAuth();
 
 
-async function loadUpNext(currentVideo) {
-  const list = document.getElementById('upNextList');
-  list.innerHTML = '<div class="loading" style="padding:0.5rem">Loading...</div>';
 
-  const { tagWeights, watchedIds, recentUploaders } = getInterestProfile();
-  const currentTags = currentVideo.tags || [];
-
-  try {
-    // Recommendation pool is sourced from Supabase.
-    const sbVideos = await fetchSupabaseVideos().catch(() => []);
-    let pool = sbVideos.filter(v =>
-      v.$id !== currentVideo.$id && !watchedIds.has(v.$id)
-    );
-
-    // Score each video — same algorithm for both sources
-    pool.forEach(v => {
-      let score = 0;
-
-      // Tag matching: interest profile (long-term) + current video tags (short-term)
-      (v.tags || []).forEach(tag => {
-        if (tagWeights[tag]) score += tagWeights[tag] * 100;
-        if (currentTags.includes(tag)) score += 30;
-      });
-
-      // Same uploader bonus (works across sources via uploader field)
-      if (v.uploader && currentVideo.uploader && v.uploader === currentVideo.uploader) score += 25;
-      if (v.uploader && recentUploaders.includes(v.uploader)) score += 15;
-
-      // Engagement boost (log-scaled views)
-      const views = v.videoStats?.views || 0;
-      score += Math.log10(views + 1) * 2;
-
-      // Recency boost (last 30 days get a small lift)
-      const ageMs = Date.now() - new Date(v.$createdAt || 0).getTime();
-      const ageDays = ageMs / (1000 * 60 * 60 * 24);
-      if (ageDays < 30) score += Math.max(0, 10 - ageDays / 3);
-
-      // Small randomness so feed feels fresh on each visit
-      score += Math.random() * 5;
-
-      v._score = score;
-    });
-
-    // Sort by score, take top 10
-    pool.sort((a, b) => b._score - a._score);
-    const suggestions = pool.slice(0, 10);
-
-    // Resolve uploader info — Supabase videos already have _uploaderInfo cached;
-    // for any missing, batch-fetch from profiles.
-    const uploaders = {};
-    for (const v of suggestions) {
-      if (v._uploaderInfo) uploaders[v.uploader] = v._uploaderInfo;
-    }
-    const missingUploaderIds = [...new Set(
-      suggestions.map(v => v.uploader).filter(id => id && !uploaders[id])
-    )];
-    if (missingUploaderIds.length) {
-      try {
-        const { data: sbProfiles } = await supabase
-          .from('profiles')
-          .select('id, username, avatar_url')
-          .in('id', missingUploaderIds);
-        for (const p of (sbProfiles || [])) {
-          uploaders[p.id] = { $id: p.id, username: p.username, avatar: p.avatar_url };
-        }
-      } catch {}
-    }
-
-    // Render
-    list.innerHTML = '';
-    if (!suggestions.length) {
-      list.innerHTML = '<div style="color:var(--text3);font-size:0.85rem;padding:0.5rem">No suggestions yet</div>';
-      return;
-    }
-
-    suggestions.forEach(v => {
-      const uploader = uploaders[v.uploader];
-      const item = renderUpNextItem(v, uploader, currentTags);
-      list.appendChild(item);
-    });
-  } catch (e) {
-    list.innerHTML = `<div style="color:var(--text3);font-size:0.85rem;padding:0.5rem">Couldn't load: ${e.message}</div>`;
-  }
-}
-
-function renderUpNextItem(video, uploader, currentTags) {
-  const div = document.createElement('div');
-  div.className = 'upnext-item';
-  div.onclick = () => playVideo(video.$id);
-
-  const name = uploader?.username || 'Unknown';
-  const views = (video.videoStats?.views || 0).toLocaleString();
-  const matchingTag = (video.tags || []).find(t => currentTags.includes(t));
-
-  div.innerHTML = `
-    <div class="upnext-thumb">
-      ${video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : ''}
-      <span class="upnext-thumb-duration" data-duration></span>
-    </div>
-    <div class="upnext-info">
-      <div class="upnext-title-text">${escHTML(video.title || 'Untitled')}</div>
-      <div class="upnext-meta">
-        ${escHTML(name)}<br>
-        ${views} views • ${timeAgo(video.$createdAt)}
-      </div>
-      ${matchingTag ? `<span class="upnext-tag">${escHTML(matchingTag)}</span>` : ''}
-    </div>
-  `;
-
-  // Lazy-load duration
-  const durationEl = div.querySelector('[data-duration]');
-  const videoDuration = video.videoStats?.duration;
-  if (videoDuration) {
-    durationEl.textContent = formatDuration(videoDuration);
-  }
-
-  return div;
-}
 
 // ── Videos ──
 const videosPage = document.getElementById('videosPage');
@@ -8346,22 +8120,8 @@ function hideAllMainPages() {
   // Reset scroll on every page nav so tabs always start at the top.
   scrollToTop();
 }
-let currentHls = null;
 
 // Resume playback storage
-function getResumeKey(videoId) { return `video_resume_${videoId}`; }
-function getResumeTime(videoId) {
-  const t = localStorage.getItem(getResumeKey(videoId));
-  return t ? parseFloat(t) : 0;
-}
-function saveResumeTime(videoId, time, duration) {
-  if (!time || time < 5) return; // ignore very early
-  if (duration && time > duration - 10) {
-    localStorage.removeItem(getResumeKey(videoId));
-    return;
-  }
-  localStorage.setItem(getResumeKey(videoId), time);
-}
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return '';
   const h = Math.floor(seconds / 3600);
@@ -8371,19 +8131,6 @@ function formatDuration(seconds) {
   return `${m}:${s.toString().padStart(2,'0')}`;
 }
 
-function stopVideoPlayer() {
-  const player = document.getElementById('videoPlayer');
-  if (player) {
-    if (player._saveInterval) { clearInterval(player._saveInterval); player._saveInterval = null; }
-    player.pause();
-    player.removeAttribute('src');
-    player.load();
-  }
-  if (currentHls) {
-    currentHls.destroy();
-    currentHls = null;
-  }
-}
 
 
 function showStudio(forceReload = false) {
@@ -10577,102 +10324,21 @@ function showAuthor(forceReload = false) {
 // ════════════════════════════════════════════════════════════════════════════
 // VIDEO PLAYER — premium nav controls (prev / rewind / fast-forward / next + autoplay)
 // ════════════════════════════════════════════════════════════════════════════
-const _videoHistoryStack = [];          // IDs of videos we've watched, for the "Previous" button
-const SKIP_SECONDS = 10;
-const AUTONEXT_KEY = 'selebox_video_autonext';
 
 function _currentVideoIdForRoute() {
-  if (!_currentVideoCtx) return null;
-  return _currentVideoCtx.supabaseId ? 'sb_' + _currentVideoCtx.supabaseId : null;
+  // 2026-05-15 (Stage 7B fix): _currentVideoCtx now lives inside
+  // videos.js as module-private state. The getter returns it so this
+  // route-resolver keeps working for #video/<id> deep-link handling.
+  const ctx = getCurrentVideoCtx();
+  if (!ctx) return null;
+  return ctx.supabaseId ? 'sb_' + ctx.supabaseId : null;
 }
 
-function vcRewind() {
-  const v = document.getElementById('videoPlayer');
-  if (!v) return;
-  v.currentTime = Math.max(0, (v.currentTime || 0) - SKIP_SECONDS);
-  _flashSkipBadge('back');
-}
 
-function vcFastForward() {
-  const v = document.getElementById('videoPlayer');
-  if (!v) return;
-  const dur = isFinite(v.duration) ? v.duration : 0;
-  v.currentTime = Math.min(dur || (v.currentTime + SKIP_SECONDS), (v.currentTime || 0) + SKIP_SECONDS);
-  _flashSkipBadge('forward');
-}
 
-function _flashSkipBadge(direction) {
-  const el = document.querySelector(direction === 'back' ? '#vcRewind' : '#vcFastForward');
-  if (!el) return;
-  el.classList.add('vc-flash');
-  setTimeout(() => el.classList.remove('vc-flash'), 360);
-}
 
-function vcPrev() {
-  const prevId = _videoHistoryStack.pop();
-  if (!prevId) { toast('No previous video', 'error'); return; }
-  // Don't push current onto history — that would create a loop
-  playVideo(prevId);
-}
 
-function vcNext() {
-  const list = document.getElementById('upNextList');
-  const firstItem = list?.querySelector('.upnext-item');
-  if (!firstItem) { toast('No related video to play next', 'error'); return; }
-  // Push current onto history before navigating
-  const cur = _currentVideoIdForRoute();
-  if (cur) _videoHistoryStack.push(cur);
-  firstItem.click(); // existing handler calls playVideo(video.$id)
-}
 
-function vcInitControls() {
-  // Wire buttons (idempotent — won't re-bind)
-  const wire = (id, fn) => {
-    const el = document.getElementById(id);
-    if (!el || el.dataset.bound === '1') return;
-    el.dataset.bound = '1';
-    el.addEventListener('click', fn);
-  };
-  wire('vcRewind',      vcRewind);
-  wire('vcFastForward', vcFastForward);
-  wire('vcPrev',        vcPrev);
-  wire('vcNext',        vcNext);
-
-  // Autoplay toggle — restore from localStorage
-  const autoEl = document.getElementById('vcAutoNext');
-  if (autoEl && autoEl.dataset.bound !== '1') {
-    autoEl.dataset.bound = '1';
-    autoEl.checked = localStorage.getItem(AUTONEXT_KEY) !== '0';  // default ON
-    autoEl.addEventListener('change', (e) => {
-      localStorage.setItem(AUTONEXT_KEY, e.target.checked ? '1' : '0');
-    });
-  }
-
-  // Hook into the video element's `ended` event for auto-next
-  const video = document.getElementById('videoPlayer');
-  if (video && video.dataset.autoNextBound !== '1') {
-    video.dataset.autoNextBound = '1';
-    video.addEventListener('ended', () => {
-      const auto = document.getElementById('vcAutoNext');
-      if (auto?.checked) vcNext();
-    });
-  }
-
-  // Keyboard shortcuts (only when video page is visible and not typing in input/textarea)
-  if (!window._videoKbBound) {
-    window._videoKbBound = true;
-    document.addEventListener('keydown', (e) => {
-      const playerVisible = document.getElementById('videoPlayerPage')?.style.display === 'block';
-      if (!playerVisible) return;
-      const t = e.target;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-      if (e.key === 'ArrowLeft')  { e.preventDefault(); vcRewind(); }
-      else if (e.key === 'ArrowRight') { e.preventDefault(); vcFastForward(); }
-      else if (e.key === 'n' || e.key === 'N') { e.preventDefault(); vcNext(); }
-      else if (e.key === 'p' || e.key === 'P') { e.preventDefault(); vcPrev(); }
-    });
-  }
-}
 // Init when DOM is ready
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', vcInitControls);
 else vcInitControls();
@@ -10882,7 +10548,7 @@ async function toggleVideoBookmark(videoSupabaseId) {
 }
 
 document.getElementById('videoBookmarkBtn')?.addEventListener('click', () => {
-  const videoId = window._currentVideoCtx?.supabaseId;
+  const videoId = getCurrentVideoCtx()?.supabaseId;
   toggleVideoBookmark(videoId);
 });
 
@@ -14570,19 +14236,6 @@ window.addEventListener('beforeunload', (e) => {
 // Replaced with the imported escHTML during the move.
 // ════════════════════════════════════════════════════════════════════════
 
-function showVideoPlayer() {
-  hideAllMainPages();
-  videoPlayerPage.style.display = 'block';
-  // CRITICAL: enables full-bleed layout (body.on-videos .main-wrap rule).
-  // Without this the player gets the default narrow main-wrap width when
-  // navigating from a user's wall (skipping showVideos), leaving big empty
-  // gutters left/right of the video.
-  document.body.classList.add('on-videos');
-  // Idempotent — attaches native play/pause/ended/timeupdate listeners
-  // ONCE on first show. Subsequent calls are no-ops thanks to the
-  // _videoEventsInit flag inside the helper.
-  _initVideoEventLogging();
-}
 
 document.getElementById('btnVideos').addEventListener('click', () => {
   setSidebarActive('btnVideos');
@@ -14614,528 +14267,30 @@ document.getElementById('btnGoToAuthor')?.addEventListener('click', () => {
   showAuthor();
 });
 document.getElementById('btnBackVideos').addEventListener('click', () => {
-  if (currentHls) { currentHls.destroy(); currentHls = null; }
-  document.getElementById('videoPlayer').pause();
+  // 2026-05-15 (Stage 7B fix): the currentHls + .pause() teardown
+  // moved into stopVideoPlayer() inside js/videos.js. The state
+  // variable is module-private there now, so we just call the
+  // shared helper instead of trying to reach in from app.js.
+  stopVideoPlayer();
   showVideos();
 });
 
 
-export async function playVideo(videoId) {
-  try {
-    let video = null;
-    let uploader = null;
-
-    // All videos are now Supabase. Cache holds the most recent ~100 platform-wide,
-    // but profiles can list older uploads — so a cache miss is normal and not an error.
-    // Try the cache first, then fall back to a direct fetch by ID.
-    if (!getAllVideos().length) {
-      const fresh = await fetchSupabaseVideos();
-      setAllVideos(fresh);
-    }
-    let cached = findVideoInCache(videoId);
-    if (!cached) {
-      // Cache miss — fetch this specific video by ID (works for older videos
-      // outside the top-100 window, deep links, and shared URLs).
-      const rawId = videoId.startsWith('sb_') ? videoId.slice(3) : videoId;
-      const { data, error } = await supabase
-        .from('videos')
-        .select(`id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, status, is_hidden, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`)
-        .eq('id', rawId)
-        .maybeSingle();
-      if (error || !data) {
-        toast('Video not found', 'error');
-        return;
-      }
-      // Block playback for banned uploaders or unready/hidden videos (unless owner).
-      const isOwner = currentUser && currentUser.id === data.uploader_id;
-      if (data.profiles?.is_banned) { toast('Video unavailable', 'error'); return; }
-      if (!isOwner && (data.status !== 'ready' || data.is_hidden)) {
-        toast('Video unavailable', 'error');
-        return;
-      }
-      cached = {
-        $id: 'sb_' + data.id,
-        _supabase: true,
-        _supabaseId: data.id,
-        title: data.title,
-        description: data.description || '',
-        tags: data.tags || [],
-        uploader: data.uploader_id,
-        thumbnail: data.thumbnail_url,
-        videoUrl: data.video_url,
-        uri: data.video_url,
-        videoStats: { views: data.views || 0, duration: data.duration || 0 },
-        status: data.status || 'ready',
-        $createdAt: data.created_at,
-        is_locked:         data.is_locked,
-        is_monetized:      data.is_monetized,
-        unlock_cost_coins: data.unlock_cost_coins,
-        unlock_cost_stars: data.unlock_cost_stars,
-        _uploaderInfo: data.profiles ? { $id: data.profiles.id, username: data.profiles.username, avatar: data.profiles.avatar_url } : null,
-      };
-      // Cache it so revisits are instant + Prev/Next nav has it.
-      addToVideosCache(cached);
-    }
-    video = cached;
-    uploader = cached._uploaderInfo || null;
-
-    showVideoPlayer();
-    history.pushState(null, '', `#video/${videoId}`);
-
-    const player = document.getElementById('videoPlayer');
-    if (currentHls) { currentHls.destroy(); currentHls = null; }
-
-    // PAYWALL: locked videos that the viewer hasn't unlocked AND don't own.
-    // Owner (the uploader) can always preview their own video.
-    const sbId = video._supabaseId || (videoId.startsWith('sb_') ? videoId.slice(3) : videoId);
-    const isOwner = currentUser && currentUser.id === video.uploader;
-    const paywallEl = document.getElementById('videoPaywall');
-    if (video.is_locked && !isOwner && !isUnlocked('video', sbId)) {
-      const coinCost = resolveUnlockCost('video', 'coin', { unlock_cost_coins: video.unlock_cost_coins, unlock_cost_stars: video.unlock_cost_stars });
-      const starCost = resolveUnlockCost('video', 'star', { unlock_cost_coins: video.unlock_cost_coins, unlock_cost_stars: video.unlock_cost_stars });
-      // Stop playback + hide controls until unlock.
-      player.pause();
-      player.removeAttribute('src');
-      player.load();
-      document.getElementById('videoPaywallTitle').textContent = video.title || 'This video is locked';
-      document.getElementById('videoPaywallCoins').textContent = coinCost;
-      document.getElementById('videoPaywallStars').textContent = starCost;
-      paywallEl.style.display = '';
-      const unlockBtn = document.getElementById('btnVideoUnlock');
-      unlockBtn.onclick = () => {
-        openUnlockDialog({
-          targetType: 'video',
-          targetId:   sbId,
-          row:        { unlock_cost_coins: video.unlock_cost_coins, unlock_cost_stars: video.unlock_cost_stars },
-          title:      video.title,
-          onUnlocked: () => { paywallEl.style.display = 'none'; playVideo(videoId); },
-        });
-      };
-      return;
-    }
-    if (paywallEl) paywallEl.style.display = 'none';
-
-    // PHASE 6 — time-based monetization. Independent of the legacy is_locked
-    // gated-from-start paywall above. If video.is_monetized is true and the
-    // viewer has NOT permanently unlocked (no `unlocks` row), set up a
-    // timeupdate listener that pauses + prompts at thresholds (180, 780,
-    // 1380, 1980, …). Coin = permanent. Star = 10-min window only.
-    if (video.is_monetized && !isOwner && !isUnlocked('video', sbId)) {
-      // sbId may be 'aw_xxx' for legacy videos; setupVideoMonetGate handles
-      // both UUID and legacy ids by skipping video_progress writes for legacy.
-      await setupVideoMonetGate(player, sbId, video);
-    } else {
-      teardownVideoMonetGate(player);
-    }
-
-    const resumeFrom = getResumeTime(videoId);
-
-    const startPlayback = () => {
-      if (resumeFrom > 0) {
-        player.currentTime = resumeFrom;
-        toast(`Resumed at ${formatDuration(resumeFrom)}`, '');
-      }
-      player.play().catch(() => {});
-    };
-
-    if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
-      if (player.canPlayType('application/vnd.apple.mpegurl')) {
-        player.src = video.videoUrl;
-        player.addEventListener('loadedmetadata', startPlayback, { once: true });
-      } else if (window.Hls && Hls.isSupported()) {
-        currentHls = new Hls();
-        currentHls.loadSource(video.videoUrl);
-        currentHls.attachMedia(player);
-        currentHls.on(Hls.Events.MANIFEST_PARSED, startPlayback);
-      } else {
-        toast('HLS not supported in this browser', 'error');
-      }
-    } else {
-      player.src = video.videoUrl || '';
-      player.addEventListener('loadedmetadata', startPlayback, { once: true });
-    }
-
-    // Save position every 3 seconds + accumulate watch-time toward
-    // the "Watch N mins of video" daily goal. tickGoal('watch_video',
-    // 1) fires once per full minute of actual playback (paused time
-    // doesn't count). Mirrors mobile at app/(video)/video-player.jsx.
-    // _accumWatchSec lives on the player element so we don't pollute
-    // module scope and so it resets cleanly when the player is reused.
-    player._accumWatchSec = player._accumWatchSec || 0;
-    player._lastTickSec   = (player.currentTime > 0) ? player.currentTime : 0;
-    let saveInterval = setInterval(() => {
-      if (!player.paused && player.currentTime > 0) {
-        saveResumeTime(videoId, player.currentTime, player.duration);
-
-        // Watch-time accumulator. Use the *delta* between samples so
-        // seeking forward doesn't farm the counter (a 30-second skip
-        // only adds 3 seconds — the interval tick width — to the
-        // accumulator). On backward seek the delta goes negative,
-        // which we clamp to zero so a rewind doesn't reduce credit.
-        const delta = Math.max(0, Math.min(3, player.currentTime - player._lastTickSec));
-        player._lastTickSec   = player.currentTime;
-        player._accumWatchSec = (player._accumWatchSec || 0) + delta;
-        // Fire ONE minute-tick per 60s crossed. Loop in case the
-        // interval was paused (browser tab background throttling) and
-        // we accumulated multiple minutes at once.
-        while (player._accumWatchSec >= 60) {
-          tickGoal('watch_video', 1);
-          player._accumWatchSec -= 60;
-        }
-      } else if (!player.paused && player.currentTime > 0) {
-        // Player resumed after a pause — update the baseline so the
-        // first delta after resume doesn't credit paused time.
-        player._lastTickSec = player.currentTime;
-      }
-    }, 3000);
-
-    // Clean up interval when video changes
-    player._saveInterval && clearInterval(player._saveInterval);
-    player._saveInterval = saveInterval;
-
-    // Save when paused
-    player.onpause = () => saveResumeTime(videoId, player.currentTime, player.duration);
-
-    document.getElementById('videoTitle').textContent = video.title || 'Untitled';
-    document.getElementById('videoViews').textContent = '';
-    document.getElementById('videoDate').textContent = timeAgo(video.$createdAt);
-    document.getElementById('videoDescription').textContent = video.description || '';
-
-    const name = uploader?.username || 'Unknown';
-    const avatarEl = document.getElementById('videoUploaderAvatar');
-    avatarEl.innerHTML = uploader?.avatar ? `<img src="${uploader.avatar}"/>` : initials(name);
-    document.getElementById('videoUploaderName').textContent = name;
-    document.getElementById('videoUploaderBadge').textContent = video.tags?.length ? video.tags.join(' • ') : '';
-    
-    // Track watch history & load suggestions
-    addToWatchHistory(video, uploader);
-    loadUpNext(video);
-
-    // Each setup is independent — wrap so one failing path doesn't kill the others
-    try { setupVideoActions(video); }       catch (e) { console.warn('setupVideoActions failed:', e); }
-    try { setupVideoComments(video); }      catch (e) { console.warn('setupVideoComments failed:', e); }
-    try { setupCreatorFollow(video, uploader); } catch (e) { console.warn('setupCreatorFollow failed:', e); }
-    try { setupDescriptionToggle(); }       catch (e) { console.warn('setupDescriptionToggle failed:', e); }
-  } catch (error) {
-    toast('Couldn\'t load video: ' + error.message, 'error');
-  }
-}
 
 // ── Follow-the-creator button on the video player ──
 // Always visible (except on your own video). Falls back to a friendly toast
 // when the creator is mobile-only (no matching Supabase profile).
-async function setupCreatorFollow(video, uploader) {
-  const btn = document.getElementById('btnFollowCreator');
-  if (!btn) return;
-  btn.style.display = 'none';
-  btn.disabled = false;
-  btn.classList.remove('following');
-  btn.onclick = null;
-  if (!currentUser) return;
-
-  const isSupabaseVideo = !!resolveSupabaseVideoId(video);
-  const username = uploader?.username || video?.uploader?.username || null;
-  let creatorId = null;
-
-  if (isSupabaseVideo) {
-    creatorId =
-         uploader?.id
-      || uploader?.$id
-      || video?.author_id
-      || video?.uploader
-      || video?._uploaderInfo?.$id
-      || video?._uploaderInfo?.id
-      || null;
-    if (creatorId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(creatorId)) {
-      creatorId = null;
-    }
-  } else if (username) {
-    const { data: matchingProfile } = await supabase
-      .from('profiles')
-      .select('id')
-      .ilike('username', username)
-      .maybeSingle();
-    creatorId = matchingProfile?.id || null;
-  }
-
-  if (creatorId === currentUser.id) return;   // your own video → hide
-
-  // Always show the button. Behavior depends on whether we resolved a profile.
-  btn.style.display = 'inline-flex';
-
-  // CASE A: creator has a Supabase profile → full follow flow
-  if (creatorId) {
-    const setFollowingState = (isFollowing) => {
-      if (isFollowing) {
-        btn.classList.add('following');
-        btn.textContent = '✓ Following';
-      } else {
-        btn.classList.remove('following');
-        btn.textContent = '+ Follow';
-      }
-    };
-
-    const { data: existing } = await supabase
-      .from('follows')
-      .select('follower_id')
-      .eq('follower_id', currentUser.id)
-      .eq('following_id', creatorId)
-      .maybeSingle();
-    setFollowingState(!!existing);
-
-    btn.onclick = async () => {
-      btn.disabled = true;
-      const wasFollowing = btn.classList.contains('following');
-      setFollowingState(!wasFollowing);   // optimistic
-      let error = null;
-      if (wasFollowing) {
-        ({ error } = await supabase.from('follows').delete()
-          .eq('follower_id', currentUser.id).eq('following_id', creatorId));
-      } else {
-        ({ error } = await supabase.from('follows').insert({
-          follower_id: currentUser.id, following_id: creatorId,
-        }));
-      }
-      btn.disabled = false;
-      if (error) {
-        setFollowingState(wasFollowing);
-        toast('Couldn\'t update follow: ' + error.message, 'error');
-      } else {
-        toast(wasFollowing ? 'Unfollowed' : 'Following!', 'success');
-      }
-    };
-    return;
-  }
-
-  // CASE B: legacy creator without a Supabase profile → show button, friendly toast
-  btn.textContent = '+ Follow';
-  btn.classList.remove('following');
-  btn.onclick = () => {
-    const who = username ? `@${username}` : 'this creator';
-    toast(`${who} is on the mobile app — follow them there for now.`, 'error');
-  };
-  return;
-
-  const setFollowingState = (isFollowing) => {
-    if (isFollowing) {
-      btn.classList.add('following');
-      btn.textContent = '✓ Following';
-    } else {
-      btn.classList.remove('following');
-      btn.textContent = '+ Follow';
-    }
-  };
-
-  // Initial state lookup
-  const { data: existing } = await supabase
-    .from('follows')
-    .select('follower_id')
-    .eq('follower_id', currentUser.id)
-    .eq('following_id', creatorId)
-    .maybeSingle();
-  setFollowingState(!!existing);
-
-  btn.onclick = async () => {
-    btn.disabled = true;
-    const wasFollowing = btn.classList.contains('following');
-    setFollowingState(!wasFollowing);   // optimistic
-    let error = null;
-    if (wasFollowing) {
-      ({ error } = await supabase.from('follows').delete()
-        .eq('follower_id', currentUser.id).eq('following_id', creatorId));
-    } else {
-      ({ error } = await supabase.from('follows').insert({
-        follower_id: currentUser.id, following_id: creatorId,
-      }));
-    }
-    btn.disabled = false;
-    if (error) {
-      // Revert on failure
-      setFollowingState(wasFollowing);
-      toast('Couldn\'t update follow: ' + error.message, 'error');
-    } else {
-      toast(wasFollowing ? 'Unfollowed' : 'Following!', 'success');
-    }
-  };
-}
 
 // ── Description "Show more" toggle (4-line clamp) ──
-function setupDescriptionToggle() {
-  const desc   = document.getElementById('videoDescription');
-  const toggle = document.getElementById('videoDescriptionToggle');
-  if (!desc || !toggle) return;
-
-  // Reset state so navigating between videos doesn't carry over
-  desc.classList.remove('expanded');
-  toggle.style.display = 'none';
-  toggle.textContent = 'Show more';
-
-  // Wait one frame for the new text to lay out, then check overflow
-  requestAnimationFrame(() => {
-    if (desc.scrollHeight > desc.clientHeight + 2) {
-      toggle.style.display = 'inline-block';
-    }
-  });
-
-  toggle.onclick = () => {
-    const expanded = desc.classList.toggle('expanded');
-    toggle.textContent = expanded ? 'Show less' : 'Show more';
-  };
-}
 
 // Resolve the Supabase video ID from whatever shape `video` happens to be
-function resolveSupabaseVideoId(video) {
-  if (!video) return null;
-  if (video._supabaseId) return video._supabaseId;
-  if (video._supabase && video.id) return video.id;
-  if (typeof video.$id === 'string' && video.$id.startsWith('sb_')) return video.$id.slice(3);
-  return null;
-}
 
 // Wire up the comment section on the video player page.
 // `video_id` in the comments table is a text column to support legacy
 // pre-migration formats; new comments always use the Supabase video UUID.
-function setupVideoComments(video) {
-  const wrap = document.getElementById('videoCommentsWrap');
-  if (!wrap) {
-    console.warn('[video] videoCommentsWrap missing from the DOM — index.html may be stale');
-    return;
-  }
-  const supabaseId = resolveSupabaseVideoId(video);
-  // Pick whichever id this video has. Supabase ID wins if present.
-  const videoIdForComments = supabaseId || video?.$id || null;
-
-  if (!videoIdForComments) {
-    wrap.style.display = 'none';
-    return;
-  }
-
-  // Make sure the wrap is visible (override any stale inline display:none)
-  wrap.style.display = 'block';
-  const countEl = document.getElementById('videoCommentsCount');
-  if (countEl) countEl.textContent = '';
-  loadComments(null, videoIdForComments);
-  loadCommentCount(null, videoIdForComments);
-}
 
 // ── VIDEO ACTIONS: Like / Repost / Share ──
-let _currentVideoCtx = null;   // { supabaseId, title, post_id }
 
-async function setupVideoActions(video) {
-  const actionsBar = document.getElementById('videoActions');
-  if (!actionsBar) return;
-
-  const supabaseVideoId = resolveSupabaseVideoId(video);
-  const legacyVideoId   = !supabaseVideoId ? (video?.$id || null) : null;
-  const isLegacy        = !supabaseVideoId;
-  // Polymorphic id used for the reactions table — works for both Supabase and legacy now
-  const videoIdForActions = supabaseVideoId || legacyVideoId;
-
-  // ── Record a unique view (May 2026 parity fix) ──────────────────────
-  // Mobile inserts into public.video_views on open; web previously had
-  // no view-recording path at all, so videos.views_count never advanced
-  // from web traffic. Composite PK (video_id, viewer_id) makes this
-  // idempotent — a returning viewer hits ON CONFLICT and the trigger
-  // doesn't double-count. We deliberately don't await this; the player
-  // shouldn't block on analytics.
-  if (supabaseVideoId && currentUser?.id) {
-    // Strip the 'sb_' prefix that resolveSupabaseVideoId prepends for
-    // cache lookups. The DB column is the bare UUID.
-    const rawVideoId = supabaseVideoId.startsWith('sb_')
-      ? supabaseVideoId.slice(3)
-      : supabaseVideoId;
-    // Fire-and-forget. Swallow errors silently — RLS or transient
-    // network blips here must never interrupt playback.
-    supabase
-      .from('video_views')
-      .upsert({ video_id: rawVideoId, viewer_id: currentUser.id }, { onConflict: 'video_id,viewer_id', ignoreDuplicates: true })
-      .then(({ error }) => {
-        if (error) console.warn('[recordVideoView] failed (non-fatal):', error.message);
-      });
-  }
-
-  const reactionWrap = actionsBar.querySelector('.reaction-wrap[data-type="video"]');
-  const reactionBtn  = actionsBar.querySelector('.reaction-trigger[data-type="video"]');
-  const picker       = actionsBar.querySelector('.reaction-picker');
-
-  // Like button — works for both Supabase and legacy videos via the polymorphic
-  // reactions.target_id (now text after migration_reactions_legacy.sql).
-  if (videoIdForActions) {
-    reactionWrap.style.display = '';
-    reactionWrap.dataset.target = videoIdForActions;
-    reactionBtn.dataset.target  = videoIdForActions;
-    reactionBtn.onclick = null;     // restore default reaction-picker behavior
-    picker.style.display = '';
-    picker.innerHTML = REACTIONS.map(r => `
-      <button class="reaction-option" data-key="${r.key}" data-target="${videoIdForActions}" data-type="video" title="${r.label}">
-        <span class="r-emoji">${r.emoji}</span>
-        <span class="r-label">${r.label}</span>
-      </button>
-    `).join('');
-    loadReactions(videoIdForActions, 'video');
-  } else {
-    reactionWrap.style.display = 'none';
-  }
-
-  // Repost — always show. Supabase: real repost via the auto-created post.
-  // Legacy: friendly toast (we can't repost into the posts table without a video_id FK).
-  const repostBtn = document.getElementById('videoRepostBtn');
-  repostBtn.style.display = '';
-  let postIdForRepost = null;
-  if (supabaseVideoId) {
-    const { data: postRow } = await supabase
-      .from('posts')
-      .select('id')
-      .eq('video_id', supabaseVideoId)
-      .maybeSingle();
-    postIdForRepost = postRow?.id || null;
-  }
-  if (postIdForRepost) {
-    repostBtn.onclick = () => repostPost(postIdForRepost);
-  } else if (isLegacy) {
-    repostBtn.onclick = () => toast('Reposting legacy videos is coming soon — share the link instead.', 'error');
-  } else {
-    repostBtn.onclick = () => toast('This video has no original post to repost.', 'error');
-  }
-
-  // Share — always works. Opens the menu, options pick the platform.
-  const shareBtn  = document.getElementById('videoShareBtn');
-  const shareMenu = document.getElementById('videoShareMenu');
-  shareBtn.onclick = (e) => {
-    e.stopPropagation();
-    shareMenu.classList.toggle('visible');
-  };
-  shareMenu.querySelectorAll('.share-option').forEach(opt => {
-    opt.onclick = (e) => {
-      e.stopPropagation();
-      shareMenu.classList.remove('visible');
-      const platform = opt.dataset.platform;
-      const fragId = supabaseVideoId ? 'sb_' + supabaseVideoId : (video.$id || '');
-      const url = `${window.location.origin}/#video/${fragId}`;
-      const text = encodeURIComponent(video.title || 'Check out this video on Selebox');
-      const shareUrl = encodeURIComponent(url);
-      if (platform === 'copy') {
-        navigator.clipboard?.writeText(url).then(
-          () => toast('Link copied', 'success'),
-          () => toast('Could not copy link', 'error')
-        );
-      } else if (platform === 'facebook') {
-        window.open(`https://www.facebook.com/sharer/sharer.php?u=${shareUrl}`, '_blank');
-      } else if (platform === 'twitter') {
-        window.open(`https://twitter.com/intent/tweet?text=${text}&url=${shareUrl}`, '_blank');
-      } else if (platform === 'whatsapp') {
-        window.open(`https://wa.me/?text=${text}%20${shareUrl}`, '_blank');
-      }
-    };
-  });
-
-  _currentVideoCtx = { supabaseId: supabaseVideoId, title: video?.title || '' };
-
-  // Defensive: hide bookmark button if the video has no Supabase row (shouldn't happen post-migration)
-  const bmBtn = document.getElementById('videoBookmarkBtn');
-  if (bmBtn) bmBtn.style.display = supabaseVideoId ? 'inline-flex' : 'none';
-  if (supabaseVideoId) loadVideoBookmarkState(supabaseVideoId);
-}
 
 // Update popstate to handle videos
 window.addEventListener('popstate', () => {
