@@ -2074,7 +2074,20 @@ async function loadStorePacks() {
 
 async function purchasePack(packId, btnEl) {
   if (!currentUser) { toast('Sign in to buy coins', 'error'); return; }
-  if (btnEl) { btnEl.classList.add('is-loading'); btnEl.disabled = true; }
+  // Capture the original label so we can restore it on error (the success
+  // path replaces the whole page so we don't need to restore in that case).
+  // 2026-05-15: the hitpay-create-payment call takes ~3-5s because it does
+  // auth verify + pack lookup + insert pending row + POST to HitPay's API +
+  // patch back the request_id, all sequentially. We can't speed up the
+  // external HitPay call, but a clear label-change makes the wait less
+  // confusing — users see something happening instead of staring at an
+  // unresponsive purple button.
+  const originalText = btnEl ? btnEl.textContent : null;
+  if (btnEl) {
+    btnEl.classList.add('is-loading');
+    btnEl.disabled = true;
+    btnEl.textContent = 'Connecting to HitPay…';
+  }
   try {
     const data = await callEdgeFunction('hitpay-create-payment', { package_id: packId });
     if (!data?.url) { toast('Could not start checkout', 'error'); return; }
@@ -2083,7 +2096,11 @@ async function purchasePack(packId, btnEl) {
   } catch (err) {
     toast(err.message || 'Checkout failed', 'error');
   } finally {
-    if (btnEl) { btnEl.classList.remove('is-loading'); btnEl.disabled = false; }
+    if (btnEl) {
+      btnEl.classList.remove('is-loading');
+      btnEl.disabled = false;
+      if (originalText !== null) btnEl.textContent = originalText;
+    }
   }
 }
 
@@ -2210,12 +2227,18 @@ function playRewardedAd() {
 // is to verify against the database: when we see ?store=success&ref=…,
 // fetch the matching coin_purchases row and look at its real status.
 //
-// Only `completed`/`paid` rows trigger the success toast. `failed`/
-// `cancelled` rows trigger the cancel toast. `pending` rows (webhook
-// hasn't fired yet OR was never going to because the user bailed)
-// stay silent — the wallet's realtime subscription will still credit
-// the coins if a webhook eventually lands, and we'd rather show no
-// toast than a wrong toast.
+// `failed` / `cancelled` rows trigger a cancel toast. `pending` rows
+// (webhook hasn't fired yet OR was never going to because the user
+// bailed) stay silent — the wallet's realtime subscription will still
+// credit the coins if a webhook eventually lands, and we'd rather
+// show no toast than a wrong toast.
+//
+// 2026-05-15 UX update: no more success toast. Charles reported that
+// the toast was firing even when he just clicked Back from HitPay
+// without paying, which felt dishonest. The wallet pill ticking up +
+// a fresh entry in the Coins history is confirmation enough. We also
+// always route back to the Coins/Store page on a `success` flag so the
+// user lands directly on their updated balance instead of Home.
 async function handleStoreReturn() {
   const params = new URLSearchParams(window.location.search);
   const storeFlag = params.get('store');
@@ -2236,11 +2259,15 @@ async function handleStoreReturn() {
     return;
   }
 
-  // success branch — verify the purchase row actually completed.
+  // success branch — always land the user on the Coins/Store page so
+  // they can see their refreshed balance + the new history row, even
+  // if the webhook hasn't fired yet (the wallet realtime subscription
+  // will tick the balance up when it does).
+  setTimeout(() => showStore(), 50);
+
   if (!ref) {
-    // No reference id to verify against. Stay silent — better than
-    // a false positive. The webhook (if it fires) will still credit
-    // the wallet via the realtime subscription on `wallets`.
+    // No reference id to verify against. We've already navigated to
+    // the store — just don't show any error/cancel toast.
     return;
   }
 
@@ -2258,14 +2285,13 @@ async function handleStoreReturn() {
     return;
   }
 
-  if (purchaseStatus === 'completed' || purchaseStatus === 'paid') {
-    toast('Payment received! Your coins will land any moment.', 'success');
-    setTimeout(() => showStore(), 50);
-  } else if (purchaseStatus === 'failed' || purchaseStatus === 'cancelled') {
+  // Only surface the error toast when the row definitively says the
+  // payment didn't go through. credited / completed / paid → silent
+  // (no more success toast, per UX feedback). pending / null →
+  // silent (the realtime wallet subscription will catch a late credit).
+  if (purchaseStatus === 'failed' || purchaseStatus === 'cancelled') {
     toast('Payment was not completed. No coins added.', 'error');
   }
-  // pending OR null OR anything else → silent. The realtime wallet
-  // subscription handles the credit if a delayed webhook lands.
 }
 // Run on initial load (after auth has had a chance to mount).
 setTimeout(handleStoreReturn, 800);
