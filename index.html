@@ -9,14 +9,14 @@
   <link rel="stylesheet" href="css/style.css?v=2026-05-12-unlock-registry-parity"/>
 
   <!-- ─── Google Analytics ─────────────────────────────────────────────── -->
-  <!-- Replace G-XXXXXXXXXX with your real Measurement ID from
+  <!-- Replace G-4NS9B6V1N6 with your real Measurement ID from
        https://analytics.google.com → Admin → Data Streams → Web → Measurement ID -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-4NS9B6V1N6"></script>
   <script>
     window.dataLayer = window.dataLayer || [];
     function gtag(){dataLayer.push(arguments);}
     gtag('js', new Date());
-    gtag('config', 'G-XXXXXXXXXX', {
+    gtag('config', 'G-4NS9B6V1N6', {
       // Strip query params from page paths so we don't leak ids/tokens to GA
       page_path: location.pathname,
       anonymize_ip: true,
@@ -24,14 +24,19 @@
   </script>
 
   <!-- ─── Sentry error tracking ────────────────────────────────────────── -->
-  <!-- Replace YOUR_DSN_HERE with your Sentry project DSN from
-       https://sentry.io → Project → Settings → Client Keys (DSN) -->
+  <!-- Wired 2026-05-15. DSN tied to selevia-mod's Sentry project.
+       Free tier covers 5,000 errors/month — plenty at current scale.
+       Initialization is gated on window.Sentry existing (defensive
+       in case the CDN script fails to load) but otherwise always
+       runs in production. The previous placeholder check
+       ('YOUR_DSN_HERE' !== 'YOUR_DSN_HERE') was always false, which
+       is why we had zero JS error telemetry until now. -->
   <script src="https://browser.sentry-cdn.com/7.114.0/bundle.tracing.min.js"
           crossorigin="anonymous"></script>
   <script>
-    if (window.Sentry && 'YOUR_DSN_HERE' !== 'YOUR_DSN_HERE') {
+    if (window.Sentry) {
       Sentry.init({
-        dsn: 'YOUR_DSN_HERE',
+        dsn: 'https://c4c2052a29b745326b96a31bfe9f30f9@o4511298030862336.ingest.us.sentry.io/4511298037022720',
         environment: location.hostname.includes('vercel.app') ? 'staging' : 'production',
         tracesSampleRate: 0.1,
         // Don't capture noisy non-issues
