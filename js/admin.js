@@ -2846,6 +2846,15 @@ function initPayoutsTab() {
   });
   document.getElementById('kycFilter')?.addEventListener('change', loadKycList);
   document.getElementById('changeRequestsFilter')?.addEventListener('change', loadChangeRequests);
+
+  // KYC list (compact directory) search input — debounced 300ms so each
+  // keystroke doesn't fire its own server round-trip. Reads its value
+  // from the DOM at call time so we don't need to thread state through.
+  let _kycListSearchTimer = null;
+  document.getElementById('kycListSearch')?.addEventListener('input', () => {
+    clearTimeout(_kycListSearchTimer);
+    _kycListSearchTimer = setTimeout(() => loadKycListSimple(), 300);
+  });
 }
 
 function switchPayoutsSubtab(name) {
@@ -2856,7 +2865,193 @@ function switchPayoutsSubtab(name) {
   if (name === 'withdrawals')    loadPayouts();
   if (name === 'kyc')            loadKycList();
   if (name === 'changerequests') loadChangeRequests();
+  // Compact "KYC list" subtab — approved-only directory. See
+  // loadKycListSimple() below; same admin_kyc_list RPC as the
+  // full KYC review surface, just rendered as one-line rows.
+  if (name === 'kyclist')        loadKycListSimple();
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// KYC list (compact directory) — approved-only, single-line rows.
+//
+// The "KYC review" subtab is for reviewers verifying documents on
+// pending submissions. This one's for the everyday "who's approved
+// already?" lookup. Uses the same admin_kyc_list RPC, scoped to
+// status='approved', and reads the search box server-side so very
+// long lists stay fast (admin_kyc_list runs the ILIKE filter against
+// username + display_name + full_name + email in one query).
+//
+// No row-level actions on this view — it's read-only by design.
+// Admins who need to freeze/ban/revoke from here can switch over to
+// the KYC review tab and pull up the same user there.
+// ════════════════════════════════════════════════════════════════════════
+async function loadKycListSimple() {
+  const rowsEl  = document.getElementById('kycListRows');
+  const countEl = document.getElementById('kycListCount');
+  const search  = document.getElementById('kycListSearch')?.value?.trim() || '';
+  if (!rowsEl) return;
+
+  rowsEl.innerHTML = `<div class="kyc-list-empty">Loading…</div>`;
+  if (countEl) countEl.textContent = '';
+
+  const { data: rows, error } = await supabase.rpc('admin_kyc_list', {
+    p_status: 'approved',
+    p_search: search || null,
+    p_limit:  200,
+    p_offset: 0,
+  });
+
+  if (error) {
+    rowsEl.innerHTML = `<div class="kyc-list-empty admin-error">${esc(error.message)}</div>`;
+    return;
+  }
+  if (!rows?.length) {
+    rowsEl.innerHTML = `<div class="kyc-list-empty">${search ? 'No approved KYCs match your search.' : 'No approved KYCs yet.'}</div>`;
+    if (countEl) countEl.textContent = '0 results';
+    return;
+  }
+
+  // total_count is the same on every row (window function over the
+  // filtered set). Use it for the toolbar counter so the user can see
+  // when their search matched a subset of a much larger directory.
+  const total = Number(rows[0].total_count || rows.length);
+  if (countEl) {
+    countEl.textContent = total > rows.length
+      ? `Showing ${rows.length} of ${total}`
+      : `${total} approved`;
+  }
+
+  rowsEl.innerHTML = rows.map(r => {
+    const display  = esc(r.display_name || r.full_name || r.username || 'unnamed');
+    const handle   = r.username ? `@${esc(r.username)}` : '';
+    const email    = esc(r.email || '—');
+    // Approved date — small meta on the right so reviewers can sort
+    // mentally without an extra column. Locale set to en-PH to match
+    // the rest of the admin shell's date formatting.
+    const approvedAt = r.approved_at
+      ? new Date(r.approved_at).toLocaleDateString('en-PH', { dateStyle: 'medium' })
+      : '—';
+    // data-uid carries the author_id so the row click handler below
+    // (delegated, attached at module load) can open the detail modal
+    // without rebinding listeners on every reload.
+    return `
+      <div class="kyc-list-row" data-uid="${esc(r.author_id)}" role="button" tabindex="0">
+        <div class="kyc-list-name">${display}</div>
+        <div class="kyc-list-handle">${handle}</div>
+        <div class="kyc-list-email" title="${email}">${email}</div>
+        <div class="kyc-list-meta">${esc(approvedAt)}</div>
+      </div>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// KYC detail modal — opened when a row in the KYC list is clicked.
+// Fetches the single user's full record + docs, signs the three image
+// URLs, and renders the same verification card the KYC review tab uses.
+// All security-action buttons inside the card use data-act="kyc-..."
+// which the global delegated handler (broadened below) catches whether
+// the button is in #kycList or in #kycDetailBody.
+// ════════════════════════════════════════════════════════════════════════
+async function openKycDetailModal(authorId) {
+  const backdrop = document.getElementById('kycDetailBackdrop');
+  const body     = document.getElementById('kycDetailBody');
+  if (!backdrop || !body) return;
+
+  // Show the modal immediately with a loading state so the user gets
+  // visual feedback even if the network is slow. Backdrop alone is
+  // already styled as the overlay; body holds the populated card.
+  body.innerHTML = `<div class="admin-empty" style="padding:3rem;text-align:center">Loading details…</div>`;
+  backdrop.style.display = 'grid';
+
+  try {
+    // Two parallel reads: the admin_kyc_list row (with role + freeze +
+    // ban + viewer_is_super_admin), and the author_kyc raw row (with
+    // doc URLs + phone + address). admin_kyc_list filters by status,
+    // so search by username/email instead — but since we're targeting
+    // a specific author_id, fetch the full approved page and pick the
+    // matching row. (Cheaper than adding a per-uuid RPC.)
+    const [{ data: rows, error: listErr }, { data: docs, error: docsErr }, { data: avatarRow }] = await Promise.all([
+      supabase.rpc('admin_kyc_list', { p_status: 'all', p_search: null, p_limit: 200, p_offset: 0 }),
+      supabase.from('author_kyc')
+        .select('user_id, date_of_birth, id_type, id_number, id_document_url, selfie_url, payment_qr_url, signature_url, payment_method, phone, address, submitted_at')
+        .eq('user_id', authorId)
+        .maybeSingle(),
+      supabase.from('profiles').select('avatar_url').eq('id', authorId).maybeSingle(),
+    ]);
+
+    if (listErr) { body.innerHTML = `<div class="admin-empty admin-error">${esc(listErr.message)}</div>`; return; }
+    const r = (rows || []).find(x => x.author_id === authorId);
+    if (!r) { body.innerHTML = `<div class="admin-empty">User not found in KYC list.</div>`; return; }
+
+    const viewerIsSuperAdmin = Boolean(r.viewer_is_super_admin);
+    const avatar = avatarRow?.avatar_url || null;
+
+    // Stash docs + sign image URLs on r — same shape as loadKycList
+    // pre-processes for its row loop. _renderKycCardInnerHTML expects
+    // r._docs + r.payment_qr_signed + r.signature_signed +
+    // r.id_document_signed.
+    r._docs = docs || {};
+    const signTasks = [];
+    const d = r._docs;
+    if (d.payment_qr_url && !/^https?:\/\//i.test(d.payment_qr_url)) {
+      signTasks.push(_signKycUrl(d.payment_qr_url).then((u) => { r.payment_qr_signed = u; }));
+    } else { r.payment_qr_signed = d.payment_qr_url || null; }
+    if (d.signature_url && !/^https?:\/\//i.test(d.signature_url)) {
+      signTasks.push(_signKycUrl(d.signature_url).then((u) => { r.signature_signed = u; }));
+    } else { r.signature_signed = d.signature_url || null; }
+    if (d.id_document_url && !/^https?:\/\//i.test(d.id_document_url)) {
+      signTasks.push(_signKycUrl(d.id_document_url).then((u) => { r.id_document_signed = u; }));
+    } else { r.id_document_signed = d.id_document_url || null; }
+    await Promise.all(signTasks);
+
+    body.innerHTML = _renderKycCardInnerHTML(r, viewerIsSuperAdmin, avatar);
+  } catch (err) {
+    body.innerHTML = `<div class="admin-empty admin-error">${esc(err?.message || String(err))}</div>`;
+  }
+}
+
+function closeKycDetailModal() {
+  const backdrop = document.getElementById('kycDetailBackdrop');
+  if (backdrop) backdrop.style.display = 'none';
+}
+
+// One-time wiring (module load): row clicks → open modal; close
+// button + backdrop click + Escape → close modal. Delegated so it
+// survives rowsEl.innerHTML re-renders on every search keystroke.
+document.addEventListener('click', (e) => {
+  // Row click (inside the KYC list directory)
+  const row = e.target.closest('#kycListRows .kyc-list-row[data-uid]');
+  if (row) {
+    openKycDetailModal(row.dataset.uid);
+    return;
+  }
+  // Close button (× in the modal corner)
+  if (e.target.closest('#kycDetailClose')) {
+    closeKycDetailModal();
+    return;
+  }
+  // Backdrop click — only if the click landed on the backdrop itself,
+  // not on the modal card inside it. closest('.admin-modal') being
+  // null means the click went through the empty area.
+  if (e.target.id === 'kycDetailBackdrop') {
+    closeKycDetailModal();
+  }
+});
+
+// Keyboard: Escape closes the modal when it's visible.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const bd = document.getElementById('kycDetailBackdrop');
+  if (bd && bd.style.display !== 'none') closeKycDetailModal();
+});
+
+// Row click via keyboard (Enter/Space when role=button row is focused)
+// for accessibility. Same destination as the click path.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const row = e.target.closest?.('#kycListRows .kyc-list-row[data-uid]');
+  if (row) { e.preventDefault(); openKycDetailModal(row.dataset.uid); }
+});
 
 // ─── Payment info change requests ──────────────────────────────────────
 async function loadChangeRequests() {
@@ -3540,11 +3735,15 @@ async function loadKycList() {
     p_status: filter, p_search: null, p_limit: 200, p_offset: 0,
   });
   const docsPromise = (async () => {
+    // Real schema uses user_id (not author_id) and status (not kyc_status).
+    // We alias user_id → author_id below so the rest of the render code
+    // can keep using r.author_id consistently with what admin_kyc_list
+    // returns.
     let q = supabase.from('author_kyc')
-      .select('author_id, date_of_birth, id_type, id_number, id_document_url, selfie_url, payment_qr_url, signature_url, payment_method, phone, address, submitted_at')
+      .select('user_id, date_of_birth, id_type, id_number, id_document_url, selfie_url, payment_qr_url, signature_url, payment_method, phone, address, submitted_at')
       .order('submitted_at', { ascending: false })
       .limit(200);
-    if (filter !== 'all') q = q.eq('kyc_status', filter);
+    if (filter !== 'all') q = q.eq('status', filter);
     return q;
   })();
 
@@ -3555,10 +3754,12 @@ async function loadKycList() {
     return;
   }
 
-  // Index docs by author_id for O(1) lookup during the row loop.
-  // Fall back to an empty object if the secondary fetch failed —
-  // the row still renders with no document images.
-  const docsMap = Object.fromEntries((docs || []).map(d => [d.author_id, d]));
+  // Index docs by user_id (the real column name) for O(1) lookup
+  // during the row loop. The keys map to admin_kyc_list's r.author_id
+  // alias because both reference the same uuid (the author's profile id).
+  // Fall back to an empty object if the secondary fetch failed — the
+  // row still renders with no document images.
+  const docsMap = Object.fromEntries((docs || []).map(d => [d.user_id, d]));
 
   // Capture the viewer's super-admin flag once (it's the same on every
   // row). Drives whether the "Change role" button renders. Server-side
@@ -3598,110 +3799,115 @@ async function loadKycList() {
 
   listEl.innerHTML = '';
   for (const r of rows) {
-    const username = r.username || '(unknown)';
-    const avatar   = aMap[r.author_id];
-    const d        = r._docs || {};
     const card = document.createElement('div');
     card.className = `kyc-card kyc-status-${r.kyc_status}`;
-
-    // Build the security-actions row. Reused for every status; the
-    // available buttons depend on current state. `data-uid` carries
-    // the author_id for the click delegation below.
-    const uid = r.author_id;
-    const secBtns = [];
-    if (r.kyc_status === 'pending' || r.kyc_status === 'rejected') {
-      secBtns.push(`<button class="admin-btn admin-btn-primary" data-act="kyc-approve" data-uid="${uid}">Approve KYC</button>`);
-    }
-    if (r.kyc_status === 'pending' || r.kyc_status === 'approved') {
-      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-reject" data-uid="${uid}">Reject</button>`);
-    }
-    if (r.kyc_status === 'approved') {
-      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-revoke" data-uid="${uid}">Revoke</button>`);
-    }
-    if (r.payouts_frozen) {
-      secBtns.push(`<button class="admin-btn" data-act="kyc-unfreeze" data-uid="${uid}">Unfreeze payouts</button>`);
-    } else {
-      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-freeze" data-uid="${uid}">Freeze payouts</button>`);
-    }
-    if (r.is_banned) {
-      secBtns.push(`<button class="admin-btn" data-act="kyc-unban" data-uid="${uid}">Unban</button>`);
-    } else {
-      secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-ban" data-uid="${uid}">Ban</button>`);
-    }
-    if (viewerIsSuperAdmin) {
-      secBtns.push(`<button class="admin-btn" data-act="kyc-setrole" data-uid="${uid}">Change role</button>`);
-    }
-
-    // Flag pills shown next to the status badge so reviewers see
-    // freeze/ban state without scrolling down to the action buttons.
-    const flagPills = [
-      r.payouts_frozen ? `<span class="payout-status-badge payout-status-badge-rejected" title="${esc(r.payouts_frozen_reason || '')}">Frozen</span>` : '',
-      r.is_banned     ? `<span class="payout-status-badge payout-status-badge-rejected" title="${esc(r.banned_reason || '')}">Banned</span>` : '',
-    ].join('');
-
-    // Reuses the .payout-* CSS classes so both cards share the visual
-    // language (verify grid + verify-media row of three image cards).
-    card.innerHTML = `
-      <div class="payout-card-head">
-        <div class="payout-author">
-          <div class="user-row-avatar">${avatar ? `<img src="${esc(avatar)}"/>` : esc(initials(username))}</div>
-          <div>
-            <div class="payout-author-name">${esc(r.display_name || username)} <span style="color:var(--text2,#aaa);font-weight:400">@${esc(username)}</span></div>
-            <div class="payout-author-email">${esc(r.email || '')}</div>
-          </div>
-        </div>
-        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <span class="payout-status-badge" style="background:rgba(155,89,182,0.18);color:#b07ee8">${esc(r.user_role || 'user')}</span>
-          ${flagPills}
-          <span class="payout-status-badge payout-status-badge-${r.kyc_status}">${esc(r.kyc_status)}</span>
-        </div>
-      </div>
-
-      <div class="payout-verify">
-        <div class="payout-verify-grid">
-          <div class="payout-verify-row"><span class="payout-verify-label">Full name</span><span class="payout-verify-val">${esc(r.full_name || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Birthdate</span><span class="payout-verify-val">${esc(_formatBirthdate(d.date_of_birth) || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Phone</span><span class="payout-verify-val">${esc(d.phone || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Email</span><span class="payout-verify-val">${esc(r.email || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(d.payment_method || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">ID type</span><span class="payout-verify-val">${esc(d.id_type || '—')}</span></div>
-          <div class="payout-verify-row"><span class="payout-verify-label">ID number</span><span class="payout-verify-val">${esc(d.id_number || '—')}</span></div>
-          <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(d.address || '—')}</span></div>
-          ${d.submitted_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Submitted</span><span class="payout-verify-val">${timeAgo(d.submitted_at)}</span></div>` : ''}
-          ${r.approved_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Approved</span><span class="payout-verify-val">${timeAgo(r.approved_at)}</span></div>` : ''}
-          ${r.rejection_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Rejection reason</span><span class="payout-verify-val">${esc(r.rejection_reason)}</span></div>` : ''}
-          ${r.payouts_frozen_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Freeze reason</span><span class="payout-verify-val">${esc(r.payouts_frozen_reason)}</span></div>` : ''}
-          ${r.banned_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Ban reason</span><span class="payout-verify-val">${esc(r.banned_reason)}</span></div>` : ''}
-        </div>
-
-        <div class="payout-verify-media">
-          <div class="payout-verify-media-card">
-            <div class="payout-verify-media-label">GCash QR</div>
-            ${r.payment_qr_signed
-              ? `<a href="${esc(r.payment_qr_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.payment_qr_signed)}" alt="GCash QR" loading="lazy"/></a>`
-              : `<div class="payout-verify-media-empty">— not provided —</div>`}
-          </div>
-          <div class="payout-verify-media-card">
-            <div class="payout-verify-media-label">Signature</div>
-            ${r.signature_signed
-              ? `<a href="${esc(r.signature_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.signature_signed)}" alt="Signature" loading="lazy"/></a>`
-              : `<div class="payout-verify-media-empty">— not provided —</div>`}
-          </div>
-          <div class="payout-verify-media-card">
-            <div class="payout-verify-media-label">Valid ID</div>
-            ${r.id_document_signed
-              ? `<a href="${esc(r.id_document_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.id_document_signed)}" alt="Valid ID" loading="lazy"/></a>`
-              : `<div class="payout-verify-media-empty">— not provided —</div>`}
-          </div>
-        </div>
-      </div>
-
-      <div class="payout-actions" style="flex-wrap:wrap;gap:6px">
-        ${secBtns.join('')}
-      </div>
-    `;
+    card.innerHTML = _renderKycCardInnerHTML(r, viewerIsSuperAdmin, aMap[r.author_id]);
     listEl.appendChild(card);
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Shared card builder — used by both the KYC review tab (full list) AND
+// the KYC list directory's per-row click modal. Centralizing the HTML
+// here means one source of truth for the verification card layout +
+// the security action button row. Caller must have already signed the
+// three document URLs (payment_qr_signed, signature_signed,
+// id_document_signed) and attached them to `r`, plus stashed the
+// secondary author_kyc record at `r._docs`.
+// ════════════════════════════════════════════════════════════════════════
+function _renderKycCardInnerHTML(r, viewerIsSuperAdmin, avatar) {
+  const username = r.username || '(unknown)';
+  const d        = r._docs || {};
+  const uid      = r.author_id;
+
+  const secBtns = [];
+  if (r.kyc_status === 'pending' || r.kyc_status === 'rejected') {
+    secBtns.push(`<button class="admin-btn admin-btn-primary" data-act="kyc-approve" data-uid="${uid}">Approve KYC</button>`);
+  }
+  if (r.kyc_status === 'pending' || r.kyc_status === 'approved') {
+    secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-reject" data-uid="${uid}">Reject</button>`);
+  }
+  if (r.kyc_status === 'approved') {
+    secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-revoke" data-uid="${uid}">Revoke</button>`);
+  }
+  if (r.payouts_frozen) {
+    secBtns.push(`<button class="admin-btn" data-act="kyc-unfreeze" data-uid="${uid}">Unfreeze payouts</button>`);
+  } else {
+    secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-freeze" data-uid="${uid}">Freeze payouts</button>`);
+  }
+  if (r.is_banned) {
+    secBtns.push(`<button class="admin-btn" data-act="kyc-unban" data-uid="${uid}">Unban</button>`);
+  } else {
+    secBtns.push(`<button class="admin-btn admin-btn-danger-ghost" data-act="kyc-ban" data-uid="${uid}">Ban</button>`);
+  }
+  if (viewerIsSuperAdmin) {
+    secBtns.push(`<button class="admin-btn" data-act="kyc-setrole" data-uid="${uid}">Change role</button>`);
+  }
+
+  const flagPills = [
+    r.payouts_frozen ? `<span class="payout-status-badge payout-status-badge-rejected" title="${esc(r.payouts_frozen_reason || '')}">Frozen</span>` : '',
+    r.is_banned     ? `<span class="payout-status-badge payout-status-badge-rejected" title="${esc(r.banned_reason || '')}">Banned</span>` : '',
+  ].join('');
+
+  return `
+    <div class="payout-card-head">
+      <div class="payout-author">
+        <div class="user-row-avatar">${avatar ? `<img src="${esc(avatar)}"/>` : esc(initials(username))}</div>
+        <div>
+          <div class="payout-author-name">${esc(r.display_name || username)} <span style="color:var(--text2,#aaa);font-weight:400">@${esc(username)}</span></div>
+          <div class="payout-author-email">${esc(r.email || '')}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span class="payout-status-badge" style="background:rgba(155,89,182,0.18);color:#b07ee8">${esc(r.user_role || 'user')}</span>
+        ${flagPills}
+        <span class="payout-status-badge payout-status-badge-${r.kyc_status}">${esc(r.kyc_status)}</span>
+      </div>
+    </div>
+
+    <div class="payout-verify">
+      <div class="payout-verify-grid">
+        <div class="payout-verify-row"><span class="payout-verify-label">Full name</span><span class="payout-verify-val">${esc(r.full_name || '—')}</span></div>
+        <div class="payout-verify-row"><span class="payout-verify-label">Birthdate</span><span class="payout-verify-val">${esc(_formatBirthdate(d.date_of_birth) || '—')}</span></div>
+        <div class="payout-verify-row"><span class="payout-verify-label">Phone</span><span class="payout-verify-val">${esc(d.phone || '—')}</span></div>
+        <div class="payout-verify-row"><span class="payout-verify-label">Email</span><span class="payout-verify-val">${esc(r.email || '—')}</span></div>
+        <div class="payout-verify-row"><span class="payout-verify-label">Method</span><span class="payout-verify-val">${esc(d.payment_method || '—')}</span></div>
+        <div class="payout-verify-row"><span class="payout-verify-label">ID type</span><span class="payout-verify-val">${esc(d.id_type || '—')}</span></div>
+        <div class="payout-verify-row"><span class="payout-verify-label">ID number</span><span class="payout-verify-val">${esc(d.id_number || '—')}</span></div>
+        <div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Home address</span><span class="payout-verify-val">${esc(d.address || '—')}</span></div>
+        ${d.submitted_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Submitted</span><span class="payout-verify-val">${timeAgo(d.submitted_at)}</span></div>` : ''}
+        ${r.approved_at ? `<div class="payout-verify-row"><span class="payout-verify-label">Approved</span><span class="payout-verify-val">${timeAgo(r.approved_at)}</span></div>` : ''}
+        ${r.rejection_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Rejection reason</span><span class="payout-verify-val">${esc(r.rejection_reason)}</span></div>` : ''}
+        ${r.payouts_frozen_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Freeze reason</span><span class="payout-verify-val">${esc(r.payouts_frozen_reason)}</span></div>` : ''}
+        ${r.banned_reason ? `<div class="payout-verify-row payout-verify-row-wide"><span class="payout-verify-label">Ban reason</span><span class="payout-verify-val">${esc(r.banned_reason)}</span></div>` : ''}
+      </div>
+
+      <div class="payout-verify-media">
+        <div class="payout-verify-media-card">
+          <div class="payout-verify-media-label">GCash QR</div>
+          ${r.payment_qr_signed
+            ? `<a href="${esc(r.payment_qr_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.payment_qr_signed)}" alt="GCash QR" loading="lazy"/></a>`
+            : `<div class="payout-verify-media-empty">— not provided —</div>`}
+        </div>
+        <div class="payout-verify-media-card">
+          <div class="payout-verify-media-label">Signature</div>
+          ${r.signature_signed
+            ? `<a href="${esc(r.signature_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.signature_signed)}" alt="Signature" loading="lazy"/></a>`
+            : `<div class="payout-verify-media-empty">— not provided —</div>`}
+        </div>
+        <div class="payout-verify-media-card">
+          <div class="payout-verify-media-label">Valid ID</div>
+          ${r.id_document_signed
+            ? `<a href="${esc(r.id_document_signed)}" target="_blank" rel="noopener"><img class="payout-verify-img" src="${esc(r.id_document_signed)}" alt="Valid ID" loading="lazy"/></a>`
+            : `<div class="payout-verify-media-empty">— not provided —</div>`}
+        </div>
+      </div>
+    </div>
+
+    <div class="payout-actions" style="flex-wrap:wrap;gap:6px">
+      ${secBtns.join('')}
+    </div>
+  `;
 }
 
 // Delegated click handler — one place to dispatch every per-row admin
@@ -3711,7 +3917,10 @@ async function loadKycList() {
 // requires one; calls the matching SECURITY DEFINER RPC; then re-loads
 // the list to reflect the new state.
 document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('#kycList button[data-act^="kyc-"]');
+  // Catch buttons inside the KYC review tab (#kycList) AND inside the
+  // detail modal (#kycDetailBody) — both render via
+  // _renderKycCardInnerHTML and emit the same data-act/data-uid pair.
+  const btn = e.target.closest('#kycList button[data-act^="kyc-"], #kycDetailBody button[data-act^="kyc-"]');
   if (!btn) return;
   const act = btn.dataset.act;
   const uid = btn.dataset.uid;
@@ -3764,13 +3973,27 @@ document.addEventListener('click', async (e) => {
   const [rpcName, rpcArgs] = rpcMap[act] || [];
   if (!rpcName) { toast(`Unknown action: ${act}`); return; }
 
+  // If the action came from the modal (button is inside #kycDetailBody),
+  // close the modal on success and refresh the directory; otherwise
+  // refresh the inline KYC review list. Either way, the freshly-loaded
+  // data reflects the post-action state.
+  const fromModal = !!btn.closest('#kycDetailBody');
+
   btn.disabled = true;
   try {
     const { data, error } = await supabase.rpc(rpcName, rpcArgs);
     if (error) { toast(`${act}: ${error.message}`); return; }
     if (data?.noop) toast(`${act}: no change (${data.reason || 'already in target state'}).`);
     else            toast(`${act.replace('kyc-', '')} applied.`);
-    await loadKycList();
+    if (fromModal) {
+      closeKycDetailModal();
+      // The KYC list directory only shows approved users — after
+      // Reject / Revoke / Ban etc. the row may legitimately disappear,
+      // which is the expected feedback.
+      if (typeof loadKycListSimple === 'function') await loadKycListSimple();
+    } else {
+      await loadKycList();
+    }
   } catch (err) {
     toast(`${act} threw: ${err?.message || err}`);
   } finally {

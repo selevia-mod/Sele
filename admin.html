@@ -312,6 +312,12 @@
           <button class="admin-subtab active" data-subtab="withdrawals">Withdrawals</button>
           <button class="admin-subtab" data-subtab="kyc">KYC review</button>
           <button class="admin-subtab" data-subtab="changerequests">Info change requests</button>
+          <!-- Compact one-line list of approved KYCs. Different from the
+               KYC Review tab — that's for verifying documents on pending
+               submissions. This one's the directory: name + handle +
+               email per row, searchable. See loadKycListSimple() in
+               js/admin.js. -->
+          <button class="admin-subtab" data-subtab="kyclist">KYC list</button>
         </nav>
 
         <div class="admin-subtab-content" data-subtab-content="withdrawals">
@@ -375,6 +381,115 @@
           </div>
           <div id="kycList" class="admin-list">
             <div class="admin-empty">Loading…</div>
+          </div>
+        </div>
+
+        <!-- ════════════════════════════════════════════════════════════
+             KYC List subtab — compact one-line directory of approved
+             KYCs. Single row per user: display name, @handle, email.
+             Search box filters server-side via admin_kyc_list(p_search).
+             Different from "KYC review" which is the documents-heavy
+             approval surface for pending submissions. Use this when an
+             admin just wants to look up an approved creator quickly.
+             ════════════════════════════════════════════════════════════ -->
+        <div class="admin-subtab-content" data-subtab-content="kyclist" style="display:none">
+          <style>
+            /* All visual tokens here pull from the admin shell's CSS
+               variables so the directory matches both light and dark
+               themes automatically. */
+            .kyc-list-toolbar {
+              display: flex; gap: 0.6rem; align-items: center;
+              margin-bottom: 1rem;
+            }
+            .kyc-list-toolbar .admin-input {
+              flex: 1; max-width: 480px;
+            }
+            .kyc-list-count {
+              color: var(--admin-text-2); font-size: 0.8rem;
+              white-space: nowrap;
+            }
+            .kyc-list-rows {
+              border: 1px solid var(--admin-border);
+              border-radius: var(--admin-radius-lg, 12px);
+              overflow: hidden;
+              background: var(--admin-card);
+            }
+            .kyc-list-row {
+              display: grid;
+              grid-template-columns: minmax(200px, 1.4fr) minmax(140px, 1fr) minmax(220px, 1.6fr) auto;
+              gap: 1rem; align-items: center;
+              padding: 0.85rem 1.1rem; font-size: 0.9rem;
+              border-bottom: 1px solid var(--admin-border);
+              cursor: pointer;
+              transition: background var(--admin-dur) var(--admin-ease);
+            }
+            .kyc-list-row:last-child { border-bottom: none; }
+            .kyc-list-row:hover { background: var(--admin-hover, rgba(167, 139, 250, 0.06)); }
+            .kyc-list-name { font-weight: 600; color: var(--admin-text); }
+            .kyc-list-handle { color: var(--admin-text-2); }
+            .kyc-list-email {
+              color: var(--admin-text-2); font-size: 0.82rem;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            }
+            .kyc-list-meta {
+              color: var(--admin-text-3, var(--admin-text-2));
+              font-size: 0.78rem; text-align: right; white-space: nowrap;
+            }
+            .kyc-list-empty {
+              text-align: center; padding: 2.5rem 1.25rem;
+              color: var(--admin-text-2); font-size: 0.9rem;
+            }
+            /* Wide modal for the KYC detail card — overrides the
+               default 480px max-width so the document grid (three
+               cards side-by-side) doesn't get squashed. */
+            .admin-modal-wide {
+              max-width: 1080px;
+              padding: 1.25rem 1.5rem 1.5rem;
+              max-height: 92vh;
+              overflow-y: auto;
+            }
+            .admin-modal-wide .admin-modal-close {
+              position: absolute; top: 0.85rem; right: 1rem;
+              background: transparent; border: none; cursor: pointer;
+              color: var(--admin-text-2); font-size: 1.4rem; line-height: 1;
+              padding: 0.25rem 0.5rem; border-radius: 6px;
+              transition: background var(--admin-dur) var(--admin-ease);
+            }
+            .admin-modal-wide .admin-modal-close:hover {
+              background: var(--admin-hover, rgba(167, 139, 250, 0.08));
+              color: var(--admin-text);
+            }
+          </style>
+
+          <div class="admin-toolbar">
+            <div class="admin-toolbar-left">
+              <h2>Approved KYCs</h2>
+              <span class="admin-toolbar-sub">Quick directory of verified creators — click a row for details</span>
+            </div>
+          </div>
+
+          <div class="kyc-list-toolbar">
+            <input type="search" id="kycListSearch" class="admin-input"
+                   placeholder="Search by name, username, or email…"
+                   aria-label="Search approved KYCs"/>
+            <span class="kyc-list-count" id="kycListCount">—</span>
+          </div>
+
+          <div id="kycListRows" class="kyc-list-rows">
+            <div class="kyc-list-empty">Loading…</div>
+          </div>
+        </div>
+
+        <!-- KYC detail modal — populated dynamically when a row in the
+             KYC list is clicked. Same card layout the KYC review tab
+             uses, just rendered inside an overlay so the user keeps
+             their place in the directory. The detail card includes the
+             full security action row (Reject / Revoke / Freeze / Ban /
+             Change role). See _buildKycReviewCard() in js/admin.js. -->
+        <div id="kycDetailBackdrop" class="admin-modal-backdrop" style="display:none">
+          <div class="admin-modal admin-modal-wide" role="dialog" aria-modal="true" aria-labelledby="kycDetailTitle">
+            <button type="button" class="admin-modal-close" id="kycDetailClose" aria-label="Close">×</button>
+            <div id="kycDetailBody"></div>
           </div>
         </div>
 
