@@ -4525,40 +4525,85 @@ window.deletePost = async (postId) => {
   });
   if (!ok) return;
 
-  // Check if this post has a video — if so, also delete the video & Bunny file
-  const { data: post, error: lookupError } = await supabase
-    .from('posts')
-    .select('video_id')
-    .eq('id', postId)
-    .single();
+  // ── Optimistic update (2026-05-15) ────────────────────────────────────
+  // Pre-fix: this function awaited 3 sequential network round trips
+  // (lookup → bunny-delete → posts.delete) plus a full loadFeed() refetch
+  // before the card visibly disappeared. That's 1-2 seconds of "did my
+  // click register?" UI freeze.
+  //
+  // Now: we fade the card out immediately + splice it from the in-memory
+  // feed array, then run the backend work in the background. If anything
+  // fails, we restore the card and surface the error via toast.
+  //
+  // We DON'T reorder the backend chain (lookup → bunny → posts.delete) —
+  // the latent orphan-Bunny-on-DB-fail edge case is its own task.
+  const cards = document.querySelectorAll(`.post-card[data-postid="${postId}"]`);
+  const cardSnapshots = [];
+  cards.forEach(el => {
+    const prev = {
+      el,
+      display:    el.style.display,
+      opacity:    el.style.opacity,
+      transition: el.style.transition,
+      hideTimer:  null,
+    };
+    el.style.transition = 'opacity 120ms ease-out';
+    el.style.opacity = '0';
+    // After the fade, fully collapse the layout. Tracked so we can cancel
+    // the timeout if the backend errors and we restore the card.
+    prev.hideTimer = setTimeout(() => { el.style.display = 'none'; }, 140);
+    cardSnapshots.push(prev);
+  });
 
-  if (lookupError) {
-    toast('Failed to find post: ' + lookupError.message, 'error');
-    return;
-  }
+  // Also remove from the in-memory feed array so a re-render (tab switch
+  // back to home, scroll-up, etc.) doesn't repaint the row.
+  const feedIndex = posts.findIndex(p => p.id === postId);
+  const feedSnapshot = feedIndex >= 0 ? posts.splice(feedIndex, 1)[0] : null;
 
-  if (post?.video_id) {
-    try {
-      await callEdgeFunction('bunny-delete', { videoId: post.video_id });
-    } catch (err) {
-      toast('Failed to delete video file: ' + err.message, 'error');
-      return;
+  const restoreCard = () => {
+    cardSnapshots.forEach(s => {
+      clearTimeout(s.hideTimer);
+      s.el.style.display    = s.display;
+      s.el.style.opacity    = s.opacity;
+      s.el.style.transition = s.transition;
+    });
+    if (feedSnapshot && feedIndex >= 0) posts.splice(feedIndex, 0, feedSnapshot);
+  };
+
+  // ── Backend work (now non-blocking from the UI's POV) ─────────────────
+  try {
+    // Check if this post has a video — if so, also delete the video & Bunny file
+    const { data: post, error: lookupError } = await supabase
+      .from('posts')
+      .select('video_id')
+      .eq('id', postId)
+      .single();
+    if (lookupError) throw new Error('Failed to find post: ' + lookupError.message);
+
+    if (post?.video_id) {
+      try {
+        await callEdgeFunction('bunny-delete', { videoId: post.video_id });
+      } catch (err) {
+        throw new Error('Failed to delete video file: ' + err.message);
+      }
     }
-  }
 
-  const { error } = await supabase.from('posts').delete().eq('id', postId);
-  if (error) {
-    toast(error.message, 'error');
-    return;
-  }
+    const { error } = await supabase.from('posts').delete().eq('id', postId);
+    if (error) throw error;
 
-  toast('Deleted', 'success');
-  loadFeed();
+    toast('Deleted', 'success');
 
-  // Always invalidate videos cache so next visit to videos page is fresh
-  allVideosCache = [];
-  if (videosPage.style.display === 'block') {
-    loadVideos();
+    // Always invalidate videos cache so next visit to videos page is fresh.
+    // Note: we deliberately DON'T call loadFeed() anymore — the optimistic
+    // DOM removal + array splice already reflect the deletion, and the
+    // full refetch was the single largest contributor to the old delay.
+    allVideosCache = [];
+    if (videosPage.style.display === 'block') {
+      loadVideos();
+    }
+  } catch (err) {
+    restoreCard();
+    toast(err.message || 'Delete failed', 'error');
   }
 };
 
