@@ -146,22 +146,42 @@ single import line + the bell button click handler. Site works identically.
 
 ---
 
-## Stage 2 — Extract Scheduled Posts Modal (~1 hour)
+## Stage 2 — Extract Scheduled Posts Modal (~1 hour) ✅
 
-Smallest possible stage. Builds confidence in the pattern.
+**Status:** Complete (2026-05-15). Confirmed the Stage 1 config-injection
+pattern scales down cleanly to small modules.
 
-### What moves
+**Surface:** 3 functions + 5 event wirings (pill click, close button,
+backdrop click, Escape keydown, delegated row-action handler). Single
+injected dependency: `getCurrentUser`. Compare to Stage 1's 11 injected
+nav functions — Stage 2 took a fraction of the time.
+
+### What moved
 Into `js/scheduled-posts.js`:
-- `refreshScheduledPostsBadge()`
-- `openScheduledPostsModal()` + `closeScheduledPostsModal()`
-- The delegated click handler for `data-sp-act` buttons
-- The pill click + escape handlers
+- [x] `refreshScheduledPostsBadge()` (also re-exported so post-submit handler can call it)
+- [x] `openScheduledPostsModal()` + `closeScheduledPostsModal()`
+- [x] The delegated click handler for `data-sp-act` buttons
+- [x] The pill click + close button + backdrop click + escape handlers
 
-### Verify
-- [ ] Pre-deploy script passes
-- [ ] Schedule a post, see badge appear
-- [ ] Click pill, see modal with row + buttons
-- [ ] Click "Publish now" or "Cancel", verify state updates
+### How (as executed)
+- [x] Created `js/scheduled-posts.js` (~180 lines).
+- [x] Imports `supabase, escHTML, toast` from `./supabase.js` ONLY.
+- [x] No imports from `./app.js` — Stage 1 lesson preserved.
+- [x] `app.js` adds a single import + replaces the standalone
+      `refreshScheduledPostsBadge()` call in `onSignedIn` with
+      `initScheduledPosts({getCurrentUser: () => currentUser})`.
+- [x] All listeners attached at module-load time in `scheduled-posts.js`
+      (NOT inside `initScheduledPosts`) so sign-out/in doesn't accumulate
+      duplicate handlers. This matters more here than in Stage 1 because
+      the delegated handler is bound to `document` — duplicating it would
+      double-fire every click.
+
+### Verify (as executed)
+- [x] `node --check` passes on both files.
+- [x] `scripts/pre-deploy-check.sh` passes (same 5 advisory warnings).
+- [ ] Manual: schedule a post, badge appears.
+- [ ] Manual: click pill, modal opens with row + buttons.
+- [ ] Manual: "Publish now" + "Cancel" both work, badge refreshes.
 
 ---
 
