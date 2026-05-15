@@ -1218,6 +1218,23 @@ export function openNotifPanel() {
     });
   }
 }
+// Teardown — call from app.js signOut() before supabase.auth.signOut().
+// Removes the notif realtime channel + clears the in-memory list so the
+// next signed-in user doesn't briefly see the previous user's bell state.
+// 2026-05-15: added when sign-out broke post-Stage-1 — the original
+// signOut() reached for _notifChannel which had moved into this module
+// and was no longer in app.js's scope (ReferenceError killed signOut
+// before supabase.auth.signOut() could run).
+export function teardownNotifications() {
+  if (_notifChannel) {
+    try { supabase.removeChannel(_notifChannel); } catch {}
+    _notifChannel = null;
+  }
+  _notifications.length = 0;
+  _notifUnreadCount = 0;
+  updateNotifBadge();
+}
+
 export function closeNotifPanel() {
   const panel = document.getElementById('notificationsPanel');
   if (!panel) return;
