@@ -1,6 +1,7 @@
 import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction, escHTML, toast } from './supabase.js';
 import { initNotifications } from './notifications.js';
 import { initScheduledPosts, refreshScheduledPostsBadge } from './scheduled-posts.js';
+import { initComposer } from './composer.js';
 // Anti-fraud telemetry — fire-and-forget event logging used by the
 // Phase 4 detection job. All four helpers are safe to call any time;
 // signed-out callers short-circuit, network errors get swallowed.
@@ -387,6 +388,38 @@ async function onSignedIn(user) {
   // Fire-and-forget; the initial badge refresh happens inside init.
   initScheduledPosts({
     getCurrentUser: () => currentUser,
+  });
+
+  // Composer module — wires the textbox / image preview / schedule
+  // popover / submit handler. Config-injects everything it needs from
+  // app.js: currentUser getter, image uploader, FEED_SELECT constant,
+  // and two callbacks for the "post created" hand-off (one for success,
+  // one for the rare RPC-succeeded-but-refetch-empty safety net).
+  // Stage 3 pattern: composer.js imports ONLY from supabase.js +
+  // scheduled-posts.js. The injected callbacks let it stay decoupled
+  // from app.js's internal posts[] array + render fns.
+  initComposer({
+    getCurrentUser: () => currentUser,
+    uploadImage,
+    feedSelect: FEED_SELECT,
+    onPostCreated: (post) => {
+      // Dedup: if the post somehow already lives in posts[] (rapid
+      // re-clicks past the composer's _submitting guard, or a realtime
+      // INSERT that beat the optimistic prepend), skip the prepend so
+      // we don't double-render the card.
+      if (post?.id && posts.some(p => p?.id === post.id)) return;
+      posts = [post, ...posts];
+      const feedEl = document.getElementById('feed');
+      if (feedEl) {
+        const el = renderPost(post);
+        el.style.animationDelay = '0s';
+        feedEl.insertBefore(el, feedEl.firstChild);
+        _wireUpNewPosts(feedEl);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+      _bumpFeedLastSeenAt([post]);
+    },
+    onPostCreateFallback: () => loadFeed(),
   });
 
   // Daily-goal: tick "Log in today". Dedupe key is the date so
@@ -2237,314 +2270,20 @@ document.getElementById('signOutModal')?.addEventListener('click', (e) => {
   if (e.target.id === 'signOutModal') _closeSignOutModal();
 });
 
-// ── Compose ──
-const composeText = document.getElementById('composeText');
-const charCount = document.getElementById('charCount');
-const composeImageInput = document.getElementById('composeImageInput');
-const composeImagePreview = document.getElementById('composeImagePreview');
-let composeImageFile = null;
-// Compose scheduling state — set when user picks a future datetime via
-// the Schedule button. When non-null, the submit handler routes through
-// the submit_post RPC with is_hidden=true + scheduled_publish_at, so a
-// server cron job flips the post live at that moment. Mirrors mobile's
-// "Schedule for later" flow. See btnOpenSchedule wiring + the submit
-// handler below.
-let composeScheduledAt = null;   // Date | null
-
-// Schedule UI — 2026-05-15: rewritten to use a custom popover with
-// separate <input type="date"> + <input type="time"> instead of the
-// native <input type="datetime-local">. The combined control had broken
-// UX on Safari (no calendar, no obvious close button, no proper time
-// picker). The split inputs render decent native pickers in both
-// Safari and Chrome, and the explicit Set/Cancel buttons remove the
-// silent fallthrough we had before — you can no longer "schedule" by
-// clicking the button and accidentally posting immediately because no
-// time got picked. If composeScheduledAt is null at submit time, the
-// post button label still reads "Post" (not "Schedule"), so the user
-// always knows whether they're scheduling or posting live.
-const _btnOpenSchedule        = document.getElementById('btnOpenSchedule');
-const _composeSchedulePopover = document.getElementById('composeSchedulePopover');
-const _composeScheduleDate    = document.getElementById('composeScheduleDate');
-const _composeScheduleTime    = document.getElementById('composeScheduleTime');
-const _composeScheduleSetBtn  = document.getElementById('composeScheduleSet');
-const _composeScheduleCancelBtn = document.getElementById('composeScheduleCancel');
-const _composeScheduleChip    = document.getElementById('composeScheduleChip');
-const _composeScheduleLabel   = document.getElementById('composeScheduleLabel');
-const _composeScheduleClear   = document.getElementById('composeScheduleClear');
-
-function _updateComposeScheduleUI() {
-  const btn = document.getElementById('btnPostSubmit');
-  if (composeScheduledAt) {
-    _composeScheduleChip.style.display = 'inline-flex';
-    _composeScheduleLabel.textContent = `Scheduled for ${composeScheduledAt.toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })}`;
-    if (btn) btn.textContent = 'Schedule';
-  } else {
-    _composeScheduleChip.style.display = 'none';
-    if (btn) btn.textContent = 'Post';
-  }
-}
-
-// Helpers for the local-time formatting that <input type="date"> and
-// <input type="time"> expect. We deliberately avoid toISOString() here
-// because that converts to UTC and would shift the date across midnight
-// for evening-time users in non-zero UTC offsets.
-function _localYmd(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-function _localHm(d) {
-  const h = String(d.getHours()).padStart(2, '0');
-  const m = String(d.getMinutes()).padStart(2, '0');
-  return `${h}:${m}`;
-}
-
-function _openComposeSchedulePopover() {
-  if (!_composeSchedulePopover) return;
-  // Default to 1 hour from now, rounded down to the minute. If a value
-  // is already set (user re-opening to adjust), preserve it.
-  const seed = composeScheduledAt || (() => {
-    const d = new Date(Date.now() + 60 * 60 * 1000);
-    d.setSeconds(0, 0);
-    return d;
-  })();
-  _composeScheduleDate.value = _localYmd(seed);
-  _composeScheduleTime.value = _localHm(seed);
-  _composeScheduleDate.min = _localYmd(new Date());
-  _composeSchedulePopover.style.display = 'block';
-}
-
-function _closeComposeSchedulePopover() {
-  if (_composeSchedulePopover) _composeSchedulePopover.style.display = 'none';
-}
-
-_btnOpenSchedule?.addEventListener('click', (e) => {
-  e.stopPropagation();   // don't trip the outside-click handler below
-  // Toggle: clicking the button again while the popover is open closes it.
-  if (_composeSchedulePopover?.style.display === 'block') {
-    _closeComposeSchedulePopover();
-  } else {
-    _openComposeSchedulePopover();
-  }
-});
-
-_composeScheduleSetBtn?.addEventListener('click', () => {
-  const dateStr = _composeScheduleDate?.value;
-  const timeStr = _composeScheduleTime?.value;
-  if (!dateStr || !timeStr) {
-    toast('Pick both a date and a time', 'error');
-    return;
-  }
-  // `${YYYY-MM-DD}T${HH:MM}` parses as local time in every browser we
-  // care about. (datetime-local strings without a Z are local.)
-  const d = new Date(`${dateStr}T${timeStr}`);
-  if (Number.isNaN(d.getTime())) { toast('Invalid date/time', 'error'); return; }
-  if (d.getTime() <= Date.now()) { toast('Schedule time must be in the future', 'error'); return; }
-  composeScheduledAt = d;
-  _updateComposeScheduleUI();
-  _closeComposeSchedulePopover();
-});
-
-_composeScheduleCancelBtn?.addEventListener('click', () => {
-  _closeComposeSchedulePopover();
-});
-
-// Click outside the popover closes it (without committing).
-document.addEventListener('click', (e) => {
-  if (!_composeSchedulePopover || _composeSchedulePopover.style.display !== 'block') return;
-  // Click is inside the popover OR on the Schedule toggle button → ignore.
-  if (e.target.closest('#composeSchedulePopover')) return;
-  if (e.target.closest('#btnOpenSchedule')) return;
-  _closeComposeSchedulePopover();
-});
-
-// Escape closes the popover.
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  if (_composeSchedulePopover?.style.display === 'block') {
-    _closeComposeSchedulePopover();
-  }
-});
-
-// "Scheduled for X" chip × button — clears the schedule + flips the
-// submit button label back to "Post".
-_composeScheduleClear?.addEventListener('click', () => {
-  composeScheduledAt = null;
-  _updateComposeScheduleUI();
-});
-
 // ════════════════════════════════════════════════════════════════════════
-// Scheduled posts management moved to js/scheduled-posts.js (Stage 2,
-// 2026-05-15). The original block lived here from line ~2305 to ~2454
-// and owned: refreshScheduledPostsBadge, openScheduledPostsModal,
-// closeScheduledPostsModal, plus pill click / close button / backdrop
-// click / Escape / delegated row-action handlers.
+// Composer moved to js/composer.js (Stage 3, 2026-05-15). The original
+// block lived here from line ~2268 to ~2575 and owned: composeText,
+// composeImageFile, composeScheduledAt state; the schedule popover
+// (date + time inputs, Set/Cancel/clear handlers, outside-click +
+// Escape dismissers); composeText input listener; composeImageInput
+// change listener; and the entire btnPostSubmit click handler.
 //
-// The pattern: import from ./scheduled-posts.js at the top, and call
-// initScheduledPosts({getCurrentUser: () => currentUser}) from onSignedIn.
-// refreshScheduledPostsBadge is also re-exported so the post-submit
-// handler below (~line 2571 originally) can still call it after queueing
-// a new scheduled post — that call site is unchanged.
+// The pattern: import { initComposer } from ./composer.js at the top,
+// and call initComposer({getCurrentUser, uploadImage, feedSelect,
+// onPostCreated, onPostCreateFallback}) from onSignedIn. App.js still
+// owns the posts[] array + render fns + last-seen bump + loadFeed
+// fallback; those are wired in via the two callbacks.
 // ════════════════════════════════════════════════════════════════════════
-
-composeText.addEventListener('input', () => {
-  const len = composeText.value.length;
-  charCount.textContent = `${len} / 5000`;
-  charCount.className = 'char-count' + (len > 4500 ? ' warn' : '') + (len >= 5000 ? ' over' : '');
-  composeText.style.height = 'auto';
-  composeText.style.height = composeText.scrollHeight + 'px';
-});
-
-composeImageInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  composeImageFile = file;
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    composeImagePreview.innerHTML = `
-      <div class="image-preview">
-        <img src="${ev.target.result}" alt="preview"/>
-        <button class="image-preview-remove" id="removeComposeImage">×</button>
-      </div>`;
-    document.getElementById('removeComposeImage').addEventListener('click', () => {
-      composeImageFile = null;
-      composeImagePreview.innerHTML = '';
-      composeImageInput.value = '';
-    });
-  };
-  reader.readAsDataURL(file);
-});
-
-// Composer submit. Selector matches the renamed id="btnPostSubmit"
-// in index.html. Was id="btnPost" originally, but that collided with
-// the sidebar Post nav button (also id="btnPost") — getElementById
-// returned the sidebar one and this listener silently never fired.
-//
-// Routes through the submit_post RPC mobile uses, which supports the
-// is_hidden + scheduled_publish_at parameters needed for scheduling.
-// The legacy raw insert path (still present in git history) didn't
-// give us scheduling; mobile users could schedule, web users couldn't.
-// The RPC handles the insert + the AFTER INSERT follower-fanout trigger
-// (which is gated on is_hidden=false so scheduled posts don't pre-spam
-// notifications).
-document.getElementById('btnPostSubmit').addEventListener('click', async () => {
-  const body = composeText.value.trim();
-  if (!body && !composeImageFile) return;
-  if (!currentUser) return toast('Please sign in first', 'error');
-
-  const isScheduled = !!composeScheduledAt;
-  const scheduledIso = isScheduled ? composeScheduledAt.toISOString() : null;
-
-  const btn = document.getElementById('btnPostSubmit');
-  btn.disabled = true;
-  btn.textContent = composeImageFile ? 'Uploading...' : (isScheduled ? 'Scheduling...' : 'Posting...');
-
-  let imageUrl = null;
-  if (composeImageFile) {
-    imageUrl = await uploadImage(composeImageFile);
-    if (!imageUrl) {
-      btn.disabled = false;
-      _updateComposeScheduleUI();
-      return;
-    }
-  }
-
-  btn.textContent = isScheduled ? 'Scheduling...' : 'Posting...';
-
-  // submit_post returns { id, status, error } (per the RPC contract).
-  // It performs the insert server-side under SECURITY DEFINER, so we
-  // don't get the inserted row back with joins like the legacy
-  // .insert().select(FEED_SELECT) did. Re-fetch via posts table after
-  // for the local prepend, mirroring what mobile's createNewPost does.
-  //
-  // 9-param call: production has submit_post extended to accept
-  // p_is_hidden + p_scheduled_publish_at (migration_scheduled_post_
-  // notifications.sql, referenced but not in repo — applied via
-  // Supabase SQL editor). This atomic-scheduled-insert path is what
-  // mobile uses (selebox-mobile-main/lib/posts.js::createNewPost).
-  // The matching AFTER INSERT notification trigger is gated on
-  // is_hidden=false so scheduled posts don't fire "shared a post"
-  // notifications to followers until the cron flips them live.
-  const { data: rpcResult, error: rpcErr } = await supabase.rpc('submit_post', {
-    p_actor_id:             currentUser.id,
-    p_body:                 body || null,
-    p_image_url:            imageUrl,
-    p_video_id:             null,
-    p_book_id:              null,
-    p_reposted_from:        null,
-    p_legacy_appwrite_id:   null,
-    p_is_hidden:            isScheduled,
-    p_scheduled_publish_at: scheduledIso,
-  });
-
-  btn.disabled = false;
-  if (rpcErr)              { toast(rpcErr.message, 'error'); _updateComposeScheduleUI(); return; }
-  if (rpcResult?.error)    { toast(rpcResult.error, 'error'); _updateComposeScheduleUI(); return; }
-  const newPostId = rpcResult?.id;
-  if (!newPostId)          { toast('Post creation failed (no id returned)', 'error'); _updateComposeScheduleUI(); return; }
-
-  // Re-fetch the row with joins so we can prepend it locally
-  // (same shape the legacy .insert().select(FEED_SELECT) returned).
-  let created = null;
-  if (newPostId) {
-    const { data: row } = await supabase
-      .from('posts')
-      .select(FEED_SELECT)
-      .eq('id', newPostId)
-      .maybeSingle();
-    created = row;
-  }
-
-  // Reset composer state — caption, image, schedule.
-  composeText.value = '';
-  composeImageFile = null;
-  composeImagePreview.innerHTML = '';
-  composeImageInput.value = '';
-  charCount.textContent = '0 / 5000';
-  composeScheduledAt = null;
-  // The old datetime-local input is gone (replaced by the popover with
-  // separate date/time inputs in 2026-05-15). The popover inputs reset
-  // themselves the next time _openComposeSchedulePopover() runs, so we
-  // don't need to clear them here.
-  _updateComposeScheduleUI();   // also resets btn text to "Post"
-
-  if (isScheduled) {
-    // Scheduled posts shouldn't appear in the feed yet — the AFTER
-    // INSERT trigger skipped fanout because is_hidden=true. Toast the
-    // confirmation with the scheduled time so the user has feedback.
-    toast(`Scheduled for ${new Date(scheduledIso).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })}`, 'success');
-    // Refresh the "X scheduled" pill so it reflects the new total
-    // (and reveals itself if this was the user's first scheduled post).
-    refreshScheduledPostsBadge();
-    return;
-  }
-
-  toast('Posted!', 'success');
-
-  // Prepend the new post locally so the user sees it at the top of the
-  // feed immediately (Facebook-style "you posted!" affordance). On the
-  // next manual refresh, feed_for_you will correctly exclude it from
-  // the For You ranking — by design — and it'll vanish from this list,
-  // but it lives forever on the user's profile/timeline.
-  if (created) {
-    posts = [created, ...posts];
-    const feedEl = document.getElementById('feed');
-    if (feedEl) {
-      const el = renderPost(created);
-      el.style.animationDelay = '0s';
-      feedEl.insertBefore(el, feedEl.firstChild);
-      _wireUpNewPosts(feedEl);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-    _bumpFeedLastSeenAt([created]);
-  } else {
-    // Safety net — if the SELECT returned nothing for some reason
-    // (RLS / shape), fall back to the legacy behavior so the user's
-    // post isn't completely invisible.
-    loadFeed();
-  }
-});
 
 // ── Stories row (users) ──
 async function loadStories() {
