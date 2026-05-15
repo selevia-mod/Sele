@@ -25,6 +25,28 @@ export function initials(name) {
   return (name || 'G').split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2);
 }
 
+// ── Shared UI utilities ──
+// Moved here from js/app.js as Stage 1 prep (2026-05-15). Notification
+// extraction needs both — putting them in the existing shared module
+// (rather than creating a new core.js) keeps the import surface small.
+// Topically a bit odd to have escHTML/toast next to the supabase client,
+// but pragmatic for now; can refactor into a dedicated utils.js later.
+
+export function escHTML(str) {
+  const d = document.createElement('div');
+  d.textContent = str || '';
+  return d.innerHTML;
+}
+
+export function toast(msg, type = '') {
+  const el = document.getElementById('toast');
+  if (!el) { console.warn('[toast] #toast element missing:', msg); return; }
+  el.textContent = msg;
+  el.className = 'toast' + (type ? ' ' + type : '');
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 3000);
+}
+
 // ── Edge Function helper ──
 export async function callEdgeFunction(functionName, payload = {}) {
   const { data: { session } } = await supabase.auth.getSession();

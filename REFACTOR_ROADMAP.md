@@ -80,7 +80,24 @@ script catches core-file changes.
 
 ---
 
-## Stage 1 — Extract Notifications (~2–3 hours)
+## Stage 1 — Extract Notifications (~2–3 hours) ✅
+
+**Status:** Complete (2026-05-15). Notifications now live in `js/notifications.js`,
+imported by `app.js` via a single import + a config-injection call site.
+
+**Lessons captured for stages 2–9:**
+- The first attempt used a circular ES module import (`notifications.js`
+  imported `currentUser` + nav functions from `app.js`, while `app.js`
+  imported `initNotifications` from `notifications.js`). At module-load
+  time this caused the realtime subscriber to attach `.on(postgres_changes)`
+  AFTER `.subscribe()` had already fired, triggering the
+  `cannot add postgres_changes after subscribe()` error and breaking sign-out.
+- The fix was config injection: `notifications.js` imports ONLY from
+  `supabase.js` (which is leaf-level), and `app.js` passes a `{getCurrentUser,
+  nav: {...}}` object into `initNotifications(config)` on sign-in.
+- **Use config injection as the default pattern for stages 2–9.** Any time
+  the extracted module needs to read live `currentUser` or call a navigation
+  surface that still lives in `app.js`, inject it instead of importing it.
 
 Notifications is the right first target: low cross-feature coupling, recent
 regression source, well-bounded (everything starts at `initNotifications()`).
@@ -103,22 +120,26 @@ From `js/app.js` into a new file `js/notifications.js`:
 - The bell button click handler that opens the panel — wires via an
   `import { openNotifPanel } from './notifications.js';`
 
-### How
-- [ ] Change `index.html` script tag: `<script type="module" src="js/app.js">`
-      (already `type="module"`, good).
-- [ ] Create `js/notifications.js` with `export function initNotifications() {...}`
-      etc.
-- [ ] Cut + paste the entire notifications block into the new file.
-- [ ] Add `import { supabase } from './supabase.js'` (or whichever shared
-      module exposes it — if none exists yet, that's stage 0.5).
-- [ ] Add `import { toast, escHTML } from './utils.js'` (same caveat).
-- [ ] In `app.js`, add `import { initNotifications } from './notifications.js';`
-      at the top and call it from `onSignedIn`.
+### How (as executed)
+- [x] `js/notifications.js` created with 21 functions + 16 state vars
+      moved verbatim from `app.js` lines 18369–19548.
+- [x] `escHTML` and `toast` moved into `js/supabase.js` (leaf-level shared module).
+- [x] `notifications.js` imports `supabase, escHTML, initials, timeAgo` from
+      `./supabase.js` ONLY. No imports from `./app.js`. (This is what broke
+      the first attempt.)
+- [x] `app.js` adds a single `import { initNotifications } from './notifications.js';`
+      and calls it from `onSignedIn` with a config object containing
+      `getCurrentUser` + 10 navigation function references.
+- [x] `app.js.before-stage1` kept as local-only backup (gitignored via
+      "untracked + don't add" — not committed).
 
-### Verify
-- [ ] `./scripts/pre-deploy-check.sh` passes
-- [ ] Manual: bell opens, shows grouped follows, tap routes correctly
-- [ ] Manual: new notification arrives via realtime, badge ticks, row appears
+### Verify (as executed)
+- [x] `node --check` passes on both files.
+- [x] Manual: bell opens, shows grouped follows, tap routes correctly.
+- [x] Manual: page load → no realtime subscription error in console.
+- [x] Manual: sign-out works (was broken in first attempt).
+- [ ] Smoke test post-delete delay separately — pre-existing UX issue, not
+      a Stage 1 regression. New task `fix/post-delete-optimistic`.
 
 **Stage 1 done when:** zero notification code remains in `app.js` except the
 single import line + the bell button click handler. Site works identically.
