@@ -2350,7 +2350,14 @@ body.light .book-grid-loadmore {
 .book-cover img {
   width: 100%;
   height: 100%;
+  /* `cover` + `top` — for ratio-mismatched sources we keep the TOP of the
+     image visible (where most book titles live) instead of center-cropping
+     them out of frame. The right long-term fix is _supabaseRatioCrop on
+     every cover at render time so the source arrives at 2:3 — `contain`
+     was a worse trade because tall sources (some covers are 1:3+) became
+     thin slivers with huge white bars. */
   object-fit: cover;
+  object-position: top;
   display: block;
 }
 .book-cover-placeholder {
@@ -2452,7 +2459,12 @@ body.light .book-card:hover .book-card-title { color: #7c3aed; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(139, 92, 246, 0.15);
   background: linear-gradient(135deg, #1a1428, #0f0a1c);
 }
-.book-detail-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* `cover` + `top` — keep the top of the source visible (titles usually
+   live there). See .book-cover img for the full reasoning on why contain
+   was a worse trade. The detail page also passes the cover through
+   _supabaseRatioCrop in books.js so the source arrives at 2:3 when it
+   can. */
+.book-detail-cover img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
 .book-detail-info h1 {
   margin: 0 0 0.5rem;
   font-size: 1.85rem;
@@ -7575,7 +7587,10 @@ body:not(.light) .book-recommend-sub { color: #9ca3af; }
 .recommend-card-cover img {
   width: 100%;
   height: 100%;
+  /* `cover` + `top` — see .book-cover img. renderBookRecsRail now also
+     pre-crops via _supabaseRatioCrop. */
   object-fit: cover;
+  object-position: top;
   display: block;
 }
 .recommend-card-cover-empty {
@@ -14869,7 +14884,11 @@ body:not(.light) .book-section-see-all:hover {
 }
 .book-card-v2-cover img {
   width: 100%; height: 100%;
+  /* `cover` + `top` — see .book-cover img. _supabaseRatioCrop already
+     pre-crops Supabase URLs so this rule only matters for external/old
+     uploads at non-2:3 ratios. */
   object-fit: cover;
+  object-position: top;
   display: block;
 }
 .book-card-v2-cover-placeholder {
@@ -15844,7 +15863,11 @@ body.light .home-books-next:hover {
   inset: 0;
   width: 100%;
   height: 100%;
+  /* `cover` + `top` — see .book-cover img. _supabaseRatioCrop already
+     pre-crops Supabase URLs to 2:3 before they reach this rule, so the
+     CSS only kicks in for external / old-upload covers at non-2:3. */
   object-fit: cover;
+  object-position: top;
   z-index: 1;
   display: block;
 }
@@ -16096,7 +16119,11 @@ body.light .home-book-cover {
   background: linear-gradient(135deg, #d6cdf6, #ece8fd);
   margin: 0.15rem 0;
 }
-.rank-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* `cover` + `top` — Ranking tab uses the same source-aspect-ratio
+   heuristic as the other shelves. _renderRankCard now also calls
+   _supabaseRatioCrop so most covers arrive at 2:3 server-side; this
+   CSS is the safety net for external sources. See .book-cover img. */
+.rank-card-cover img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
 .rank-card-cover-placeholder {
   width: 100%; height: 100%;
   display: flex; align-items: center; justify-content: center;

@@ -802,11 +802,22 @@ async function flushPostLazyLoad() {
   ]);
 }
 
-function renderPost(post) {
+// `idScope` is an optional namespace prepended to every DOM id this
+// function stamps (rsummary, ccount, sharemenu, comments). When the same
+// post is rendered in two places at once (e.g. the home featured-post
+// column + the Discover feed), unscoped IDs collide and
+// document.getElementById picks the first match — usually the wrong copy.
+// Callers like the home featured-post block pass idScope='home' so its
+// IDs become e.g. 'home-comments-XYZ' and feed lookups land on the feed
+// copy unambiguously. Empty string keeps the legacy unscoped IDs for
+// every other call site, so no behavior change for the Discover feed.
+function renderPost(post, idScope = '') {
+  const _ns = (id) => idScope ? `${idScope}-${id}` : id;
   const div = document.createElement('div');
   div.className = 'post-card' + (post.pinned_at ? ' is-pinned' : '');
   div.dataset.postid  = post.id;
   div.dataset.authorId = post.user_id || '';
+  if (idScope) div.dataset.idScope = idScope;
   if (post.pinned_at) div.dataset.pinned = '1';
 
   const profile = post.profiles || {};
@@ -886,8 +897,8 @@ function renderPost(post) {
       ` : ''}
 
     <div class="post-stats">
-      <div class="rcount" id="rsummary-${post.id}" data-target="${post.id}" data-type="post"></div>
-      <div class="ccount" id="ccount-${post.id}" data-postid="${post.id}"></div>
+      <div class="rcount" id="${_ns(`rsummary-${post.id}`)}" data-target="${post.id}" data-type="post"></div>
+      <div class="ccount" id="${_ns(`ccount-${post.id}`)}" data-postid="${post.id}"></div>
     </div>
 
     <div class="post-actions">
@@ -923,7 +934,7 @@ function renderPost(post) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
           <span>Share</span>
         </button>
-        <div class="share-menu" id="sharemenu-${post.id}">
+        <div class="share-menu" id="${_ns(`sharemenu-${post.id}`)}">
           <button class="share-option" onclick="shareTo('facebook','${post.id}')">📘 Facebook</button>
           <button class="share-option" onclick="shareTo('twitter','${post.id}')">🐦 Twitter / X</button>
           <button class="share-option" onclick="shareTo('whatsapp','${post.id}')">💬 WhatsApp</button>
@@ -932,7 +943,7 @@ function renderPost(post) {
       </div>
     </div>
 
-    <div class="comments-section" id="comments-${post.id}" style="display:none"></div>
+    <div class="comments-section" id="${_ns(`comments-${post.id}`)}" style="display:none"></div>
   `;
   // Reactions and comment count are now loaded lazily by setupFeedLazyLoaders
   // when the post-card scrolls into view (saves ~2 queries per off-screen post)

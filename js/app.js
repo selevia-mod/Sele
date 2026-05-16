@@ -50,6 +50,88 @@ import {
   initMessagesDock, teardownMessagesDock,
   openMessagesDock, openMessagesDockToConv,
 } from './messages-dock.js';
+// Stage 8A — Books listing / discovery. Owns showBook + the four tabs
+// (For You / Discover / Ranking / Reading List), the See-All sub-view,
+// book search + writer-channel cards, normalization, and the
+// recommendation rail. Stage 8B added: book detail page +
+// chapter reader + reader watermark / anti-copy / nav-button wiring
+// (under wireBookReader). Bookmarks dispatcher stays in app.js — it
+// straddles videos + books and gets its own future module.
+import {
+  initBooks, wireBooksPage, wireBookReader,
+  showBook, loadBooksTab, _openBookSeeAll,
+  runBookSearch, prettyGenre, renderBookChips, loadBookRecommendations,
+  fetchSupabaseBooks, fetchBooksServerSearch,
+  renderBookCard, _renderBookCardV2, renderWriterChannelCard,
+  _normalizeBookRow, _normalizeBookRows,
+  openBookDetail, openChapterReader,
+  toggleBookLike, toggleBookBookmark, loadBookActionState,
+  applyReaderWatermark, flushReadClose,
+  getActiveBookTab, setActiveBookTab,
+  getActiveBookSearchQuery, setActiveBookSearchQuery,
+  resetBooksSessionState,
+} from './books.js';
+// Stage 9A — Direct Messages core. Owns the full-page Messenger flow:
+// conversation list, thread render, message send/edit/delete/react,
+// realtime + presence + typing channels, inbox unread badge. The
+// floating dock (messages-dock.js) factored out the shared data layer
+// earlier; this is the full-page UI on top. Stage 9B (queued) moves the
+// remaining extras — emoji picker, attach menu, GIF picker, secret
+// lock IIFE, reply state, conv menu, group admin, search, mention
+// dropdown. Until 9B, those still-in-app.js helpers read/write
+// dmState + _renderedMessageIds via the live-binding exports.
+import {
+  initMessages,
+  showMessages, openConversation, openConversationWithUser,
+  loadConversationList, renderConversationList,
+  loadMessages, renderMessages,
+  sendDmMessage, sendDmThumbsUp,
+  updateSendButton, resizeDmInput,
+  scrollMessagesToBottom, isDmAtBottom,
+  fetchReactionsForConversation,
+  toggleReaction, deleteMessage,
+  startEditMessage, saveEditMessage,
+  openHoverMenu, closeHoverMenu,
+  openReactionPicker, closeReactionPicker,
+  copyMessageText,
+  subscribeToThread, subscribeToPresenceAndTyping,
+  updateThreadPresenceUI, broadcastTyping,
+  subscribeToInbox,
+  computeDmUnreadTotal, updateUnreadBadge, bootstrapDmBadge,
+  dmState, _renderedMessageIds,
+  // ─── Stage 9B exports ─────────────────────────────────────────
+  // Functions used by app.js's DM page event-listener block (lines
+  // ~13270+) and notification routing.
+  openScopedEmojiPicker, insertEmojiIntoComposer, closeDmEmojiPicker,
+  openNewConvModal, openSecretChatPicker, openAddMembersModal,
+  closeConvMenu, openConvActionsMenu,
+  archiveConversation, confirmDeleteConversation, confirmLeaveGroup,
+  toggleConvMute, showGroupMembersDialog,
+  startReplyToMessage, showReplyPreview, hideReplyPreview,
+  closeMentionDropdown, maybeShowMentionDropdown, renderMentionDropdown, selectMention,
+  handleMentionKeydown,
+  closeDmAttachMenu, showDmAttachPreview, hideDmAttachPreview, sendDmAttachment,
+  fileToDataUrl, compressImageToJpeg, formatBytes,
+  closeDmGifPicker, openDmGifPicker, sendDmGif,
+  renderDmLinkPreview, hydrateDmInternalPreviews,
+  renderGlobalSearchResults, highlightSearchMatch,
+  dmIsMutualFollow, dmGetOrCreateSecretConv,
+  // Read-only IIFE export — SECRET_LOCK.isUnlocked() + .onVisibilityChange()
+  // are called from app.js's secret-tab boot wiring at line ~13127.
+  SECRET_LOCK,
+  // Accessor pairs for 9B mutable state — app.js's DM page wiring
+  // block reassigns these and ES module `let` exports are read-only on
+  // the import side. Wrap reads/writes in get/set calls.
+  // Follow-up: move the wiring block itself into a wireMessagesPage()
+  // inside messages.js, the way Stage 8 did with wireBooksPage().
+  getDmAttachMenuEl, setDmAttachMenuEl,
+  getDmPendingAttachment, setDmPendingAttachment,
+  getDmSearchTimer, setDmSearchTimer,
+  // Codex P2/#213 — page-leave cleanup. Calls supabase.removeChannel on
+  // realtime + presence subscriptions so they don't keep the connection
+  // open in the background when the user navigates away from Messages.
+  teardownActiveConversation,
+} from './messages.js';
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
@@ -175,32 +257,10 @@ function closeAllModals(selector = '.modal-backdrop') {
 // const or to a getter — both break the live binding.
 export let currentUser = null;
 
-// ── Anti-fraud telemetry state for the book reader ───────────────────────
-// Tracks the currently-open chapter so the close event can include
-// real dwell_ms + max scroll_pct. _readChapterOpenTs is 0 when no
-// chapter is open. flushReadClose() drains + resets the state and
-// emits the matching close record_read_event. Called from anywhere
-// that exits a chapter (next/prev nav, back button, route change).
-let _readChapterOpenTs = 0;
-let _readChapterOpenId = null;
-let _readChapterOpenBookId = null;
-let _readMaxScrollPct = 0;
-
-function flushReadClose(completed = null) {
-  if (!_readChapterOpenTs || !_readChapterOpenId) return;
-  const dwellMs = Date.now() - _readChapterOpenTs;
-  logRead({
-    chapterId: _readChapterOpenId,
-    bookId:    _readChapterOpenBookId,
-    dwellMs,
-    scrollPct: _readMaxScrollPct,
-    completed,
-  });
-  _readChapterOpenTs = 0;
-  _readChapterOpenId = null;
-  _readChapterOpenBookId = null;
-  _readMaxScrollPct = 0;
-}
+// (flushReadClose moved into js/books.js as part of Stage 8B — it pairs
+// with _readChapterOpenTs / _readChapterOpenId / _readChapterOpenBookId /
+// _readMaxScrollPct, which all live in books.js now. The import at the
+// top of this file makes it available to hideAllMainPages.)
 
 // ── Anti-fraud telemetry state for the video player ───────────────────────
 // Tracks the currently-playing video so we can emit play / pause / end
@@ -385,12 +445,16 @@ async function onSignedIn(user) {
   // last_seen; cost is one RPC ~100ms, doesn't block anything below.
   // See js/event-log.js for the full registerSessionDevice contract.
   registerSessionDevice();
-  // Books page: invalidate the user-scoped tab cache (Reading List) so a
-  // fresh sign-in re-fetches it instead of reusing the previous user's
-  // (or the signed-out) state.
-  if (typeof _bookTabLoaded !== 'undefined') {
-    _bookTabLoaded.readinglist = false;
-  }
+  // Books page: invalidate user-scoped state (Reading List gate +
+  // user-taste cache + recs cache) so a fresh sign-in re-fetches
+  // instead of reusing the previous user's (or the signed-out) state.
+  // The public listing pool stays — it's not user-scoped, no reason to
+  // make the new user wait through another trending fetch.
+  resetBooksSessionState();
+  // Home: clear cache + restore skeletons so admin-only UI (the inline
+  // "replace cover" pencil on home book cards) from the prior session
+  // doesn't linger into a regular user's view.
+  resetHomeSessionState();
   // Defensive: if the profile row doesn't exist yet (rare race on first sign-in),
   // keep currentProfile null so downstream code can short-circuit cleanly.
   const { data: profile, error: profileErr } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
@@ -513,6 +577,117 @@ initVideos({
   normalizeForSearch,
   sanitizeSearchQuery,
   escapeIlike,
+});
+
+// ─── books.js (Stage 8A — listing/discovery + Stage 8B — detail/reader) ─
+// Both halves of the books surface now live in books.js. Detail page +
+// chapter reader (8B) added: currentProfile getter (Editor's-Pick admin
+// gate), wallet config getter (book_bulk_unlock_discount_pct read),
+// unlock/paywall bridges (openUnlockDialog, openBulkBookUnlockDialog,
+// isUnlocked, resolveUnlockCost — all shared with feed/videos), and
+// engagement counters (tickGoalUnique, flushReadClose, logRead).
+//
+// `openBookDetail` is intentionally NOT in this object — it now lives
+// in books.js (the import at the top of the file gives us access). The
+// Stage 8A bridge that routed book cards through `_cfg.openBookDetail`
+// becomes a direct intra-module call once books.js owns the function.
+initBooks({
+  // Identity
+  getCurrentUser:           () => currentUser,
+  getCurrentProfile:        () => currentProfile,
+
+  // Navigation
+  hideAllMainPages,
+  stopVideoPlayer,
+  openProfile,
+  // (openBookDetail dropped from the bridge in Stage 8B Codex review —
+  // it lives in books.js now, intra-module call, no bridge needed.)
+
+  // Formatters + search-input sanitisers
+  formatCompact,
+  sanitizeSearchQuery,
+  escapeIlike,
+  normalizeForSearch,
+
+  // CDN URL helpers (8A — used by _renderBookCardV2)
+  _cleanCdnUrl,
+  _supabaseRatioCrop,
+
+  // ─ 8B bridges ─────────────────────────────────────────────────
+  // Wallet config — books.js reads `_cfg.getWalletConfig().X` for the
+  // bulk-unlock discount percentage. App.js owns the live object so
+  // the realtime app_config subscription keeps everyone in sync.
+  getWalletConfig:          () => _walletConfigDefaults,
+
+  // Unlock / paywall — same surface as feed.js + videos.js.
+  openUnlockDialog,
+  openBulkBookUnlockDialog,
+  isUnlocked,
+  resolveUnlockCost,
+
+  // Engagement counters + anti-fraud telemetry — chapter open ticks
+  // the "Read N chapters" goal and emits a logRead open event.
+  // flushReadClose lives inside books.js now (Stage 8B) — it owns the
+  // open-state vars so there's no bridge needed for the close emit.
+  tickGoalUnique,
+  logRead,
+});
+// Page-level DOM wiring — split into two functions:
+//   • wireBooksPage()  — listing tab clicks, See-All delegation, See-All back
+//   • wireBookReader() — back-to-books, reader anti-copy IIFE, theme-toggle
+//                        watermark sync, reader prev/next/font/back nav
+// Both stay in books.js but get called from here so app.js remains the
+// single place that decides "this runs at boot time".
+wireBooksPage();
+wireBookReader();
+
+// ─── messages.js (Stage 9A — DM core) ──────────────────────
+// Full-page Messenger UI on top of messages-dock.js's shared data layer.
+// 9A's bridge surface is narrower than feed/books because most DM logic
+// is self-contained (one canonical dmState object, internal helpers
+// call siblings directly). The bridges below cover (a) cross-feature
+// navigation (hideAllMainPages, openProfile, setSidebarActive,
+// stopVideoPlayer), (b) shared dialogs (confirmDialog, closeAllModals,
+// uploadImage), (c) shared formatters (formatCompact, linkify), and
+// (d) Stage 9B-territory helpers that still live in app.js — emoji
+// picker, attach menu, GIF picker, secret lock, reply state, conv
+// menu, group admin, search, mention dropdown. Each 9B target gets a
+// bridge entry so 9A code can call into it; when 9B lands the bridge
+// drops and the call becomes intra-module.
+initMessages({
+  // Identity
+  getCurrentUser:    () => currentUser,
+  getCurrentProfile: () => currentProfile,
+
+  // Navigation
+  hideAllMainPages,
+  openProfile,
+  setSidebarActive,
+  stopVideoPlayer,
+
+  // Shared dialogs
+  confirmDialog,
+  closeAllModals,
+  uploadImage,
+
+  // Formatters
+  formatCompact,
+  linkify,
+
+  // The ONLY 9B-era bridge that survived — firstUrlInText is shared
+  // with the general feed renderLinkPreview (which stays in app.js)
+  // so messages.js's renderDmLinkPreview can't import it without a
+  // cycle. Every other 9B bridge dropped because the function moved
+  // into messages.js alongside its callers (emoji picker, attach
+  // menu, GIF picker, secret lock IIFE, reply state, conv menu,
+  // group admin, mention dropdown, DM link preview).
+  firstUrlInText,
+  // Two more bridges caught in the Codex Stage 9 review pass:
+  //   • openReportUserModal — shared with post/video/profile reports
+  //   • renderLinkPreview   — the general feed link-preview renderer,
+  //     called by sendDmMessage's optimistic non-internal URL rendering
+  openReportUserModal,
+  renderLinkPreview,
 });
 
 // ─── feed.js (Stage 5) ──────────────────────────────────
@@ -675,10 +850,12 @@ window.shareTo = shareTo;
   // and so smoke testing surfaces any boot-order issues early.
   initMessagesDock({
     getCurrentUser:        () => currentUser,
-    openScopedEmojiPicker,      // shared picker — used by future mini-chats
+    getCurrentProfile:     () => currentProfile,  // for launcher avatar
+    openScopedEmojiPicker,      // shared picker — used by mini-chats
     openProfile,
     showMessages,               // hand-off to full-page Messages
     closeAllModals,
+    uploadImage,                // for + button + drag-drop attach
   });
 
   // Daily-goal: tick "Log in today". Dedupe key is the date so
@@ -708,15 +885,21 @@ window.shareTo = shareTo;
     // to a hash form. This keeps the URL bar clean and shareable.
     setSidebarActive('btnBook');
     const bookId = (bookChapterPath || bookOnlyPath)[1];
-    // openBookDetail will canonicalize the URL via replaceState so it
-    // matches whatever path shape it loaded under.
-    openBookDetail(bookId);
+    // openBookDetail canonicalizes the URL via replaceState so it
+    // matches whatever path shape it loaded under. The optional
+    // { chapter } hint deep-link-opens the matching chapter once the
+    // chapters list resolves (Stage 8B Codex P1 — was set as
+    // _pendingChapterFromUrl but never read).
     if (bookChapterPath) {
-      // Chapter restoration is best-effort — _openChapterFromUrl reads
-      // the path again once the book's chapter list has loaded.
-      _pendingChapterFromUrl = bookChapterPath[2];
+      openBookDetail(bookId, { chapter: bookChapterPath[2] });
+    } else {
+      openBookDetail(bookId);
     }
-    // Fall through still loads the home shell (sidebar / header / etc.).
+    // RETURN here — without this we'd fall through to the no-hash
+    // default branch below and call showHomeLanding(), which hides
+    // the detail page we just opened. (Codex P1.) Path-based deep
+    // links own the route on their own.
+    return;
   }
 
   // Check URL hash for routing
@@ -865,31 +1048,17 @@ async function signOut() {
   posts = [];
   _wallet = { coin_balance: 0, star_balance: 0 };
   _userUnlocks.clear();
-  // Reset book caches so the next user doesn't see prior browsing state.
-  if (typeof allBooksCache !== 'undefined') allBooksCache = [];
-  if (typeof allBooksRaw   !== 'undefined') allBooksRaw   = [];
-  if (typeof _booksLoadedSort  !== 'undefined') _booksLoadedSort  = null;
-  if (typeof _booksLoadedGenre !== 'undefined') _booksLoadedGenre = null;
-  // Reset the v2 tabbed-books "first-visit" flags so the personal tab
-  // (Reading List) re-fetches when the user signs back in. Otherwise it'd
-  // stay stuck showing "Sign in to see your reading list" until a hard reload.
-  if (typeof _bookTabLoaded !== 'undefined') {
-    _bookTabLoaded.foryou      = false;
-    _bookTabLoaded.discover    = false;
-    _bookTabLoaded.ranking     = false;
-    _bookTabLoaded.readinglist = false;
-  }
-  // Reset user-taste cache (book reads + likes) — would otherwise show
-  // previous user's reading interests in the Discover ribbon.
-  if (typeof _userBookTasteCache !== 'undefined') {
-    _userBookTasteCache = null;
-    _userBookTasteAt = 0;
-  }
-  // Personalised book recs cache is also user-scoped
-  if (typeof _bookRecsCache !== 'undefined') {
-    _bookRecsCache = null;
-    _bookRecsTimestamp = 0;
-  }
+  // Reset books-module session state — public listing pool + per-tab gates
+  // + user-taste cache + recs cache. clearPublic:true so memory is fully
+  // released on sign-out. (Stage 8A pre-Codex used `typeof X !== 'undefined'`
+  // guards that silently returned undefined in an ES module — Codex P1
+  // catch. Moved into the books.js owner module so the next mover
+  // doesn't have to re-derive what's user-scoped.)
+  resetBooksSessionState({ clearPublic: true });
+  // Home: same reset on sign-out so cached data + DOM (including the
+  // admin pencil) is fully released. Next showHomeLanding() will trigger
+  // a fresh loadHomeVideos and the skeletons paint immediately.
+  resetHomeSessionState();
   // Earnings/withdrawal/bookmarks page-load timestamps so the next user
   // doesn't inherit "we already loaded this" stale gates.
   ['_earningsLoadedAt', '_authorLoadedAt', '_bookmarksLoadedAt', '_dmListLoadedAt'].forEach(k => {
@@ -3172,147 +3341,6 @@ function renderLinkPreview(text) {
   } catch { return ''; }
 }
 
-// ── DM-specific link preview: Selebox-internal links get rich cards ──
-// Detects URLs of the form `…#video/UUID`, `…#book/UUID`, `…#profile/UUID`
-// and renders an in-app card with thumbnail/title/author. Async hydration
-// runs after renderMessages via hydrateDmInternalPreviews().
-function parseSeleboxInternalUrl(url) {
-  if (!url) return null;
-  const m = url.match(/#(video|book|profile)\/([a-z0-9-]+)/i);
-  if (!m) return null;
-  return { type: m[1].toLowerCase(), id: m[2] };
-}
-
-// In-memory cache so we don't refetch the same item on every render
-const _dmInternalPreviewCache = new Map(); // key = type:id, value = {title, thumb, sub}
-
-function renderDmLinkPreview(body) {
-  const url = firstUrlInText(body);
-  if (!url) return '';
-
-  // Selebox-internal: render placeholder, hydrator fills it in
-  const internal = parseSeleboxInternalUrl(url);
-  if (internal) {
-    const cacheKey = `${internal.type}:${internal.id}`;
-    const cached = _dmInternalPreviewCache.get(cacheKey);
-    return renderInternalPreviewCard(internal, cached);
-  }
-
-  // External: existing YouTube/generic preview (just wrap in dm-link-preview class for spacing)
-  const html = renderLinkPreview(body);
-  return html ? `<div class="dm-link-preview-wrap">${html}</div>` : '';
-}
-
-function renderInternalPreviewCard(internal, data) {
-  const { type, id } = internal;
-  const typeLabel = type === 'video' ? '🎬 Video' : type === 'book' ? '📖 Book' : '👤 Profile';
-  if (data) {
-    const thumb = data.thumb
-      ? `<img src="${escHTML(data.thumb)}" alt="" loading="lazy"/>`
-      : `<div class="dm-internal-placeholder">${type === 'profile' ? initials(data.title || '?') : (type === 'book' ? '📖' : '🎬')}</div>`;
-    const sub = data.sub ? `<div class="dm-internal-sub">${escHTML(data.sub)}</div>` : '';
-    return `
-      <button class="dm-internal-preview" data-internal-type="${type}" data-internal-id="${escHTML(id)}" type="button">
-        <div class="dm-internal-thumb">${thumb}</div>
-        <div class="dm-internal-meta">
-          <div class="dm-internal-platform">${typeLabel} on Selebox</div>
-          <div class="dm-internal-title">${escHTML(data.title || 'Untitled')}</div>
-          ${sub}
-        </div>
-        <div class="dm-internal-arrow">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-        </div>
-      </button>
-    `;
-  }
-  // Placeholder skeleton — gets filled in by hydrateDmInternalPreviews
-  return `
-    <button class="dm-internal-preview is-loading" data-internal-type="${type}" data-internal-id="${escHTML(id)}" data-pending="1" type="button">
-      <div class="dm-internal-thumb dm-internal-skel"></div>
-      <div class="dm-internal-meta">
-        <div class="dm-internal-platform">${typeLabel} on Selebox</div>
-        <div class="dm-internal-title dm-internal-skel-line"></div>
-        <div class="dm-internal-sub dm-internal-skel-line dm-internal-skel-line-short"></div>
-      </div>
-    </button>
-  `;
-}
-
-// Async fetch the actual content for any pending preview cards in the DOM.
-// Called after each renderMessages — only hits the network for unhydrated cards.
-async function hydrateDmInternalPreviews() {
-  const pending = document.querySelectorAll('.dm-internal-preview[data-pending="1"]');
-  if (!pending.length) return;
-
-  // Group by type for batched fetch
-  const byType = { video: new Set(), book: new Set(), profile: new Set() };
-  pending.forEach(el => {
-    const t = el.dataset.internalType;
-    const id = el.dataset.internalId;
-    if (byType[t]) byType[t].add(id);
-  });
-
-  // Fetch in parallel
-  const tasks = [];
-  if (byType.video.size) tasks.push(
-    supabase.from('videos')
-      .select('id, title, thumbnail_url, profiles!videos_uploader_id_fkey(username)')
-      .in('id', [...byType.video])
-      .then(({ data }) => (data || []).forEach(v => {
-        _dmInternalPreviewCache.set(`video:${v.id}`, {
-          title: v.title || 'Untitled video',
-          thumb: v.thumbnail_url,
-          sub: v.profiles?.username ? `by @${v.profiles.username}` : '',
-        });
-      }))
-  );
-  if (byType.book.size) tasks.push(
-    supabase.from('books')
-      .select('id, title, cover_url, profiles!books_author_id_fkey(username)')
-      .in('id', [...byType.book])
-      .then(({ data }) => (data || []).forEach(b => {
-        _dmInternalPreviewCache.set(`book:${b.id}`, {
-          title: b.title || 'Untitled book',
-          thumb: b.cover_url,
-          sub: b.profiles?.username ? `by @${b.profiles.username}` : '',
-        });
-      }))
-  );
-  if (byType.profile.size) tasks.push(
-    supabase.from('profiles')
-      .select('id, username, avatar_url, bio')
-      .in('id', [...byType.profile])
-      .then(({ data }) => (data || []).forEach(p => {
-        _dmInternalPreviewCache.set(`profile:${p.id}`, {
-          title: '@' + (p.username || 'unknown'),
-          thumb: p.avatar_url,
-          sub: (p.bio || '').slice(0, 60),
-        });
-      }))
-  );
-
-  await Promise.all(tasks);
-
-  // Snapshot scroll position BEFORE we mutate — if the user was at the bottom,
-  // we re-pin AFTER the swap so the latest message stays in view (the
-  // skeleton→full-card replacement can grow each bubble by a few px).
-  const wrap = document.getElementById('dmMessages');
-  const wasAtBottom = wrap ? isDmAtBottom(wrap) : false;
-
-  // Now swap each pending placeholder with the real card
-  pending.forEach(el => {
-    const t = el.dataset.internalType;
-    const id = el.dataset.internalId;
-    const data = _dmInternalPreviewCache.get(`${t}:${id}`);
-    if (!data) return;
-    const replacement = document.createElement('div');
-    replacement.innerHTML = renderInternalPreviewCard({ type: t, id }, data).trim();
-    el.parentNode.replaceChild(replacement.firstChild, el);
-  });
-
-  if (wasAtBottom) scrollMessagesToBottom();
-}
-
 // Click handler for internal preview cards (delegated)
 document.addEventListener('click', (e) => {
   const card = e.target.closest('.dm-internal-preview');
@@ -4541,7 +4569,7 @@ async function _resolveDearJenUploaderId() {
       .maybeSingle();
     if (data?.id) {
       _dearJenUploaderId = data.id;
-      console.log(`[home] Dear Jen uploader resolved: "${data.username}" id=${data.id}`);
+      // (Resolution-success log removed — runs once per session, no signal value.)
     } else {
       console.warn('[home] No profile matched username ILIKE "%Dear Jen%" — featured slot will stay empty');
     }
@@ -4549,6 +4577,39 @@ async function _resolveDearJenUploaderId() {
     console.warn('[home] Dear Jen profile lookup failed:', err?.message || err);
   }
   return _dearJenUploaderId;
+}
+
+// ─── Home session-state reset (called from sign-in / sign-out paths) ─────
+// Clears the 60s TTL cache + book shelf pools + in-flight promise so an
+// admin-rendered home (with the inline "replace cover" pencils) doesn't
+// linger across an auth flip into a regular user's session. Without this,
+// signing out then signing in within 60s reused the cached HTML — the
+// regular user briefly saw the previous admin's pencils because
+// `_homeDataLoadedAt` was still fresh and showHomeLanding returned early
+// without re-rendering. (Codex P1 catch.)
+function resetHomeSessionState() {
+  _homeDataLoadedAt = 0;
+  _homeDataInFlight = null;
+  _bookShelfPools.trending = [];
+  _bookShelfPools.recent = [];
+  _bookShelfPages.trending = 0;
+  _bookShelfPages.recent = 0;
+  // Restore skeletons so the next showHomeLanding renders fresh state
+  // immediately instead of carrying over the prior user's cards. The
+  // `.home-skeleton-card` class is the default look from index.html.
+  ['homeHeroVideo', 'homeFeaturedPost'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.classList.add('home-skeleton-card');
+      el.innerHTML = '';
+      el.onclick = null;
+    }
+  });
+  document.querySelectorAll('.home-video-medium, .home-video-trending, .home-book-card').forEach(el => {
+    el.classList.add('home-skeleton-card');
+    el.innerHTML = '';
+    el.onclick = null;
+  });
 }
 
 // Short-form view-count formatter — "4,213" → "4.2K", "1,580,000" → "1.6M"
@@ -4799,8 +4860,16 @@ async function _replaceBookCoverFromHome(bookId) {
     if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
 
     openCropModal(file, {
-      aspectRatio: NaN, // no aspect lock — admin keeps full aspect or freely re-crops
-      title: 'Replace book cover',
+      // Lock to 2:3 — the canonical book-cover ratio that mobile uses
+      // and that every display surface (For You, Discover, Ranking,
+      // detail page, home shelves) renders into. Pre-fix this was NaN
+      // (no aspect lock), which is why old covers landed at random
+      // ratios and the display side kept fighting CSS object-fit to
+      // make them look right. Charles flagged this directly: "this
+      // cropper always [a] problem". Locking the aspect at upload
+      // time means we never have to chase the display side again.
+      aspectRatio: 2 / 3,
+      title: 'Replace book cover (2:3)',
       onSave: async (croppedFile) => {
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) { toast('Sign in first', 'error'); return; }
@@ -5063,10 +5132,9 @@ async function loadHomeVideos({ force = false } = {}) {
     .order('views', { ascending: false })
     .limit(60);
 
-  // Recent row was removed from the home layout (May 2026). Keep a
-  // minimal stub here so the destructure below doesn't break — the
-  // resolved data is never used.
-  const recentPromise = Promise.resolve({ data: [], error: null });
+  // (Recent video row was removed from the home layout in May 2026.
+  // The recentPromise stub + matching recentRes destructure slot +
+  // render block were dead code; cleaned up in the Codex home review.)
 
   // Featured Posts — most-recent visible posts (Discover-feed
   // convention). We render up to 10 stacked vertically in the panel,
@@ -5102,10 +5170,18 @@ async function loadHomeVideos({ force = false } = {}) {
     profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
   `;
 
+  // Mirror books.js list filters — visibility gates (is_public/is_hidden)
+  // + status whitelist (ongoing/completed). Without these, a book that
+  // was unpublished server-side or hidden by moderation but still has
+  // its `published_at` set would surface on Home's Trending shelf.
+  // (Codex P1 catch.)
   const trendingBooksPromise = supabase
     .from('books')
     .select(BOOK_HOME_SELECT)
     .not('published_at', 'is', null)
+    .eq('is_public', true)
+    .eq('is_hidden', false)
+    .in('status', ['ongoing', 'completed'])
     .order('views_count', { ascending: false, nullsFirst: false })
     .limit(20); // overfetch — keep 14 after banned-author filter for 2 pages of 7
 
@@ -5123,39 +5199,28 @@ async function loadHomeVideos({ force = false } = {}) {
     .limit(80); // overfetch — need ~14 unique book_ids for 2 pages of 7
 
   _homeDataInFlight = Promise.all([
-    heroPromise, trendingPromise, recentPromise, featuredPostPromise,
+    heroPromise, trendingPromise, featuredPostPromise,
     trendingBooksPromise, recentChaptersPromise,
   ])
-    .then(async ([heroRes, trendingRes, recentRes, featuredPostRes, trendingBooksRes, recentChaptersRes]) => {
+    .then(async ([heroRes, trendingRes, featuredPostRes, trendingBooksRes, recentChaptersRes]) => {
       if (heroRes.error)     console.warn('[home] hero (Dear Jen) query failed:', heroRes.error.message);
       if (trendingRes.error) console.warn('[home] trending (views>=100) query failed:', trendingRes.error.message);
-      if (recentRes.error)   console.warn('[home] recent query failed:', recentRes.error.message);
       if (featuredPostRes.error) console.warn('[home] featured post query failed:', featuredPostRes.error.message);
       if (trendingBooksRes.error) console.warn('[home] trending books query failed:', trendingBooksRes.error.message);
       if (recentChaptersRes.error) console.warn('[home] recent chapters query failed:', recentChaptersRes.error.message);
 
-      // Quick visibility — strip these logs once the home page is
-      // observed populating reliably across browsers.
-      console.log('[home] hero pool (Dear Jen channel):', heroRes.data?.length ?? 0);
-      console.log('[home] trending pool (views>=100):', trendingRes.data?.length ?? 0);
-      console.log('[home] recent pool:', recentRes.data?.length ?? 0);
-      console.log('[home] featured post pool:', featuredPostRes.data?.length ?? 0);
-      console.log('[home] trending books pool:', trendingBooksRes.data?.length ?? 0);
-      console.log('[home] recent-chapter rows pool:', recentChaptersRes.data?.length ?? 0);
+      // (Pool-size console logs removed in the Codex home review — they
+      // were "strip once the home page is observed populating reliably"
+      // markers that overstayed their welcome.)
 
       // Drop banned-uploader rows post-fetch (RLS can't see is_banned).
       const heroPool = (heroRes.data || []).filter(v => !v.profiles?.is_banned);
       const trendingPool = (trendingRes.data || []).filter(v => !v.profiles?.is_banned);
-      const recentPool = (recentRes.data || []).filter(v => !v.profiles?.is_banned);
 
       // Pick the hero first so we can exclude it from the other slots.
       const hero = heroPool.length > 0 ? _shuffle(heroPool)[0] : null;
       const usedIds = new Set();
       if (hero) usedIds.add(hero.id);
-
-      // Recent row was removed from the home layout. Skip — recentPool
-      // is intentionally empty.
-      const recent = [];
 
       // Trending list — shuffled pool, take the first 5 that aren't
       // the hero. Variety on every refresh. 4 slots — capped at 4 after
@@ -5166,7 +5231,15 @@ async function loadHomeVideos({ force = false } = {}) {
         .slice(0, 4);
 
       // ── Render hero ──
+      // Reset to skeleton state before fill so a no-hero refresh (Dear
+      // Jen lookup failed, channel empty) doesn't keep the previous
+      // hero clickable. Same Codex P2 pattern as the Trending stack.
       const heroEl = document.getElementById('homeHeroVideo');
+      if (heroEl) {
+        heroEl.classList.add('home-skeleton-card');
+        heroEl.innerHTML = '';
+        heroEl.onclick = null;
+      }
       if (heroEl && hero) {
         heroEl.innerHTML = _renderHomeVideoCard(hero, 'hero');
         _wireHomeVideoCard(heroEl, hero);
@@ -5180,23 +5253,24 @@ async function loadHomeVideos({ force = false } = {}) {
         }
       }
 
-      // ── Render Recent row ──
-      const recentRow = document.getElementById('homeVideoMediumRow');
-      if (recentRow) {
-        const cards = recentRow.querySelectorAll('.home-video-medium');
-        cards.forEach((el, i) => {
-          const v = recent[i];
-          if (!v) return; // leave skeleton if no data for this slot
-          el.innerHTML = _renderHomeVideoCard(v, 'recent');
-          _wireHomeVideoCard(el, v);
-        });
-      }
+      // (Render Recent row block removed in the Codex home review —
+      // homeVideoMediumRow was deleted from the May 2026 redesign;
+      // this loop iterated an empty `recent` array and was a no-op.)
 
       // ── Render Trending stack ──
+      // Codex P2 — reset every slot to skeleton state BEFORE filling, so
+      // a refresh that returns fewer rows (or zero rows) clears prior
+      // cards instead of leaving them clickable. Without this, a stale
+      // card from the previous fetch would still respond to clicks even
+      // though its underlying video might no longer match the new
+      // ranking pool.
       const trendingStack = document.getElementById('homeVideoSide');
       if (trendingStack) {
         const cards = trendingStack.querySelectorAll('.home-video-trending');
         cards.forEach((el, i) => {
+          el.classList.add('home-skeleton-card');
+          el.innerHTML = '';
+          el.onclick = null;
           const v = trending[i];
           if (!v) return;
           el.innerHTML = _renderHomeVideoCard(v, 'trending');
@@ -5221,7 +5295,25 @@ async function loadHomeVideos({ force = false } = {}) {
         featuredPostEl.classList.remove('home-skeleton-card');
         featuredPosts.forEach((post) => {
           try {
-            const postCardEl = renderPost(post);
+            // Pass idScope='home' so renderPost stamps namespaced IDs
+            // (e.g. `home-comments-XYZ`, `home-sharemenu-XYZ`) instead
+            // of the unscoped variants the Discover feed uses. Without
+            // this, since #homeLanding is earlier in the DOM than
+            // #feed, document.getElementById('sharemenu-XYZ') and
+            // document.getElementById('comments-XYZ') would resolve to
+            // the Home copy and the feed's share/comment buttons would
+            // operate on a hidden element.
+            //
+            // We previously fixed this with a post-render mutation that
+            // prefixed every stamped id with `home-` — kept working but
+            // was fragile because any new id added to renderPost had to
+            // be remembered by the walker. The idScope parameter makes
+            // the namespacing structural (Codex P2 / task #232).
+            //
+            // The Home copy stays read-only — inner buttons fall through
+            // to openPostFromSearch via the outer click handler below.
+            const postCardEl = renderPost(post, 'home');
+
             // Click anywhere outside the inner interactive elements
             // opens the full post (same fallback pattern as the
             // Discover feed). Inner handlers (profile link, lightbox,
@@ -5271,11 +5363,19 @@ async function loadHomeVideos({ force = false } = {}) {
         if (orderedBookIds.length >= _BOOKS_PER_PAGE * 2 + 4) break; // a few extras for banned drop-off
       }
       if (orderedBookIds.length > 0) {
+        // Same visibility/status filter as trendingBooksPromise — a chapter
+        // can be published on a book that itself is no longer public/visible
+        // (author hid the book post-publish, mod removed it, status flipped
+        // to draft). Without the gate, Recent Update could leak such books.
+        // (Codex P1 catch.)
         const { data: recentBooksData, error: recentBooksErr } = await supabase
           .from('books')
           .select(BOOK_HOME_SELECT)
           .in('id', orderedBookIds)
-          .not('published_at', 'is', null);
+          .not('published_at', 'is', null)
+          .eq('is_public', true)
+          .eq('is_hidden', false)
+          .in('status', ['ongoing', 'completed']);
         if (recentBooksErr) {
           console.warn('[home] recent-update books query failed:', recentBooksErr.message);
         } else {
@@ -5682,7 +5782,7 @@ function updateSearchPlaceholder() {
     searchInput.value = '';
     if (topbarSearchClear) topbarSearchClear.style.display = 'none';
     setActiveSearchQuery('');
-    activeBookSearchQuery = '';
+    setActiveBookSearchQuery('');
     searchResultsEl.classList.remove('open');
   }
   _lastSearchContext = ctx;
@@ -5703,7 +5803,7 @@ searchInput.addEventListener('input', (e) => {
   }
 
   if (ctx === 'books') {
-    activeBookSearchQuery = value;
+    setActiveBookSearchQuery(value);
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(() => runBookSearch(), 200);
     searchResultsEl.classList.remove('open');
@@ -5750,13 +5850,14 @@ if (topbarSearchClear) {
       setActiveSearchQuery('');
       runSearch();
     } else if (ctx === 'books') {
-      activeBookSearchQuery = '';
+      setActiveBookSearchQuery('');
       // Close the See-All search view and return to the active tab panel.
       // (No "restore the cached grid" step — the v2 books page is tabbed.)
       const seeAll = document.getElementById('bookSeeAllView');
       if (seeAll) seeAll.style.display = 'none';
+      const activeTab = getActiveBookTab();
       document.querySelectorAll('.book-tab-panel').forEach(p => {
-        const isActive = p.dataset.bookPanel === _activeBookTab;
+        const isActive = p.dataset.bookPanel === activeTab;
         p.style.display = isActive ? '' : 'none';
         p.classList.toggle('active', isActive);
       });
@@ -7155,7 +7256,17 @@ function hideAllMainPages() {
   if (bookDetailPage) bookDetailPage.style.display = 'none';
   if (chapterReaderPage) chapterReaderPage.style.display = 'none';
   if (bookmarksPage) bookmarksPage.style.display = 'none';
-  if (messagesPage) messagesPage.style.display = 'none';
+  if (messagesPage) {
+    // Codex P2/#213 fix — tear down the active conversation's realtime
+    // + presence channels when the Messages page leaves the screen.
+    // Without this, switching to any other tab (Home, Books, etc.) left
+    // the Supabase subscriptions running in the background until the
+    // tab was closed. Safe no-op when no conversation was active.
+    if (messagesPage.style.display !== 'none') {
+      try { teardownActiveConversation(); } catch {}
+    }
+    messagesPage.style.display = 'none';
+  }
   if (storePage) storePage.style.display = 'none';
   if (earningsPage) earningsPage.style.display = 'none';
   // Sibling sentinels (live outside the page divs) — also hide
@@ -7223,1361 +7334,17 @@ function showStudio(forceReload = false) {
   }
 }
 
-// ════════════════════════════════════════
-// BOOK / READER
-// ════════════════════════════════════════
-let allBooksCache = [];     // filtered + sorted view (what's rendered)
-let allBooksRaw   = [];     // unfiltered raw books fetched from server (for fast tab switching)
-let bookGenreFilter = '';
-let bookSortBy = 'trending';
-let activeBookSearchQuery = '';
-let currentBookDetail = null;       // { book, chapters }
-let currentChapterIndex = 0;
-let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
+// (Tab switching, See-All click delegation, and See-All back wiring all
+// migrated to wireBooksPage() in js/books.js as part of Stage 8A. The
+// initBooks({…}) + wireBooksPage() pair near the top of this file owns
+// the boot-time attach now.)
 
-// ── Books page (mirrors mobile-app shape: tabbed sections of curated rows) ──
-//
-// Tabs:
-//   foryou      → Weekly Featured (editor's picks) / Fresh Reads / Completed & Excellent
-//   discover    → Genre-grouped rows of top books
-//   ranking     → Most Loved / Most Read / Trending This Week
-//   readinglist → User's bookmarks
-//
-// (Library was dropped from web — the sidebar's existing Bookmarks page
-// already plays that role; mobile app's "Library" maps to web's Bookmarks.)
-//
-// Each section has a See All link that opens an in-page list view with
-// infinite scroll, sorted/filtered the same way that section was populated.
-// ────────────────────────────────────────────────────────────────────────────
-let _activeBookTab = 'foryou';
-const _bookTabLoaded = { foryou: false, discover: false, ranking: false, readinglist: false };
-
-function showBook(force = false) {
-  hideAllMainPages();
-  bookPage.style.display = 'block';
-  // Wider canvas: 7 covers per row needs the full viewport, not the 900px
-  // home-feed column. The body class is removed by hideAllMainPages on nav.
-  document.body.classList.add('on-books');
-  stopVideoPlayer();
-  history.pushState(null, '', '#book');
-  // Hide See-All sub-view if it was open from a previous visit.
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (seeAll) seeAll.style.display = 'none';
-  // Show the active tab's panel; hide the rest.
-  document.querySelectorAll('.book-tab-panel').forEach(p => {
-    const isActive = p.dataset.bookPanel === _activeBookTab;
-    p.style.display = isActive ? '' : 'none';
-    p.classList.toggle('active', isActive);
-  });
-  loadBooksTab(_activeBookTab, force);
-}
-
-function loadBooksTab(tab, force = false) {
-  _activeBookTab = tab;
-  if (!force && _bookTabLoaded[tab]) return;
-  _bookTabLoaded[tab] = true;
-  if (tab === 'foryou')      return _loadForYouTab();
-  if (tab === 'discover')    return _loadDiscoverTab();
-  if (tab === 'ranking')     return _loadRankingTab();
-  if (tab === 'readinglist') return _loadReadingListTab();
-}
-
-// (The old fire-and-render `_loadBookSection` was removed when For You and
-// Ranking moved to the parallel-fetch + claim-by-priority pattern below.
-// `_renderBookSection` is the new render-only helper.)
-
-// ── For You tab — 10 Wattpad-inspired rails ────────────────────────────────
-//
-// Strategy: fetch all rails in parallel (each overfetches 2× for dedup
-// headroom), then walk them in priority order and CLAIM books — once a
-// book lands in an earlier rail, later rails skip it. This guarantees
-// every book appears at most once across the whole For You tab, while
-// keeping the parallel speed (no sequential wait between waves).
-//
-// Order is the priority order: curated → personal → fresh activity →
-// discovery → format → all-time → completed. Edit this array to reorder.
-const _SECTION_ROW_SIZE = 7;
-const _FORYOU_SECTIONS = [
-  { key: 'weeklyFeatured',     fetch: (n) => _fetchWeeklyFeaturedWithFallback(n),                       empty: 'No featured books yet' },
-  { key: 'recommended',        fetch: (n) => _fetchRecommendedForUser(n),                               empty: 'Read a few books to get personalised picks' },
-  { key: 'trending',           fetch: (n) => fetchSupabaseBooks(0, n, 'trending'),                      empty: 'Nothing trending yet' },
-  { key: 'freshReads',         fetch: (n) => fetchSupabaseBooks(0, n, 'recent'),                        empty: 'No fresh reads' },
-  { key: 'justUpdated',        fetch: (n) => fetchSupabaseBooks(0, n, 'just-updated'),                  empty: 'No recent updates' },
-  { key: 'hiddenGems',         fetch: (n) => _fetchHiddenGems(n),                                       empty: 'No hidden gems found' },
-  { key: 'quickReads',         fetch: (n) => _fetchQuickReads(n),                                       empty: 'No quick reads yet' },
-  { key: 'mostLoved',          fetch: (n) => fetchSupabaseBooks(0, n, 'most-liked'),                    empty: 'Nothing here yet' },
-  { key: 'mostRead',           fetch: (n) => fetchSupabaseBooks(0, n, 'most-read'),                     empty: 'Nothing here yet' },
-  { key: 'completedExcellent', fetch: (n) => fetchSupabaseBooks(0, n, 'completed'),                     empty: 'No completed books yet' },
-];
-
-async function _loadForYouTab() {
-  // Scope all DOM queries to this panel. Several keys (mostLoved / mostRead /
-  // trending) are reused by the Ranking tab — without this scope, querySelector
-  // would write to whichever copy comes first in the DOM.
-  const panel = document.getElementById('bookTabForYou');
-  if (!panel) return;
-  // Show a loading state on every track immediately so the page never looks empty.
-  for (const s of _FORYOU_SECTIONS) {
-    const track = panel.querySelector(`.book-section-track[data-track="${s.key}"]`);
-    if (track) track.innerHTML = '<div class="loading">Loading…</div>';
-  }
-
-  // Overfetch 3× — gives the dedup pass plenty of headroom even when later
-  // rails get most of their top picks claimed by earlier rails.
-  const FETCH = _SECTION_ROW_SIZE * 3;
-  const results = await Promise.all(
-    _FORYOU_SECTIONS.map(s =>
-      s.fetch(FETCH).catch(err => {
-        console.warn(`[For You] section "${s.key}" failed:`, err);
-        return [];
-      })
-    )
-  );
-
-  // Claim books in priority order with SOFT dedup:
-  //   1. First pass: take un-claimed books only (the strict dedup).
-  //   2. If a rail ends up too sparse to be useful (< MIN_PER_RAIL), top it
-  //      up with its own already-claimed books — better to repeat a great
-  //      book in a category showcase than to leave the rail empty.
-  // This is the right trade for "category" rails like Most Loved / Completed,
-  // where the rail's whole job is "show me the best of this slice", and dies
-  // visually if dedup steals all its top picks.
-  const seen = new Set();
-  const MIN_PER_RAIL = 4;
-  results.forEach((books, i) => {
-    const pool = books || [];
-    const claimed = [];
-    const claimedIds = new Set();
-    // Pass 1 — strict dedup
-    for (const b of pool) {
-      if (!b || seen.has(b.id) || claimedIds.has(b.id)) continue;
-      claimed.push(b);
-      claimedIds.add(b.id);
-      seen.add(b.id);
-      if (claimed.length >= _SECTION_ROW_SIZE) break;
-    }
-    // Pass 2 — soft fill if the rail came up short
-    if (claimed.length < MIN_PER_RAIL) {
-      for (const b of pool) {
-        if (!b || claimedIds.has(b.id)) continue;
-        claimed.push(b);
-        claimedIds.add(b.id);
-        if (claimed.length >= _SECTION_ROW_SIZE) break;
-      }
-    }
-    _renderBookSection(_FORYOU_SECTIONS[i].key, claimed, _FORYOU_SECTIONS[i].empty, panel);
-  });
-}
-
-// Render-only helper — paints already-fetched books into a section track.
-// `scope` defaults to `document` but should be the parent tab panel when
-// the same section key exists in multiple tabs (For You and Ranking both
-// use mostLoved / mostRead / trending). Without scoping, the loaders write
-// to the first matching track in DOM order — usually the wrong tab.
-function _renderBookSection(sectionKey, books, emptyMsg, scope) {
-  const root = scope || document;
-  const track = root.querySelector(`.book-section-track[data-track="${sectionKey}"]`);
-  if (!track) return;
-  if (!books || !books.length) {
-    track.innerHTML = `<div class="book-section-empty">${escHTML(emptyMsg || 'Nothing here yet')}</div>`;
-    return;
-  }
-  track.innerHTML = '';
-  books.forEach(b => track.appendChild(_renderBookCardV2(b)));
-}
-
-// Hidden Gems: high engagement RATE, not absolute likes. A book with 8 likes
-// and 12 views is more of a "gem" than one with 50 likes and 600 views — the
-// first signals "almost everyone who reads it loves it". Server filter is
-// the same (low-views floor), but we re-rank client-side by likes/views ratio
-// to pick the *true* gems out of that pool.
-async function _fetchHiddenGems(limit = _SECTION_ROW_SIZE) {
-  // Overfetch — we need headroom because we re-rank below.
-  const raw = await fetchSupabaseBooks(0, Math.max(limit * 3, 24), 'most-liked', {
-    filter: q => q.gte('likes_count', 3).lt('views_count', 500),
-  });
-  return [...raw].sort((a, b) => {
-    // Smoothed ratio: floor views at 10 so a 5-view, 5-like fluke doesn't
-    // win over a 50-view, 40-like consistent favourite.
-    const rateA = (a.likes_count || 0) / Math.max(a.views_count || 0, 10);
-    const rateB = (b.likes_count || 0) / Math.max(b.views_count || 0, 10);
-    if (rateB !== rateA) return rateB - rateA;
-    return (b.likes_count || 0) - (a.likes_count || 0);
-  }).slice(0, limit);
-}
-
-// Quick Reads: short stories ranked by likes-PER-CHAPTER so a 1-chapter
-// masterpiece beats a 5-chapter draft. Density of love > sheer count.
-async function _fetchQuickReads(limit = _SECTION_ROW_SIZE) {
-  const raw = await fetchSupabaseBooks(0, Math.max(limit * 3, 24), 'most-liked', {
-    filter: q => q.gte('chapters_count', 1).lte('chapters_count', 5),
-  });
-  return [...raw].sort((a, b) => {
-    const densityA = (a.likes_count || 0) / Math.max(a.chapters_count || 0, 1);
-    const densityB = (b.likes_count || 0) / Math.max(b.chapters_count || 0, 1);
-    if (densityB !== densityA) return densityB - densityA;
-    return (b.likes_count || 0) - (a.likes_count || 0);
-  }).slice(0, limit);
-}
-
-// Weekly Featured = editor's picks first; if too few, top up with trending
-// (last-7-day hot) and finally with high-likes recent books, so the row
-// always feels alive even before a moderator curates anything.
-async function _fetchWeeklyFeaturedWithFallback(limit = _SECTION_ROW_SIZE) {
-  const target = limit;
-  const picks = await fetchSupabaseBooks(0, target, 'editors-pick');
-  if (picks.length >= target) return picks;
-
-  // Top up with trending (most likely to feel "weekly featured" without curation)
-  const fillers = await fetchSupabaseBooks(0, target, 'trending');
-  const seen = new Set(picks.map(b => b.id));
-  for (const b of fillers) {
-    if (picks.length >= target) break;
-    if (!seen.has(b.id)) { picks.push(b); seen.add(b.id); }
-  }
-  if (picks.length >= 3) return picks;
-
-  // Final fallback: most-loved books overall — guarantees a populated row.
-  const safetyNet = await fetchSupabaseBooks(0, target, 'most-liked');
-  for (const b of safetyNet) {
-    if (picks.length >= target) break;
-    if (!seen.has(b.id)) { picks.push(b); seen.add(b.id); }
-  }
-  return picks;
-}
-
-// "Recommended for You" — picks books matching the tags/genres the user has
-// previously read or liked. For brand-new users (no signal), gracefully
-// falls back to trending so the rail is always populated.
-async function _fetchRecommendedForUser(limit = _SECTION_ROW_SIZE) {
-  if (!currentUser?.id) {
-    return await fetchSupabaseBooks(0, limit, 'most-liked');
-  }
-  try {
-    // Pull a small sample of the user's recent reads + likes to derive their taste.
-    const [{ data: reads }, { data: likes }] = await Promise.all([
-      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(20),
-      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(20),
-    ]);
-    const seedIds = [...new Set([...(reads || []), ...(likes || [])].map(r => r.book_id))];
-    if (!seedIds.length) {
-      return await fetchSupabaseBooks(0, limit, 'trending');
-    }
-    // Build a tag-weight map from those books.
-    const { data: seedBooks } = await supabase.from('books')
-      .select('genre, tags').in('id', seedIds);
-    const tagWeights = {};
-    for (const b of (seedBooks || [])) {
-      if (b.genre) tagWeights[b.genre] = (tagWeights[b.genre] || 0) + 2;
-      for (const t of (b.tags || [])) {
-        if (t) tagWeights[t] = (tagWeights[t] || 0) + 1;
-      }
-    }
-    const topTag = Object.entries(tagWeights).sort((a,b) => b[1] - a[1])[0]?.[0];
-    if (!topTag) return await fetchSupabaseBooks(0, limit, 'trending');
-
-    // Fetch top books in that taste, excluding ones the user already read/liked.
-    // Overfetch so we have headroom after excluding their seedlist.
-    const exclude = new Set(seedIds);
-    const candidates = await fetchSupabaseBooks(0, Math.max(limit * 2, 14), 'most-liked', { genre: topTag });
-    const fresh = candidates.filter(b => !exclude.has(b.id)).slice(0, limit);
-    if (fresh.length >= 3) return fresh;
-    return await fetchSupabaseBooks(0, limit, 'trending');
-  } catch (err) {
-    console.warn('Recommended-for-you failed, falling back:', err);
-    return await fetchSupabaseBooks(0, _SECTION_ROW_SIZE, 'trending');
-  }
-}
-
-// ── Ranking tab — Top-100 leaderboard with genre filter (App-aligned) ──────
-// One ranked vertical list per genre, numbered ribbons on each row. The
-// chip rail at the top filters by genre; "All" shows the platform-wide Top 100.
-// Sort is by likes_count (the canonical "Most Loved" axis) — the same axis
-// the mobile app uses for its single ranking score.
-const _RANKING_GENRES = [
-  { slug: '',                  label: 'All' },
-  { slug: 'dark-romance',      label: 'Dark Romance' },
-  { slug: 'mafia-boss',        label: 'Mafia Boss' },
-  { slug: 'billionaire',       label: 'Billionaire' },
-  { slug: 'enemies-to-lovers', label: 'Enemies to Lovers' },
-  { slug: 'forbidden-love',    label: 'Forbidden Love' },
-  { slug: 'hot-romance',       label: 'Hot Romance' },
-  { slug: 'sci-fi',            label: 'Sci-fi' },
-  { slug: 'teen-fiction',      label: 'Teen Fiction' },
-  { slug: 'general-fiction',   label: 'General Fiction' },
-];
-let _rankingActiveGenre = '';
-let _rankingSeq = 0;
-
-async function _loadRankingTab() {
-  const panel = document.getElementById('bookTabRanking');
-  if (!panel) return;
-  _renderRankGenreChips();
-  await _loadRankingForGenre(_rankingActiveGenre);
-}
-
-function _renderRankGenreChips() {
-  const wrap = document.getElementById('rankGenreChips');
-  if (!wrap) return;
-  wrap.innerHTML = '';
-  for (const g of _RANKING_GENRES) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'rank-genre-chip' + (g.slug === _rankingActiveGenre ? ' active' : '');
-    btn.dataset.genre = g.slug;
-    btn.textContent = g.label;
-    btn.addEventListener('click', () => {
-      if (g.slug === _rankingActiveGenre) return;
-      _rankingActiveGenre = g.slug;
-      // Update active chip styling without a full chip-rail rebuild
-      wrap.querySelectorAll('.rank-genre-chip').forEach(c => {
-        c.classList.toggle('active', c.dataset.genre === g.slug);
-      });
-      _loadRankingForGenre(g.slug);
-    });
-    wrap.appendChild(btn);
-  }
-}
-
-async function _loadRankingForGenre(genreSlug) {
-  const list = document.getElementById('rankList');
-  if (!list) return;
-  const seq = ++_rankingSeq;
-  list.innerHTML = '<div class="loading">Loading rankings…</div>';
-
-  let books;
-  try {
-    // Top 100 by all-time VIEWS — highest read count wins #1, matching the
-    // mobile App. Genre filter is optional (empty string = All).
-    books = await fetchSupabaseBooks(0, 100, 'most-read', genreSlug ? { genre: genreSlug } : {});
-  } catch (err) {
-    if (seq !== _rankingSeq) return;
-    console.warn('[Ranking] load failed:', err);
-    list.innerHTML = '<div class="rank-empty">Couldn\'t load rankings. Try again.</div>';
-    return;
-  }
-  if (seq !== _rankingSeq) return; // user switched genre mid-flight
-
-  if (!books.length) {
-    list.innerHTML = '<div class="rank-empty">No books in this category yet.</div>';
-    return;
-  }
-
-  list.innerHTML = '';
-  books.forEach((book, idx) => {
-    list.appendChild(_renderRankCard(book, idx + 1));
-  });
-}
-
-// Single ranked-list row — cover left with numbered ribbon, info right.
-// Mirrors the mobile app's leaderboard card: title, description, status
-// badge, paid/free badge, and an icon-stats row.
-function _renderRankCard(book, rank) {
-  const card = document.createElement('button');
-  card.type = 'button';
-  card.className = 'rank-card';
-  card.dataset.rank = String(rank);
-  card.dataset.bookId = book.id;
-  card.onclick = () => openBookDetail(book.id);
-
-  const initial = (book.title || '?').trim().charAt(0).toUpperCase();
-  const cover = book.cover_url
-    ? `<img src="${escHTML(book.cover_url)}" alt="" loading="lazy"/>`
-    : `<div class="rank-card-cover-placeholder">${escHTML(initial)}</div>`;
-
-  const isCompleted = (book.status || '').toLowerCase() === 'completed';
-  const isPaid = (book.lock_from_chapter || 0) > 0;
-
-  // Synthesised rating (same scale as the v2 card so numbers stay consistent).
-  const rating = Math.min(5, (book.likes_count || 0) / 5).toFixed(2);
-  const views  = formatCompact(book.views_count || 0);
-  const likes  = formatCompact(book.likes_count || 0);
-  const chapters = book.chapters_count || 0;
-
-  const desc = (book.description || '').trim() || 'No description yet.';
-
-  card.innerHTML = `
-    <div class="rank-card-ribbon">${rank}</div>
-    <div class="rank-card-cover">${cover}</div>
-    <div class="rank-card-body">
-      <h3 class="rank-card-title">${escHTML(book.title || 'Untitled')}</h3>
-      <p class="rank-card-desc">${escHTML(desc)}</p>
-      <div class="rank-card-badges">
-        ${isCompleted
-          ? '<span class="rank-card-badge rank-card-badge-completed">Completed</span>'
-          : '<span class="rank-card-badge rank-card-badge-ongoing">Ongoing</span>'}
-        ${isPaid ? '<span class="rank-card-badge rank-card-badge-paid">Paid</span>' : ''}
-      </div>
-      <div class="rank-card-stats">
-        <span class="rank-card-stat rank-card-stat-rating"><span class="rank-card-stat-icon">★</span>${rating}</span>
-        <span class="rank-card-stat rank-card-stat-views"><span class="rank-card-stat-icon">👁</span>${views}</span>
-        <span class="rank-card-stat rank-card-stat-likes"><span class="rank-card-stat-icon">♥</span>${likes}</span>
-        <span class="rank-card-stat"><span class="rank-card-stat-icon">📋</span>${chapters}</span>
-      </div>
-    </div>`;
-  return card;
-}
-
-// ── Discover tab — genre-grouped rows ──────────────────────────────────────
-const _DISCOVER_GENRES = [
-  'hot-romance', 'dark-romance', 'mafia-boss', 'enemies-to-lovers',
-  'forbidden-love', 'sci-fi', 'teen-fiction', 'general-fiction',
-];
-async function _loadDiscoverTab() {
-  const wrap = document.getElementById('bookDiscoverGenres');
-  if (!wrap) return;
-  // Build the section skeletons so each row gets its own loading state.
-  wrap.innerHTML = '';
-  _DISCOVER_GENRES.forEach(g => {
-    const sec = document.createElement('div');
-    sec.className = 'book-section';
-    const safeG = escHTML(g);
-    const pretty = escHTML(prettyGenre(g));
-    // Same head markup as For You / Ranking — keeps "See All" right-aligned
-    // and the title styling consistent across every tab.
-    sec.innerHTML = `
-      <div class="book-section-head">
-        <h2 class="book-section-title">${pretty}</h2>
-        <button class="book-section-see-all" data-see-all="genre:${safeG}" type="button">See All</button>
-      </div>
-      <div class="book-section-track" data-track="genre:${safeG}"><div class="loading">Loading…</div></div>`;
-    wrap.appendChild(sec);
-  });
-  // Hydrate each row in parallel.
-  await Promise.all(_DISCOVER_GENRES.map(g => _loadDiscoverGenreRow(g)));
-}
-
-async function _loadDiscoverGenreRow(genre) {
-  // Find the entire section (not just the track) so we can hide it if empty —
-  // mobile-app parity: a genre with zero books shouldn't take up space.
-  const section = document.querySelector(`.book-section-track[data-track="genre:${genre}"]`)?.closest('.book-section');
-  const track = section?.querySelector(`.book-section-track[data-track="genre:${genre}"]`);
-  if (!track) return;
-  try {
-    const books = await fetchSupabaseBooks(0, _SECTION_ROW_SIZE, 'most-liked', { genre });
-    if (!books.length) {
-      // Hide the section entirely — cleaner than an empty-state placeholder.
-      if (section) section.style.display = 'none';
-      return;
-    }
-    track.innerHTML = '';
-    books.forEach(b => track.appendChild(_renderBookCardV2(b)));
-  } catch (err) {
-    console.warn(`Discover genre "${genre}" failed:`, err);
-    track.innerHTML = '<div class="book-section-empty">Couldn\'t load.</div>';
-  }
-}
-
-// ── Reading List tab (user-scoped collection grid) ────────────────────────
-async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg, orderColumn }) {
-  const grid = document.getElementById(gridId);
-  const empty = document.getElementById(emptyId);
-  if (!grid) return;
-  if (!currentUser?.id) {
-    grid.innerHTML = `<div class="book-collection-empty"><h3>${escHTML(signedOutMsg)}</h3></div>`;
-    if (empty) empty.style.display = 'none';
-    return;
-  }
-  grid.innerHTML = '<div class="loading">Loading…</div>';
-  if (empty) empty.style.display = 'none';
-  try {
-    // Join through the user's pivot table (book_reads / book_bookmarks) so we
-    // both fetch the book row AND keep the user's own "latest first" order.
-    //
-    // CRITICAL: book_reads's timestamp column is `last_read_at`, NOT
-    // `created_at` — ordering by created_at on book_reads throws "column
-    // does not exist" and the whole tab errors out. The orderColumn arg
-    // lets each caller name its own.
-    const col = orderColumn || 'created_at';
-    const { data, error } = await supabase.from(table)
-      .select(`book_id, ${col}, books!${fkName}(${BOOK_CARD_SELECT})`)
-      .eq('user_id', currentUser.id)
-      .order(col, { ascending: false })
-      .limit(60);
-    if (error) throw error;
-    const books = _normalizeBookRows((data || []).map(r => r.books));
-    if (!books.length) {
-      grid.innerHTML = '';
-      if (empty) empty.style.display = 'block';
-      return;
-    }
-    // v2 cards (corner ribbon + rating + views) so Reading List looks
-    // identical to every other rail across the books page.
-    grid.innerHTML = '';
-    books.forEach((b, i) => {
-      const card = _renderBookCardV2(b);
-      card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
-      grid.appendChild(card);
-    });
-  } catch (err) {
-    console.error(`${table} load failed:`, err);
-    grid.innerHTML = '<div class="book-collection-empty"><p>Couldn\'t load. Try again.</p></div>';
-  }
-}
-// (Library tab loader was removed alongside its DOM. The web's existing
-// sidebar Bookmarks page is the canonical "Library" experience here.)
-function _loadReadingListTab() {
-  return _loadCollectionTab({
-    table: 'book_bookmarks',
-    fkName: 'book_bookmarks_book_id_fkey',
-    gridId: 'bookReadingListGrid',
-    emptyId: 'bookReadingListEmpty',
-    signedOutMsg: 'Sign in to see your reading list',
-    orderColumn: 'created_at',
-  });
-}
-
-// ── v2 book card (matches mobile look: cover + corner badge + stats) ───────
-function _renderBookCardV2(b) {
-  const card = document.createElement('button');
-  card.type = 'button';
-  card.className = 'book-card-v2';
-  card.dataset.bookId = b.id;
-  card.onclick = () => openBookDetail(b.id);
-
-  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
-  // Use Supabase's server-side image transform to crop the cover to a
-  // clean 2:3 (400x600 px) — same trick the home shelves use. Without
-  // this, 9:16 video-shaped source covers would render in their
-  // native tall aspect inside our 2:3 container, looking stretched.
-  // Pass-through for non-Supabase URLs (Appwrite/Bunny).
-  const croppedCover = b.cover_url
-    ? _supabaseRatioCrop(_cleanCdnUrl(b.cover_url), { width: 400, height: 600 })
-    : null;
-  const cover = croppedCover
-    ? `<img src="${escHTML(croppedCover)}" alt="" loading="lazy" onerror="this.style.display='none'"/>`
-    : `<div class="book-card-v2-cover-placeholder">${escHTML(initialLetter)}</div>`;
-  const isPaid = (b.lock_from_chapter || 0) > 0;
-  const author = b.author?.username || b.profiles?.username || 'Unknown';
-  // Visual rating that mirrors the mobile-app card. We don't have a real
-  // ratings table yet, so we synthesise a 0-5 star from likes_count using
-  // the same scale the mobile UI seems to apply: ~25 likes → 5.0 stars.
-  const rating = Math.min(5, (b.likes_count || 0) / 5).toFixed(1);
-  const views = formatCompact(b.views_count || 0);
-
-  card.innerHTML = `
-    <div class="book-card-v2-cover">
-      ${cover}
-      <div class="book-card-v2-badge ${isPaid ? 'book-card-v2-badge-paid' : 'book-card-v2-badge-free'}">${isPaid ? 'Paid' : 'Free'}</div>
-    </div>
-    <div class="book-card-v2-body">
-      <h3 class="book-card-v2-title">${escHTML(b.title || 'Untitled')}</h3>
-      <p class="book-card-v2-author">by ${escHTML(author)}</p>
-      <div class="book-card-v2-stats">
-        <span class="book-card-v2-stat book-card-v2-stat-rating">★ ${rating}</span>
-        <span class="book-card-v2-stat book-card-v2-stat-views">👁 ${views}</span>
-      </div>
-    </div>`;
-  return card;
-}
-
-// ── Tab switching (event delegation) ───────────────────────────────────────
-// One listener on the tab bar instead of one-per-button — robust if the bar
-// is ever rebuilt (e.g., by a future feature flag) and one less DOM walk.
-document.getElementById('bookTabs')?.addEventListener('click', (e) => {
-  const tabBtn = e.target.closest('.book-tab');
-  if (!tabBtn) return;
-  const t = tabBtn.dataset.bookTab;
-  if (!t || t === _activeBookTab) return;
-  _activeBookTab = t;
-  document.querySelectorAll('#bookTabs .book-tab').forEach(x => {
-    const isActive = x === tabBtn;
-    x.classList.toggle('active', isActive);
-    x.setAttribute('aria-selected', isActive ? 'true' : 'false');
-  });
-  document.querySelectorAll('.book-tab-panel').forEach(p => {
-    const isActive = p.dataset.bookPanel === t;
-    p.style.display = isActive ? '' : 'none';
-    p.classList.toggle('active', isActive);
-  });
-  // Close any open See-All sub-view when switching tabs.
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (seeAll) seeAll.style.display = 'none';
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-  loadBooksTab(t);
-  window.scrollTo({ top: 0, behavior: 'instant' });
-});
-
-// ── See All sub-view ───────────────────────────────────────────────────────
-let _seeAllSeq = 0;
-let _seeAllOffset = 0;
-let _seeAllSort = '';
-let _seeAllGenre = null;
-// Optional custom predicate for See-All — set when the section had a `filter`
-// in _SEE_ALL_MAP (Hidden Gems, Quick Reads). Threaded through to fetchSupabaseBooks.
-let _seeAllFilter = null;
-let _seeAllHasMore = false;
-let _seeAllLoading = false;
-let _seeAllObserver = null;
-
-const _SEE_ALL_MAP = {
-  weeklyFeatured:     { sort: 'editors-pick',  title: 'Weekly Featured' },
-  recommended:        { sort: 'most-liked',    title: 'Recommended for You' },
-  trending:           { sort: 'trending',      title: 'Trending This Week' },
-  freshReads:         { sort: 'recent',        title: 'Fresh Reads' },
-  justUpdated:        { sort: 'just-updated',  title: 'Just Updated' },
-  hiddenGems:         { sort: 'most-liked',    title: 'Hidden Gems',
-                        filter: q => q.gte('likes_count', 3).lt('views_count', 500) },
-  quickReads:         { sort: 'most-liked',    title: 'Quick Reads',
-                        filter: q => q.gte('chapters_count', 1).lte('chapters_count', 5) },
-  mostLoved:          { sort: 'most-liked',    title: 'Most Loved' },
-  mostRead:           { sort: 'most-read',     title: 'Most Read' },
-  completedExcellent: { sort: 'completed',     title: 'Completed & Excellent Works' },
-};
-
-document.getElementById('bookPage')?.addEventListener('click', (e) => {
-  const seeAllBtn = e.target.closest('.book-section-see-all');
-  if (!seeAllBtn) return;
-  e.preventDefault();
-  _openBookSeeAll(seeAllBtn.dataset.seeAll);
-});
-
-document.getElementById('btnBookSeeAllBack')?.addEventListener('click', () => {
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (seeAll) seeAll.style.display = 'none';
-  document.querySelectorAll('.book-tab-panel').forEach(p => {
-    const isActive = p.dataset.bookPanel === _activeBookTab;
-    p.style.display = isActive ? '' : 'none';
-    p.classList.toggle('active', isActive);
-  });
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-  window.scrollTo({ top: 0, behavior: 'instant' });
-});
-
-async function _openBookSeeAll(key) {
-  let cfg = _SEE_ALL_MAP[key];
-  let genre = null;
-  if (!cfg && key && key.startsWith('genre:')) {
-    genre = key.slice('genre:'.length).replace(/[^a-z0-9-]/gi, '');
-    cfg = { sort: 'most-liked', title: prettyGenre(genre) };
-  }
-  if (!cfg) return;
-
-  _seeAllSeq++;
-  _seeAllSort = cfg.sort;
-  _seeAllGenre = genre;
-  _seeAllFilter = cfg.filter || null;
-  _seeAllOffset = 0;
-  _seeAllHasMore = true;
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-
-  document.querySelectorAll('.book-tab-panel').forEach(p => p.style.display = 'none');
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (!seeAll) return;
-  seeAll.style.display = 'block';
-  document.getElementById('bookSeeAllTitle').textContent = cfg.title;
-  document.getElementById('bookSeeAllGrid').innerHTML = '<div class="loading">Loading…</div>';
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  if (sentinel) sentinel.style.display = 'none';
-
-  window.scrollTo({ top: 0, behavior: 'instant' });
-  await _loadMoreSeeAllBooks(true);
-}
-
-async function _loadMoreSeeAllBooks(initial = false) {
-  if (_seeAllLoading || (!_seeAllHasMore && !initial)) return;
-  _seeAllLoading = true;
-  const seq = _seeAllSeq;
-  const grid = document.getElementById('bookSeeAllGrid');
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  const limit = 40;
-
-  try {
-    // One fetcher path, three optional shapes — sort-only, genre-filtered, or
-    // predicate-filtered (Hidden Gems / Quick Reads). All three combine cleanly.
-    const opts = {};
-    if (_seeAllGenre)  opts.genre  = _seeAllGenre;
-    if (_seeAllFilter) opts.filter = _seeAllFilter;
-    const books = await fetchSupabaseBooks(_seeAllOffset, limit, _seeAllSort, opts);
-
-    if (seq !== _seeAllSeq) return; // user opened a different See-All
-
-    if (initial) grid.innerHTML = '';
-    if (initial && !books.length) {
-      grid.innerHTML = '<div class="book-collection-empty"><p>Nothing here yet.</p></div>';
-      _seeAllHasMore = false;
-      if (sentinel) sentinel.style.display = 'none';
-      return;
-    }
-
-    books.forEach((b, i) => {
-      const card = renderBookCard(b);
-      card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
-      grid.appendChild(card);
-    });
-    _seeAllOffset += books.length;
-
-    if (books.length < limit) {
-      _seeAllHasMore = false;
-      if (sentinel) {
-        sentinel.style.display = 'block';
-        sentinel.innerHTML = `<div class="book-grid-end-msg">You've reached the end · ${_seeAllOffset.toLocaleString()} books</div>`;
-      }
-      if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-    } else {
-      if (sentinel) {
-        sentinel.style.display = 'block';
-        sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
-      }
-      _setupSeeAllInfiniteScroll();
-    }
-  } catch (err) {
-    if (seq !== _seeAllSeq) return;
-    console.error('See-all load failed:', err);
-    if (initial) grid.innerHTML = '<div class="book-collection-empty"><p>Couldn\'t load. Try again.</p></div>';
-    if (sentinel) sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more.</div>';
-  } finally {
-    _seeAllLoading = false;
-  }
-}
-
-function _setupSeeAllInfiniteScroll() {
-  if (_seeAllObserver || !('IntersectionObserver' in window)) return;
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  if (!sentinel) return;
-  _seeAllObserver = new IntersectionObserver(entries => {
-    if (entries[0].isIntersecting) _loadMoreSeeAllBooks(false);
-  }, { root: null, rootMargin: '600px 0px', threshold: 0.01 });
-  _seeAllObserver.observe(sentinel);
-}
-
-// ── Pagination state for the See All sub-view (back-compat shims kept for
-// any older code paths that still reference these names) ──
-const BOOKS_PAGE_SIZE = 80;
-let _booksOffset = 0;
 let _hasMoreBooks = true;
 let _isLoadingMoreBooks = false;
 let _bookScrollObserver = null;
 let _booksSeq = 0;
 let _booksLoadedSort = null;
 let _booksLoadedGenre = null;
-
-// (loadBooks / loadMoreBooks removed — the books page is now tabbed, with
-// curated sections rendered by _loadForYouTab / _loadDiscoverTab / etc., and
-// the See-All sub-view's pagination is handled by _loadMoreSeeAllBooks.)
-
-// applyBookFilter — kept as a small helper. Currently unused by the v2 flow
-// (server-side genre filter handles it for the See-All view), but cheap to
-// keep around for future call sites.
-function applyBookFilter(list, genre) {
-  const filter = genre || '';
-  if (!filter) return [...list];
-  const filterLower = filter.toLowerCase();
-  const filterWords = filterLower.replace(/-/g, ' ');
-  return list.filter(b => {
-    if (b.genre === filter) return true;
-    return (b.tags || []).some(t => {
-      const tagLower = (t || '').toLowerCase();
-      return tagLower === filterLower || tagLower === filterWords;
-    });
-  });
-}
-
-// ── Book search (filters the currently-loaded book cache) ──
-// Searches: title, description, tags, genre, author/uploader name.
-// `#tag` prefix restricts to tag-only matches. Suspends infinite scroll while active.
-function searchBooks(query) {
-  query = (query || '').trim();
-  if (!query) return allBooksCache;
-
-  const hashtagMatch = query.match(/^#(\w+)/);
-  const isHashtag = !!hashtagMatch;
-  const cleanQuery = normalizeForSearch(isHashtag ? hashtagMatch[1] : query);
-
-  return allBooksCache.filter(b => {
-    if (isHashtag) {
-      return (b.tags || []).some(t => normalizeForSearch(t).includes(cleanQuery));
-    }
-
-    const title  = normalizeForSearch(b.title);
-    const desc   = normalizeForSearch(b.description);
-    const tags   = normalizeForSearch((b.tags || []).join(' '));
-    const genre  = normalizeForSearch((b.genre || '').replace(/-/g, ' '));
-    const author = normalizeForSearch(b.profiles?.username || b.author?.username || '');
-
-    return title.includes(cleanQuery)
-        || desc.includes(cleanQuery)
-        || tags.includes(cleanQuery)
-        || genre.includes(cleanQuery)
-        || author.includes(cleanQuery);
-  });
-}
-
-async function runBookSearch() {
-  // The v2 books page has no flat grid — search results render into the
-  // See-All sub-view, which already has its own grid + infinite scroll.
-  const grid = document.getElementById('bookSeeAllGrid');
-  const seeAllRoot = document.getElementById('bookSeeAllView');
-  const titleEl = document.getElementById('bookSeeAllTitle');
-  if (!grid || !seeAllRoot || !titleEl) return;
-
-  // Defensive: only render into the books page when it's actually visible.
-  // (getSearchContext now restricts books-context to the listing page, but
-  // this is a belt-and-braces check in case future code changes that.)
-  if (bookPage && bookPage.style.display === 'none') return;
-
-  if (!activeBookSearchQuery.trim()) {
-    // Empty query → close the search view and return to the active tab panel
-    seeAllRoot.style.display = 'none';
-    document.querySelectorAll('.book-tab-panel').forEach(p => {
-      const isActive = p.dataset.bookPanel === _activeBookTab;
-      p.style.display = isActive ? '' : 'none';
-      p.classList.toggle('active', isActive);
-    });
-    return;
-  }
-
-  // Show the See-All view and treat search as its own kind of "list"
-  document.querySelectorAll('.book-tab-panel').forEach(p => p.style.display = 'none');
-  seeAllRoot.style.display = 'block';
-  titleEl.textContent = `Search: "${activeBookSearchQuery}"`;
-  // Disable any pending see-all infinite scroll — search isn't paginated here
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-  _seeAllHasMore = false;
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  if (sentinel) sentinel.style.display = 'none';
-  grid.innerHTML = '<div class="loading">Searching books…</div>';
-
-  const savedQuery = activeBookSearchQuery;
-  const { books: serverHits, writers } = await fetchBooksServerSearch(savedQuery)
-    .catch(() => ({ books: [], writers: [] }));
-
-  // Stale-query guard: ignore if user kept typing
-  if (activeBookSearchQuery !== savedQuery) return;
-
-  grid.innerHTML = '';
-
-  // ── Writer channel cards (YouTube-style, above the books) ──
-  if (writers && writers.length) {
-    const header = document.createElement('div');
-    header.className = 'video-creators-header';
-    header.style.gridColumn = '1 / -1';
-    header.textContent = writers.length === 1 ? 'Writer' : 'Writers';
-    grid.appendChild(header);
-
-    const row = document.createElement('div');
-    row.className = 'video-creators-row';
-    row.style.gridColumn = '1 / -1';
-    writers.forEach(w => row.appendChild(renderWriterChannelCard(w)));
-    grid.appendChild(row);
-
-    if (serverHits.length) {
-      const booksHeader = document.createElement('div');
-      booksHeader.className = 'video-creators-header';
-      booksHeader.style.gridColumn = '1 / -1';
-      booksHeader.textContent = 'Books';
-      grid.appendChild(booksHeader);
-    }
-  }
-
-  if (!serverHits.length) {
-    const emptyEl = document.createElement('div');
-    emptyEl.className = 'book-collection-empty';
-    emptyEl.style.gridColumn = '1 / -1';
-    emptyEl.innerHTML = (writers && writers.length)
-      ? '<h3>No books found</h3><p>The writers above match — open one of their pages to see their work.</p>'
-      : '<h3>No books found</h3><p>Try a different keyword, author, or #tag.</p>';
-    grid.appendChild(emptyEl);
-    return;
-  }
-
-  serverHits.forEach((b, i) => {
-    const card = renderBookCard(b);
-    card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
-    grid.appendChild(card);
-  });
-}
-
-// Writer channel card — same shape as the video creator card so the books
-// page reuses the existing .creator-channel-card styling.
-function renderWriterChannelCard(writer) {
-  const card = document.createElement('button');
-  card.className = 'creator-channel-card';
-  card.type = 'button';
-  card.onclick = () => openProfile(writer.id);
-
-  const initial = (writer.username || '?').trim().charAt(0).toUpperCase();
-  const avatar = writer.avatar_url
-    ? `<img src="${escHTML(writer.avatar_url)}" alt=""/>`
-    : `<div class="creator-channel-avatar-placeholder">${initial}</div>`;
-
-  const booksLabel = writer.books_count === 1 ? '1 book' : `${(writer.books_count || 0).toLocaleString()} books`;
-
-  card.innerHTML = `
-    <div class="creator-channel-avatar">${avatar}</div>
-    <div class="creator-channel-info">
-      <div class="creator-channel-name">${escHTML(writer.username || 'Unknown')}</div>
-      <div class="creator-channel-meta">${booksLabel}</div>
-      ${writer.bio ? `<div class="creator-channel-bio">${escHTML(writer.bio.slice(0, 90))}${writer.bio.length > 90 ? '…' : ''}</div>` : ''}
-    </div>
-    <div class="creator-channel-cta">View profile →</div>
-  `;
-  return card;
-}
-
-// (setupBooksInfiniteScroll removed — the See-All sub-view uses
-// _setupSeeAllInfiniteScroll instead. Other tabs render fixed-size sections.)
-
-// ── Supabase books ──
-// ────────────────────────────────────────────────────────────────────────
-// Adaptive book chip rail — YouTube-style: tags from user's reads + platform popular
-// Re-renders on each books-page open so it adapts as reading habits evolve.
-// ────────────────────────────────────────────────────────────────────────
-const PRETTY_GENRE = {
-  'hot-romance':         'Hot Romance',
-  'dark-romance':        'Dark Romance',
-  'mafia-boss':          'Mafia Boss',
-  'enemies-to-lovers':   'Enemies to Lovers',
-  'forbidden-love':      'Forbidden Love',
-  'arranged-marriage':   'Arranged Marriage',
-  'contract-marriage':   'Contract Marriage',
-  'second-chance':       'Second Chance',
-  'boy-love-bl':         'Boy Love',
-  'girl-love-gl':        'Girl Love',
-  'sci-fi':              'Sci-fi',
-  'teen-fiction':        'Teen Fiction',
-  'general-fiction':     'General Fiction',
-  'slice-of-life':       'Slice of Life',
-  'one-shot-story':      'One Shot Story',
-  'valentines-special':  'Valentines Special',
-};
-function prettyGenre(slug) {
-  if (!slug) return '';
-  if (PRETTY_GENRE[slug]) return PRETTY_GENRE[slug];
-  return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
-
-// Cache for user's book reading taste (reads + likes) — used by both
-// renderBookChips() and loadBookRecommendations() in the same page load.
-// 60-second TTL so stale-but-fresh-enough data doesn't trigger 2 round-trips.
-let _userBookTasteCache = null;
-let _userBookTasteAt = 0;
-async function getUserBookTaste() {
-  if (!currentUser) return { reads: [], likes: [] };
-  const now = Date.now();
-  if (_userBookTasteCache && (now - _userBookTasteAt) < 60_000) {
-    return _userBookTasteCache;
-  }
-  const [{ data: reads }, { data: likes }] = await Promise.all([
-    supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(50),
-    supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
-  ]);
-  _userBookTasteCache = { reads: reads || [], likes: likes || [] };
-  _userBookTasteAt = now;
-  return _userBookTasteCache;
-}
-
-async function renderBookChips() {
-  const wrap = document.getElementById('bookGenreChips');
-  if (!wrap) return;
-
-  // Build a candidate set from BOTH platform popularity + user's reading taste
-  let userTags = {};
-  let platformGenres = {};
-
-  // Platform popularity — count genres + tags across the books we already loaded
-  const allLoadedBooks = (typeof allBooks !== 'undefined' && Array.isArray(allBooks))
-    ? allBooks
-    : (Array.isArray(window._latestBooksList) ? window._latestBooksList : []);
-  for (const b of allLoadedBooks) {
-    if (b.genre) platformGenres[b.genre] = (platformGenres[b.genre] || 0) + 1;
-    for (const t of (b.tags || [])) {
-      const slug = String(t).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      if (slug) platformGenres[slug] = (platformGenres[slug] || 0) + 1;
-    }
-  }
-
-  // User reading taste (only for signed-in users)
-  if (currentUser) {
-    try {
-      const { reads, likes } = await getUserBookTaste();
-      const seedIds = [...new Set([...reads, ...likes].map(r => r.book_id))].slice(0, 30);
-      if (seedIds.length) {
-        const { data: seedBooks } = await supabase
-          .from('books').select('id, genre, tags').in('id', seedIds);
-        for (const b of (seedBooks || [])) {
-          if (b.genre) userTags[b.genre] = (userTags[b.genre] || 0) + 2;
-          for (const t of (b.tags || [])) {
-            const slug = String(t).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-            if (slug) userTags[slug] = (userTags[slug] || 0) + 1;
-          }
-        }
-      }
-    } catch {}
-  }
-
-  const userRanked = Object.entries(userTags)
-    .filter(([t]) => platformGenres[t]) // only show tags that have content
-    .sort((a, b) => b[1] - a[1])
-    .map(([t]) => t);
-
-  const platformRanked = Object.entries(platformGenres)
-    .sort((a, b) => b[1] - a[1])
-    .map(([t]) => t);
-
-  // Blend: 70% from interest, 30% platform discovery (or 100% platform for new users)
-  const limit = 22;
-  let chips = [];
-  if (userRanked.length) {
-    const userQuota = Math.ceil(limit * 0.7);
-    const seen = new Set(userRanked.slice(0, userQuota));
-    for (const t of platformRanked) { if (seen.size >= limit) break; seen.add(t); }
-    chips = [...seen].slice(0, limit);
-  } else {
-    chips = platformRanked.slice(0, limit);
-  }
-
-  // Fallback if we still have nothing (e.g. on first page open before any books load)
-  if (!chips.length) {
-    chips = ['romance', 'hot-romance', 'dark-romance', 'mafia-boss', 'billionaire', 'werewolf', 'vampire', 'thriller', 'horror', 'fantasy', 'comedy', 'drama'];
-  }
-
-  // Render — "All" chip first, then adaptive list
-  const activeAll = !bookGenreFilter ? 'active' : '';
-  let html = `<button class="book-chip ${activeAll}" data-genre="">All</button>`;
-  html += chips.map(g =>
-    `<button class="book-chip ${g === bookGenreFilter ? 'active' : ''}" data-genre="${escHTML(g)}">${escHTML(prettyGenre(g))}</button>`
-  ).join('');
-  wrap.innerHTML = html;
-}
-
-let _bookRecsCache = null;
-let _bookRecsTimestamp = 0;
-const BOOK_RECS_TTL = 5 * 60 * 1000; // 5 min
-
-async function loadBookRecommendations() {
-  const rail = document.getElementById('bookRecommendRail');
-  const track = document.getElementById('bookRecommendTrack');
-  const sub   = document.getElementById('bookRecommendSub');
-  if (!rail || !track) return;
-
-  // Only show for signed-in users
-  if (!currentUser) { rail.style.display = 'none'; return; }
-
-  // Use cache if fresh
-  if (_bookRecsCache && (Date.now() - _bookRecsTimestamp) < BOOK_RECS_TTL) {
-    renderBookRecsRail(_bookRecsCache);
-    return;
-  }
-
-  try {
-    // Pull user's reading taste from shared cache (avoids duplicate fetch
-    // since renderBookChips() already pulled this seconds ago)
-    const { reads, likes } = await getUserBookTaste();
-    const readIds  = new Set(reads.map(r => r.book_id));
-    const likedIds = new Set(likes.map(l => l.book_id));
-    const seedIds  = [...new Set([...readIds, ...likedIds])].slice(0, 30);
-
-    // Fetch a candidate pool (most recent public books)
-    const { data: pool } = await supabase
-      .from('books')
-      .select(`
-        id, title, cover_url, genre, tags,
-        views_count, likes_count, chapters_count,
-        author_id, created_at,
-        profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
-      `)
-      .eq('is_public', true)
-      .eq('is_hidden', false)
-      .order('created_at', { ascending: false })
-      .limit(200);
-
-    if (!pool || !pool.length) { rail.style.display = 'none'; return; }
-
-    // Build interest profile from seed books (tags + authors)
-    let tagWeights = {};
-    let authorWeights = {};
-    if (seedIds.length) {
-      const { data: seedBooks } = await supabase
-        .from('books')
-        .select('id, genre, tags, author_id')
-        .in('id', seedIds);
-      for (const sb of (seedBooks || [])) {
-        for (const t of (sb.tags || [])) tagWeights[t] = (tagWeights[t] || 0) + 1;
-        if (sb.genre) tagWeights[sb.genre] = (tagWeights[sb.genre] || 0) + 1;
-        if (sb.author_id) authorWeights[sb.author_id] = (authorWeights[sb.author_id] || 0) + 1;
-      }
-    }
-
-    const hasInterest = Object.keys(tagWeights).length > 0;
-
-    // Score each candidate
-    const scored = pool
-      .filter(b => !readIds.has(b.id))                  // skip already-read
-      .filter(b => !b.profiles?.is_banned)              // skip banned authors
-      .map(b => {
-        let score = 0;
-        // Tag overlap with user's interests
-        for (const t of (b.tags || [])) {
-          if (tagWeights[t]) score += tagWeights[t] * 12;
-        }
-        // Genre match
-        if (b.genre && tagWeights[b.genre]) score += tagWeights[b.genre] * 10;
-        // Same-author bonus
-        if (authorWeights[b.author_id]) score += authorWeights[b.author_id] * 18;
-        // Engagement boost
-        score += Math.log10((b.views_count || 0) + 1) * 1.5;
-        score += Math.log10((b.likes_count || 0) + 1) * 2;
-        // Recency boost (last 60 days)
-        const ageDays = (Date.now() - new Date(b.created_at).getTime()) / 86400000;
-        if (ageDays < 60) score += Math.max(0, 6 - ageDays / 10);
-        // Random freshness
-        score += Math.random() * 4;
-        return { book: b, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 12)
-      .map(x => x.book);
-
-    _bookRecsCache = scored;
-    _bookRecsTimestamp = Date.now();
-
-    if (sub) sub.textContent = hasInterest ? 'Based on your reading taste' : 'Trending this week';
-    renderBookRecsRail(scored);
-  } catch (e) {
-    console.warn('[recs] failed', e);
-    rail.style.display = 'none';
-  }
-}
-
-function renderBookRecsRail(books) {
-  const rail = document.getElementById('bookRecommendRail');
-  const track = document.getElementById('bookRecommendTrack');
-  if (!rail || !track) return;
-  if (!books || !books.length) { rail.style.display = 'none'; return; }
-
-  track.innerHTML = '';
-  for (const b of books) {
-    const a = document.createElement('a');
-    a.href = `#book/${b.id}`;
-    a.className = 'recommend-card';
-    a.onclick = (e) => { e.preventDefault(); openBookDetail(b.id, b); };
-
-    const initial = (b.title || '?').trim().charAt(0).toUpperCase();
-    a.innerHTML = `
-      <div class="recommend-card-cover">
-        ${b.cover_url
-          ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
-          : `<div class="recommend-card-cover-empty">${escHTML(initial)}</div>`}
-      </div>
-      <div class="recommend-card-title">${escHTML(b.title || 'Untitled')}</div>
-      <div class="recommend-card-author">${escHTML(b.profiles?.username || 'Unknown')}</div>
-      <div class="recommend-card-meta">${(b.views_count || 0).toLocaleString()} reads · ${(b.likes_count || 0).toLocaleString()} ♥</div>
-    `;
-    track.appendChild(a);
-  }
-  rail.style.display = 'block';
-}
-
-// ── Book row helpers ──────────────────────────────────────────────────────
-// One source of truth for the columns the UI needs from the books table.
-// Used by every fetcher so adding/removing a column is a one-line change.
-const BOOK_LIST_SELECT = `
-  id, title, description, cover_url, genre, tags, status,
-  views_count, likes_count, chapters_count, word_count,
-  views_last_7d, likes_last_7d, trending_score,
-  is_editors_pick, editors_pick_at, editors_pick_note,
-  lock_from_chapter, published_at, created_at, author_id,
-  profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
-`;
-// Slimmer projection — used by the home-feed dropdown and other places where
-// only cover/title/author are needed.
-const BOOK_CARD_SELECT = `
-  id, title, cover_url, genre, status, views_count, likes_count,
-  chapters_count, lock_from_chapter, published_at, created_at, author_id,
-  profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
-`;
-
-// Normalise a raw row into the shape the rest of the app expects.
-// Filters out banned-author rows; returns null for those (caller filters).
-function _normalizeBookRow(row) {
-  if (!row) return null;
-  if (row.profiles?.is_banned) return null;
-  return {
-    ...row,
-    $id: 'sb_' + row.id,
-    author: row.profiles
-      ? { id: row.profiles.id, username: row.profiles.username, avatar: row.profiles.avatar_url }
-      : null,
-  };
-}
-function _normalizeBookRows(rows) {
-  return (rows || []).map(_normalizeBookRow).filter(Boolean);
-}
-
-// Server-side sort matrix. Each entry returns the chained query so callers
-// can range() it. Keeping the per-sort logic centralised here means
-// every code path that lists books paginates the same axis as page 1.
-const _BOOK_SORT_PIPELINES = {
-  // Trending: precomputed by refresh_book_trending_stats() (indexed).
-  trending:      (q) => q.order('trending_score', { ascending: false, nullsFirst: false })
-                          .order('likes_count',  { ascending: false })
-                          .order('created_at',   { ascending: false }),
-  recent:        (q) => q.order('published_at', { ascending: false, nullsFirst: false })
-                          .order('created_at',  { ascending: false }),
-  'most-liked':  (q) => q.order('likes_count', { ascending: false })
-                          .order('created_at', { ascending: false }),
-  'most-read':   (q) => q.order('views_count', { ascending: false })
-                          .order('created_at', { ascending: false }),
-  // Completed: filter then sort (likes_count index covers exactly this case).
-  completed:     (q) => q.eq('status', 'completed').order('likes_count', { ascending: false }),
-  // Editor's Pick: filter then sort by editors_pick_at (indexed).
-  'editors-pick':(q) => q.eq('is_editors_pick', true).order('editors_pick_at', { ascending: false, nullsFirst: false }),
-  // Just Updated: surfaces ongoing series with recent chapter drops.
-  'just-updated':(q) => q.order('updated_at', { ascending: false, nullsFirst: false })
-                          .order('created_at', { ascending: false }),
-};
-
-// Single fetcher for every browse-style book list. Supports server-side
-// sort (via _BOOK_SORT_PIPELINES) and an optional genre filter that matches
-// against either the genre column or the tags array.
-//
-//   fetchSupabaseBooks(0, 12, 'most-liked')                  → top 12 by likes
-//   fetchSupabaseBooks(0, 12, 'most-liked', { genre: 'sci-fi' }) → top 12 sci-fi
-async function fetchSupabaseBooks(offset = 0, limit = 80, sortBy = bookSortBy, opts = {}) {
-  try {
-    let q = supabase.from('books').select(BOOK_LIST_SELECT)
-      .eq('is_public', true).eq('is_hidden', false);
-
-    // The Completed and Editor's-Pick pipelines apply their own status filter,
-    // so only add the public-status filter for the OTHER sorts (otherwise
-    // .in('status', [...]) would override .eq('status', 'completed')).
-    if (sortBy !== 'completed' && sortBy !== 'editors-pick') {
-      q = q.in('status', ['ongoing', 'completed']);
-    }
-
-    // Optional genre filter — matches either the dedicated `genre` column or
-    // a tag in the `tags` array. Strip anything but [a-z0-9-] defensively so
-    // a malformed genre slug can't break the .or() clause.
-    if (opts.genre) {
-      const safeG = String(opts.genre).toLowerCase().replace(/[^a-z0-9-]/g, '');
-      if (safeG) q = q.or(`genre.eq.${safeG},tags.cs.{${safeG}}`);
-    }
-
-    // Optional custom predicate — caller-supplied function that adds extra
-    // filters before the sort + range are applied. Used by Hidden Gems
-    // (low-views + min-likes) and Quick Reads (short chapter count) so
-    // those callers don't need their own duplicated query function.
-    if (typeof opts.filter === 'function') q = opts.filter(q);
-
-    const pipeline = _BOOK_SORT_PIPELINES[sortBy] || _BOOK_SORT_PIPELINES.trending;
-    const { data, error } = await pipeline(q).range(offset, offset + limit - 1);
-    if (error) {
-      console.error('Supabase books fetch error:', error);
-      return [];
-    }
-    return _normalizeBookRows(data);
-  } catch (err) {
-    console.error('fetchSupabaseBooks failed:', err);
-    return [];
-  }
-}
-
-// Server-side book search — hits both content (title/description) AND
-// matching author usernames. Used as a fallback when the local cache misses
-// because pagination only loaded the first 80 books.
-async function fetchBooksServerSearch(query) {
-  // Sanitize FIRST — strips comma/parens/quotes that break PostgREST .or() —
-  // THEN escape ilike wildcards. Without sanitize, queries like `Romeo, Juliet`
-  // or `What's next?` returned 0 rows because the OR clause was malformed.
-  const safeQ = sanitizeSearchQuery(query);
-  if (!safeQ) return { books: [], writers: [] };
-  const q = escapeIlike(safeQ);
-  try {
-    // Two parallel queries: content match + author username match
-    const [contentRes, authorRes] = await Promise.all([
-      supabase.from('books').select(BOOK_LIST_SELECT)
-        .eq('is_public', true).eq('is_hidden', false)
-        .in('status', ['ongoing', 'completed'])
-        .or(`title.ilike.%${q}%,description.ilike.%${q}%`)
-        .limit(40),
-      // Find matching author profiles (also surfaced as the YouTube-style writers row)
-      supabase.from('profiles')
-        .select('id, username, avatar_url, bio, is_banned')
-        .ilike('username', `%${q}%`).eq('is_banned', false)
-        .limit(8)
-    ]);
-
-    let authorBooks = [];
-    const matchingWriters = authorRes.data || [];
-    if (matchingWriters.length) {
-      const ids = matchingWriters.map(p => p.id);
-      const { data } = await supabase.from('books').select(BOOK_LIST_SELECT)
-        .in('author_id', ids)
-        .eq('is_public', true).eq('is_hidden', false)
-        .in('status', ['ongoing', 'completed'])
-        .limit(40);
-      authorBooks = data || [];
-    }
-
-    // Merge + dedupe + normalise (drops banned-author rows along the way).
-    const seen = new Set();
-    const merged = [...(contentRes.data || []), ...authorBooks].filter(b => {
-      if (seen.has(b.id)) return false;
-      seen.add(b.id);
-      return true;
-    });
-    const books = _normalizeBookRows(merged);
-
-    // Decorate writers with their book count from the returned set
-    const writerStats = new Map();
-    for (const b of books) {
-      if (!b.author?.id) continue;
-      writerStats.set(b.author.id, (writerStats.get(b.author.id) || 0) + 1);
-    }
-    const writers = matchingWriters.map(p => ({
-      id: p.id,
-      username: p.username,
-      avatar_url: p.avatar_url,
-      bio: p.bio || '',
-      books_count: writerStats.get(p.id) || 0,
-    }));
-    return { books, writers };
-  } catch (err) {
-    console.warn('fetchBooksServerSearch failed:', err);
-    return { books: [], writers: [] };
-  }
-}
-
-// (renderBooks removed — the v2 books page renders into per-tab DOM targets:
-// section tracks for For You/Discover/Ranking, a dedicated grid for the
-// Reading List collection, and bookSeeAllGrid for the See-All sub-view.)
-
-function renderBookCard(b) {
-  const card = document.createElement('button');
-  card.className = 'book-card';
-  card.dataset.bookId = b.id;
-  card.onclick = () => openBookDetail(b.id);
-
-  const authorName = b.author?.username || 'Unknown author';
-  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
-  const cover = b.cover_url
-    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=&quot;book-cover-placeholder&quot;>${initialLetter}</div>'"/>`
-    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
-  const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
-
-  const editorsPickBadge = b.is_editors_pick
-    ? `<div class="book-editors-pick-badge" title="${escHTML(b.editors_pick_note || 'Editor\'s Pick')}">
-         <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-         Editor's Pick
-       </div>`
-    : '';
-
-  card.innerHTML = `
-    <div class="book-cover">
-      ${cover}
-      ${editorsPickBadge}
-      <div class="book-stats">
-        <span title="Views" data-stat="views">👁 ${formatCompact(b.views_count || 0)}</span>
-        <span title="Likes" data-stat="likes">❤ ${formatCompact(b.likes_count || 0)}</span>
-      </div>
-    </div>
-    ${genreLabel ? `<div class="book-card-genre">${escHTML(genreLabel)}</div>` : ''}
-    <h3 class="book-card-title">${escHTML(b.title || 'Untitled')}</h3>
-    <p class="book-card-author">by ${escHTML(authorName)}</p>
-  `;
-  return card;
-}
 
 // Format a number compactly: 1234 → "1.2k", 1500000 → "1.5M"
 function formatCompact(n) {
@@ -8587,792 +7354,15 @@ function formatCompact(n) {
   return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
 }
 
-// (Old genre-chip + sort-select handlers removed alongside their DOM. The v2
-// books page expresses the same intent through tabs and curated sections —
-// "trending", "recent", "most-liked" etc. live in _SEE_ALL_MAP for the See-All
-// list view.)
+// (`_pendingChapterFromUrl` removed in Stage 8B Codex review — it was
+// set by the boot router + popstate handler but never read. Deep-linked
+// chapters are now threaded through openBookDetail(bookId, { chapter })
+// instead.)
 
-// ── Book detail page ──
-// Stale-fetch guard so rapid taps (open A → tap B before A loads) don't
-// render whichever happens to resolve last. Captures the bookId in a token
-// and only renders if it still matches when the queries return.
-let _openBookToken = null;
-// Set by the boot-time router when the inbound URL was
-// /books/<id>/chapter/<n>. Read once the chapter list has loaded so the
-// chapter is auto-opened. Cleared after use.
-let _pendingChapterFromUrl = null;
-export async function openBookDetail(bookId) {
-  hideAllMainPages();
-  bookDetailPage.style.display = 'block';
-
-  // Path-based, shareable, deep-link-friendly URL. Use replaceState when
-  // the URL bar already shows the same book (e.g. boot-time inbound) so
-  // we don't add a duplicate history entry; pushState otherwise. Either
-  // way the result is `/books/<id>`, which mobile's Universal Links /
-  // App Links pick up correctly. The legacy hash form (#book/<id>) only
-  // appears as an inbound rewrite from old links — once we hit
-  // openBookDetail we always upgrade to the canonical path form.
-  const targetPath = `/books/${bookId}`;
-  const samePath = (location.pathname || '') === targetPath;
-  if (samePath) {
-    history.replaceState(null, '', targetPath);
-  } else {
-    history.pushState(null, '', targetPath);
-  }
-
-  const content = document.getElementById('bookDetailContent');
-  content.innerHTML = '<div class="loading">Loading book...</div>';
-
-  // Only the LATEST openBookDetail call gets to render. Earlier ones bail
-  // when their token no longer matches — fixes the "open A, tap B quickly,
-  // see A's cover with B's chapters" race.
-  const token = bookId;
-  _openBookToken = token;
-
-  // All books are now Supabase. Bare UUID or "sb_<uuid>" — strip the prefix if present.
-  const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
-
-  // Detect ID shape — Supabase UUIDs are 36 chars with dashes
-  // (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); Appwrite hex IDs are 20 hex
-  // chars with no dashes. Mobile users share Appwrite-shaped IDs via
-  // WhatsApp/SMS because the mobile app still has books on Appwrite.
-  // Web migrated books to Supabase but kept legacy_appwrite_id, so we
-  // query the right column for whichever shape we see.
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(realId);
-  const bookFilterColumn = isUuid ? 'id' : 'legacy_appwrite_id';
-
-  let supBook, supChapters;
-  try {
-    const bookRes = await supabase.from('books')
-      .select(`
-        id, title, description, cover_url, genre, tags,
-        views_count, likes_count, chapters_count, word_count, status,
-        published_at, created_at, lock_from_chapter, locked_at,
-        author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
-      `)
-      .eq(bookFilterColumn, realId)
-      .single();
-    if (bookRes.error || !bookRes.data) throw new Error(bookRes.error?.message || 'Book not found');
-    supBook = bookRes.data;
-
-    // Chapters are always keyed by the book's Supabase UUID, regardless
-    // of which shape we used to find the book.
-    const chRes = await supabase.from('chapters')
-      .select('id, chapter_number, title, word_count, views_count, is_published, is_locked, unlock_cost_coins, unlock_cost_stars, created_at')
-      .eq('book_id', supBook.id)
-      .eq('is_published', true)
-      .order('chapter_number', { ascending: true });
-    if (chRes.error) console.warn('Failed to load chapters:', chRes.error);
-    supChapters = chRes.data;
-  } catch (err) {
-    if (_openBookToken !== token) return; // user already tapped a different book
-    console.error('openBookDetail failed:', err);
-    const friendly = /timeout|canceling statement/i.test(err.message || '')
-      ? 'This book is taking too long to load. Tap to retry.'
-      : /not found/i.test(err.message || '')
-      ? 'This book isn\'t available — it may have been unpublished.'
-      : 'Couldn\'t load this book. Tap to retry.';
-    content.innerHTML = `<div class="loading" id="bookRetry" style="cursor:pointer">${escHTML(friendly)}</div>`;
-    document.getElementById('bookRetry')?.addEventListener('click', () => openBookDetail(bookId));
-    return;
-  }
-
-  if (_openBookToken !== token) return; // stale — user tapped a different book
-
-  currentBookDetail = { book: supBook, chapters: supChapters || [] };
-  renderBookDetail();
-}
-
-function renderBookDetail() {
-  if (!currentBookDetail) return;
-  const { book, chapters } = currentBookDetail;
-  const content = document.getElementById('bookDetailContent');
-
-  const authorName = book.profiles?.username || 'Unknown';
-  const authorAvatar = book.profiles?.avatar_url;
-  const initialLetter = (book.title || '?').trim().charAt(0).toUpperCase();
-  const cover = book.cover_url
-    ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
-    : `<div class="book-cover-placeholder" style="width:100%;height:100%">${initialLetter}</div>`;
-
-  const tagsHtml = (book.tags || []).map(t =>
-    `<button class="book-chip" data-tag="${escHTML(t)}" type="button">${escHTML(t)}</button>`
-  ).join('');
-
-  // Single-source lock-detection helper. Used by both the per-row lock badge
-  // AND the bulk-unlock CTA cost calculation, so the row icons and the
-  // "Unlock all N chapters" count CANNOT diverge by construction. Two-signal
-  // logic mirrors mobile's BookUnlocksService.isChapterLockedForDisplay:
-  //
-  //   • Book-level threshold: book.lock_from_chapter is set AND
-  //     chapter.chapter_number >= lock_from_chapter
-  //   • Per-chapter override:  chapter.is_locked === true
-  //
-  // …minus already-unlocked chapters (the user has already paid for them, no
-  // lock should display). No owner-bypass here — author + reader both see
-  // locks, matching what mobile now does too.
-  const lockFrom = book.lock_from_chapter || null;
-  const isChapterLockedForReader = (c) => {
-    if (!lockFrom && !c.is_locked) return false;
-    const isAtOrAfterLockPoint = lockFrom != null && c.chapter_number >= lockFrom;
-    if (!isAtOrAfterLockPoint && !c.is_locked) return false;
-    const realId = c.id.startsWith('sb_') ? c.id.slice(3) : c.id;
-    return !isUnlocked('chapter', realId);
-  };
-
-  const stillLockedChapters = chapters.filter(isChapterLockedForReader);
-  const lockedChapterCount = stillLockedChapters.length;
-
-  const chaptersHtml = chapters.length
-    ? chapters.map(c => {
-        const locked = isChapterLockedForReader(c);
-        const lockBadge = locked
-          ? `<span class="chapter-row-lock" title="Locked — tap to unlock">
-               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-             </span>`
-          : '';
-        return `
-          <div class="chapter-row${locked ? ' is-locked' : ''}" data-chapter-id="${c.id}">
-            <span class="chapter-row-num">#${c.chapter_number}</span>
-            <span class="chapter-row-title">${escHTML(c.title || `#${c.chapter_number}`)}</span>
-            ${lockBadge}
-            <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
-          </div>
-        `;
-      }).join('')
-    : '<div style="color:var(--text2);padding:1rem 0">No chapters published yet.</div>';
-
-  // Bulk unlock CTA — shown only when at least 1 chapter is currently locked.
-  //
-  // Cost is the SUM of each still-locked chapter's resolved price (per-chapter
-  // override OR global default), then the bulk discount applied. This mirrors
-  // what mobile does in BookChaptersUnlockModal.jsx (sumLockedChaptersCost).
-  // The previous implementation multiplied the global default by lockedChapterCount,
-  // which ignored the per-chapter overrides entirely — an author who set
-  // 3 coins per chapter saw a bulk price computed off the 25-coin global default.
-  const bulkDiscount = _walletConfigDefaults.book_bulk_unlock_discount_pct ?? 15;
-  const bulkBefore = stillLockedChapters.reduce(
-    (sum, c) => sum + (resolveUnlockCost('chapter', 'coin', c) || 0),
-    0,
-  );
-  const bulkStarBefore = stillLockedChapters.reduce(
-    (sum, c) => sum + (resolveUnlockCost('chapter', 'star', c) || 0),
-    0,
-  );
-  const bulkCoin = Math.max(1, bulkBefore - Math.floor((bulkBefore * bulkDiscount) / 100));
-  const bulkStar = Math.max(1, bulkStarBefore - Math.floor((bulkStarBefore * bulkDiscount) / 100));
-  const bulkUnlockCard = lockedChapterCount > 0 ? `
-    <div class="book-bulk-unlock">
-      <div class="book-bulk-unlock-icon">📚</div>
-      <div class="book-bulk-unlock-meta">
-        <div class="book-bulk-unlock-title">Unlock all <strong>${lockedChapterCount}</strong> locked chapter${lockedChapterCount === 1 ? '' : 's'}</div>
-        <div class="book-bulk-unlock-sub">Save ${bulkDiscount}% vs unlocking one by one</div>
-      </div>
-      <button class="btn btn-purple" id="btnBulkUnlockBook" data-locked-count="${lockedChapterCount}" data-coin="${bulkCoin}" data-star="${bulkStar}">
-        ${bulkCoin} coin${bulkCoin === 1 ? '' : 's'} or ${bulkStar} star${bulkStar === 1 ? '' : 's'}
-      </button>
-    </div>
-  ` : '';
-
-  content.innerHTML = `
-    <div class="book-detail">
-      <div class="book-detail-cover">${cover}</div>
-      <div class="book-detail-info">
-        <h1>${escHTML(book.title || 'Untitled')}</h1>
-        <button class="book-detail-author book-detail-author-link" data-author-id="${escHTML(book.profiles?.id || book.author_id || '')}" type="button" title="View author profile">
-          <div class="avatar">${authorAvatar ? `<img src="${escHTML(authorAvatar)}"/>` : initials(authorName)}</div>
-          <span>by <strong>${escHTML(authorName)}</strong></span>
-        </button>
-        <div class="book-detail-meta">
-          <span><strong>${(book.chapters_count || chapters.length).toLocaleString()}</strong> chapters</span>
-          <span><strong>${(book.word_count || 0).toLocaleString()}</strong> words</span>
-          <span><strong>${(book.views_count || 0).toLocaleString()}</strong> views</span>
-          <span><strong>${(book.likes_count || 0).toLocaleString()}</strong> likes</span>
-        </div>
-        <div class="book-detail-genre-row">
-          ${book.genre ? `<button class="book-chip active" type="button">${escHTML(book.genre.replace(/-/g, ' '))}</button>` : ''}
-          ${tagsHtml}
-        </div>
-        <div class="book-detail-actions">
-          <button class="btn btn-purple btn-sm" id="btnStartReading" ${chapters.length ? '' : 'disabled style="opacity:0.5;cursor:not-allowed"'}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            Start reading
-          </button>
-          <button class="btn btn-ghost btn-sm book-action-btn" id="btnLikeBook" data-active="0">
-            <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-            <span class="book-action-label">Like</span>
-            <span class="book-action-count" id="btnLikeBookCount">${(book.likes_count || 0).toLocaleString()}</span>
-          </button>
-          <button class="btn btn-ghost btn-sm book-action-btn" id="btnBookmarkBook" data-active="0">
-            <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-            <span class="book-action-label">Bookmark</span>
-          </button>
-          ${(currentProfile?.role === 'admin' || currentProfile?.role === 'moderator') ? `
-            <button class="btn btn-sm book-action-btn book-editors-pick-btn ${book.is_editors_pick ? 'is-picked' : ''}" id="btnEditorsPick" data-picked="${book.is_editors_pick ? '1' : '0'}" title="${book.is_editors_pick ? "Remove Editor's Pick" : "Mark as Editor's Pick"}">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="${book.is_editors_pick ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-              <span class="book-action-label">${book.is_editors_pick ? "Editor's Pick" : 'Pick'}</span>
-            </button>
-          ` : ''}
-        </div>
-        <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
-        ${bulkUnlockCard}
-        <div class="chapter-list">
-          <div class="chapter-list-title">Chapters</div>
-          ${chaptersHtml}
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Sanity check: the count of `.chapter-row.is-locked` DOM nodes must
-  // equal `lockedChapterCount` (the number used by the bulk-unlock CTA).
-  // If the two ever disagree, the bulk button will charge for a different
-  // set of chapters than the user can see locked — exactly the kind of
-  // bug we just fixed (and want a guard against re-introducing).
-  //
-  // We log a console warning rather than throwing so a divergence in
-  // production surfaces in dev tools without breaking the user's flow.
-  // The `_walletConfigDefaults` and lock detection both live in this
-  // function, so any future logic change touching either will be caught
-  // here on the next render.
-  const renderedLockCount = content.querySelectorAll('.chapter-row.is-locked').length;
-  if (renderedLockCount !== lockedChapterCount) {
-    console.warn(
-      `[lock-count-mismatch] book ${book.id}: rendered ${renderedLockCount} lock icons but bulk CTA says ${lockedChapterCount}. ` +
-      `Lock detection has diverged between row render and stillLockedChapters filter — check isChapterLockedForReader callers.`
-    );
-  }
-
-  // Wire chapter rows
-  content.querySelectorAll('.chapter-row').forEach((row, i) => {
-    row.addEventListener('click', () => openChapterReader(i));
-  });
-
-  // Wire clickable author → opens their profile
-  content.querySelector('.book-detail-author-link')?.addEventListener('click', (e) => {
-    const authorId = e.currentTarget.dataset.authorId;
-    if (authorId) openProfile(authorId);
-  });
-
-  // Bulk-unlock button — opens a modal with coin/star choice + final price
-  document.getElementById('btnBulkUnlockBook')?.addEventListener('click', () => {
-    openBulkBookUnlockDialog({
-      bookId:        book.id,
-      bookTitle:     book.title || 'this book',
-      lockedCount:   parseInt(document.getElementById('btnBulkUnlockBook').dataset.lockedCount, 10) || lockedChapterCount,
-      coinCost:      parseInt(document.getElementById('btnBulkUnlockBook').dataset.coin, 10) || bulkCoin,
-      starCost:      parseInt(document.getElementById('btnBulkUnlockBook').dataset.star, 10) || bulkStar,
-      discountPct:   bulkDiscount,
-      onUnlocked:    () => openBookDetail(book.id),
-    });
-  });
-  // Start reading → first unread chapter (or chapter 1)
-  document.getElementById('btnStartReading')?.addEventListener('click', () => openChapterReader(0));
-
-  // Wire like + bookmark
-  const likeBtn = document.getElementById('btnLikeBook');
-  const bookmarkBtn = document.getElementById('btnBookmarkBook');
-  likeBtn?.addEventListener('click', () => toggleBookLike(book.id));
-  bookmarkBtn?.addEventListener('click', () => toggleBookBookmark(book.id));
-
-  // Editor's Pick toggle (mods/admins only — button is gated server-side too)
-  document.getElementById('btnEditorsPick')?.addEventListener('click', async (e) => {
-    const btn = e.currentTarget;
-    const currentlyPicked = btn.dataset.picked === '1';
-    const willPick = !currentlyPicked;
-    btn.disabled = true;
-    let note = null;
-    if (willPick) {
-      // Optional editorial note — short blurb that shows up in tooltips/lists
-      note = prompt('Optional — short editorial note (why is this an Editor\'s Pick?):', '') || null;
-    }
-    try {
-      const { data, error } = await supabase.rpc('set_editors_pick', {
-        p_book_id: book.id,
-        p_pick: willPick,
-        p_note: note,
-      });
-      if (error) throw error;
-      if (!data?.ok) throw new Error(data?.error || 'Failed to update Editor\'s Pick');
-      // Update UI inline
-      btn.dataset.picked = willPick ? '1' : '0';
-      btn.classList.toggle('is-picked', willPick);
-      btn.querySelector('.book-action-label').textContent = willPick ? "Editor's Pick" : 'Pick';
-      btn.querySelector('svg').setAttribute('fill', willPick ? 'currentColor' : 'none');
-      btn.title = willPick ? "Remove Editor's Pick" : "Mark as Editor's Pick";
-      // Mutate cached book so re-renders stay in sync
-      if (currentBookDetail?.book) {
-        currentBookDetail.book.is_editors_pick = willPick;
-        currentBookDetail.book.editors_pick_at = willPick ? new Date().toISOString() : null;
-        currentBookDetail.book.editors_pick_note = willPick ? note : null;
-      }
-      toast(willPick ? 'Marked as Editor\'s Pick ⭐' : 'Removed from Editor\'s Pick', 'success');
-    } catch (err) {
-      toast(err.message || String(err), 'error');
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
-  // Load initial state (whether the user has already liked/bookmarked)
-  loadBookActionState(book.id);
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Load initial like/bookmark state for the current book + render visual
-// ────────────────────────────────────────────────────────────────────────
-async function loadBookActionState(bookId) {
-  if (!currentUser) return;
-  try {
-    const [{ data: like }, { data: bm }] = await Promise.all([
-      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle(),
-      supabase.from('book_bookmarks').select('book_id').eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle(),
-    ]);
-    setBookActionActive('btnLikeBook',     !!like);
-    setBookActionActive('btnBookmarkBook', !!bm);
-  } catch (e) { /* non-fatal */ }
-}
-
-function setBookActionActive(buttonId, active) {
-  const btn = document.getElementById(buttonId);
-  if (!btn) return;
-  btn.dataset.active = active ? '1' : '0';
-  // Fill the SVG icon when active (heart filled, bookmark filled)
-  const icon = btn.querySelector('.book-action-icon');
-  if (icon) icon.setAttribute('fill', active ? 'currentColor' : 'none');
-  // Update label
-  const label = btn.querySelector('.book-action-label');
-  if (label) {
-    if (buttonId === 'btnLikeBook')      label.textContent = active ? 'Liked' : 'Like';
-    if (buttonId === 'btnBookmarkBook')  label.textContent = active ? 'Saved' : 'Bookmark';
-  }
-}
-
-async function toggleBookLike(bookId) {
-  if (!currentUser) { toast('Sign in to like books', 'error'); return; }
-  const btn  = document.getElementById('btnLikeBook');
-  const wasActive = btn?.dataset.active === '1';
-  const countEl   = document.getElementById('btnLikeBookCount');
-
-  // Optimistic UI — flip immediately
-  setBookActionActive('btnLikeBook', !wasActive);
-  if (countEl) {
-    const cur = parseInt(countEl.textContent.replace(/[^\d]/g, ''), 10) || 0;
-    const next = wasActive ? Math.max(0, cur - 1) : cur + 1;
-    countEl.textContent = next.toLocaleString();
-    if (currentBookDetail?.book) currentBookDetail.book.likes_count = next;
-  }
-
-  try {
-    if (wasActive) {
-      const { error } = await supabase.from('book_likes')
-        .delete()
-        .eq('user_id', currentUser.id)
-        .eq('book_id', bookId);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from('book_likes')
-        .insert({ user_id: currentUser.id, book_id: bookId });
-      // Ignore duplicate-key (already liked from another tab); other errors throw
-      if (error && !/duplicate|unique/i.test(error.message)) throw error;
-    }
-  } catch (e) {
-    // Revert optimistic UI on error
-    setBookActionActive('btnLikeBook', wasActive);
-    if (countEl) {
-      const cur = parseInt(countEl.textContent.replace(/[^\d]/g, ''), 10) || 0;
-      countEl.textContent = (wasActive ? cur + 1 : Math.max(0, cur - 1)).toLocaleString();
-    }
-    toast('Failed: ' + (e.message || e), 'error');
-  }
-}
-
-async function toggleBookBookmark(bookId) {
-  if (!currentUser) { toast('Sign in to bookmark books', 'error'); return; }
-  const btn = document.getElementById('btnBookmarkBook');
-  const wasActive = btn?.dataset.active === '1';
-
-  // Optimistic UI
-  setBookActionActive('btnBookmarkBook', !wasActive);
-
-  try {
-    if (wasActive) {
-      const { error } = await supabase.from('book_bookmarks')
-        .delete()
-        .eq('user_id', currentUser.id)
-        .eq('book_id', bookId);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from('book_bookmarks')
-        .insert({ user_id: currentUser.id, book_id: bookId });
-      if (error && !/duplicate|unique/i.test(error.message)) throw error;
-    }
-  } catch (e) {
-    setBookActionActive('btnBookmarkBook', wasActive);
-    toast('Failed: ' + (e.message || e), 'error');
-  }
-}
-
-// Back to book list
-document.getElementById('btnBackBooks')?.addEventListener('click', () => showBook());
-
-// ── Chapter reader ──
-async function openChapterReader(chapterIndex) {
-  if (!currentBookDetail || !currentBookDetail.chapters[chapterIndex]) return;
-  // Flush any in-progress chapter dwell BEFORE we mutate the
-  // module-scoped open-state below. Without this, navigating
-  // chapter-to-chapter would lose the previous chapter's close event.
-  flushReadClose();
-  currentChapterIndex = chapterIndex;
-  const chapter = currentBookDetail.chapters[chapterIndex];
-
-  hideAllMainPages();
-  chapterReaderPage.style.display = 'block';
-
-  // Daily-goal: "Read N chapters" tick. Dedupe by chapter id (strip
-  // the 'sb_' prefix if present) so re-opening the same chapter
-  // mid-session doesn't farm. Fire-and-forget — the RPC is best-
-  // effort and never gates the reader render. Mirrors mobile at
-  // app/(book)/book-reading.jsx:444.
-  try {
-    const ckey = String(chapter.id || '').replace(/^sb_/, '');
-    if (ckey) tickGoalUnique('read_chapters', ckey);
-  } catch {}
-
-  // Anti-fraud telemetry — log chapter open (dwell_ms=0, scroll_pct=0).
-  // The matching close event fires from the "previous chapter" / "next
-  // chapter" / back-out handlers a few hundred lines down with the
-  // actual dwell + scroll values. Two-event pattern lets Phase 4's
-  // detection job compute dwell distributions and flag bot-like reads
-  // (open → immediate close with no scroll).
-  const realChapterIdForLog = String(chapter.id || '').replace(/^sb_/, '');
-  if (realChapterIdForLog) {
-    _readChapterOpenTs = Date.now();
-    _readChapterOpenId = realChapterIdForLog;
-    _readChapterOpenBookId = currentBookDetail?.book?.id || null;
-    _readMaxScrollPct = 0;
-    logRead({
-      chapterId: realChapterIdForLog,
-      bookId:    _readChapterOpenBookId,
-      dwellMs:   0,
-      scrollPct: 0,
-    });
-  }
-
-  document.getElementById('readerBookTitle').textContent = currentBookDetail.book.title || 'Book';
-  document.getElementById('readerChapterTitle').textContent = chapter.title || `Chapter ${chapter.chapter_number}`;
-  document.getElementById('readerProgress').textContent = `Chapter ${chapter.chapter_number} of ${currentBookDetail.chapters.length}`;
-  document.getElementById('btnReaderPrev').disabled = chapterIndex <= 0;
-  document.getElementById('btnReaderNext').disabled = chapterIndex >= currentBookDetail.chapters.length - 1;
-
-  // Path-based deep-link-friendly chapter URL — keeps mobile Universal
-  // Links / App Links able to pick this URL up if shared.
-  history.pushState(null, '', `/books/${currentBookDetail.book.id}/chapter/${chapter.chapter_number}`);
-
-  const content = document.getElementById('readerContent');
-  content.innerHTML = '<div class="loading">Loading chapter...</div>';
-
-  // Fetch full chapter content + lock fields from the right source
-  let chapterContent = '';
-  let resolvedChapterId = chapter.id;
-  let chapterRow = null;
-  try {
-    const realChapterId = chapter.id.startsWith('sb_') ? chapter.id.slice(3) : chapter.id;
-    const { data, error } = await supabase
-      .from('chapters')
-      .select('id, chapter_number, title, content, is_locked, unlock_cost_coins, unlock_cost_stars')
-      .eq('id', realChapterId)
-      .single();
-    if (error || !data) throw new Error(error?.message || 'Chapter not found');
-    chapterContent = data.content || '';
-    resolvedChapterId = data.id;
-    chapterRow = data;
-  } catch (err) {
-    console.error('openChapterReader failed:', err);
-    const friendly = /timeout|canceling statement/i.test(err.message || '')
-      ? 'This chapter is taking too long to load. Tap to retry.'
-      : /not found/i.test(err.message || '')
-      ? 'This chapter isn\'t available — it may have been unpublished.'
-      : 'Couldn\'t load this chapter. Tap to retry.';
-    content.innerHTML = `<div class="loading" id="chapterRetry" style="cursor:pointer">${escHTML(friendly)}</div>`;
-    document.getElementById('chapterRetry')?.addEventListener('click', () => openChapterReader(chapterIndex));
-    return;
-  }
-
-  // PAYWALL: locked + not unlocked → render the lock CTA instead of content.
-  //
-  // Two-signal lock check, matching the row-rendering logic above and mobile's
-  // isAuthorChapterLocked / isChapterLocked helpers. A chapter is locked when:
-  //   • chapter.is_locked === true (per-chapter explicit override), OR
-  //   • book.lock_from_chapter is set AND chapter_number >= lock_from_chapter
-  //     (book-level paywall threshold cascade).
-  //
-  // The previous version only honored chapter.is_locked, so any chapter that
-  // was only locked via the book-level threshold (the common case for writers
-  // using the picker) silently rendered for free even though the TOC row
-  // showed a lock badge — a real revenue-leak bug.
-  const bookLockFrom = currentBookDetail?.book?.lock_from_chapter;
-  const isThresholdLocked = bookLockFrom != null && Number(chapterRow.chapter_number) >= Number(bookLockFrom);
-  const chapterIsLocked = !!chapterRow.is_locked || isThresholdLocked;
-  if (chapterIsLocked && !isUnlocked('chapter', resolvedChapterId)) {
-    const coinCost = resolveUnlockCost('chapter', 'coin', chapterRow);
-    const starCost = resolveUnlockCost('chapter', 'star', chapterRow);
-    content.style.fontSize = '';
-    content.innerHTML = `
-      <div class="reader-paywall">
-        <div class="reader-paywall-icon">🔒</div>
-        <h2>This chapter is locked</h2>
-        <p>Unlock once to read as many times as you like.</p>
-        <div class="reader-paywall-pricing">
-          <span><b>${coinCost}</b> coin${coinCost === 1 ? '' : 's'}</span>
-          <span class="reader-paywall-or">or</span>
-          <span><b>${starCost}</b> star${starCost === 1 ? '' : 's'}</span>
-        </div>
-        <button class="btn btn-purple" id="btnReaderUnlock">Unlock chapter</button>
-      </div>
-    `;
-    document.getElementById('btnReaderUnlock')?.addEventListener('click', () => {
-      openUnlockDialog({
-        targetType: 'chapter',
-        targetId:   resolvedChapterId,
-        row:        chapterRow,
-        title:      chapterRow.title || `Chapter ${chapterRow.chapter_number}`,
-        onUnlocked: () => openChapterReader(chapterIndex),  // re-open after unlock
-      });
-    });
-    return;
-  }
-
-  // Apply current font size and inject normalized content (HTML or plain text)
-  content.style.fontSize = `${readerFontSize}rem`;
-  content.innerHTML = normalizeChapterContent(chapterContent);
-  content.scrollTop = 0;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-
-  // Apply username watermark (re-run in case the user logged in/out since last read)
-  applyReaderWatermark();
-
-  saveReadingProgress(currentBookDetail.book.id, resolvedChapterId, chapter.chapter_number);
-}
-
-// Normalize chapter content: if HTML-ish, render as-is; if plain text, wrap in <p>
-function normalizeChapterContent(content) {
-  if (!content) return '<p><em>(No content)</em></p>';
-  // Detect common HTML tags to decide
-  if (/<\/?(p|div|br|h[1-6]|blockquote|ul|ol|li|strong|em|b|i|a|img|span)\b/i.test(content)) {
-    return content;
-  }
-  // Treat as plain text — split by blank lines into paragraphs, preserve single newlines as <br>
-  return content
-    .split(/\n\s*\n/)
-    .filter(p => p.trim())
-    .map(p => `<p>${escHTML(p).replace(/\n/g, '<br>')}</p>`)
-    .join('');
-}
-
-async function saveReadingProgress(bookId, chapterId, chapterNumber) {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-    const nowIso = new Date().toISOString();
-
-    // 1) book_reads — per-user reading progress (continue-reading rail).
-    //    Composite PK (user_id, book_id), one row per user per book ever.
-    await supabase.from('book_reads').upsert({
-      user_id: user.id,
-      book_id: bookId,
-      last_chapter_id: chapterId,
-      last_chapter_number: chapterNumber,
-      last_read_at: nowIso,
-    }, { onConflict: 'user_id,book_id' });
-
-    // 2) chapter_reads — per-(user, chapter) row that drives the
-    //    aggregate views counter. The bump_views_on_chapter_read
-    //    trigger fires here:
-    //      - On INSERT (first read of this chapter for this user) →
-    //        +1 to chapters.views_count and books.views_count.
-    //      - On UPDATE-after-24h cooldown → +1 again.
-    //    Mobile already does the same write (lib/book-reads-supabase.js
-    //    → readBookChapter); without this branch on web, chapter
-    //    reads from web readers were never feeding into the aggregate
-    //    counter and writers' view totals only reflected mobile
-    //    readers. Mirroring mobile's INSERT-then-UPDATE-on-23505
-    //    pattern keeps both surfaces uniform.
-    if (chapterId) {
-      try {
-        const { error: insertErr } = await supabase
-          .from('chapter_reads')
-          .insert({
-            chapter_id: chapterId,
-            user_id: user.id,
-            read_count: 1,
-            last_read_at: nowIso,
-          });
-        if (insertErr && insertErr.code === '23505') {
-          // Row already exists — bump read_count + last_read_at so the
-          // trigger's UPDATE branch can decide whether the cooldown
-          // has elapsed.
-          const { data: existing } = await supabase
-            .from('chapter_reads')
-            .select('read_count')
-            .eq('chapter_id', chapterId)
-            .eq('user_id', user.id)
-            .maybeSingle();
-          await supabase
-            .from('chapter_reads')
-            .update({
-              read_count: (existing?.read_count ?? 0) + 1,
-              last_read_at: nowIso,
-            })
-            .eq('chapter_id', chapterId)
-            .eq('user_id', user.id);
-        }
-      } catch (_) {
-        // Best-effort. A stats write must never block a reader from
-        // continuing through the chapter.
-      }
-    }
-  } catch (e) { /* ignore */ }
-}
-
-// ── Reader watermark (deterrent: leaked screenshots reveal the source) ──
-let _watermarkLabelCache = null;
-async function getReaderWatermarkLabel() {
-  if (_watermarkLabelCache) return _watermarkLabelCache;
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { _watermarkLabelCache = 'Guest'; return _watermarkLabelCache; }
-    // Try profile.username, then email local part, then user id prefix
-    const { data: profile } = await supabase
-      .from('profiles').select('username').eq('id', user.id).maybeSingle();
-    const username = profile?.username
-      || (user.email ? user.email.split('@')[0] : null)
-      || (user.id ? user.id.slice(0, 8) : 'User');
-    _watermarkLabelCache = `${username} · ${(user.id || '').slice(0, 6)}`;
-  } catch {
-    _watermarkLabelCache = 'Reader';
-  }
-  return _watermarkLabelCache;
-}
-
-async function applyReaderWatermark() {
-  const el = document.getElementById('readerContent');
-  if (!el) return;
-  const label = await getReaderWatermarkLabel();
-  const isLight = document.body.classList.contains('light');
-  const fillColor = isLight ? '%237c3aed' : '%23a78bfa'; // %23 = encoded "#"
-  // Encode for safe data URI use
-  const safeLabel = String(label).replace(/[<>&'"]/g, c =>
-    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&#39;', '"': '&quot;' }[c]));
-  const svg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200">' +
-      '<text x="160" y="100" text-anchor="middle"' +
-        ' transform="rotate(-25 160 100)"' +
-        ` fill="${isLight ? '#7c3aed' : '#a78bfa'}" fill-opacity="0.09"` +
-        ' font-family="system-ui, -apple-system, sans-serif"' +
-        ' font-size="13" font-weight="500" letter-spacing="0.04em">' +
-        safeLabel +
-      '</text>' +
-    '</svg>';
-  const dataUri = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
-  el.style.setProperty('--reader-watermark-bg', dataUri);
-}
-
-// Re-render watermark when theme toggles (so colour matches background).
-// May 2026: theme switcher moved from a single topbar button to a
-// segmented radio (Light/Dark) in the sidebar — listen on both so
-// the watermark stays in sync regardless of which option is picked.
-document.querySelectorAll('#sidebarThemeToggle .sidebar-theme-option').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    // Run after the body class actually flips
-    setTimeout(() => {
-      if (chapterReaderPage?.style.display === 'block') applyReaderWatermark();
-    }, 50);
-  });
-});
-
-// ── Anti-copy protection on the reader ──
-// Discourages casual copy-paste. Not bulletproof against DevTools/view-source,
-// but blocks selection, right-click, and Cmd/Ctrl+C / Cmd/Ctrl+A inside the reader.
-(function setupReaderAntiCopy() {
-  const el = document.getElementById('readerContent');
-  if (!el) return;
-
-  const isReaderVisible = () =>
-    chapterReaderPage && chapterReaderPage.style.display === 'block';
-
-  let antiCopyToastTimer = null;
-  const showAntiCopyToast = () => {
-    if (antiCopyToastTimer) return;          // throttle so we don't spam
-    toast('Copying is disabled to protect the author\'s work', 'error');
-    antiCopyToastTimer = setTimeout(() => { antiCopyToastTimer = null; }, 1500);
-  };
-
-  // Block selection-start (covers click-and-drag)
-  el.addEventListener('selectstart', (e) => {
-    e.preventDefault();
-    return false;
-  });
-
-  // Block native copy (Cmd/Ctrl+C, right-click → Copy)
-  el.addEventListener('copy', (e) => {
-    e.preventDefault();
-    e.clipboardData?.setData('text/plain', '');
-    showAntiCopyToast();
-    return false;
-  });
-
-  // Block cut + paste too, just in case the reader ever becomes editable somehow
-  el.addEventListener('cut', (e) => { e.preventDefault(); return false; });
-
-  // Block right-click context menu inside the reader
-  el.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showAntiCopyToast();
-    return false;
-  });
-
-  // Block drag (so users can't drag-out a text fragment)
-  el.addEventListener('dragstart', (e) => { e.preventDefault(); return false; });
-
-  // Block Cmd/Ctrl+A so a user can't quickly select-all then copy
-  document.addEventListener('keydown', (e) => {
-    if (!isReaderVisible()) return;
-    const isMod = e.metaKey || e.ctrlKey;
-    if (!isMod) return;
-    const k = e.key.toLowerCase();
-    if (k === 'a' || k === 'c' || k === 'x') {
-      // Only block if the focus is in/over the reader content, not in form inputs
-      const tag = (e.target?.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
-      e.preventDefault();
-      showAntiCopyToast();
-    }
-  });
-})();
-
-// Reader controls
-document.getElementById('btnReaderPrev')?.addEventListener('click', () => {
-  if (currentChapterIndex > 0) openChapterReader(currentChapterIndex - 1);
-});
-document.getElementById('btnReaderNext')?.addEventListener('click', () => {
-  if (currentBookDetail && currentChapterIndex < currentBookDetail.chapters.length - 1) {
-    openChapterReader(currentChapterIndex + 1);
-  }
-});
-document.getElementById('btnBackBookDetail')?.addEventListener('click', () => {
-  if (currentBookDetail) openBookDetail(currentBookDetail.book.id);
-});
-document.getElementById('btnReaderFontSmaller')?.addEventListener('click', () => {
-  readerFontSize = Math.max(0.85, readerFontSize - 0.05);
-  localStorage.setItem('selebox_reader_font', readerFontSize);
-  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
-});
-document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => {
-  readerFontSize = Math.min(1.6, readerFontSize + 0.05);
-  localStorage.setItem('selebox_reader_font', readerFontSize);
-  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
-});
+// (Back-to-books, theme-toggle watermark sync, reader anti-copy IIFE, and
+// the five reader nav buttons all migrated to wireBookReader() in
+// js/books.js as part of Stage 8B. App.js calls it after wireBooksPage()
+// near the initBooks({…}) block.)
 
 // ── Author (Manuscript Studio) page ──
 function showAuthor(forceReload = false) {
@@ -9559,13 +7549,20 @@ async function loadVideoBookmarks() {
 
   const items = (data || []).filter(r => r.videos);
   if (!items.length) {
+    // Inline onclick can't see module-scoped imports (`showVideos`,
+    // `setSidebarActive`) since the migration to ES modules — Codex P3.
+    // Wire the CTA via a real listener after innerHTML lands.
     wrap.innerHTML = `
       <div class="bookmarks-empty">
         <div class="bookmarks-empty-icon">🎬</div>
         <h3>No saved videos yet</h3>
         <p>Tap the <strong>Bookmark</strong> button on any video to save it here.</p>
-        <button class="btn btn-purple btn-sm" onclick="setSidebarActive('btnVideos');showVideos();">Browse videos</button>
+        <button class="btn btn-purple btn-sm" id="btnBookmarksBrowseVideos">Browse videos</button>
       </div>`;
+    document.getElementById('btnBookmarksBrowseVideos')?.addEventListener('click', () => {
+      setSidebarActive('btnVideos');
+      showVideos();
+    });
     return;
   }
 
@@ -9617,13 +7614,20 @@ async function loadBookBookmarks() {
 
   const items = (data || []).filter(r => r.books);
   if (!items.length) {
+    // Inline onclick can't see module-scoped imports (`showBook`,
+    // `setSidebarActive`) since the migration to ES modules — Codex P3.
+    // Wire the CTA via a real listener after innerHTML lands.
     wrap.innerHTML = `
       <div class="bookmarks-empty">
         <div class="bookmarks-empty-icon">📚</div>
         <h3>No saved books yet</h3>
         <p>Tap the <strong>Bookmark</strong> button on any book to save it for later.</p>
-        <button class="btn btn-purple btn-sm" onclick="setSidebarActive('btnBook');showBook();">Browse books</button>
+        <button class="btn btn-purple btn-sm" id="btnBookmarksBrowseBooks">Browse books</button>
       </div>`;
+    document.getElementById('btnBookmarksBrowseBooks')?.addEventListener('click', () => {
+      setSidebarActive('btnBook');
+      showBook();
+    });
     return;
   }
 
@@ -12284,19 +10288,20 @@ document.getElementById('bookCoverFile')?.addEventListener('change', async (e) =
   if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
   if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
 
-  // Open the crop modal with NO forced aspect ratio. The previous
-  // hardcoded 2:3 silently chopped the sides off every uploaded
-  // cover — creators upload at 9:16 (vertical-video aspect), the
-  // 2:3 crop box locks narrower, and pixels outside that frame are
-  // permanently discarded before reaching Supabase Storage. That's
-  // why almost every cover on Selebox had its title clipped at the
-  // edges. With aspectRatio: NaN, Cropper.js lets the creator
-  // resize the crop box freely — by default it covers 100% of the
-  // image (autoCropArea: 1), so most uploads will just save the
-  // entire original at full aspect.
+  // Lock to 2:3 — the canonical book-cover ratio. Mobile uses it for
+  // every render path, and every web display surface (For You,
+  // Discover, Ranking, detail page, home shelves) frames covers at
+  // 2:3 via aspect-ratio CSS. The previous NaN (free crop) was added
+  // to fix one symptom (titles clipped on 9:16 uploads) but caused a
+  // bigger one (covers landed at random aspect ratios → display layer
+  // had to letterbox-or-zoom-crop them forever). Better fix: tell the
+  // author to crop their 9:16 source to 2:3 here, once, instead of
+  // chasing the consequences across every shelf and detail page.
+  // Cropper.js shows a draggable 2:3 box over the source so creators
+  // can pick the best 2:3 window of their original at upload time.
   openCropModal(file, {
-    aspectRatio: NaN,
-    title: 'Crop book cover',
+    aspectRatio: 2 / 3,
+    title: 'Crop book cover (2:3)',
     onSave: async (croppedFile) => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { toast('Sign in first', 'error'); return; }
@@ -15047,108 +13052,11 @@ document.addEventListener('click', (e) => {
 // Type @ in any .comment-input → dropdown with matching usernames.
 // Arrow keys navigate, Enter/Tab inserts, Esc closes.
 // ════════════════════════════════════════
-let _mentionDropdown = null;
-let _mentionTextarea = null;
-let _mentionResults  = [];
-let _mentionIdx      = 0;
-let _mentionDebounce = null;
-
-function getMentionDropdown() {
-  if (_mentionDropdown) return _mentionDropdown;
-  const el = document.createElement('div');
-  el.className = 'mention-dropdown';
-  el.style.display = 'none';
-  document.body.appendChild(el);
-  _mentionDropdown = el;
-  return el;
-}
-
-function closeMentionDropdown() {
-  if (_mentionDropdown) _mentionDropdown.style.display = 'none';
-  _mentionTextarea = null;
-  _mentionResults = [];
-  _mentionIdx = 0;
-}
-
-function positionMentionDropdown(textarea) {
-  const dd = getMentionDropdown();
-  const rect = textarea.getBoundingClientRect();
-  dd.style.position = 'fixed';
-  // Place below the textarea by default; flip above if it would clip the viewport
-  const wantTop = rect.bottom + 6;
-  const ddH = dd.offsetHeight || 220;
-  const flipAbove = wantTop + ddH > window.innerHeight - 12;
-  dd.style.top  = `${flipAbove ? Math.max(8, rect.top - ddH - 6) : wantTop}px`;
-  dd.style.left = `${Math.max(8, rect.left)}px`;
-  dd.style.minWidth = `${Math.min(260, Math.max(220, rect.width * 0.7))}px`;
-}
-
-async function maybeShowMentionDropdown(textarea) {
-  if (!textarea) return;
-  const cursor = textarea.selectionStart ?? textarea.value.length;
-  const before = textarea.value.slice(0, cursor);
-  // Match @<word> at end of `before`. Allow underscores and digits.
-  const match = before.match(/(?:^|\s)@([A-Za-z0-9_]{0,24})$/);
-  if (!match) {
-    closeMentionDropdown();
-    return;
-  }
-  _mentionTextarea = textarea;
-  const query = match[1] || '';
-  _mentionIdx = 0;
-
-  // Debounced profile search
-  clearTimeout(_mentionDebounce);
-  _mentionDebounce = setTimeout(async () => {
-    let q = supabase.from('profiles').select('id, username, avatar_url').limit(6);
-    if (query) q = q.ilike('username', `${query}%`);
-    else q = q.order('username', { ascending: true }).limit(6);
-    const { data } = await q;
-    _mentionResults = (data || []).filter(p => p.id !== currentUser?.id);
-    renderMentionDropdown();
-  }, 120);
-}
-
-function renderMentionDropdown() {
-  const dd = getMentionDropdown();
-  if (!_mentionResults.length || !_mentionTextarea) {
-    dd.style.display = 'none';
-    return;
-  }
-  dd.innerHTML = _mentionResults.map((p, i) => `
-    <div class="mention-item ${i === _mentionIdx ? 'active' : ''}" data-idx="${i}">
-      <div class="mention-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : escHTML((p.username || '?').slice(0,2).toUpperCase())}</div>
-      <div class="mention-name"><strong>@${escHTML(p.username || '')}</strong></div>
-    </div>
-  `).join('');
-  dd.querySelectorAll('.mention-item').forEach(item => {
-    item.addEventListener('mousedown', (e) => {
-      e.preventDefault();    // keep textarea focus
-      e.stopPropagation();
-      selectMention(parseInt(item.dataset.idx, 10));
-    });
-  });
-  dd.style.display = 'block';
-  positionMentionDropdown(_mentionTextarea);
-}
-
-function selectMention(index) {
-  const profile = _mentionResults[index];
-  const textarea = _mentionTextarea;
-  if (!profile || !textarea) return;
-  const cursor = textarea.selectionStart ?? textarea.value.length;
-  const before = textarea.value.slice(0, cursor);
-  const after  = textarea.value.slice(cursor);
-  // Replace the @<typed> at end of `before` with @username + space
-  const newBefore = before.replace(/(^|\s)@([A-Za-z0-9_]{0,24})$/, `$1@${profile.username} `);
-  textarea.value = newBefore + after;
-  const newCursor = newBefore.length;
-  textarea.setSelectionRange(newCursor, newCursor);
-  // Bubble an input event so any auto-resize textareas re-measure
-  textarea.dispatchEvent(new Event('input', { bubbles: true }));
-  textarea.focus();
-  closeMentionDropdown();
-}
+// (Mention dropdown state vars moved to js/messages.js in Stage 9B Codex
+// review pass — the mention helpers themselves moved as part of 9B but
+// their backing state was missed by the codemod's EXTRACT_STATE list,
+// causing ReferenceErrors at runtime when the dropdown tried to read
+// _mentionDropdown / _mentionResults / etc.)
 
 // Document-level event delegation — works for dynamically created comment textareas
 document.addEventListener('input', (e) => {
@@ -15158,23 +13066,12 @@ document.addEventListener('input', (e) => {
   maybeShowMentionDropdown(ta);
 });
 
+// Delegate to messages.js — all of _mentionTextarea / _mentionResults /
+// _mentionDropdown / _mentionIdx live in that module after the Stage 9B
+// state move. Referencing them from app.js threw ReferenceError on every
+// keystroke (Stage 9 re-verification finding 1).
 document.addEventListener('keydown', (e) => {
-  if (!_mentionTextarea || !_mentionResults.length) return;
-  if (_mentionDropdown?.style.display !== 'block') return;
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    _mentionIdx = (_mentionIdx + 1) % _mentionResults.length;
-    renderMentionDropdown();
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    _mentionIdx = (_mentionIdx - 1 + _mentionResults.length) % _mentionResults.length;
-    renderMentionDropdown();
-  } else if (e.key === 'Enter' || e.key === 'Tab') {
-    e.preventDefault();
-    selectMention(_mentionIdx);
-  } else if (e.key === 'Escape') {
-    closeMentionDropdown();
-  }
+  handleMentionKeydown(e);
 });
 
 document.addEventListener('click', (e) => {
@@ -15336,1690 +13233,12 @@ async function openReactorListModal(targetId, targetType = 'post') {
   });
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// DIRECT MESSAGES — Phase 1 (FB Messenger-style with purple)
-// Two-pane layout: conversation list on left, active thread on right.
-// Realtime via Supabase channel on `messages` table.
-// ════════════════════════════════════════════════════════════════════════════
-
-let dmState = {
-  conversations: [],            // [{ id, isGroup, isSecret, archived, name, otherUser?, members?, lastMessageAt, lastMessagePreview, unread }]
-  activeConvId: null,           // currently-open conversation id
-  activeConv: null,             // full active conversation object (incl. is_group, name, members)
-  activeOther: null,            // for 1:1: the other user; for groups: null
-  messages: [],                 // current thread's messages
-  reactions: {},                // { messageId: [{ user_id, emoji }, ...] }
-  realtimeChannel: null,        // active Realtime subscription (DB changes for active thread)
-  presenceChannel: null,        // presence + typing broadcast for active thread
-  totalUnread: 0,
-  inboxChannel: null,           // realtime subscription for unread badge
-  otherIsTyping: false,         // is the other user currently typing?
-  typingUsers: {},              // groups: { userId: { name, lastSeen } } for "X is typing"
-  otherTypingTimer: null,       // auto-clear typing if no broadcast for N seconds
-  myTypingTimer: null,          // debounce my own typing broadcasts
-  otherIsOnline: false,
-  otherLastSeen: null,
-  hoverMenuEl: null,            // currently-open bubble hover menu
-  reactionPickerEl: null,       // currently-open reaction picker
-  convMenuEl: null,             // thread header ⋯ menu
-  editingMessageId: null,       // bubble being inline-edited
-  replyingTo: null,             // { id, body, sender_id, sender_name } when composing a reply
-  globalSearchResults: null,    // { conversations: [], messages: [] } when global search is active
-  viewMode: 'active',           // 'active' | 'archived' | 'secret' — which tab pill is selected
-};
-
-// ─────────────────────────────────────────────────────────────────────────
-// Secret-tab lock — web parity for the mobile lib/secret-lock.js module.
-//
-// PIN persists across browser restarts in localStorage (hashed + salted).
-// "Unlocked for this session" is held in sessionStorage so closing the
-// tab forgets the unlock — a closed tab in a coffee-shop browser stays
-// locked until re-authenticated. Visibility change (tab background)
-// triggers a re-lock after RELOCK_AFTER_BG_MS for an extra layer.
-//
-// Threat model: same as mobile — the PIN raises friction for a casual
-// snooper. Anyone with full access to the user's browser data can still
-// recover the salt + hash. For real privacy we'd put the hash on a
-// server profile column with per-device unlock; deferred.
-// ─────────────────────────────────────────────────────────────────────────
-
-const SECRET_LOCK = (() => {
-  const KEY_HASH = 'selebox.secretLock.pinHash.v1';
-  const KEY_SALT = 'selebox.secretLock.pinSalt.v1';
-  const SESSION_UNLOCKED = 'selebox.secretLock.unlocked';
-  const RELOCK_AFTER_BG_MS = 60 * 1000;
-
-  let backgroundedAt = null;
-
-  // djb2 with salt — fast non-crypto digest. Detail in mobile module's
-  // header comment.
-  const djb2 = (s) => {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
-    return (h >>> 0).toString(36);
-  };
-  const genSalt = () => {
-    let s = '';
-    for (let i = 0; i < 16; i++) s += Math.floor(Math.random() * 36).toString(36);
-    return s;
-  };
-  const hashPin = (pin, salt) => djb2(`${salt}:${pin}:${salt}`);
-
-  return {
-    hasPin: () => !!localStorage.getItem(KEY_HASH),
-    setPin: (pin) => {
-      if (!pin || String(pin).length < 4) throw new Error('PIN must be at least 4 digits');
-      const salt = genSalt();
-      localStorage.setItem(KEY_SALT, salt);
-      localStorage.setItem(KEY_HASH, hashPin(String(pin), salt));
-      sessionStorage.setItem(SESSION_UNLOCKED, '1');
-      backgroundedAt = null;
-    },
-    verifyPin: (pin) => {
-      const hash = localStorage.getItem(KEY_HASH);
-      const salt = localStorage.getItem(KEY_SALT);
-      if (!hash || !salt) return false;
-      return hashPin(String(pin), salt) === hash;
-    },
-    unlock: () => {
-      sessionStorage.setItem(SESSION_UNLOCKED, '1');
-      backgroundedAt = null;
-    },
-    lock: () => {
-      sessionStorage.removeItem(SESSION_UNLOCKED);
-      backgroundedAt = null;
-    },
-    isUnlocked: () => sessionStorage.getItem(SESSION_UNLOCKED) === '1',
-    onVisibilityChange: () => {
-      if (document.hidden) {
-        backgroundedAt = Date.now();
-      } else if (backgroundedAt && Date.now() - backgroundedAt > RELOCK_AFTER_BG_MS) {
-        sessionStorage.removeItem(SESSION_UNLOCKED);
-        backgroundedAt = null;
-        // Re-render the conversations list so the lock gate appears if
-        // the user is on the Secret tab.
-        if (typeof renderConversationList === 'function') renderConversationList();
-      }
-    },
-    clearPin: () => {
-      localStorage.removeItem(KEY_HASH);
-      localStorage.removeItem(KEY_SALT);
-      sessionStorage.removeItem(SESSION_UNLOCKED);
-      backgroundedAt = null;
-    },
-  };
-})();
-
-const secretLockIsUnlocked = () => SECRET_LOCK.isUnlocked();
+// (Dead const `secretLockIsUnlocked` removed in Stage 9 Codex review —
+// was a pre-9B bridge wrapper, no remaining callers.)
 
 // Wire visibility changes once at module load — covers tab switch,
 // minimize, lock screen on macOS, etc.
 document.addEventListener('visibilitychange', () => SECRET_LOCK.onVisibilityChange());
-
-// Wire the Secret-tab UI handlers — empty-state CTA, lock gate inputs,
-// PIN flow. Called from renderConversationList after the HTML is set.
-function wireSecretTabHandlers(wrap) {
-  // Empty-state CTA: "Start a Secret chat"
-  const startBtn = wrap.querySelector('#dmStartSecretBtn');
-  if (startBtn) startBtn.onclick = () => openSecretChatPicker();
-
-  // Lock gate
-  const gate = wrap.querySelector('.dm-secret-gate');
-  if (!gate) return;
-  const input = gate.querySelector('.dm-secret-input');
-  const submit = gate.querySelector('.dm-secret-submit');
-  const errorEl = gate.querySelector('.dm-secret-error');
-  let pendingPin = null; // first half of the create flow
-
-  const phase = SECRET_LOCK.hasPin() ? 'verify' : 'createNew';
-  let currentPhase = phase;
-
-  const reflect = (txt) => {
-    if (errorEl) errorEl.textContent = txt || '';
-  };
-
-  const onSubmit = () => {
-    const pin = (input?.value || '').replace(/[^0-9]/g, '').slice(0, 6);
-    if (pin.length < 4) { reflect('Use at least 4 digits.'); return; }
-    if (currentPhase === 'createNew') {
-      pendingPin = pin;
-      input.value = '';
-      reflect('');
-      currentPhase = 'createConfirm';
-      const titleEl = gate.querySelector('.dm-secret-title');
-      const subtitleEl = gate.querySelector('.dm-secret-subtitle');
-      if (titleEl) titleEl.textContent = 'Confirm your PIN';
-      if (subtitleEl) subtitleEl.textContent = 'Enter the same digits once more.';
-      input.focus();
-      return;
-    }
-    if (currentPhase === 'createConfirm') {
-      if (pin !== pendingPin) {
-        reflect("PINs don't match. Try again.");
-        pendingPin = null;
-        currentPhase = 'createNew';
-        input.value = '';
-        return;
-      }
-      try {
-        SECRET_LOCK.setPin(pin);
-        renderConversationList();
-      } catch (e) {
-        reflect(e?.message || 'Could not set PIN.');
-      }
-      return;
-    }
-    if (SECRET_LOCK.verifyPin(pin)) {
-      SECRET_LOCK.unlock();
-      renderConversationList();
-    } else {
-      reflect('Wrong PIN.');
-      input.value = '';
-    }
-  };
-
-  if (submit) submit.onclick = onSubmit;
-  if (input) {
-    input.oninput = () => {
-      input.value = input.value.replace(/[^0-9]/g, '').slice(0, 6);
-      reflect('');
-    };
-    input.onkeydown = (e) => { if (e.key === 'Enter') onSubmit(); };
-    setTimeout(() => input.focus(), 0);
-  }
-}
-
-// HTML for the PIN gate. Three phases: createNew, createConfirm, verify.
-// Phase logic lives in wireSecretTabHandlers; this just paints the
-// initial state based on whether a PIN exists.
-function renderSecretLockGateHtml() {
-  const has = SECRET_LOCK.hasPin();
-  const title = has ? 'Enter your Secret PIN' : 'Set a Secret PIN';
-  const subtitle = has
-    ? 'Enter your PIN to view Secret chats.'
-    : 'This PIN locks your Secret tab. Pick at least 4 digits.';
-  const buttonLabel = has ? 'Unlock' : 'Continue';
-  return `
-    <div class="dm-secret-gate">
-      <div class="dm-secret-gate-icon">🔒</div>
-      <div class="dm-secret-title">${title}</div>
-      <div class="dm-secret-subtitle">${subtitle}</div>
-      <input class="dm-secret-input" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••" />
-      <div class="dm-secret-error"></div>
-      <button class="dm-secret-submit" type="button">${buttonLabel}</button>
-    </div>
-  `;
-}
-
-// Quick-reaction emojis (FB-style — these match the existing post REACTIONS set)
-const DM_QUICK_REACTIONS = ['❤️','😂','😮','😢','😡','👍'];
-
-// IDs of messages already painted to the DOM. Used in renderMessages to skip
-// the entrance animation on bubbles that already existed — prevents the whole
-// list from flashing every time we re-render (sends, reactions, read receipts).
-const _renderedMessageIds = new Set();
-
-export async function showMessages(targetUserId = null) {
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-  hideAllMainPages();
-  if (messagesPage) messagesPage.style.display = 'block';
-  document.body.classList.remove('on-videos');
-  history.pushState(null, '', '#messages');
-  setSidebarActive('btnMessages');
-
-  // DMs have a realtime subscription that keeps the list fresh — so on a
-  // quick tab-flick the list is already up to date. Only re-fetch on first
-  // load, when forced (targetUserId), or after 30 seconds.
-  const dmList = document.getElementById('dmList') || messagesPage?.querySelector('.dm-list');
-  const alreadyRendered = dmList && dmList.children.length > 0 && !dmList.querySelector('.loading');
-  const now = Date.now();
-  const stale = !window._dmListLoadedAt || (now - window._dmListLoadedAt) > 30_000;
-  if (!alreadyRendered || stale || targetUserId) {
-    await loadConversationList();
-    window._dmListLoadedAt = now;
-  }
-
-  if (targetUserId) {
-    // Open or create conversation with this user
-    await openConversationWithUser(targetUserId);
-  }
-}
-
-// ── Conversation list ─────────────────────────────────────────────────────
-const DM_EMPTY_HTML = `
-  <div class="dm-empty-list" id="dmEmptyList">
-    <div class="dm-empty-icon">💬</div>
-    <h3>No conversations yet</h3>
-    <p>Start one from anyone's profile.</p>
-  </div>
-`;
-
-async function loadConversationList() {
-  const wrap = document.getElementById('dmConvList');
-  if (!wrap || !currentUser) return;
-
-  // Skeleton while loading
-  if (!dmState.conversations.length) {
-    wrap.innerHTML = `
-      <div class="dm-conv-skel"></div>
-      <div class="dm-conv-skel"></div>
-      <div class="dm-conv-skel"></div>
-    `;
-  }
-
-  // Fetch the conversation ids the viewer can see. Two parallel sources,
-  // unioned client-side:
-  //   (1) conversation_participants — covers groups + most 1:1s.
-  //   (2) conversations.user_a / user_b — covers 1:1s where the participants
-  //       row was never written. Secret 1:1 conversations created via the
-  //       getOrCreateSecretConversation flow only insert into `conversations`
-  //       and don't always seed `conversation_participants` (depends on the
-  //       trigger pipeline). Without (2), Secret chats are invisible to web
-  //       even though they're correctly stored.
-  // Mobile already does this via direct user_a / user_b query in
-  // lib/messages-supabase.js → loadConversations; this matches that
-  // behavior for cross-platform parity.
-  const [partsRes, oneOnOneRes] = await Promise.all([
-    supabase
-      .from('conversation_participants')
-      .select('conversation_id')
-      .eq('user_id', currentUser.id),
-    supabase
-      .from('conversations')
-      .select('id')
-      .eq('is_group', false)
-      .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`),
-  ]);
-  if (partsRes.error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(partsRes.error.message)}</div>`;
-    return;
-  }
-  if (oneOnOneRes.error) {
-    // Non-fatal — fall back to participants-only. Logged so we notice if
-    // it starts failing universally.
-    console.warn('[dm] 1:1 fetch failed, falling back to participants-only:', oneOnOneRes.error?.message);
-  }
-  const idSet = new Set();
-  for (const p of partsRes.data || []) if (p.conversation_id) idSet.add(p.conversation_id);
-  for (const c of oneOnOneRes.data || []) if (c.id) idSet.add(c.id);
-  const convIds = [...idSet];
-  if (!convIds.length) {
-    wrap.innerHTML = DM_EMPTY_HTML;
-    dmState.conversations = [];
-    updateUnreadBadge(0);
-    return;
-  }
-
-  const { data: convs, error } = await supabase
-    .from('conversations')
-    .select('id, user_a, user_b, is_group, is_secret, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
-    .in('id', convIds)
-    .order('last_message_at', { ascending: false, nullsFirst: false })
-    .limit(100);
-
-  if (error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(error.message)}</div>`;
-    return;
-  }
-
-  if (!convs || !convs.length) {
-    wrap.innerHTML = DM_EMPTY_HTML;
-    dmState.conversations = [];
-    updateUnreadBadge(0);
-    return;
-  }
-
-  // We no longer filter at fetch time. The 3-tab pill (Active / Archived /
-  // Secret) lives in renderConversationList and decides which bucket
-  // each conversation belongs to. This means the user can switch tabs
-  // without re-fetching from the network.
-  const visibleConvs = convs;
-
-  // Pull all participants for groups so we can render stacked avatars
-  const groupConvIds = visibleConvs.filter(c => c.is_group).map(c => c.id);
-  const groupMembersByConv = {};
-  if (groupConvIds.length) {
-    const { data: members } = await supabase
-      .from('conversation_participants')
-      .select('conversation_id, user_id')
-      .in('conversation_id', groupConvIds);
-    (members || []).forEach(m => {
-      if (!groupMembersByConv[m.conversation_id]) groupMembersByConv[m.conversation_id] = [];
-      groupMembersByConv[m.conversation_id].push(m.user_id);
-    });
-  }
-
-  // Hydrate ALL profiles needed (1:1 partners + group members)
-  const allProfileIds = new Set();
-  visibleConvs.forEach(c => {
-    if (!c.is_group) {
-      const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
-      if (otherId) allProfileIds.add(otherId);
-    } else {
-      (groupMembersByConv[c.id] || []).forEach(id => allProfileIds.add(id));
-    }
-  });
-  const [{ data: profiles }, unreadByConv] = await Promise.all([
-    allProfileIds.size
-      ? supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', [...allProfileIds])
-      : Promise.resolve({ data: [] }),
-    fetchUnreadCounts(visibleConvs.map(c => c.id)),
-  ]);
-
-  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-  // totalUnread excludes:
-  //   - Archived (per-side flag)
-  //   - Muted
-  //   - Secret (stealth design — never count toward the global badge)
-  let totalUnread = 0;
-  dmState.conversations = visibleConvs.map(c => {
-    const unread = unreadByConv[c.id] || 0;
-    const isMutedNow = isConvMutedForMe(c);
-    const archivedByMe = c.is_group
-      ? false  // groups don't expose per-side archive yet
-      : ((c.user_a === currentUser.id && c.archived_by_a) ||
-         (c.user_b === currentUser.id && c.archived_by_b));
-    const isSecret = !!c.is_secret;
-    if (!isMutedNow && !archivedByMe && !isSecret) totalUnread += unread;
-
-    if (c.is_group) {
-      const memberIds = (groupMembersByConv[c.id] || []).filter(id => id !== currentUser.id);
-      const members = memberIds.map(id => profileMap.get(id)).filter(Boolean);
-      const allMembers = (groupMembersByConv[c.id] || []).map(id => profileMap.get(id) || { id, username: 'Unknown' });
-      // Auto-name: "Alice, Bob, Carol" from up to 3 other members
-      const autoName = c.name || members.slice(0, 3).map(m => m.username).join(', ') || 'Group chat';
-      return {
-        id: c.id,
-        isGroup: true,
-        isSecret,
-        archived: archivedByMe,
-        createdBy: c.created_by,
-        name: autoName,
-        members: allMembers,
-        memberCount: allMembers.length,
-        avatarUrl: c.avatar_url,
-        lastMessageAt: c.last_message_at,
-        lastMessagePreview: c.last_message_preview || '',
-        lastMessageSender: c.last_message_sender,
-        unread,
-        muted: isMutedNow,
-        raw: c,
-      };
-    }
-    const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
-    return {
-      id: c.id,
-      isGroup: false,
-      isSecret,
-      archived: archivedByMe,
-      createdBy: c.created_by,
-      otherUser: profileMap.get(otherId) || { id: otherId, username: 'Unknown', avatar_url: null },
-      lastMessageAt: c.last_message_at,
-      lastMessagePreview: c.last_message_preview || '',
-      lastMessageSender: c.last_message_sender,
-      unread,
-      muted: isMutedNow,
-      raw: c,
-    };
-  });
-
-  renderConversationList();
-  updateUnreadBadge(totalUnread);
-}
-
-// Returns true if the conversation is currently muted for the current user
-function isConvMutedForMe(c) {
-  if (!c) return false;
-  const my = currentUser?.id;
-  let until;
-  if (c.is_group) return false; // group mute TBD
-  if (c.user_a === my)      until = c.muted_until_a;
-  else if (c.user_b === my) until = c.muted_until_b;
-  if (!until) return false;
-  return new Date(until).getTime() > Date.now();
-}
-
-async function fetchUnreadCounts(conversationIds) {
-  if (!conversationIds.length) return {};
-  // Pull only unread messages where I'm NOT the sender, group client-side
-  const { data } = await supabase
-    .from('messages')
-    .select('conversation_id, sender_id')
-    .in('conversation_id', conversationIds)
-    .is('read_at', null)
-    .is('deleted_at', null)
-    .neq('sender_id', currentUser.id);
-  const counts = {};
-  (data || []).forEach(m => {
-    counts[m.conversation_id] = (counts[m.conversation_id] || 0) + 1;
-  });
-  return counts;
-}
-
-function renderConversationList() {
-  const wrap = document.getElementById('dmConvList');
-  if (!wrap) return;
-
-  // ── Bucket conversations into Active / Archived / Secret ─────────────
-  // Secret wins over Archived — a Secret conversation that's somehow
-  // archived still shows under Secret only, never leaks back to
-  // Archived. This matches the mobile invariant.
-  const buckets = { active: [], archived: [], secret: [] };
-  for (const c of dmState.conversations) {
-    if (c.isSecret) buckets.secret.push(c);
-    else if (c.archived) buckets.archived.push(c);
-    else buckets.active.push(c);
-  }
-
-  const mode = dmState.viewMode || 'active';
-  const visible = buckets[mode] || [];
-
-  // ── 3-tab pill ───────────────────────────────────────────────────────
-  // Always show Active. Show Archived only when there's at least one
-  // archived chat OR the user is currently viewing it. Always show
-  // Secret so the lock affordance is discoverable.
-  const showArchivedTab = buckets.archived.length > 0 || mode === 'archived';
-  const pillHtml = `
-    <div class="dm-tab-pill">
-      <button class="dm-tab ${mode === 'active' ? 'is-active' : ''}" data-tab="active" type="button">
-        Active${mode !== 'active' ? ` (${buckets.active.length})` : ''}
-      </button>
-      ${showArchivedTab ? `
-        <button class="dm-tab ${mode === 'archived' ? 'is-active' : ''}" data-tab="archived" type="button">
-          Archived (${buckets.archived.length})
-        </button>` : ''}
-      <button class="dm-tab ${mode === 'secret' ? 'is-active' : ''}" data-tab="secret" type="button">
-        Secret
-      </button>
-    </div>
-  `;
-
-  // ── Body ─────────────────────────────────────────────────────────────
-  // Secret tab is gated by the lock module; if not unlocked, render the
-  // PIN gate instead of the list.
-  let bodyHtml;
-  if (mode === 'secret' && !secretLockIsUnlocked()) {
-    bodyHtml = renderSecretLockGateHtml();
-  } else if (visible.length === 0) {
-    bodyHtml = renderConvEmptyStateHtml(mode);
-  } else {
-    bodyHtml = visible.map(c => renderConvItemHtml(c)).join('');
-  }
-
-  wrap.innerHTML = pillHtml + bodyHtml;
-
-  // Wire pill clicks
-  wrap.querySelectorAll('.dm-tab').forEach(el => {
-    el.onclick = () => {
-      dmState.viewMode = el.dataset.tab;
-      renderConversationList();
-    };
-  });
-
-  // Wire conversation row clicks (only when not on the locked Secret gate)
-  wrap.querySelectorAll('.dm-conv-item').forEach(el => {
-    el.onclick = () => openConversation(el.dataset.convId);
-  });
-
-  // Wire Secret-tab CTA + lock-gate handlers (when present)
-  wireSecretTabHandlers(wrap);
-}
-
-// Empty-state HTML per tab. Secret gets a CTA inviting the user to
-// start one — others get the existing "no chats" copy.
-function renderConvEmptyStateHtml(mode) {
-  if (mode === 'secret') {
-    return `
-      <div class="dm-empty-list">
-        <div class="dm-empty-icon">🔒</div>
-        <div class="dm-empty-title">No Secret chats yet</div>
-        <div class="dm-empty-sub">
-          Secret chats are silent — no notifications, hidden from the unread badge,
-          and only available with mutual followers.
-        </div>
-        <button class="dm-cta-btn" id="dmStartSecretBtn" type="button">🔒 Start a Secret chat</button>
-      </div>
-    `;
-  }
-  if (mode === 'archived') {
-    return `
-      <div class="dm-empty-list">
-        <div class="dm-empty-icon">📥</div>
-        <div class="dm-empty-title">No archived chats.</div>
-      </div>
-    `;
-  }
-  return DM_EMPTY_HTML;
-}
-
-function renderConvItemHtml(c) {
-  let safeName, avatarHtml;
-  if (c.isGroup) {
-    safeName = escHTML(c.name || 'Group chat');
-    // If the creator has set an explicit group photo (avatar_url), prefer
-    // it. Falls back to the stacked-member avatars when no photo set.
-    // Without this branch, the group-photo edit feature was invisible
-    // anywhere outside the group settings modal — same root cause as
-    // the mobile bug we just fixed.
-    avatarHtml = c.avatarUrl
-      ? `<div class="dm-conv-avatar"><img src="${escHTML(c.avatarUrl)}" alt=""/></div>`
-      : renderGroupAvatarHtml(c.members, 'list');
-  } else {
-    const u = c.otherUser;
-    safeName = escHTML(u.username || 'Unknown');
-    avatarHtml = `<div class="dm-conv-avatar">${u.avatar_url
-      ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
-      : `<span class="dm-avatar-initials">${initials(u.username)}</span>`}</div>`;
-  }
-  // Secret rows get a small lock badge on the avatar so it's clear
-  // at a glance which conversations are stealth.
-  //
-  // We need to add the dm-conv-avatar-secret class to whatever the
-  // outer wrapper turned out to be — but the wrapper varies by branch:
-  //   1:1 with photo:        class="dm-conv-avatar"
-  //   1:1 initials:          class="dm-conv-avatar"
-  //   group with photo:      class="dm-conv-avatar"
-  //   group stacked avatars: class="dm-conv-avatar dm-group-avatar"
-  //   group empty (no others): class="dm-conv-avatar"
-  // A literal-string replace covered three of those but missed the
-  // stacked-group case (no badge for Secret groups). Use a regex that
-  // appends the modifier class regardless of what other classes are
-  // already on the wrapper.
-  if (c.isSecret) {
-    avatarHtml = avatarHtml.replace(/class="dm-conv-avatar([^"]*)"/, 'class="dm-conv-avatar$1 dm-conv-avatar-secret"');
-  }
-  const isMine = c.lastMessageSender === currentUser.id;
-  const senderPrefix = c.isGroup && c.lastMessageSender && !isMine
-    ? (escHTML(senderUsernameInGroup(c, c.lastMessageSender) || 'Someone') + ': ')
-    : (isMine ? 'You: ' : '');
-  // If preview body is whitespace-only (image-only message), show generic label
-  const previewText = (c.lastMessagePreview || '').trim();
-  const preview = c.lastMessagePreview && previewText
-    ? senderPrefix + escHTML(c.lastMessagePreview)
-    : (c.lastMessageAt ? senderPrefix + '<em>📷 Sent an attachment</em>' : '<em>No messages yet</em>');
-  const time = c.lastMessageAt ? timeAgo(c.lastMessageAt) : '';
-  const isActive = c.id === dmState.activeConvId;
-  const unreadCls = c.unread > 0 ? ' has-unread' : '';
-  const mutedIcon = c.muted ? '<span class="dm-conv-muted" title="Muted">🔕</span>' : '';
-  return `
-    <button class="dm-conv-item${isActive ? ' active' : ''}${unreadCls}" data-conv-id="${c.id}">
-      ${avatarHtml}
-      <div class="dm-conv-meta">
-        <div class="dm-conv-row">
-          <span class="dm-conv-name">${safeName}${mutedIcon}</span>
-          <span class="dm-conv-time">${time}</span>
-        </div>
-        <div class="dm-conv-preview">${preview}</div>
-      </div>
-      ${c.unread > 0 && !c.muted ? `<span class="dm-conv-unread">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
-    </button>
-  `;
-}
-
-function senderUsernameInGroup(conv, senderId) {
-  if (!conv?.members) return null;
-  const m = conv.members.find(p => p.id === senderId);
-  return m?.username || null;
-}
-
-// Stacked avatars for group conversations (list = small, header = large)
-function renderGroupAvatarHtml(members, variant = 'list') {
-  const others = (members || []).filter(m => m.id !== currentUser.id).slice(0, 2);
-  if (!others.length) {
-    return `<div class="dm-conv-avatar">👥</div>`;
-  }
-  const cls = variant === 'list' ? 'dm-conv-avatar dm-group-avatar' : 'dm-thread-avatar dm-group-avatar';
-  const tiles = others.map((m, i) => {
-    const safeAvatar = m.avatar_url ? escHTML(m.avatar_url) : '';
-    return `<span class="dm-group-tile dm-group-tile-${i}">${safeAvatar
-      ? `<img src="${safeAvatar}" alt=""/>`
-      : initials(m.username)}</span>`;
-  }).join('');
-  return `<div class="${cls}">${tiles}</div>`;
-}
-
-// ── Open a thread ─────────────────────────────────────────────────────────
-async function openConversationWithUser(otherUserId) {
-  // Resolve / create the conversation, then open it
-  const { data: convId, error } = await supabase
-    .rpc('get_or_create_conversation', { p_other_user_id: otherUserId });
-
-  if (error) {
-    if (/blocked/i.test(error.message)) toast('Cannot message blocked user', 'error');
-    else toast(error.message, 'error');
-    return;
-  }
-  await loadConversationList();
-  await openConversation(convId);
-}
-
-export async function openConversation(convId) {
-  if (!convId || !currentUser) return;
-  dmState.activeConvId = convId;
-  dmState.replyingTo = null;
-  hideReplyPreview();
-
-  // Find conversation in cache (or refetch — also re-hydrate participants)
-  let conv = dmState.conversations.find(c => c.id === convId);
-  if (!conv) {
-    // Fetch conversation + participants in parallel (saves one round-trip).
-    // For 1:1 we still know the partner from user_a/user_b, but we kick off
-    // the participants query speculatively so groups don't pay an extra hop.
-    const [{ data, error: fetchErr }, { data: parts }] = await Promise.all([
-      supabase.from('conversations')
-        .select('id, user_a, user_b, is_group, is_secret, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, archived_by_a, archived_by_b, muted_until_a, muted_until_b, created_at')
-        .eq('id', convId)
-        .single(),
-      supabase.from('conversation_participants').select('user_id').eq('conversation_id', convId),
-    ]);
-    if (fetchErr || !data) { toast('Conversation not found', 'error'); console.warn('[dm] conv fetch failed', fetchErr); return; }
-    if (data.is_group) {
-      const memberIds = (parts || []).map(p => p.user_id);
-      const { data: profs } = memberIds.length
-        ? await supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', memberIds)
-        : { data: [] };
-      const members = (profs || []);
-      conv = {
-        id: data.id, isGroup: true, isSecret: !!data.is_secret, createdBy: data.created_by,
-        name: data.name || members.filter(m => m.id !== currentUser.id).slice(0,3).map(m => m.username).join(', '),
-        members, memberCount: members.length, avatarUrl: data.avatar_url,
-        lastMessageAt: data.last_message_at, lastMessagePreview: data.last_message_preview || '',
-        unread: 0, muted: false, raw: data,
-      };
-    } else {
-      const otherId = data.user_a === currentUser.id ? data.user_b : data.user_a;
-      const { data: prof } = await supabase.from('profiles').select('id, username, avatar_url, is_guest').eq('id', otherId).single();
-      conv = {
-        id: data.id, isGroup: false, isSecret: !!data.is_secret, createdBy: data.created_by,
-        otherUser: prof || { id: otherId, username: 'Unknown', avatar_url: null },
-        lastMessageAt: data.last_message_at,
-        lastMessagePreview: data.last_message_preview || '',
-        unread: 0, muted: isConvMutedForMe(data), raw: data,
-      };
-    }
-  }
-  // Carry the raw flags onto the activeConv for any downstream code that
-  // checks them by snake_case (the send-time mutuals gate, etc.).
-  if (conv && conv.raw) {
-    conv.is_secret = !!conv.raw.is_secret;
-    conv.is_group = !!conv.raw.is_group;
-    conv.user_a = conv.raw.user_a;
-    conv.user_b = conv.raw.user_b;
-  }
-  dmState.activeConv = conv;
-  dmState.activeOther = conv.isGroup ? null : conv.otherUser;
-
-  // Show active panel, hide empty placeholder
-  document.getElementById('dmThreadEmpty').style.display = 'none';
-  document.getElementById('dmThreadActive').style.display = 'flex';
-
-  // Header — different rendering for groups vs 1:1
-  const av = document.getElementById('dmThreadAvatar');
-  const nameBtn = document.getElementById('dmThreadName');
-  const statusEl = document.getElementById('dmThreadStatus');
-  if (conv.isGroup) {
-    // Prefer the explicitly-set group photo (creator-uploaded). Falls
-    // back to the stacked-member rendering when no photo is set. Same
-    // resolution rule as the conversation list — keeps the surfaces in
-    // sync with the group settings modal's avatar editor.
-    if (conv.avatarUrl) {
-      av.innerHTML = `<img src="${escHTML(conv.avatarUrl)}" alt=""/>`;
-    } else {
-      av.innerHTML = renderGroupAvatarHtml(conv.members, 'list')
-        .replace('class="dm-conv-avatar dm-group-avatar"', 'class="dm-group-avatar dm-group-avatar-header"');
-    }
-    av.onclick = () => openConvActionsMenu(); // tap header avatar → menu (View members)
-    nameBtn.textContent = (conv.isSecret ? '🔒 ' : '') + conv.name;
-    nameBtn.onclick = () => openConvActionsMenu();
-    statusEl.textContent = `${conv.memberCount} members`;
-  } else {
-    const u = conv.otherUser;
-    av.innerHTML = (u.avatar_url
-      ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
-      : `<span class="dm-avatar-initials">${initials(u.username)}</span>`) +
-      `<span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>`;
-    av.onclick = () => openProfile(u.id);
-    nameBtn.textContent = (conv.isSecret ? '🔒 ' : '') + (u.username || 'Unknown');
-    nameBtn.onclick = () => openProfile(u.id);
-    statusEl.textContent = '';
-  }
-
-  // Highlight in list
-  document.querySelectorAll('.dm-conv-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.convId === convId);
-  });
-
-  // Mobile: collapse list, show thread
-  document.querySelector('.dm-shell')?.classList.add('thread-open');
-
-  // Load messages
-  await loadMessages(convId);
-
-  // ── Optimistically clear unread BEFORE the RPC call ──
-  // Even if mark_conversation_read fails (RPC missing, network error, etc.),
-  // the user sees the badge clear immediately. Real-time correction happens
-  // on next loadConversationList if the server disagrees.
-  const _zeroUnread = () => {
-    const c = dmState.conversations.find(x => x.id === convId);
-    if (c) c.unread = 0;
-    renderConversationList();
-    updateUnreadBadge(computeDmUnreadTotal());
-  };
-  _zeroUnread();
-  supabase.rpc('mark_conversation_read', { p_conversation_id: convId })
-    .then(_zeroUnread)
-    .catch(() => {});  // Already cleared optimistically; ignore RPC errors
-
-  // Subscribe to realtime updates for this conversation
-  subscribeToThread(convId);
-}
-
-async function loadMessages(convId) {
-  const wrap = document.getElementById('dmMessages');
-  if (!wrap) return;
-  wrap.innerHTML = '<div class="dm-loading">Loading messages…</div>';
-  // Fresh conversation → reset the "already-animated" tracker so first paint animates in
-  _renderedMessageIds.clear();
-
-  // Fetch messages + reactions in parallel (include reply_to_id + image fields).
-  // Pull the LATEST 100 (descending), then reverse to chronological order so
-  // newest sits at the bottom. Previously this was ascending+limit(200) which,
-  // on a thread with >200 messages, would silently miss the most recent ones.
-  // Older messages can be paged in via a future "load older" affordance.
-  const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
-    supabase
-      .from('messages')
-      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id, image_url, image_urls, image_kind')
-      .eq('conversation_id', convId)
-      .order('created_at', { ascending: false })
-      .limit(100),
-    fetchReactionsForConversation(convId),
-  ]);
-
-  if (msgErr) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load messages: ${escHTML(msgErr.message)}</div>`;
-    return;
-  }
-  // Reverse to chronological order (oldest first → newest at bottom of thread)
-  // and normalize image fields so the renderer always sees image_urls as an
-  // array. Pre-2026-05-07 rows only have image_url populated; new rows have
-  // both. The mobile lib does the same shape promotion; matching here means
-  // renderMessages doesn't have to branch on legacy schema shape.
-  dmState.messages = (msgs || []).slice().reverse().map((m) => {
-    if (Array.isArray(m.image_urls) && m.image_urls.length > 0) return m;
-    if (m.image_url) return { ...m, image_urls: [m.image_url] };
-    return { ...m, image_urls: [] };
-  });
-  dmState.reactions = reactionsByMsg;
-  renderMessages();
-  // Initial open of a thread → always pin to bottom regardless of prior scroll.
-  scrollMessagesToBottom({ force: true });
-}
-
-// Fetch all reactions for messages in this conversation, indexed by message_id
-async function fetchReactionsForConversation(convId) {
-  // First get the message ids in this convo (RLS-protected)
-  const { data: msgIds } = await supabase
-    .from('messages')
-    .select('id')
-    .eq('conversation_id', convId);
-  if (!msgIds?.length) return {};
-  const ids = msgIds.map(m => m.id);
-  const { data: reactions } = await supabase
-    .from('message_reactions')
-    .select('message_id, user_id, emoji, created_at')
-    .in('message_id', ids);
-  const out = {};
-  (reactions || []).forEach(r => {
-    if (!out[r.message_id]) out[r.message_id] = [];
-    out[r.message_id].push(r);
-  });
-  return out;
-}
-
-// ── Render messages with FB-style grouping ────────────────────────────────
-function renderMessages() {
-  const wrap = document.getElementById('dmMessages');
-  if (!wrap) return;
-
-  if (!dmState.messages.length) {
-    if (dmState.activeConv?.isGroup) {
-      wrap.innerHTML = `
-        <div class="dm-thread-intro">
-          <div class="dm-thread-intro-avatar">${renderGroupAvatarHtml(dmState.activeConv.members, 'list')}</div>
-          <h3>${escHTML(dmState.activeConv.name || 'Group chat')}</h3>
-          <p>${dmState.activeConv.memberCount} members. Send a message to get the chat going.</p>
-        </div>
-      `;
-    } else {
-      wrap.innerHTML = `
-        <div class="dm-thread-intro">
-          <div class="dm-thread-intro-avatar">${dmState.activeOther?.avatar_url
-            ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-            : initials(dmState.activeOther?.username)}</div>
-          <h3>${escHTML(dmState.activeOther?.username || '')}</h3>
-          <p>Say hello — your first message starts the conversation.</p>
-        </div>
-      `;
-    }
-    return;
-  }
-  const isGroup = !!dmState.activeConv?.isGroup;
-  const memberMap = new Map();
-  if (isGroup) (dmState.activeConv.members || []).forEach(m => memberMap.set(m.id, m));
-
-  // Identify the LAST message sent by ME that the OTHER has already read,
-  // so we can stick the read avatar to it (FB pattern).
-  let lastReadOfMine = null;
-  for (let i = dmState.messages.length - 1; i >= 0; i--) {
-    const m = dmState.messages[i];
-    if (m.sender_id === currentUser.id && m.read_at) { lastReadOfMine = m.id; break; }
-  }
-
-  let lastDateStamp = '';
-  let html = '';
-  for (let i = 0; i < dmState.messages.length; i++) {
-    const m = dmState.messages[i];
-    const prev = dmState.messages[i - 1];
-    const next = dmState.messages[i + 1];
-    const mine = m.sender_id === currentUser.id;
-
-    // Date separator (every ~30 min gap or new day)
-    const stamp = formatMessageDateStamp(m.created_at, prev?.created_at);
-    if (stamp && stamp !== lastDateStamp) {
-      html += `<div class="dm-date-sep">${stamp}</div>`;
-      lastDateStamp = stamp;
-    }
-
-    // Grouping: this message belongs to the same "burst" if same sender as prev/next AND within 5 min
-    const isFirstInGroup = !prev || prev.sender_id !== m.sender_id || (new Date(m.created_at) - new Date(prev.created_at)) > 5 * 60000;
-    const isLastInGroup  = !next || next.sender_id !== m.sender_id || (new Date(next.created_at) - new Date(m.created_at)) > 5 * 60000;
-
-    // Only animate bubbles we haven't rendered before — prevents the whole
-    // list from flashing on every re-render (e.g. after optimistic→real swap).
-    const isNewBubble = !_renderedMessageIds.has(m.id);
-    const bubbleCls = `dm-bubble ${mine ? 'mine' : 'theirs'}` +
-      (isFirstInGroup ? ' first-in-group' : '') +
-      (isLastInGroup  ? ' last-in-group'  : '') +
-      (isNewBubble    ? ' is-new'         : '');
-
-    // Avatar: in groups, show the SENDER's avatar (different per message); in 1:1, the activeOther's
-    const senderProfile = isGroup ? memberMap.get(m.sender_id) : dmState.activeOther;
-    const showAvatar = !mine && isLastInGroup;
-    const avatarHtml = showAvatar
-      ? `<div class="dm-bubble-avatar">${senderProfile?.avatar_url
-          ? `<img src="${escHTML(senderProfile.avatar_url)}"/>`
-          : initials(senderProfile?.username)}</div>`
-      : '<div class="dm-bubble-avatar-spacer"></div>';
-    // In groups: show sender name above their FIRST bubble in a stretch
-    const senderNameHtml = (isGroup && !mine && isFirstInGroup && senderProfile)
-      ? `<div class="dm-sender-name">${escHTML(senderProfile.username || 'Unknown')}</div>`
-      : '';
-
-    const isDeleted = !!m.deleted_at;
-    // Build bubble content: deleted messages render as a static label (NOT through linkify),
-    // otherwise escape body, convert newlines, then linkify URLs.
-    let bubbleContent;
-    let linkPreviewHtml = '';
-    let imageHtml = '';
-    if (isDeleted) {
-      const who = mine ? 'You' : escHTML(dmState.activeOther?.username || 'User');
-      bubbleContent = `<span class="dm-bubble-deleted">${who} unsent a message</span>`;
-    } else {
-      // Image attachment(s) — multi-image post-2026-05-07. The loadMessages
-      // normalizer above guarantees `m.image_urls` is always an array
-      // (possibly empty); legacy `m.image_url` rows are promoted to
-      // length-1 arrays at fetch time. GIF detection still uses the lead
-      // url's image_kind/extension since GIFs are always single-attachment.
-      const imageUrls = Array.isArray(m.image_urls) && m.image_urls.length > 0
-        ? m.image_urls
-        : (m.image_url ? [m.image_url] : []);
-      if (imageUrls.length > 0) {
-        const leadUrl = imageUrls[0];
-        const isGif = m.image_kind === 'gif' || /\.gif(\?|$)/i.test(leadUrl);
-        if (imageUrls.length === 1) {
-          // Single image keeps the existing markup so the surrounding CSS
-          // (rounded corners, GIF tag, lightbox click handler) all still
-          // applies unchanged.
-          imageHtml = `
-            <div class="dm-bubble-image ${isGif ? 'is-gif' : ''}" data-img-url="${escHTML(leadUrl)}">
-              <img src="${escHTML(leadUrl)}" alt="Attachment" loading="lazy"/>
-              ${isGif ? '<span class="dm-bubble-image-tag">GIF</span>' : ''}
-            </div>
-          `;
-        } else {
-          // Gallery grid for 2+ images. We render up to 4 thumbs; if there
-          // are more, the 4th cell gets a "+N" overlay. Each thumb is
-          // tappable via the same data-img-url lightbox hook the single
-          // image uses, so existing click handlers keep working.
-          const visible = imageUrls.slice(0, 4);
-          const overflow = imageUrls.length - 4;
-          imageHtml = `
-            <div class="dm-bubble-gallery dm-bubble-gallery-${visible.length}">
-              ${visible.map((url, idx) => {
-                const isOverflow = idx === 3 && overflow > 0;
-                return `
-                  <div class="dm-bubble-gallery-cell" data-img-url="${escHTML(url)}">
-                    <img src="${escHTML(url)}" alt="Attachment" loading="lazy"/>
-                    ${isOverflow ? `<span class="dm-bubble-gallery-overflow">+${overflow}</span>` : ''}
-                  </div>
-                `;
-              }).join('')}
-            </div>
-          `;
-        }
-      }
-      // Body text (skip if message is image-only with whitespace body)
-      const trimmedBody = (m.body || '').trim();
-      if (trimmedBody) {
-        const escaped = escHTML(m.body || '').replace(/\n/g, '<br>');
-        bubbleContent = linkify(escaped);
-        linkPreviewHtml = renderDmLinkPreview(m.body || '');
-      } else {
-        bubbleContent = '';
-      }
-    }
-
-    const editedTag = (!isDeleted && m.edited_at) ? '<span class="dm-edited-tag" title="Edited">(edited)</span>' : '';
-
-    const readBadge = mine && m.id === lastReadOfMine
-      ? `<div class="dm-bubble-read" title="Seen ${timeAgo(m.read_at)}">
-          ${dmState.activeOther?.avatar_url
-            ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-            : `<span>${initials(dmState.activeOther?.username)}</span>`}
-        </div>`
-      : '';
-
-    // Reaction pills (groups by emoji)
-    const reactions = (dmState.reactions[m.id] || []);
-    let reactionsHtml = '';
-    if (reactions.length) {
-      const grouped = {};
-      const myReacts = new Set();
-      reactions.forEach(r => {
-        grouped[r.emoji] = (grouped[r.emoji] || 0) + 1;
-        if (r.user_id === currentUser.id) myReacts.add(r.emoji);
-      });
-      reactionsHtml = `<div class="dm-bubble-reactions">${
-        Object.entries(grouped).map(([emoji, count]) =>
-          `<button class="dm-rx-pill ${myReacts.has(emoji) ? 'mine' : ''}" data-msg="${m.id}" data-emoji="${escHTML(emoji)}" title="${myReacts.has(emoji) ? 'Remove your reaction' : 'React'}">
-            <span>${emoji}</span>${count > 1 ? `<span class="dm-rx-count">${count}</span>` : ''}
-          </button>`
-        ).join('')
-      }</div>`;
-    }
-
-    const canEditDelete = mine && !isDeleted && !m.image_url; // can't inline-edit images
-    const deletedCls = isDeleted ? ' is-deleted' : '';
-    const imageOnlyCls = (!isDeleted && imageHtml && !bubbleContent) ? ' is-image-only' : '';
-
-    // Reply quote chip — show the quoted message above the bubble
-    let replyQuoteHtml = '';
-    if (m.reply_to_id) {
-      const parent = dmState.messages.find(x => x.id === m.reply_to_id);
-      if (parent) {
-        const parentSender = isGroup
-          ? memberMap.get(parent.sender_id)
-          : (parent.sender_id === currentUser.id ? { username: 'You' } : dmState.activeOther);
-        const parentName = parent.sender_id === currentUser.id ? 'You' : (parentSender?.username || 'Unknown');
-        const parentBody = parent.deleted_at ? '(unsent message)' : (parent.body || '').slice(0, 100);
-        replyQuoteHtml = `
-          <button class="dm-reply-quote ${mine ? 'mine' : 'theirs'}" data-jump-to="${parent.id}">
-            <span class="dm-reply-quote-name">${escHTML(parentName)}</span>
-            <span class="dm-reply-quote-body">${escHTML(parentBody)}</span>
-          </button>
-        `;
-      } else {
-        replyQuoteHtml = `<div class="dm-reply-quote ${mine ? 'mine' : 'theirs'} dm-reply-orphan">Original message unavailable</div>`;
-      }
-    }
-
-    html += `
-      <div class="dm-bubble-row ${mine ? 'mine' : 'theirs'}" data-msg-id="${m.id}">
-        ${!mine ? avatarHtml : ''}
-        <div class="dm-bubble-wrap">
-          ${senderNameHtml}
-          ${replyQuoteHtml}
-          <div class="${bubbleCls}${deletedCls}${imageOnlyCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
-            ${imageHtml}
-            ${bubbleContent ? `<div class="dm-bubble-text">${bubbleContent}${editedTag ? ' ' + editedTag : ''}</div>` : (editedTag && !imageHtml ? editedTag : '')}
-          </div>
-          ${linkPreviewHtml}
-          ${reactionsHtml}
-          ${mine ? readBadge : ''}
-        </div>
-      </div>
-    `;
-  }
-
-  // Typing indicator at bottom (only if other is typing AND we have at least one msg)
-  if (dmState.otherIsTyping) {
-    html += `
-      <div class="dm-bubble-row theirs dm-typing-row">
-        <div class="dm-bubble-avatar">${dmState.activeOther?.avatar_url
-          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-          : initials(dmState.activeOther?.username)}</div>
-        <div class="dm-bubble theirs first-in-group last-in-group dm-typing-bubble" aria-label="Typing">
-          <span class="dm-typing-dot"></span><span class="dm-typing-dot"></span><span class="dm-typing-dot"></span>
-        </div>
-      </div>
-    `;
-  }
-
-  wrap.innerHTML = html;
-
-  // Mark all currently-rendered message ids as "seen" so future re-renders
-  // don't re-trigger the entrance animation on existing bubbles.
-  _renderedMessageIds.clear();
-  dmState.messages.forEach(m => _renderedMessageIds.add(m.id));
-
-  // Async-fill any Selebox-internal preview placeholders (videos/books/profiles)
-  hydrateDmInternalPreviews();
-}
-
-function formatMessageDateStamp(current, previous) {
-  const cur = new Date(current);
-  if (!previous) {
-    // Always show stamp for the first message
-    return formatStampLabel(cur);
-  }
-  const prev = new Date(previous);
-  const gapMs = cur - prev;
-  if (gapMs > 30 * 60 * 1000 || cur.toDateString() !== prev.toDateString()) {
-    return formatStampLabel(cur);
-  }
-  return null;
-}
-
-function formatStampLabel(d) {
-  const today = new Date(); today.setHours(0,0,0,0);
-  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
-  const dayStart = new Date(d); dayStart.setHours(0,0,0,0);
-  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (dayStart.getTime() === today.getTime())     return `Today at ${t}`;
-  if (dayStart.getTime() === yesterday.getTime()) return `Yesterday at ${t}`;
-  // older
-  const dateStr = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-  return `${dateStr} at ${t}`;
-}
-
-// True when the messages pane is scrolled to (or within 80px of) the bottom.
-function isDmAtBottom(wrap) {
-  if (!wrap) return false;
-  return wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
-}
-
-// Pin the messages pane to the latest message.
-//
-// Why this is more involved than a one-shot scrollTop: bubbles can grow AFTER
-// the initial pin — lazy-loaded image attachments, link-preview thumbnails
-// (favicons / YouTube), and the hydrated internal-preview cards (skeleton →
-// full card swap). Each of those landings nudges the latest message above
-// the fold. So we re-pin in a few passes as content settles, AND once per
-// <img> load.
-//
-// Pass `{ force: true }` for "I just opened the thread / I just sent" — those
-// must pin regardless of prior scroll position. Without `force`, we only
-// re-pin when the user was already at the bottom (so we don't yank them
-// back if they've scrolled up to read older messages).
-function scrollMessagesToBottom(opts = {}) {
-  const wrap = document.getElementById('dmMessages');
-  if (!wrap) return;
-  const force = !!opts.force;
-  // Capture once: was the user at the bottom at the moment of this call?
-  // Subsequent stick() calls honor that snapshot so we don't fight the user
-  // if they scroll up between passes.
-  const wasAtBottom = force || isDmAtBottom(wrap);
-  const stick = () => {
-    if (wasAtBottom) wrap.scrollTop = wrap.scrollHeight;
-  };
-  requestAnimationFrame(stick);
-  // Re-pin as async content settles (link previews, hydrated cards, fonts).
-  setTimeout(stick, 80);
-  setTimeout(stick, 300);
-  setTimeout(stick, 800);
-  // Pin once each not-yet-loaded <img> finishes — covers slower networks
-  // where attachments / link thumbnails arrive long after the timeouts.
-  wrap.querySelectorAll('img').forEach(img => {
-    if (img.complete && img.naturalWidth > 0) return;
-    img.addEventListener('load',  stick, { once: true });
-    img.addEventListener('error', stick, { once: true });
-  });
-}
-
-// Codex audit 2026-05-16: single-flight guard for DM sends. Without this,
-// Enter pressed twice in quick succession (or Enter + click race) fired two
-// sendDmMessage() calls — each one optimistically inserted, each one POSTed,
-// each one came back via realtime. Some users were seeing duplicate
-// messages. Lift the guard outside the function so both text and attachment
-// paths share it.
-let _dmSendInFlight = false;
-
-// ── Send a message ────────────────────────────────────────────────────────
-async function sendDmMessage() {
-  if (_dmSendInFlight) return;
-  const input = document.getElementById('dmInput');
-  if (!input || !dmState.activeConvId) return;
-  const body = input.value.trim();
-  if (!body) {
-    // Empty composer + send click = thumbs-up emoji (FB classic)
-    return sendDmThumbsUp();
-  }
-
-  _dmSendInFlight = true;
-  const sendBtn = document.getElementById('dmSendBtn');
-  if (sendBtn) sendBtn.disabled = true;
-  input.disabled = true;
-  // Release the single-flight lock from every exit path. Defined here so
-  // every early-return below can call it without forgetting.
-  const releaseSendLock = () => {
-    _dmSendInFlight = false;
-    if (sendBtn) sendBtn.disabled = false;
-    input.disabled = false;
-  };
-
-  // Capture & clear reply state up front
-  const replyToId = dmState.replyingTo?.id || null;
-  dmState.replyingTo = null;
-  if (typeof hideReplyPreview === 'function') hideReplyPreview();
-
-  // Secret-conversation send-time mutuals re-check. Mirrors mobile's
-  // sendMessage gate. The conversation row's is_secret never changes,
-  // so we trust dmState.activeConv (already loaded). For Secret 1:1's
-  // we re-verify the mutual-follow invariant — if either side has
-  // unfollowed since the conversation was created, the message is
-  // refused with a friendly toast. The conversation row stays visible
-  // (frozen) so the user can see the shared history.
-  const ac = dmState.activeConv;
-  if (ac && ac.is_secret && !ac.is_group) {
-    const otherId = ac.user_a === currentUser.id ? ac.user_b : ac.user_a;
-    if (otherId) {
-      const stillMutual = await dmIsMutualFollow(currentUser.id, otherId);
-      if (!stillMutual) {
-        toast('You and this person are no longer mutuals. Secret chat is frozen.', 'error');
-        releaseSendLock();
-        return;
-      }
-    }
-  }
-
-  // Optimistic render
-  const tempId = 'temp-' + Date.now();
-  const optimistic = {
-    id: tempId,
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body,
-    reply_to_id: replyToId,
-    created_at: new Date().toISOString(),
-    read_at: null,
-    _pending: true,
-  };
-  dmState.messages.push(optimistic);
-  renderMessages();
-  // Sending my own message → always pin so I see it land.
-  scrollMessagesToBottom({ force: true });
-  input.value = '';
-  resizeDmInput();
-  updateSendButton();
-
-  const { data, error } = await supabase.from('messages').insert({
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body,
-    reply_to_id: replyToId,
-  }).select().single();
-
-  if (error) {
-    // Rollback optimistic
-    dmState.messages = dmState.messages.filter(m => m.id !== tempId);
-    renderMessages();
-    toast(error.message, 'error');
-    releaseSendLock();
-    return;
-  }
-  // Replace temp with real — transfer the "already-rendered" status so the
-  // bubble doesn't re-animate (otherwise the whole list would flash).
-  const idx = dmState.messages.findIndex(m => m.id === tempId);
-  if (idx >= 0) dmState.messages[idx] = data;
-  if (_renderedMessageIds.has(tempId)) {
-    _renderedMessageIds.delete(tempId);
-    _renderedMessageIds.add(data.id);
-  }
-  // Also update the DOM in place so we don't need a full re-render at all.
-  // The bubble keeps its position + animation state; we just swap the IDs.
-  document.querySelectorAll(`[data-msg-id="${tempId}"]`).forEach(el => {
-    el.dataset.msgId = data.id;
-  });
-  releaseSendLock();
-}
-
-async function sendDmThumbsUp() {
-  if (!dmState.activeConvId) return;
-  const { data, error } = await supabase.from('messages').insert({
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body: '👍',
-  }).select().single();
-  if (error) { toast(error.message, 'error'); return; }
-  dmState.messages.push(data);
-  renderMessages();
-  // Sending my own thumbs-up → always pin.
-  scrollMessagesToBottom({ force: true });
-}
-
-function updateSendButton() {
-  const btn = document.getElementById('dmSendBtn');
-  const input = document.getElementById('dmInput');
-  if (!btn || !input) return;
-  const hasText = input.value.trim().length > 0;
-  btn.classList.toggle('has-text', hasText);
-}
-
-function resizeDmInput() {
-  const input = document.getElementById('dmInput');
-  if (!input) return;
-  // Capture whether the user was anchored to the bottom BEFORE the resize
-  const messages = document.getElementById('dmMessages');
-  const wasAtBottom = messages
-    ? (messages.scrollTop + messages.clientHeight >= messages.scrollHeight - 80)
-    : false;
-
-  input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-
-  // Composer just got taller → messages area shrunk. If user was at the
-  // bottom before, keep them at the bottom (so latest message stays visible).
-  if (wasAtBottom && messages) {
-    requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
-  }
-}
-
-// ── Realtime ──────────────────────────────────────────────────────────────
-function subscribeToThread(convId) {
-  // Tear down previous channels
-  if (dmState.realtimeChannel) {
-    supabase.removeChannel(dmState.realtimeChannel);
-    dmState.realtimeChannel = null;
-  }
-  if (dmState.presenceChannel) {
-    supabase.removeChannel(dmState.presenceChannel);
-    dmState.presenceChannel = null;
-  }
-  // Reset transient state
-  dmState.otherIsTyping = false;
-  if (dmState.otherTypingTimer) { clearTimeout(dmState.otherTypingTimer); dmState.otherTypingTimer = null; }
-  if (dmState.myTypingTimer) { clearTimeout(dmState.myTypingTimer); dmState.myTypingTimer = null; }
-  dmState.otherIsOnline = false;
-
-  // — Channel A: postgres_changes for this thread (messages + reactions) —
-  dmState.realtimeChannel = supabase
-    .channel(`dm-thread-${convId}`)
-    .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'messages',
-      filter: `conversation_id=eq.${convId}`,
-    }, (payload) => {
-      const newMsg = payload.new;
-      // Already in the array by real id? skip (covers the case where the
-      // HTTP insert response landed first and we already swapped tempId → real).
-      if (dmState.messages.some(m => m.id === newMsg.id)) return;
-
-      // Race fix: if MY own message echoes back from realtime BEFORE the HTTP
-      // insert response returns, the temp-XXX placeholder is still in the
-      // array. Without this match, we'd push a second copy and the user
-      // would see the message twice. Find the matching temp and swap in
-      // place rather than push.
-      if (newMsg.sender_id === currentUser.id) {
-        const tempIdx = dmState.messages.findIndex(m =>
-          String(m.id).startsWith('temp-') &&
-          m.sender_id === currentUser.id &&
-          (m.body || '') === (newMsg.body || '')
-        );
-        if (tempIdx >= 0) {
-          const oldId = dmState.messages[tempIdx].id;
-          dmState.messages[tempIdx] = newMsg;
-          // Migrate the rendered-id tracker so the bubble doesn't re-animate
-          if (_renderedMessageIds.has(oldId)) {
-            _renderedMessageIds.delete(oldId);
-            _renderedMessageIds.add(newMsg.id);
-          }
-          // Update the DOM in-place — same as the HTTP-response path does
-          document.querySelectorAll(`[data-msg-id="${oldId}"]`).forEach(el => {
-            el.dataset.msgId = newMsg.id;
-          });
-          return;
-        }
-      }
-
-      dmState.messages.push(newMsg);
-      renderMessages();
-      scrollMessagesToBottom();
-      if (newMsg.sender_id !== currentUser.id) {
-        // The other side just sent — clear typing indicator
-        dmState.otherIsTyping = false;
-        supabase.rpc('mark_conversation_read', { p_conversation_id: convId });
-        // Also reset local unread immediately so the sidebar badge doesn't
-        // tick up while the user is actively reading the thread. The inbox
-        // channel's guard already skips totalUnread bump, but the per-conv
-        // count needs explicit clearing here in case it drifted.
-        const c = dmState.conversations.find(x => x.id === convId);
-        if (c) c.unread = 0;
-        updateUnreadBadge(computeDmUnreadTotal());
-        renderConversationList();
-      }
-    })
-    .on('postgres_changes', {
-      event: 'UPDATE', schema: 'public', table: 'messages',
-      filter: `conversation_id=eq.${convId}`,
-    }, (payload) => {
-      const idx = dmState.messages.findIndex(m => m.id === payload.new.id);
-      if (idx >= 0) {
-        dmState.messages[idx] = payload.new;
-        renderMessages();
-      }
-    })
-    .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'message_reactions',
-    }, (payload) => {
-      const r = payload.new;
-      // Only handle reactions on messages in this thread
-      if (!dmState.messages.some(m => m.id === r.message_id)) return;
-      if (!dmState.reactions[r.message_id]) dmState.reactions[r.message_id] = [];
-      // Avoid duplicates from optimistic insert
-      const exists = dmState.reactions[r.message_id].some(x => x.user_id === r.user_id && x.emoji === r.emoji);
-      if (!exists) {
-        dmState.reactions[r.message_id].push(r);
-        renderMessages();
-      }
-    })
-    .on('postgres_changes', {
-      event: 'DELETE', schema: 'public', table: 'message_reactions',
-    }, (payload) => {
-      const r = payload.old;
-      if (!dmState.reactions[r.message_id]) return;
-      dmState.reactions[r.message_id] = dmState.reactions[r.message_id].filter(x =>
-        !(x.user_id === r.user_id && x.emoji === r.emoji));
-      renderMessages();
-    })
-    .subscribe();
-
-  // — Channel B: presence + typing broadcast (lighter weight, ephemeral) —
-  subscribeToPresenceAndTyping(convId);
-}
-
-function subscribeToPresenceAndTyping(convId) {
-  const channel = supabase.channel(`dm-presence-${convId}`, {
-    config: { presence: { key: currentUser.id } },
-  });
-
-  channel
-    .on('presence', { event: 'sync' }, () => {
-      const state = channel.presenceState();
-      const otherId = dmState.activeOther?.id;
-      const otherPresent = otherId && state[otherId];
-      dmState.otherIsOnline = !!otherPresent;
-      updateThreadPresenceUI();
-    })
-    .on('broadcast', { event: 'typing' }, (payload) => {
-      const fromId = payload.payload?.userId;
-      if (!fromId || fromId === currentUser.id) return;
-      // Show typing for ~3s; if more broadcasts arrive, refresh the timer
-      dmState.otherIsTyping = true;
-      if (dmState.otherTypingTimer) clearTimeout(dmState.otherTypingTimer);
-      dmState.otherTypingTimer = setTimeout(() => {
-        dmState.otherIsTyping = false;
-        renderMessages();
-        scrollMessagesToBottom();
-      }, 3500);
-      renderMessages();
-      scrollMessagesToBottom();
-    })
-    .subscribe(async (status) => {
-      if (status === 'SUBSCRIBED') {
-        await channel.track({ userId: currentUser.id, online_at: new Date().toISOString() });
-      }
-    });
-
-  dmState.presenceChannel = channel;
-}
-
-function updateThreadPresenceUI() {
-  const dot = document.getElementById('dmOnlineDot');
-  const status = document.getElementById('dmThreadStatus');
-  if (dot) dot.style.display = dmState.otherIsOnline ? '' : 'none';
-  if (status) status.textContent = dmState.otherIsOnline ? 'Active now' : '';
-}
-
-// Broadcast that I'm typing (debounced)
-function broadcastTyping() {
-  if (!dmState.presenceChannel) return;
-  if (dmState.myTypingTimer) return;  // already broadcasted recently — wait
-  dmState.presenceChannel.send({
-    type: 'broadcast',
-    event: 'typing',
-    payload: { userId: currentUser.id },
-  });
-  // Throttle: don't re-broadcast more than once every 1.5s
-  dmState.myTypingTimer = setTimeout(() => {
-    dmState.myTypingTimer = null;
-  }, 1500);
-}
-
-// ── Reactions API ──────────────────────────────────────────────────────────
-async function toggleReaction(messageId, emoji) {
-  if (!currentUser) return;
-  const existing = (dmState.reactions[messageId] || []).find(r =>
-    r.user_id === currentUser.id && r.emoji === emoji);
-
-  if (existing) {
-    // Remove (optimistic)
-    dmState.reactions[messageId] = dmState.reactions[messageId].filter(r =>
-      !(r.user_id === currentUser.id && r.emoji === emoji));
-    renderMessages();
-    const { error } = await supabase.from('message_reactions')
-      .delete()
-      .eq('message_id', messageId)
-      .eq('user_id', currentUser.id)
-      .eq('emoji', emoji);
-    if (error) toast(error.message, 'error');
-  } else {
-    // Add (optimistic)
-    if (!dmState.reactions[messageId]) dmState.reactions[messageId] = [];
-    dmState.reactions[messageId].push({ message_id: messageId, user_id: currentUser.id, emoji });
-    renderMessages();
-    const { error } = await supabase.from('message_reactions').insert({
-      message_id: messageId, user_id: currentUser.id, emoji,
-    });
-    if (error) {
-      // Rollback
-      dmState.reactions[messageId] = dmState.reactions[messageId].filter(r =>
-        !(r.user_id === currentUser.id && r.emoji === emoji));
-      renderMessages();
-      toast(error.message, 'error');
-    }
-  }
-  closeReactionPicker();
-}
-
-// ── Edit / delete own message ─────────────────────────────────────────────
-async function deleteMessage(messageId) {
-  const ok = await confirmDialog({
-    title: 'Delete message?',
-    body: 'This message will be replaced with "Message deleted" for both of you. Can\'t be undone.',
-    confirmLabel: 'Delete',
-  });
-  if (!ok) return;
-  const { error } = await supabase.from('messages')
-    .update({ deleted_at: new Date().toISOString() })
-    .eq('id', messageId)
-    .eq('sender_id', currentUser.id);
-  if (error) { toast(error.message, 'error'); return; }
-  // Local update — realtime UPDATE will also fire
-  const idx = dmState.messages.findIndex(m => m.id === messageId);
-  if (idx >= 0) {
-    dmState.messages[idx] = { ...dmState.messages[idx], deleted_at: new Date().toISOString() };
-    renderMessages();
-  }
-}
-
-function startEditMessage(messageId) {
-  const msg = dmState.messages.find(m => m.id === messageId);
-  if (!msg || msg.sender_id !== currentUser.id) return;
-  dmState.editingMessageId = messageId;
-  // Replace the bubble's contents with an inline editor
-  const bubble = document.querySelector(`.dm-bubble[data-msg-id="${messageId}"]`);
-  if (!bubble) return;
-  const original = msg.body || '';
-  bubble.innerHTML = `
-    <textarea class="dm-edit-textarea" maxlength="4000">${escHTML(original)}</textarea>
-    <div class="dm-edit-actions">
-      <button class="dm-edit-cancel" type="button">Cancel</button>
-      <button class="dm-edit-save" type="button">Save</button>
-    </div>
-  `;
-  const ta = bubble.querySelector('.dm-edit-textarea');
-  ta.focus();
-  ta.setSelectionRange(ta.value.length, ta.value.length);
-  bubble.querySelector('.dm-edit-cancel').onclick = () => {
-    dmState.editingMessageId = null;
-    renderMessages();
-  };
-  bubble.querySelector('.dm-edit-save').onclick = () => saveEditMessage(messageId, ta.value);
-  ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      saveEditMessage(messageId, ta.value);
-    } else if (e.key === 'Escape') {
-      dmState.editingMessageId = null;
-      renderMessages();
-    }
-  });
-}
-
-async function saveEditMessage(messageId, newBody) {
-  const trimmed = (newBody || '').trim();
-  const msg = dmState.messages.find(m => m.id === messageId);
-  if (!msg) return;
-  if (!trimmed) { toast('Message can\'t be empty', 'error'); return; }
-  if (trimmed === msg.body) {
-    dmState.editingMessageId = null;
-    renderMessages();
-    return;
-  }
-  const nowIso = new Date().toISOString();
-  const { error } = await supabase.from('messages')
-    .update({ body: trimmed, edited_at: nowIso })
-    .eq('id', messageId)
-    .eq('sender_id', currentUser.id);
-  if (error) { toast(error.message, 'error'); return; }
-  const idx = dmState.messages.findIndex(m => m.id === messageId);
-  if (idx >= 0) {
-    dmState.messages[idx] = { ...dmState.messages[idx], body: trimmed, edited_at: nowIso };
-  }
-  dmState.editingMessageId = null;
-  renderMessages();
-}
-
-// ── Hover menu + reaction picker ──────────────────────────────────────────
-function closeHoverMenu() {
-  if (dmState.hoverMenuEl) { dmState.hoverMenuEl.remove(); dmState.hoverMenuEl = null; }
-}
-function closeReactionPicker() {
-  if (dmState.reactionPickerEl) { dmState.reactionPickerEl.remove(); dmState.reactionPickerEl = null; }
-}
-
-function openHoverMenu(bubbleEl) {
-  closeHoverMenu();
-  if (!bubbleEl) return;
-  const messageId = bubbleEl.dataset.msgId;
-  const isMine = bubbleEl.dataset.isMine === '1';
-  const canEdit = bubbleEl.dataset.canEdit === '1';
-
-  const menu = document.createElement('div');
-  menu.className = 'dm-hover-menu' + (isMine ? ' mine' : ' theirs');
-  menu.innerHTML = `
-    <button class="dm-hover-btn" data-act="react" title="React">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
-    </button>
-    <button class="dm-hover-btn" data-act="reply" title="Reply">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
-    </button>
-    <button class="dm-hover-btn" data-act="copy" title="Copy text">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-    </button>
-    ${canEdit ? `
-      <button class="dm-hover-btn" data-act="edit" title="Edit">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
-      </button>
-      <button class="dm-hover-btn dm-hover-danger" data-act="delete" title="Delete">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      </button>
-    ` : ''}
-  `;
-  document.body.appendChild(menu);
-
-  // Position above the bubble
-  const r = bubbleEl.getBoundingClientRect();
-  menu.style.position = 'fixed';
-  menu.style.top = `${Math.max(8, r.top - 44)}px`;
-  if (isMine) {
-    menu.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
-  } else {
-    menu.style.left = `${Math.max(8, r.left)}px`;
-  }
-  dmState.hoverMenuEl = menu;
-
-  menu.querySelectorAll('[data-act]').forEach(btn => {
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      const act = btn.dataset.act;
-      closeHoverMenu();
-      if      (act === 'react')  openReactionPicker(bubbleEl);
-      else if (act === 'reply')  startReplyToMessage(messageId);
-      else if (act === 'copy')   copyMessageText(messageId);
-      else if (act === 'edit')   startEditMessage(messageId);
-      else if (act === 'delete') deleteMessage(messageId);
-    };
-  });
-}
-
-function openReactionPicker(bubbleEl) {
-  closeReactionPicker();
-  if (!bubbleEl) return;
-  const messageId = bubbleEl.dataset.msgId;
-  const picker = document.createElement('div');
-  picker.className = 'dm-reaction-picker';
-  picker.innerHTML = DM_QUICK_REACTIONS.map(emoji =>
-    `<button class="dm-rx-pick" data-emoji="${emoji}">${emoji}</button>`
-  ).join('');
-  document.body.appendChild(picker);
-
-  const r = bubbleEl.getBoundingClientRect();
-  picker.style.position = 'fixed';
-  picker.style.top = `${Math.max(8, r.top - 50)}px`;
-  const isMine = bubbleEl.dataset.isMine === '1';
-  if (isMine) picker.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
-  else        picker.style.left  = `${Math.max(8, r.left)}px`;
-
-  dmState.reactionPickerEl = picker;
-  picker.querySelectorAll('[data-emoji]').forEach(btn => {
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      toggleReaction(messageId, btn.dataset.emoji);
-    };
-  });
-}
-
-async function copyMessageText(messageId) {
-  const m = dmState.messages.find(x => x.id === messageId);
-  if (!m) return;
-  try {
-    await navigator.clipboard.writeText(m.body || '');
-    toast('Copied', 'success');
-  } catch {
-    toast('Copy failed', 'error');
-  }
-}
 
 // Bubble hover/click → show menu (works on mobile via tap)
 document.addEventListener('click', (e) => {
@@ -17056,80 +13275,6 @@ document.addEventListener('click', (e) => {
     closeReactionPicker();
   }
 });
-
-// Inbox-wide subscription so the unread badge updates even when DMs page is closed
-// Per-conversation cache of { user_a, user_b, is_secret } — the inbox
-// subscription would otherwise SELECT the same row on every message,
-// burning a round-trip per inbound message. The fields cached here
-// don't change for a conversation's lifetime.
-const __convInboxCache = new Map();
-
-function subscribeToInbox() {
-  if (!currentUser) return;
-  if (dmState.inboxChannel) supabase.removeChannel(dmState.inboxChannel);
-  // Drop the cache when re-subscribing — different user could be signed
-  // in, different conversations.
-  __convInboxCache.clear();
-  dmState.inboxChannel = supabase
-    .channel(`dm-inbox-${currentUser.id}`)
-    .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'messages',
-    }, async (payload) => {
-      const m = payload.new;
-      if (m.sender_id === currentUser.id) return; // my own message
-
-      let meta = __convInboxCache.get(m.conversation_id);
-      if (!meta) {
-        const { data: c } = await supabase
-          .from('conversations')
-          .select('user_a, user_b, is_secret')
-          .eq('id', m.conversation_id)
-          .single();
-        if (!c) return;
-        meta = { user_a: c.user_a, user_b: c.user_b, is_secret: !!c.is_secret };
-        __convInboxCache.set(m.conversation_id, meta);
-      }
-
-      if (meta.user_a !== currentUser.id && meta.user_b !== currentUser.id) return;
-      // Secret conversations are stealth — never bump the global badge,
-      // never surface a notification. The user discovers them only by
-      // opening the Secret tab. Mirrors mobile's useTotalUnreadCount
-      // suppression and chat-push.js Secret skip.
-      if (meta.is_secret) return;
-      // If we're already viewing this thread, the thread channel will mark it read.
-      if (dmState.activeConvId === m.conversation_id && messagesPage?.style.display === 'block') return;
-      // Otherwise bump unread
-      dmState.totalUnread++;
-      updateUnreadBadge(dmState.totalUnread);
-    })
-    .subscribe();
-}
-
-// Single source of truth for the DM unread badge total. Mute + archive +
-// secret all exclude a conversation from the lower-right badge. Codex audit
-// 2026-05-16: three separate inline `.reduce` sites were drifting (some
-// excluded only `muted`, the initial load excluded mute+archive+secret),
-// so the badge total flickered as you opened/marked threads. Centralize.
-function computeDmUnreadTotal() {
-  return dmState.conversations.reduce((sum, c) => {
-    if (c.muted || c.archived || c.isSecret) return sum;
-    return sum + (c.unread || 0);
-  }, 0);
-}
-
-function updateUnreadBadge(total) {
-  dmState.totalUnread = total;
-  const badge = document.getElementById('messagesUnreadBadge');
-  if (!badge) return;
-  if (total > 0) {
-    badge.textContent = total > 99 ? '99+' : String(total);
-    badge.style.display = '';
-  } else {
-    badge.style.display = 'none';
-  }
-}
 
 // ── Wire up sidebar + composer + back button ─────────────────────────────
 document.getElementById('btnMessages')?.addEventListener('click', () => showMessages());
@@ -17180,24 +13325,6 @@ document.getElementById('dmSearchInput')?.addEventListener('input', (e) => {
   });
 });
 
-// Initial badge load + inbox subscription on app boot
-async function bootstrapDmBadge() {
-  if (!currentUser) return;
-  // Pull is_secret too so we can exclude Secret conversations from the
-  // global unread total.
-  const { data: convs } = await supabase
-    .from('conversations')
-    .select('id, is_secret')
-    .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`);
-  if (!convs?.length) { updateUnreadBadge(0); return; }
-  const eligibleIds = convs.filter(c => !c.is_secret).map(c => c.id);
-  if (!eligibleIds.length) { updateUnreadBadge(0); return; }
-  const counts = await fetchUnreadCounts(eligibleIds);
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  updateUnreadBadge(total);
-  subscribeToInbox();
-}
-
 // Run on initial sign-in (delayed so currentUser is set)
 setTimeout(() => bootstrapDmBadge(), 1500);
 
@@ -17224,13 +13351,15 @@ window.addEventListener('popstate', () => {
   const chapterMatch = path.match(/^\/books?\/([^\/?#]+)\/chapter\/([^\/?#]+)/);
   const bookMatch = !chapterMatch ? path.match(/^\/books?\/([^\/?#]+)$/) : null;
   if (chapterMatch) {
-    _pendingChapterFromUrl = chapterMatch[2];
+    // Thread the chapter through openBookDetail(opts) so the deep-link
+    // auto-opens the right chapter after the chapters list lands
+    // (Stage 8B Codex P1 — previously set _pendingChapterFromUrl, which
+    // nothing read).
     setSidebarActive('btnBook');
-    openBookDetail(chapterMatch[1]);
+    openBookDetail(chapterMatch[1], { chapter: chapterMatch[2] });
     return;
   }
   if (bookMatch) {
-    _pendingChapterFromUrl = null;
     setSidebarActive('btnBook');
     openBookDetail(bookMatch[1]);
     return;
@@ -17245,762 +13374,16 @@ window.addEventListener('popstate', () => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
-// DMs Phase 3 — reply, conv menu, group creation, search
-// ════════════════════════════════════════════════════════════════════════════
-
-// ── Reply state ───────────────────────────────────────────────────────────
-function startReplyToMessage(messageId) {
-  const m = dmState.messages.find(x => x.id === messageId);
-  if (!m) return;
-  const senderProfile = m.sender_id === currentUser.id
-    ? { username: 'yourself' }
-    : (dmState.activeConv?.isGroup
-        ? (dmState.activeConv.members || []).find(p => p.id === m.sender_id)
-        : dmState.activeOther);
-  dmState.replyingTo = {
-    id: m.id,
-    body: m.body,
-    sender_id: m.sender_id,
-    sender_name: senderProfile?.username || 'Unknown',
-  };
-  showReplyPreview();
-  document.getElementById('dmInput')?.focus();
-}
-
-function showReplyPreview() {
-  const el = document.getElementById('dmReplyPreview');
-  if (!el || !dmState.replyingTo) return;
-  document.getElementById('dmReplyName').textContent = dmState.replyingTo.sender_name;
-  document.getElementById('dmReplyText').textContent = (dmState.replyingTo.body || '').slice(0, 140);
-  el.style.display = '';
-}
-function hideReplyPreview() {
-  const el = document.getElementById('dmReplyPreview');
-  if (el) el.style.display = 'none';
-}
-
 document.getElementById('dmReplyCancel')?.addEventListener('click', () => {
   dmState.replyingTo = null;
   hideReplyPreview();
 });
 
 
-// ── Conversation actions menu (thread header ⋯) ───────────────────────────
-function closeConvMenu() {
-  if (dmState.convMenuEl) { dmState.convMenuEl.remove(); dmState.convMenuEl = null; }
-}
-
-function openConvActionsMenu() {
-  closeConvMenu();
-  if (!dmState.activeConv) return;
-  const c = dmState.activeConv;
-  const isGroup = c.isGroup;
-  const isMuted = c.muted || isConvMutedForMe(c.raw);
-
-  const menu = document.createElement('div');
-  menu.className = 'post-action-menu dm-conv-menu';
-  menu.innerHTML = isGroup ? `
-    <button data-act="members">View members (${c.memberCount})</button>
-    <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
-    <button data-act="archive">Archive chat</button>
-    <button data-act="leave" class="pam-danger">Leave group</button>
-  ` : `
-    <button data-act="profile">View profile</button>
-    <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
-    <button data-act="archive">Archive chat</button>
-    <button data-act="report">Report user</button>
-    <button data-act="delete" class="pam-danger">Delete conversation</button>
-  `;
-  document.body.appendChild(menu);
-
-  // Position below the header ⋯ button
-  const trigger = document.getElementById('dmThreadMenu');
-  const r = trigger?.getBoundingClientRect() || { top: 80, right: window.innerWidth - 20 };
-  menu.style.position = 'fixed';
-  menu.style.top   = `${r.bottom + 6}px`;
-  menu.style.right = `${Math.max(12, window.innerWidth - r.right)}px`;
-  dmState.convMenuEl = menu;
-
-  menu.querySelectorAll('[data-act]').forEach(btn => {
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      const act = btn.dataset.act;
-      closeConvMenu();
-      if      (act === 'profile')  openProfile(dmState.activeOther?.id);
-      else if (act === 'members')  showGroupMembersDialog();
-      else if (act === 'mute')     toggleConvMute(isMuted);
-      else if (act === 'archive')  archiveConversation();
-      else if (act === 'report')   openReportUserModal(dmState.activeOther?.id, dmState.activeOther?.username || 'this user');
-      else if (act === 'delete')   confirmDeleteConversation();
-      else if (act === 'leave')    confirmLeaveGroup();
-    };
-  });
-
-  setTimeout(() => {
-    const onDocClick = (ev) => {
-      if (!dmState.convMenuEl?.contains(ev.target)) {
-        closeConvMenu();
-        document.removeEventListener('click', onDocClick);
-      }
-    };
-    document.addEventListener('click', onDocClick);
-  }, 0);
-}
-
 document.getElementById('dmThreadMenu')?.addEventListener('click', (e) => {
   e.stopPropagation();
   openConvActionsMenu();
 });
-
-async function toggleConvMute(currentlyMuted) {
-  const c = dmState.activeConv;
-  if (!c || c.isGroup) { toast('Group mute coming soon', ''); return; }
-  const conv = c.raw;
-  const myCol = conv.user_a === currentUser.id ? 'muted_until_a' : 'muted_until_b';
-  const newVal = currentlyMuted ? null : new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // mute 7 days
-  const { error } = await supabase.from('conversations').update({ [myCol]: newVal }).eq('id', conv.id);
-  if (error) { toast(error.message, 'error'); return; }
-  toast(currentlyMuted ? 'Unmuted' : 'Muted for 7 days', 'success');
-  conv[myCol] = newVal;
-  c.muted = !currentlyMuted;
-  renderConversationList();
-  // Recompute unread badge
-  updateUnreadBadge(computeDmUnreadTotal());
-}
-
-async function archiveConversation() {
-  const c = dmState.activeConv;
-  if (!c || c.isGroup) { toast('Group archive coming soon', ''); return; }
-  const conv = c.raw;
-  const myCol = conv.user_a === currentUser.id ? 'archived_by_a' : 'archived_by_b';
-  const { error } = await supabase.from('conversations').update({ [myCol]: true }).eq('id', conv.id);
-  if (error) { toast(error.message, 'error'); return; }
-  toast('Archived', 'success');
-  // Remove from list, close thread
-  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
-  document.getElementById('dmBackBtn')?.click();
-  renderConversationList();
-}
-
-async function confirmDeleteConversation() {
-  const c = dmState.activeConv;
-  if (!c) return;
-  const ok = await confirmDialog({
-    title: 'Delete this conversation?',
-    body: 'All messages will be removed for both of you. This can\'t be undone.',
-    confirmLabel: 'Delete',
-  });
-  if (!ok) return;
-  const { error } = await supabase.from('conversations').delete().eq('id', c.id);
-  if (error) { toast(error.message, 'error'); return; }
-  toast('Deleted', 'success');
-  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
-  document.getElementById('dmBackBtn')?.click();
-  renderConversationList();
-}
-
-async function confirmLeaveGroup() {
-  const c = dmState.activeConv;
-  if (!c?.isGroup) return;
-  const ok = await confirmDialog({
-    title: 'Leave this group?',
-    body: 'You\'ll stop receiving messages and won\'t see new ones unless you\'re re-added.',
-    confirmLabel: 'Leave',
-  });
-  if (!ok) return;
-  const { error } = await supabase.rpc('leave_conversation', { p_conversation_id: c.id });
-  if (error) { toast(error.message, 'error'); return; }
-  toast('Left the group', 'success');
-  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
-  document.getElementById('dmBackBtn')?.click();
-  renderConversationList();
-}
-
-// Group settings modal — full parity with mobile's group-info screen.
-// Creator-only manage affordances (rename, photo, add, kick); everyone
-// can view + leave. Reuses follow-list-modal styles for the body since
-// the row layout matches.
-function showGroupMembersDialog() {
-  const c = dmState.activeConv;
-  if (!c?.isGroup) return;
-  const isCreator = c.createdBy === currentUser.id || c.raw?.created_by === currentUser.id;
-  closeAllModals('.modal-backdrop[data-modal="group-members"]');
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'group-members';
-
-  // Sort members: creator first, then alphabetical by username.
-  const creatorId = c.createdBy || c.raw?.created_by;
-  const sortedMembers = [...c.members].sort((a, b) => {
-    if (a.id === creatorId && b.id !== creatorId) return -1;
-    if (b.id === creatorId && a.id !== creatorId) return 1;
-    return (a.username || '').toLowerCase().localeCompare((b.username || '').toLowerCase());
-  });
-
-  const headerAvatar = c.avatarUrl
-    ? `<img src="${escHTML(c.avatarUrl)}" alt=""/>`
-    : `<span class="dm-avatar-initials">${initials(c.name || '?')}</span>`;
-
-  modal.innerHTML = `
-    <div class="modal-card group-info-modal">
-      <div class="group-info-identity">
-        <div class="group-info-avatar-wrap">
-          <div class="group-info-avatar">${headerAvatar}</div>
-          ${isCreator ? `
-            <button class="group-info-avatar-edit" data-action="edit-avatar" title="Change group photo">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            </button>
-            <input type="file" accept="image/*" id="groupInfoFile" style="display:none"/>
-          ` : ''}
-        </div>
-        <div class="group-info-name-row">
-          <h2 class="group-info-name" data-action="${isCreator ? 'edit-name' : ''}">
-            ${escHTML(c.name || 'Group chat')}
-            ${isCreator ? '<span class="group-info-pencil">✎</span>' : ''}
-          </h2>
-        </div>
-        <p class="modal-sub">${c.memberCount} ${c.memberCount === 1 ? 'member' : 'members'}</p>
-      </div>
-
-      ${isCreator ? `
-        <button class="group-info-add-row" data-action="add-members" type="button">
-          <span class="group-info-add-icon">+</span>
-          <span>Add members</span>
-        </button>
-      ` : ''}
-
-      <div class="follow-list-body group-info-members-body">
-        ${sortedMembers.map(m => {
-          const isCreatorRow = m.id === creatorId;
-          const isYou = m.id === currentUser.id;
-          const showKick = isCreator && !isCreatorRow;
-          return `
-            <div class="follow-list-row">
-              <button class="follow-list-avatar" data-uid="${m.id}">
-                ${m.avatar_url ? `<img src="${escHTML(m.avatar_url)}"/>` : initials(m.username)}
-              </button>
-              <div class="follow-list-info">
-                <button class="follow-list-name" data-uid="${m.id}">@${escHTML(m.username || '')}${isYou ? ' (You)' : ''}</button>
-                ${isCreatorRow ? '<span class="group-info-creator-badge">Creator</span>' : ''}
-              </div>
-              ${showKick ? `<button class="group-info-kick" data-kick="${m.id}" title="Remove from group">×</button>` : ''}
-            </div>
-          `;
-        }).join('')}
-      </div>
-
-      <div class="modal-actions">
-        <button class="btn-danger" data-action="leave">Leave group</button>
-        <button class="btn-ghost" data-action="cancel">Close</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-
-  // Member row → open profile.
-  modal.querySelectorAll('.follow-list-avatar[data-uid], .follow-list-name[data-uid]').forEach(el => {
-    el.onclick = () => { close(); openProfile(el.dataset.uid); };
-  });
-
-  // Inline rename — creator only.
-  if (isCreator) {
-    const nameEl = modal.querySelector('[data-action="edit-name"]');
-    if (nameEl) {
-      nameEl.style.cursor = 'pointer';
-      nameEl.onclick = () => promptRenameGroup(c, modal);
-    }
-    const addBtn = modal.querySelector('[data-action="add-members"]');
-    if (addBtn) addBtn.onclick = () => { close(); openAddMembersModal(c); };
-    const editAvatarBtn = modal.querySelector('[data-action="edit-avatar"]');
-    const fileInput = modal.querySelector('#groupInfoFile');
-    if (editAvatarBtn && fileInput) {
-      editAvatarBtn.onclick = () => fileInput.click();
-      fileInput.onchange = (ev) => handleGroupAvatarPicked(ev, c, modal);
-    }
-    modal.querySelectorAll('.group-info-kick').forEach(btn => {
-      btn.onclick = () => kickGroupMember(c, btn.dataset.kick, btn);
-    });
-  }
-
-  modal.querySelector('[data-action="leave"]').onclick = () => { close(); confirmLeaveGroup(); };
-}
-
-// Inline rename — replaces the heading with an input + save button.
-function promptRenameGroup(c, modal) {
-  const newName = window.prompt('New group name', c.name || '');
-  if (newName == null) return; // cancelled
-  const trimmed = newName.trim().slice(0, 60);
-  if (!trimmed) { toast('Name cannot be empty', 'error'); return; }
-  if (trimmed === c.name) return;
-  supabase.from('conversations').update({ name: trimmed }).eq('id', c.id)
-    .then(({ error }) => {
-      if (error) { toast(error.message || 'Could not rename', 'error'); return; }
-      c.name = trimmed;
-      if (c.raw) c.raw.name = trimmed;
-      toast('Group renamed', 'success');
-      modal.remove();
-      // Reflect in list + thread header.
-      const cached = dmState.conversations.find(x => x.id === c.id);
-      if (cached) cached.name = trimmed;
-      renderConversationList();
-      const nameBtn = document.getElementById('dmThreadName');
-      if (nameBtn) nameBtn.textContent = trimmed;
-    });
-}
-
-// Avatar picker — uploads the picked file to Supabase Storage under
-// group-avatars/<convId>/, then patches conversations.avatar_url.
-async function handleGroupAvatarPicked(ev, c, modal) {
-  const file = ev.target.files?.[0];
-  if (!file) return;
-  if (!file.type.startsWith('image/')) {
-    toast('Please pick an image', 'error');
-    return;
-  }
-  if (file.size > 10 * 1024 * 1024) {
-    toast('Image too large (max 10MB)', 'error');
-    return;
-  }
-  toast('Uploading…', '');
-  try {
-    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
-    const path = `group-avatars/${c.id}/${currentUser.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const { error: upErr } = await supabase.storage.from('images').upload(path, file, {
-      contentType: file.type || `image/${ext}`,
-      cacheControl: '3600',
-      upsert: false,
-    });
-    if (upErr) throw upErr;
-    const { data } = supabase.storage.from('images').getPublicUrl(path);
-    const url = data?.publicUrl;
-    if (!url) throw new Error('Could not resolve uploaded URL');
-    const { error: updErr } = await supabase.from('conversations').update({ avatar_url: url }).eq('id', c.id);
-    if (updErr) throw updErr;
-
-    // Reflect everywhere
-    c.avatarUrl = url;
-    if (c.raw) c.raw.avatar_url = url;
-    const cached = dmState.conversations.find(x => x.id === c.id);
-    if (cached) cached.avatarUrl = url;
-    renderConversationList();
-    const headerAv = document.getElementById('dmThreadAvatar');
-    if (headerAv) headerAv.innerHTML = `<img src="${escHTML(url)}" alt=""/>`;
-    toast('Group photo updated', 'success');
-    modal.remove();
-  } catch (err) {
-    console.error('[dm] group avatar upload failed', err);
-    toast(err?.message || 'Could not update photo', 'error');
-  }
-}
-
-// Add members modal — search profiles excluding existing members, multi-
-// select, on submit insert into conversation_participants.
-function openAddMembersModal(c) {
-  if (!c?.isGroup) return;
-  const existingIds = new Set(c.members.map(m => m.id));
-  closeAllModals('.modal-backdrop[data-modal="group-add"]');
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'group-add';
-  modal.innerHTML = `
-    <div class="modal-card dm-new-modal">
-      <h2>Add members</h2>
-      <p class="modal-sub">People already in the group are hidden from results.</p>
-      <input type="text" class="dm-new-search" id="groupAddSearch" placeholder="Search by username…" autocomplete="off"/>
-      <div class="dm-new-selected" id="groupAddSelected"></div>
-      <div class="dm-new-results" id="groupAddResults">
-        <div class="dm-new-hint">Start typing a username…</div>
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">Cancel</button>
-        <button class="btn-primary" data-action="add" disabled>Add</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-
-  const selected = []; // [{id, username, avatar_url}]
-  const search = modal.querySelector('#groupAddSearch');
-  const selectedWrap = modal.querySelector('#groupAddSelected');
-  const results = modal.querySelector('#groupAddResults');
-  const addBtn = modal.querySelector('[data-action="add"]');
-
-  const refreshSelected = () => {
-    selectedWrap.innerHTML = selected.map(u => `
-      <span class="dm-new-chip" data-uid="${u.id}">
-        ${u.avatar_url ? `<img src="${escHTML(u.avatar_url)}"/>` : `<span class="dm-new-chip-init">${initials(u.username)}</span>`}
-        <span>@${escHTML(u.username)}</span>
-        <button class="dm-new-chip-x" aria-label="Remove">×</button>
-      </span>
-    `).join('');
-    selectedWrap.querySelectorAll('.dm-new-chip-x').forEach((btn, i) => {
-      btn.onclick = (ev) => {
-        ev.stopPropagation();
-        selected.splice(i, 1);
-        refreshSelected();
-        addBtn.disabled = selected.length === 0;
-      };
-    });
-  };
-
-  let timer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(timer);
-    const q = search.value.trim();
-    if (!q) { results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>'; return; }
-    timer = setTimeout(async () => {
-      const excludeIds = [...existingIds, ...selected.map(s => s.id)];
-      let qb = supabase.from('profiles').select('id, username, avatar_url, is_guest').ilike('username', `%${q}%`).limit(20);
-      if (excludeIds.length) qb = qb.not('id', 'in', `(${excludeIds.join(',')})`);
-      const { data } = await qb;
-      if (!data?.length) { results.innerHTML = '<div class="dm-new-hint">No matches.</div>'; return; }
-      results.innerHTML = data.map(p => `
-        <button class="dm-new-result" data-uid="${p.id}" type="button">
-          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
-          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
-        </button>
-      `).join('');
-      results.querySelectorAll('[data-uid]').forEach(btn => {
-        btn.onclick = () => {
-          const profile = data.find(p => p.id === btn.dataset.uid);
-          if (!profile) return;
-          if (selected.some(s => s.id === profile.id)) return;
-          selected.push(profile);
-          search.value = '';
-          results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
-          refreshSelected();
-          addBtn.disabled = selected.length === 0;
-        };
-      });
-    }, 200);
-  });
-  search.focus();
-
-  addBtn.onclick = async () => {
-    if (selected.length === 0) return;
-    addBtn.disabled = true;
-    addBtn.textContent = 'Adding…';
-    try {
-      const rows = selected.map(s => ({ conversation_id: c.id, user_id: s.id }));
-      const { error } = await supabase
-        .from('conversation_participants')
-        .upsert(rows, { onConflict: 'conversation_id,user_id', ignoreDuplicates: true });
-      if (error) throw error;
-      toast(`Added ${selected.length}`, 'success');
-      close();
-      // Refresh the active conv's members list + the conversations list.
-      await refreshActiveConvMembers(c.id);
-      renderConversationList();
-    } catch (err) {
-      console.error('[dm] add members failed', err);
-      toast(err.message || 'Could not add members', 'error');
-      addBtn.disabled = false;
-      addBtn.textContent = 'Add';
-    }
-  };
-}
-
-// Remove a member from a group. Creator-only — UI hides the X for
-// non-creator viewers; this is the second line of defense in case the
-// markup is tampered with.
-async function kickGroupMember(c, userId, btnEl) {
-  if (!c?.isGroup) return;
-  if (c.createdBy && c.createdBy !== currentUser.id) {
-    toast('Only the group creator can remove members', 'error');
-    return;
-  }
-  if (userId === currentUser.id) {
-    toast('Use Leave group to leave', 'error');
-    return;
-  }
-  if (userId === c.createdBy) {
-    toast('Cannot remove the group creator', 'error');
-    return;
-  }
-  if (!window.confirm('Remove this member from the group?')) return;
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '…'; }
-  const { error } = await supabase
-    .from('conversation_participants')
-    .delete()
-    .eq('conversation_id', c.id)
-    .eq('user_id', userId);
-  if (error) {
-    toast(error.message || 'Could not remove', 'error');
-    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '×'; }
-    return;
-  }
-  toast('Removed', 'success');
-  // Patch local state and re-render the modal.
-  c.members = c.members.filter(m => m.id !== userId);
-  c.memberCount = c.members.length;
-  document.querySelector('.modal-backdrop[data-modal="group-members"]')?.remove();
-  showGroupMembersDialog();
-  renderConversationList();
-}
-
-// Re-fetch the active group's members after a mutation (add). Local
-// state has the old list; we want the canonical server view.
-async function refreshActiveConvMembers(convId) {
-  const c = dmState.activeConv;
-  if (!c || c.id !== convId) return;
-  const { data: parts } = await supabase
-    .from('conversation_participants')
-    .select('user_id')
-    .eq('conversation_id', convId);
-  const memberIds = (parts || []).map(p => p.user_id);
-  if (!memberIds.length) return;
-  const { data: profs } = await supabase
-    .from('profiles')
-    .select('id, username, avatar_url, is_guest')
-    .in('id', memberIds);
-  c.members = profs || [];
-  c.memberCount = c.members.length;
-  // Update the cached row in the conversations list too.
-  const cached = dmState.conversations.find(x => x.id === convId);
-  if (cached) {
-    cached.members = c.members;
-    cached.memberCount = c.memberCount;
-  }
-  // Refresh the open settings modal if the user's still looking at it.
-  const openModal = document.querySelector('.modal-backdrop[data-modal="group-members"]');
-  if (openModal) {
-    openModal.remove();
-    showGroupMembersDialog();
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Mutuals helper — both directions of public.follows must exist.
-// Mirrors lib/messages-supabase.js's isMutualFollow on mobile. One round-
-// trip via the OR-of-AND postgrest filter; checks the result client-side
-// for both edges.
-// ─────────────────────────────────────────────────────────────────────────
-async function dmIsMutualFollow(uuidA, uuidB) {
-  if (!uuidA || !uuidB || uuidA === uuidB) return false;
-  const { data, error } = await supabase
-    .from('follows')
-    .select('follower_id, following_id')
-    .or(`and(follower_id.eq.${uuidA},following_id.eq.${uuidB}),and(follower_id.eq.${uuidB},following_id.eq.${uuidA})`);
-  if (error) {
-    console.warn('[dm] isMutualFollow failed:', error.message);
-    return false;
-  }
-  const ab = (data || []).some(r => r.follower_id === uuidA && r.following_id === uuidB);
-  const ba = (data || []).some(r => r.follower_id === uuidB && r.following_id === uuidA);
-  return ab && ba;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Get-or-create Secret 1:1. Direct DB calls on web (no parallel RPC yet).
-// Parity with mobile's getOrCreateSecretConversation:
-//   - Mutuals-only floor (throws if not mutual)
-//   - Self-conversation rejected
-//   - Canonical (smaller, larger) ordering for the unique-pair index
-//   - Fully separate from non-Secret 1:1's (creating a Secret with someone
-//     you already DM does NOT touch the existing thread)
-// ─────────────────────────────────────────────────────────────────────────
-async function dmGetOrCreateSecretConv(otherUserId) {
-  if (!currentUser) throw new Error('Please sign in');
-  if (!otherUserId || otherUserId === currentUser.id) {
-    throw new Error('Cannot start a conversation with yourself');
-  }
-  const mutual = await dmIsMutualFollow(currentUser.id, otherUserId);
-  if (!mutual) throw new Error('Both of you must follow each other to start a Secret chat');
-
-  const [a, b] = currentUser.id < otherUserId
-    ? [currentUser.id, otherUserId]
-    : [otherUserId, currentUser.id];
-
-  const lookup = async () => {
-    const { data } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('is_group', false)
-      .eq('is_secret', true)
-      .eq('user_a', a)
-      .eq('user_b', b)
-      .maybeSingle();
-    return data;
-  };
-
-  const existing = await lookup();
-  if (existing) return existing.id;
-
-  const { data: created, error } = await supabase
-    .from('conversations')
-    .insert({
-      user_a: a,
-      user_b: b,
-      is_group: false,
-      is_secret: true,
-      created_by: currentUser.id,
-      last_message_at: new Date().toISOString(),
-    })
-    .select()
-    .single();
-  if (!error) return created.id;
-  if (error.code === '23505') {
-    // Race — another tab inserted first. Re-fetch.
-    const winner = await lookup();
-    if (winner) return winner.id;
-  }
-  throw error;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Secret-chat picker modal — mutuals-only search. Reuses the structure of
-// openNewConvModal but pre-filters profiles to your mutual followers.
-// ─────────────────────────────────────────────────────────────────────────
-async function openSecretChatPicker() {
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-  closeAllModals('.modal-backdrop[data-modal="dm-new-secret"]');
-
-  // Pre-fetch mutual UUIDs once. Same trick as mobile's SupabaseNewChat.
-  let mutualIds = null;
-  try {
-    const [iFollow, followsMe] = await Promise.all([
-      supabase.from('follows').select('following_id').eq('follower_id', currentUser.id),
-      supabase.from('follows').select('follower_id').eq('following_id', currentUser.id),
-    ]);
-    const aSet = new Set((iFollow.data || []).map(r => r.following_id));
-    const bSet = new Set((followsMe.data || []).map(r => r.follower_id));
-    mutualIds = [];
-    for (const id of aSet) if (bSet.has(id)) mutualIds.push(id);
-  } catch (e) {
-    toast('Could not load mutuals', 'error');
-    return;
-  }
-
-  // Pre-load up to 5 mutual profiles to render as a "Suggested" row of
-  // avatar chips above the search input. Reduces friction for the common
-  // case where you want to start a Secret chat with a frequent contact —
-  // tapping an avatar skips the search entirely.
-  let suggestedMutuals = [];
-  if (mutualIds.length > 0) {
-    try {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, username, avatar_url, is_guest')
-        .in('id', mutualIds.slice(0, 50)) // upper bound for the IN list
-        .order('username', { ascending: true })
-        .limit(5);
-      suggestedMutuals = data || [];
-    } catch (e) {
-      // Non-fatal — search still works.
-      console.warn('[secret] suggested mutuals load failed', e?.message);
-    }
-  }
-  const moreThanShown = mutualIds.length > suggestedMutuals.length;
-
-  const suggestedHtml = suggestedMutuals.length > 0 ? `
-    <div class="dm-secret-suggested">
-      <div class="dm-secret-suggested-label">Suggested mutuals</div>
-      <div class="dm-secret-suggested-row">
-        ${suggestedMutuals.map(p => `
-          <button class="dm-secret-suggested-chip" data-uid="${p.id}" data-username="${escHTML(p.username || '')}" type="button" title="@${escHTML(p.username || '')}">
-            ${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}" alt=""/>` : `<span class="dm-secret-suggested-initials">${initials(p.username)}</span>`}
-          </button>
-        `).join('')}
-      </div>
-      ${moreThanShown ? '<div class="dm-secret-suggested-more">Search below to find more mutuals.</div>' : ''}
-    </div>` : '';
-
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'dm-new-secret';
-  modal.innerHTML = `
-    <div class="modal-card dm-new-modal">
-      <h2>🔒 New Secret chat</h2>
-      <p class="modal-sub">
-        ${mutualIds.length === 0
-          ? "You don't have any mutual followers yet. Both people must follow each other to start a Secret chat."
-          : 'Pick a mutual follower. The chat is silent — no notifications.'}
-      </p>
-      ${mutualIds.length > 0 ? `
-        ${suggestedHtml}
-        <input type="text" class="dm-new-search" id="dmSecretSearch" placeholder="Search mutuals by username…" autocomplete="off"/>
-        <div class="dm-new-results" id="dmSecretResults">
-          <div class="dm-new-hint">Start typing a username…</div>
-        </div>` : ''}
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">${mutualIds.length === 0 ? 'Close' : 'Cancel'}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-  if (mutualIds.length === 0) return;
-
-  // Shared handler — used by both the suggested-mutuals chips and the
-  // search-result rows. Both call dmGetOrCreateSecretConv and then jump
-  // into the new conversation.
-  const startSecretWith = async (uid, btnEl) => {
-    if (!uid) return;
-    if (btnEl) btnEl.disabled = true;
-    try {
-      const convId = await dmGetOrCreateSecretConv(uid);
-      close();
-      dmState.viewMode = 'secret';
-      await loadConversationList();
-      await openConversation(convId);
-    } catch (err) {
-      console.error('[dm] secret create failed', err);
-      toast(err.message || 'Failed to start Secret chat', 'error');
-      if (btnEl) btnEl.disabled = false;
-    }
-  };
-
-  // Wire the suggested-mutuals chips
-  modal.querySelectorAll('.dm-secret-suggested-chip').forEach((chip) => {
-    chip.onclick = () => startSecretWith(chip.dataset.uid, chip);
-  });
-
-  const search = modal.querySelector('#dmSecretSearch');
-  const results = modal.querySelector('#dmSecretResults');
-  let timer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(timer);
-    const q = search.value.trim();
-    if (!q) {
-      results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
-      return;
-    }
-    timer = setTimeout(async () => {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, username, avatar_url, is_guest')
-        .ilike('username', `%${q}%`)
-        .in('id', mutualIds)
-        .neq('id', currentUser.id)
-        .limit(20);
-      if (!data?.length) {
-        results.innerHTML = '<div class="dm-new-hint">No matching mutuals.</div>';
-        return;
-      }
-      results.innerHTML = data.map(p => `
-        <button class="dm-new-result" data-uid="${p.id}" type="button">
-          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
-          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
-          <span class="dm-new-result-arrow">→</span>
-        </button>
-      `).join('');
-      results.querySelectorAll('[data-uid]').forEach(btn => {
-        btn.onclick = () => startSecretWith(btn.dataset.uid, btn);
-      });
-    }, 200);
-  });
-  search.focus();
-}
 
 // ── New conversation modal (1:1 OR group) ────────────────────────────────
 document.getElementById('dmNewBtn')?.addEventListener('click', () => openNewConvModal());
@@ -18010,158 +13393,10 @@ document.getElementById('dmNewBtn')?.addEventListener('click', () => openNewConv
 // button in renderConvEmptyStateHtml.
 document.getElementById('dmNewSecretBtn')?.addEventListener('click', () => openSecretChatPicker());
 
-function openNewConvModal() {
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-  closeAllModals('.modal-backdrop[data-modal="dm-new"]');
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'dm-new';
-  modal.innerHTML = `
-    <div class="modal-card dm-new-modal">
-      <h2>New message</h2>
-      <p class="modal-sub">Pick one person for a 1:1 chat, or 2+ for a group.</p>
-      <input type="text" class="dm-new-search" id="dmNewSearch" placeholder="Search users by username…" autocomplete="off"/>
-      <div class="dm-new-selected" id="dmNewSelected"></div>
-      <div class="dm-new-results" id="dmNewResults">
-        <div class="dm-new-hint">Start typing a username…</div>
-      </div>
-      <div class="dm-new-name-wrap" id="dmNewNameWrap" style="display:none">
-        <input type="text" class="dm-new-name" id="dmNewName" placeholder="Group name (optional)" maxlength="120"/>
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">Cancel</button>
-        <button class="btn-primary" data-action="create" disabled>Start chat</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  const selectedUsers = []; // [{id, username, avatar_url}]
-  const search = modal.querySelector('#dmNewSearch');
-  const results = modal.querySelector('#dmNewResults');
-  const selectedWrap = modal.querySelector('#dmNewSelected');
-  const nameWrap = modal.querySelector('#dmNewNameWrap');
-  const nameInput = modal.querySelector('#dmNewName');
-  const createBtn = modal.querySelector('[data-action="create"]');
-
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-
-  function refreshSelected() {
-    selectedWrap.innerHTML = selectedUsers.map(u => `
-      <span class="dm-new-chip" data-uid="${u.id}">
-        ${u.avatar_url ? `<img src="${escHTML(u.avatar_url)}"/>` : `<span class="dm-new-chip-init">${initials(u.username)}</span>`}
-        <span>@${escHTML(u.username)}</span>
-        <button class="dm-new-chip-x" aria-label="Remove">×</button>
-      </span>
-    `).join('');
-    selectedWrap.querySelectorAll('.dm-new-chip-x').forEach((btn, i) => {
-      btn.onclick = (ev) => {
-        ev.stopPropagation();
-        const id = selectedUsers[i].id;
-        const idx = selectedUsers.findIndex(u => u.id === id);
-        if (idx >= 0) selectedUsers.splice(idx, 1);
-        refreshSelected();
-        updateButton();
-      };
-    });
-    nameWrap.style.display = selectedUsers.length >= 2 ? '' : 'none';
-  }
-  function updateButton() {
-    createBtn.disabled = selectedUsers.length === 0;
-    createBtn.textContent = selectedUsers.length >= 2 ? 'Start group chat' : 'Start chat';
-  }
-
-  let searchTimer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    const q = search.value.trim();
-    if (!q) {
-      results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
-      return;
-    }
-    searchTimer = setTimeout(async () => {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, username, avatar_url, is_guest')
-        .ilike('username', `%${q}%`)
-        .neq('id', currentUser.id)
-        .limit(20);
-      if (!data?.length) {
-        results.innerHTML = '<div class="dm-new-hint">No users found.</div>';
-        return;
-      }
-      results.innerHTML = data.map(p => `
-        <button class="dm-new-result" data-uid="${p.id}" ${selectedUsers.some(u => u.id === p.id) ? 'data-already-selected="1"' : ''}>
-          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
-          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
-          ${selectedUsers.some(u => u.id === p.id) ? '<span class="dm-new-result-check">✓</span>' : ''}
-        </button>
-      `).join('');
-      results.querySelectorAll('[data-uid]').forEach(btn => {
-        btn.onclick = () => {
-          const uid = btn.dataset.uid;
-          const profile = data.find(p => p.id === uid);
-          const idx = selectedUsers.findIndex(u => u.id === uid);
-          if (idx >= 0) selectedUsers.splice(idx, 1);
-          else selectedUsers.push(profile);
-          refreshSelected();
-          updateButton();
-          search.dispatchEvent(new Event('input')); // re-render results with check state
-        };
-      });
-    }, 200);
-  });
-  search.focus();
-
-  createBtn.onclick = async () => {
-    if (!selectedUsers.length) return;
-    createBtn.disabled = true;
-    createBtn.textContent = 'Creating…';
-    try {
-      let convId;
-      if (selectedUsers.length === 1) {
-        const { data, error } = await supabase.rpc('get_or_create_conversation', {
-          p_other_user_id: selectedUsers[0].id,
-        });
-        if (error) throw error;
-        convId = data;
-      } else {
-        const payload = {
-          p_name: nameInput.value.trim() || '',
-          p_participant_ids: selectedUsers.map(u => u.id),
-        };
-        const { data, error } = await supabase.rpc('create_group_conversation', payload);
-        if (error) {
-          console.error('[dm] create_group_conversation failed', error, 'payload:', payload);
-          throw error;
-        }
-        if (!data) {
-          console.error('[dm] create_group_conversation returned no id', { data });
-          throw new Error('No conversation id returned from server');
-        }
-        convId = data;
-      }
-      if (!convId) throw new Error('Could not resolve conversation');
-      close();
-      await loadConversationList();
-      await openConversation(convId);
-    } catch (err) {
-      console.error('[dm] create chat failed', err);
-      toast(err.message || 'Failed to create chat', 'error');
-      createBtn.disabled = false;
-      createBtn.textContent = selectedUsers.length >= 2 ? 'Start group chat' : 'Start chat';
-    }
-  };
-}
-
-// ── Global search (across conversations + message bodies) ─────────────────
-let _dmSearchTimer = null;
 const _origSearchHandler = (e) => {
   // Replace the simple-filter behavior with debounced server search if length > 1
   const q = e.target.value.trim();
-  clearTimeout(_dmSearchTimer);
+  clearTimeout(getDmSearchTimer());
   if (!q) {
     dmState.globalSearchResults = null;
     renderConversationList();
@@ -18174,7 +13409,7 @@ const _origSearchHandler = (e) => {
     el.style.display = (name.includes(q.toLowerCase()) || preview.includes(q.toLowerCase())) ? '' : 'none';
   });
   // Then debounced server message search
-  _dmSearchTimer = setTimeout(async () => {
+  setDmSearchTimer(setTimeout(async () => {
     const { data: hits } = await supabase
       .from('messages')
       .select('id, conversation_id, sender_id, body, created_at')
@@ -18184,7 +13419,7 @@ const _origSearchHandler = (e) => {
       .limit(40);
     if (!hits?.length) return;
     renderGlobalSearchResults(hits, q);
-  }, 280);
+  }, 280));
 };
 const dmSearchInput = document.getElementById('dmSearchInput');
 if (dmSearchInput) {
@@ -18194,81 +13429,24 @@ if (dmSearchInput) {
   dmSearchInput.addEventListener('input', _origSearchHandler);
 }
 
-function renderGlobalSearchResults(hits, query) {
-  const wrap = document.getElementById('dmConvList');
-  if (!wrap) return;
-  // Group hits by conversation
-  const byConv = {};
-  hits.forEach(h => {
-    if (!byConv[h.conversation_id]) byConv[h.conversation_id] = [];
-    byConv[h.conversation_id].push(h);
-  });
-  // Map convs we already have in state
-  const convsById = new Map(dmState.conversations.map(c => [c.id, c]));
-  const html = Object.entries(byConv).map(([cid, msgs]) => {
-    const conv = convsById.get(cid);
-    if (!conv) return '';
-    const name = conv.isGroup ? conv.name : conv.otherUser?.username;
-    return `
-      <div class="dm-search-group">
-        <div class="dm-search-group-name">${escHTML(name || 'Conversation')}</div>
-        ${msgs.map(m => `
-          <button class="dm-search-hit" data-conv="${cid}" data-msg="${m.id}">
-            <span class="dm-search-hit-time">${timeAgo(m.created_at)}</span>
-            <span class="dm-search-hit-body">${highlightSearchMatch(m.body, query)}</span>
-          </button>
-        `).join('')}
-      </div>
-    `;
-  }).join('');
-  wrap.innerHTML = `
-    <div class="dm-search-results">
-      ${html || '<div class="dm-empty-list"><h3>No matches</h3></div>'}
-    </div>
-  `;
-  wrap.querySelectorAll('.dm-search-hit').forEach(el => {
-    el.onclick = () => openConversation(el.dataset.conv);
-  });
-}
-
-function highlightSearchMatch(body, query) {
-  const text = (body || '').slice(0, 200);
-  const safe = escHTML(text);
-  const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig');
-  return safe.replace(re, '<mark>$1</mark>');
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // DMs Phase 4 — image attachments (2.5 MB), GIF picker, emoji picker
 // ════════════════════════════════════════════════════════════════════════════
 
+// DM_MAX_IMAGE_BYTES stays here — only app.js's file-picker handler reads
+// it directly (passed as 2nd arg to compressImageToJpeg). The picker is
+// part of the DM wiring block still pending migration to wireMessagesPage().
 const DM_MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;   // 2.5 MB
-const DM_BUCKET = 'dm-attachments';
 
-// ─── GIF picker key ───────────────────────────────────────────────────────
-// Giphy API key from developers.giphy.com/dashboard. Free tier = 100k req/day.
-// Public client-side use is the intended exposure — Giphy rate-limits per IP.
-const DM_GIPHY_KEY = 'UYrH9t3qUegWfBNynMFTHL3uEHsySkSm';
+// (DM_BUCKET, DM_GIPHY_KEY, DM_EMOJI_GROUPS moved to js/messages.js in
+// the Stage 9B Codex review pass — they're consumed by sendDmAttachment /
+// openDmGifPicker / loadGifResults / openScopedEmojiPicker which all live
+// in messages.js now. Leaving them as top-level app.js consts caused
+// ReferenceErrors as soon as the emoji button or attach-send fired.)
 
-// _dmPendingAttachment shapes (post-2026-05-07 multi-image):
-//   { kind: 'upload', files: File[], dataUrls: string[] } — 1..10 photos
-//   { kind: 'gif',    gifUrl: string }                     — single Giphy
-// Kept as one variable so the existing show/hide/send paths can keep
-// switching on `.kind`. The legacy { file, dataUrl } shape is gone —
-// the upload path always uses arrays now (single-photo sends just have
-// length-1 arrays).
-let _dmPendingAttachment = null;
-let _dmAttachMenuEl = null;
-let _dmGifPickerEl = null;
-let _dmEmojiPickerEl = null;
-
-// ── + (attach) button → small menu: Photo · GIF ───────────────────────────
-function closeDmAttachMenu() {
-  if (_dmAttachMenuEl) { _dmAttachMenuEl.remove(); _dmAttachMenuEl = null; }
-}
 document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
   e.stopPropagation();
-  if (_dmAttachMenuEl) { closeDmAttachMenu(); return; }
+  if (getDmAttachMenuEl()) { closeDmAttachMenu(); return; }
   closeDmGifPicker();
   closeDmEmojiPicker();
 
@@ -18288,7 +13466,7 @@ document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
   menu.style.position = 'fixed';
   menu.style.bottom = `${window.innerHeight - r.top + 6}px`;
   menu.style.left   = `${r.left}px`;
-  _dmAttachMenuEl = menu;
+  setDmAttachMenuEl(menu);
 
   menu.querySelectorAll('[data-act]').forEach(b => {
     b.onclick = (ev) => {
@@ -18302,7 +13480,7 @@ document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
 
   setTimeout(() => {
     const onDoc = (ev) => {
-      if (!_dmAttachMenuEl?.contains(ev.target)) {
+      if (!getDmAttachMenuEl()?.contains(ev.target)) {
         closeDmAttachMenu();
         document.removeEventListener('click', onDoc);
       }
@@ -18319,7 +13497,7 @@ document.getElementById('dmFileInput')?.addEventListener('change', async (e) => 
 
   // Cap at 10 total — combine with anything already staged. If the user
   // exceeds the cap we keep the first N and toast the rest.
-  const existing = _dmPendingAttachment?.kind === 'upload' ? _dmPendingAttachment.files : [];
+  const existing = getDmPendingAttachment()?.kind === 'upload' ? getDmPendingAttachment().files : [];
   const remainingSlots = Math.max(0, 10 - existing.length);
   if (remainingSlots === 0) {
     toast('Limit reached — up to 10 photos per message.', 'warning');
@@ -18360,250 +13538,21 @@ document.getElementById('dmFileInput')?.addEventListener('change', async (e) => 
 
   // Merge with anything already staged so the user can pick in batches.
   const allFiles = [...existing, ...processed];
-  const allDataUrls = _dmPendingAttachment?.kind === 'upload'
-    ? [..._dmPendingAttachment.dataUrls, ...dataUrls]
+  const allDataUrls = getDmPendingAttachment()?.kind === 'upload'
+    ? [...getDmPendingAttachment().dataUrls, ...dataUrls]
     : dataUrls;
 
-  _dmPendingAttachment = { kind: 'upload', files: allFiles, dataUrls: allDataUrls };
+  setDmPendingAttachment({ kind: 'upload', files: allFiles, dataUrls: allDataUrls });
   showDmAttachPreview(allDataUrls, allFiles);
   updateSendButton();
 });
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
-
-// Canvas-based JPEG compression — reduces a photo to fit under maxBytes
-async function compressImageToJpeg(file, maxBytes) {
-  const dataUrl = await fileToDataUrl(file);
-  const img = await new Promise((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.onerror = reject;
-    i.src = dataUrl;
-  });
-
-  // Step down quality until under cap (or stop at 0.5)
-  let quality = 0.85;
-  let scale = 1;
-  // Cap dimensions at 1920px for sanity
-  const maxDim = 1920;
-  if (img.width > maxDim || img.height > maxDim) {
-    scale = Math.min(maxDim / img.width, maxDim / img.height);
-  }
-
-  const canvas = document.createElement('canvas');
-  canvas.width  = Math.round(img.width  * scale);
-  canvas.height = Math.round(img.height * scale);
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality));
-    if (!blob) break;
-    if (blob.size <= maxBytes) {
-      return new File([blob], (file.name.replace(/\.[^.]+$/, '') || 'image') + '.jpg', { type: 'image/jpeg' });
-    }
-    quality -= 0.12;
-    if (quality < 0.5) break;
-  }
-  return file;
-}
-
-// Now takes either:
-//   showDmAttachPreview(dataUrl, name, size)              — legacy single-image / GIF call sites
-//   showDmAttachPreview(dataUrls: string[], files: File[]) — multi-image upload path
-// We detect the multi-image shape by Array.isArray on the first arg and
-// render a thumbnail strip; the legacy callers (gif preview) still get
-// the original single-image markup so nothing else has to change.
-function showDmAttachPreview(srcOrUrls, nameOrFiles, size) {
-  const wrap = document.getElementById('dmAttachPreview');
-  const isMulti = Array.isArray(srcOrUrls);
-  if (isMulti) {
-    const dataUrls = srcOrUrls;
-    const files = Array.isArray(nameOrFiles) ? nameOrFiles : [];
-    // Lead image goes in the existing single-image slot; the rest get
-    // injected as a horizontal thumb row right after. Each thumb has its
-    // own X overlay that drops just that file from the staged batch.
-    const leadImg = document.getElementById('dmAttachPreviewImg');
-    if (leadImg) leadImg.src = dataUrls[0] || '';
-    document.getElementById('dmAttachPreviewName').textContent = files.length === 1
-      ? (files[0]?.name || 'Image')
-      : `${files.length} photos`;
-    const totalBytes = files.reduce((sum, f) => sum + (f?.size || 0), 0);
-    document.getElementById('dmAttachPreviewSize').textContent = totalBytes ? `· ${formatBytes(totalBytes)}` : '';
-    // Render the supplementary thumb strip if more than one. Reuses the
-    // existing #dmAttachPreviewExtra container when present, otherwise
-    // appends one inside #dmAttachPreview so no HTML change is required.
-    let extra = document.getElementById('dmAttachPreviewExtra');
-    if (files.length > 1) {
-      if (!extra) {
-        extra = document.createElement('div');
-        extra.id = 'dmAttachPreviewExtra';
-        extra.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;';
-        wrap?.appendChild(extra);
-      }
-      extra.style.display = '';
-      extra.innerHTML = dataUrls.map((u, idx) => `
-        <div style="position:relative;width:48px;height:48px;border-radius:6px;overflow:hidden;background:#222">
-          <img src="${u}" style="width:100%;height:100%;object-fit:cover" alt=""/>
-          <button type="button" data-dm-remove-idx="${idx}" style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,0.85);color:#fff;border:none;font-size:11px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Remove">×</button>
-        </div>
-      `).join('');
-      // Wire per-thumb X buttons.
-      extra.querySelectorAll('[data-dm-remove-idx]').forEach((btn) => {
-        btn.addEventListener('click', (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          const idx = parseInt(btn.dataset.dmRemoveIdx, 10);
-          if (!_dmPendingAttachment || _dmPendingAttachment.kind !== 'upload') return;
-          _dmPendingAttachment.files.splice(idx, 1);
-          _dmPendingAttachment.dataUrls.splice(idx, 1);
-          if (_dmPendingAttachment.files.length === 0) {
-            hideDmAttachPreview();
-          } else {
-            showDmAttachPreview(_dmPendingAttachment.dataUrls, _dmPendingAttachment.files);
-          }
-          updateSendButton();
-        });
-      });
-    } else if (extra) {
-      extra.style.display = 'none';
-      extra.innerHTML = '';
-    }
-  } else {
-    // Legacy single-image path (still used by GIF preview).
-    document.getElementById('dmAttachPreviewImg').src = srcOrUrls;
-    document.getElementById('dmAttachPreviewName').textContent = nameOrFiles || 'Image';
-    document.getElementById('dmAttachPreviewSize').textContent = size ? `· ${formatBytes(size)}` : '';
-    const extra = document.getElementById('dmAttachPreviewExtra');
-    if (extra) { extra.style.display = 'none'; extra.innerHTML = ''; }
-  }
-  if (wrap) wrap.style.display = '';
-}
-function hideDmAttachPreview() {
-  const wrap = document.getElementById('dmAttachPreview');
-  if (wrap) wrap.style.display = 'none';
-  _dmPendingAttachment = null;
-  updateSendButton();
-}
-function formatBytes(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
-  return (n / 1024 / 1024).toFixed(1) + ' MB';
-}
 document.getElementById('dmAttachCancel')?.addEventListener('click', hideDmAttachPreview);
-
-// ── Override sendDmMessage to handle attachments + GIFs ─────────────────
-// Rather than re-declaring the function, we wrap upload logic into a helper
-// that the existing sendDmMessage delegates to when an attachment is staged.
-// We do this by hooking into the send button click before it runs sendDmMessage.
-async function sendDmAttachment() {
-  if (!dmState.activeConvId || !_dmPendingAttachment) return false;
-  const att = _dmPendingAttachment;
-
-  let imageUrls = [];
-  let imageKind = att.kind;
-
-  if (att.kind === 'gif') {
-    // GIFs are always single-attachment.
-    imageUrls = [att.gifUrl];
-  } else {
-    // Upload all picked files in parallel. Order is preserved by Promise.all
-    // so the gallery grid renders in the user's selection order. A single
-    // failed upload aborts the whole send so the user knows something went
-    // wrong rather than silently shipping a partial batch.
-    const uploads = att.files.map(async (file) => {
-      const ext = (file.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
-      const path = `${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-      const { error: upErr } = await supabase.storage.from(DM_BUCKET).upload(path, file, {
-        contentType: file.type,
-        cacheControl: '3600',
-        upsert: false,
-      });
-      if (upErr) throw upErr;
-      const { data: urlData } = supabase.storage.from(DM_BUCKET).getPublicUrl(path);
-      if (!urlData?.publicUrl) throw new Error('No public URL returned');
-      return urlData.publicUrl;
-    });
-    try {
-      imageUrls = await Promise.all(uploads);
-    } catch (upErr) {
-      console.error('[dm] upload failed', upErr);
-      toast(upErr.message || 'Upload failed', 'error');
-      return false;
-    }
-  }
-  if (!imageUrls.length) { toast('Failed to attach image(s)', 'error'); return false; }
-
-  const input = document.getElementById('dmInput');
-  const body = (input?.value || '').trim();
-  const replyToId = dmState.replyingTo?.id || null;
-  dmState.replyingTo = null;
-  hideReplyPreview();
-
-  // Optimistic render — image_url stays = the lead image so any code that
-  // still reads the singular field (legacy code paths, push notifications)
-  // sees something; image_urls is the canonical ordered list.
-  const tempId = 'temp-' + Date.now();
-  dmState.messages.push({
-    id: tempId,
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body: body || '',
-    image_url: imageUrls[0],
-    image_urls: imageUrls,
-    image_kind: imageKind,
-    reply_to_id: replyToId,
-    created_at: new Date().toISOString(),
-    read_at: null,
-    _pending: true,
-  });
-  hideDmAttachPreview();
-  if (input) { input.value = ''; resizeDmInput(); updateSendButton(); }
-  renderMessages();
-  // Image/GIF I just sent → always pin so it lands in view.
-  scrollMessagesToBottom({ force: true });
-
-  const { data, error } = await supabase.from('messages').insert({
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body: body || ' ',     // body has a NOT-NULL/length constraint; one-space passes
-    image_url: imageUrls[0],
-    image_urls: imageUrls,
-    image_kind: imageKind,
-    reply_to_id: replyToId,
-  }).select().single();
-  if (error) {
-    dmState.messages = dmState.messages.filter(m => m.id !== tempId);
-    _renderedMessageIds.delete(tempId);
-    renderMessages();
-    toast(error.message, 'error');
-    return false;
-  }
-  // Replace temp with real — transfer the "already-rendered" status so the
-  // bubble doesn't re-animate (would cause the whole list to flash).
-  const idx = dmState.messages.findIndex(m => m.id === tempId);
-  if (idx >= 0) dmState.messages[idx] = data;
-  if (_renderedMessageIds.has(tempId)) {
-    _renderedMessageIds.delete(tempId);
-    _renderedMessageIds.add(data.id);
-  }
-  document.querySelectorAll(`[data-msg-id="${tempId}"]`).forEach(el => {
-    el.dataset.msgId = data.id;
-  });
-  return true;
-}
 
 // Intercept the send button: if an attachment is pending, send it via the
 // attachment path; otherwise fall through to the normal text send.
 document.getElementById('dmSendBtn')?.addEventListener('click', (e) => {
-  if (_dmPendingAttachment) {
+  if (getDmPendingAttachment()) {
     e.stopImmediatePropagation();
     sendDmAttachment();
   }
@@ -18611,220 +13560,15 @@ document.getElementById('dmSendBtn')?.addEventListener('click', (e) => {
 
 // Also intercept Enter key in textarea when an attachment is staged
 document.getElementById('dmInput')?.addEventListener('keydown', (e) => {
-  if (_dmPendingAttachment && e.key === 'Enter' && !e.shiftKey) {
+  if (getDmPendingAttachment() && e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     e.stopImmediatePropagation();
     sendDmAttachment();
   }
 }, true);
 
-// ── GIF picker (Giphy) ───────────────────────────────────────────────────
-function closeDmGifPicker() {
-  if (_dmGifPickerEl) { _dmGifPickerEl.remove(); _dmGifPickerEl = null; }
-}
-async function openDmGifPicker() {
-  if (_dmGifPickerEl) { closeDmGifPicker(); return; }
-  closeDmEmojiPicker();
-  closeDmAttachMenu();
-
-  const composer = document.getElementById('dmComposer');
-  if (!composer) return;
-  const picker = document.createElement('div');
-  picker.className = 'dm-gif-picker';
-  picker.innerHTML = `
-    <div class="dm-gif-header">
-      <input type="text" class="dm-gif-search" placeholder="Search GIFs…" id="dmGifSearch"/>
-      <button type="button" class="dm-gif-close" aria-label="Close">×</button>
-    </div>
-    <div class="dm-gif-grid" id="dmGifGrid">
-      <div class="dm-gif-loading">Loading trending…</div>
-    </div>
-  `;
-  document.body.appendChild(picker);
-  // Position above composer
-  const r = composer.getBoundingClientRect();
-  picker.style.position = 'fixed';
-  picker.style.bottom = `${window.innerHeight - r.top + 6}px`;
-  picker.style.left   = `${r.left}px`;
-  picker.style.width  = `${r.width}px`;
-  _dmGifPickerEl = picker;
-
-  picker.querySelector('.dm-gif-close').onclick = closeDmGifPicker;
-  const search = picker.querySelector('#dmGifSearch');
-  search.focus();
-
-  // Initial: trending
-  loadGifResults('', picker.querySelector('#dmGifGrid'));
-
-  let timer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      loadGifResults(search.value.trim(), picker.querySelector('#dmGifGrid'));
-    }, 250);
-  });
-}
-async function loadGifResults(query, gridEl) {
-  if (!gridEl) return;
-
-  // No key configured → show setup instructions instead of empty results
-  if (!DM_GIPHY_KEY) {
-    gridEl.innerHTML = `
-      <div class="dm-gif-setup">
-        <div class="dm-gif-setup-icon">🔑</div>
-        <h4>GIF picker needs an API key</h4>
-        <p>Giphy's free public key was retired. Get your own (takes 3 min):</p>
-        <ol>
-          <li>Open <a href="https://developers.giphy.com/dashboard/" target="_blank" rel="noopener">developers.giphy.com</a></li>
-          <li>Create an API-type app</li>
-          <li>Copy your API key</li>
-          <li>Paste it into <code>DM_GIPHY_KEY</code> in app.js</li>
-        </ol>
-        <p class="dm-gif-setup-note">Free tier: 100,000 requests/day.</p>
-      </div>
-    `;
-    return;
-  }
-
-  gridEl.innerHTML = '<div class="dm-gif-loading">Loading…</div>';
-  const endpoint = query
-    ? `https://api.giphy.com/v1/gifs/search?api_key=${DM_GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=24&rating=pg-13`
-    : `https://api.giphy.com/v1/gifs/trending?api_key=${DM_GIPHY_KEY}&limit=24&rating=pg-13`;
-  try {
-    const res = await fetch(endpoint);
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      console.error('[dm] giphy non-OK', res.status, errBody);
-      const friendlyMsg = res.status === 401 || res.status === 403
-        ? 'Invalid Giphy API key — check the DM_GIPHY_KEY constant in app.js.'
-        : `Giphy returned ${res.status}. Try again later.`;
-      gridEl.innerHTML = `<div class="dm-gif-loading">${escHTML(friendlyMsg)}</div>`;
-      return;
-    }
-    const json = await res.json();
-    const gifs = json?.data || [];
-    if (!gifs.length) {
-      gridEl.innerHTML = '<div class="dm-gif-loading">No GIFs found</div>';
-      return;
-    }
-    gridEl.innerHTML = gifs.map(g => {
-      const preview = g.images?.fixed_height_small?.url || g.images?.fixed_height?.url || g.images?.original?.url;
-      const send    = g.images?.fixed_height?.url   || g.images?.original?.url;
-      if (!preview || !send) return '';
-      return `<button class="dm-gif-tile" type="button" data-send="${escHTML(send)}" title="${escHTML(g.title || 'GIF')}">
-        <img src="${escHTML(preview)}" alt="${escHTML(g.title || 'GIF')}" loading="lazy"/>
-      </button>`;
-    }).join('');
-    gridEl.querySelectorAll('.dm-gif-tile').forEach(tile => {
-      tile.onclick = () => sendDmGif(tile.dataset.send);
-    });
-  } catch (err) {
-    console.error('[dm] giphy fetch failed', err);
-    gridEl.innerHTML = `<div class="dm-gif-loading">Couldn't load GIFs — ${escHTML(err.message || 'network error')}</div>`;
-  }
-}
-async function sendDmGif(gifUrl) {
-  if (!gifUrl) return;
-  closeDmGifPicker();
-  _dmPendingAttachment = { file: null, dataUrl: gifUrl, kind: 'gif', gifUrl };
-  await sendDmAttachment();
-}
-
-// ── Emoji picker ─────────────────────────────────────────────────────────
-const DM_EMOJI_GROUPS = [
-  { label: 'Smileys', emojis: '😀 😃 😄 😁 😆 😅 🤣 😂 🙂 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐'.split(' ') },
-  { label: 'Gestures', emojis: '👍 👎 👏 🙌 🤝 🙏 👋 🤚 ✋ 🖐 ✊ 👊 🤛 🤜 🫶 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝ 💪 🦾'.split(' ') },
-  { label: 'Hearts', emojis: '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❤️‍🔥 ❤️‍🩹 💖 💗 💓 💞 💕 💘 💝 💟'.split(' ') },
-  { label: 'Animals', emojis: '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦄 🐝'.split(' ') },
-  { label: 'Food', emojis: '🍕 🍔 🍟 🌭 🥪 🌮 🌯 🥗 🍝 🍜 🍣 🍱 🍤 🍙 🍘 🍚 🍛 🍦 🍰 🎂 🍩 🍪 🍫 🍬 🍭 ☕ 🍺'.split(' ') },
-  { label: 'Activities', emojis: '⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🏸 🥊 🎯 🎳 🎮 🎲 🎰 🎬 🎤 🎧 🎵 🎶 📚 ✏️ 📝 💻 📱'.split(' ') },
-  { label: 'Travel', emojis: '✈️ 🚗 🚕 🚙 🚌 🚎 🏎 🚓 🚑 🚒 🚐 🚚 🚛 🚜 🏍 🛵 🚲 🛴 🛹 🚂 🚆 🚇 ⛵ 🛳 🚀'.split(' ') },
-  { label: 'Symbols', emojis: '✨ 💫 ⭐ 🌟 💥 🔥 ⚡ 💧 🌈 ☀️ 🌙 🎉 🎊 🎁 🏆 🥇 ✅ ❌ ❗ ❓ 💯 ‼️ ⁉️ 💬 💭 🔔'.split(' ') },
-];
-function closeDmEmojiPicker() {
-  if (_dmEmojiPickerEl) { _dmEmojiPickerEl.remove(); _dmEmojiPickerEl = null; }
-}
-// Tracks which trigger opened the current picker so a click on a DIFFERENT
-// trigger closes the existing one and opens a fresh one bound to the new
-// input (needed for the floating mini-chats — each has its own emoji button
-// + its own composer textarea).
-let _dmEmojiPickerTrigger = null;
-
-// Bug #202 (2026-05-16): the original `getElementById('dmEmojiBtn')
-// ?.addEventListener('click', ...)` ran ONCE at module load. If the composer
-// DOM was missing or replaced (sign-out → sign-in re-render, mini-chat
-// instance), the binding silently pointed at a detached node. Now delegated
-// + scoped — the picker takes any trigger + any input + any insert callback,
-// so the full-page #dmEmojiBtn AND every mini-chat .dm-mini-emoji share one
-// picker function.
-//
-// Exported via window so js/messages-dock.js can call it (initMessagesDock
-// captures it via the _cfg.openScopedEmojiPicker injection at boot time).
-export function openScopedEmojiPicker({ trigger, input, onInsert } = {}) {
-  if (!trigger) return;
-  // Toggle off if the same trigger is clicked twice in a row.
-  if (_dmEmojiPickerEl) {
-    const wasSameTrigger = _dmEmojiPickerTrigger === trigger;
-    closeDmEmojiPicker();
-    _dmEmojiPickerTrigger = null;
-    if (wasSameTrigger) return;
-  }
-  closeDmGifPicker();
-  closeDmAttachMenu();
-
-  const picker = document.createElement('div');
-  picker.className = 'dm-emoji-picker';
-  picker.innerHTML = DM_EMOJI_GROUPS.map(g => `
-    <div class="dm-emoji-group">
-      <div class="dm-emoji-label">${g.label}</div>
-      <div class="dm-emoji-grid">
-        ${g.emojis.map(em => `<button type="button" class="dm-emoji-cell" data-emoji="${escHTML(em)}">${em}</button>`).join('')}
-      </div>
-    </div>
-  `).join('');
-  document.body.appendChild(picker);
-
-  const r = trigger.getBoundingClientRect();
-  picker.style.position = 'fixed';
-  picker.style.bottom = `${window.innerHeight - r.top + 8}px`;
-  picker.style.right  = `${Math.max(8, window.innerWidth - r.right)}px`;
-  _dmEmojiPickerEl = picker;
-  _dmEmojiPickerTrigger = trigger;
-
-  // Caller can pass either (a) an explicit onInsert callback for full
-  // control, or (b) just an input element — in which case we insert at
-  // the cursor + restore focus + dispatch input event so any composer-
-  // local listeners (resize, counters) still fire.
-  const doInsert = (em) => {
-    if (typeof onInsert === 'function') return onInsert(em);
-    if (!input) return;
-    const start = input.selectionStart ?? input.value.length;
-    const end   = input.selectionEnd   ?? input.value.length;
-    input.value = input.value.slice(0, start) + em + input.value.slice(end);
-    const caret = start + em.length;
-    input.focus();
-    try { input.setSelectionRange(caret, caret); } catch {}
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-
-  picker.querySelectorAll('.dm-emoji-cell').forEach(cell => {
-    cell.onclick = (ev) => {
-      ev.stopPropagation();
-      doInsert(cell.dataset.emoji);
-    };
-  });
-
-  setTimeout(() => {
-    const onDoc = (ev) => {
-      if (!_dmEmojiPickerEl?.contains(ev.target) && !trigger.contains(ev.target)) {
-        closeDmEmojiPicker();
-        _dmEmojiPickerTrigger = null;
-        document.removeEventListener('click', onDoc);
-      }
-    };
-    document.addEventListener('click', onDoc);
-  }, 0);
-}
+// (DM_EMOJI_GROUPS moved to js/messages.js in Stage 9B Codex review pass —
+// openScopedEmojiPicker is the only consumer and it lives in messages.js.)
 
 // Delegated handler for the full-page composer's emoji button. The dock's
 // per-mini-chat triggers wire their OWN delegated handler in messages-dock.js
@@ -18840,16 +13584,3 @@ document.addEventListener('click', (e) => {
     onInsert: insertEmojiIntoComposer,  // full-page-specific insert
   });
 });
-
-function insertEmojiIntoComposer(emoji) {
-  const input = document.getElementById('dmInput');
-  if (!input) return;
-  const start = input.selectionStart ?? input.value.length;
-  const end   = input.selectionEnd   ?? input.value.length;
-  input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
-  const newPos = start + emoji.length;
-  input.setSelectionRange(newPos, newPos);
-  input.focus();
-  resizeDmInput();
-  updateSendButton();
-}
