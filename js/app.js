@@ -888,7 +888,7 @@ async function loadWalletState() {
 
   _userUnlocks.clear();
   for (const u of (unlocksRes.data || [])) {
-    _userUnlocks.add(`${u.target_type}:${u.target_id}`);
+    markUnlocked(u.target_type, u.target_id);
   }
 
   for (const c of (configRes.data || [])) {
@@ -923,9 +923,31 @@ function formatBalance(n) {
   return n.toLocaleString();
 }
 
+// Normalize an unlock target id BEFORE storing or looking up in _userUnlocks.
+// Codex audit (2026-05-16, bug #192): videos can carry either a bare
+// Supabase UUID or an 'sb_<uuid>' prefixed id depending on which call path
+// produced them — playVideo() uses the prefixed form for the player but
+// strips it down to the bare uuid (`sbId`) before passing to isUnlocked /
+// unlock_content. If we store one shape and look up the other, isUnlocked
+// returns false after a successful unlock and the paywall re-shows.
+// Everything is normalized to the bare server id here.
+function normalizeUnlockTargetId(targetType, targetId) {
+  const id = String(targetId || '');
+  if (targetType === 'video' && id.startsWith('sb_')) return id.slice(3);
+  return id;
+}
+
+// Always add to _userUnlocks through this — keeps the key shape consistent
+// with what isUnlocked() will look up later.
+function markUnlocked(targetType, targetId) {
+  const normalized = normalizeUnlockTargetId(targetType, targetId);
+  _userUnlocks.add(`${targetType}:${normalized}`);
+}
+
 // Has the current user unlocked this content?
 function isUnlocked(targetType, targetId) {
-  return _userUnlocks.has(`${targetType}:${targetId}`);
+  const normalized = normalizeUnlockTargetId(targetType, targetId);
+  return _userUnlocks.has(`${targetType}:${normalized}`);
 }
 
 // Resolve cost: per-row override → app_config default
@@ -1044,7 +1066,7 @@ function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
       // Local state update (Realtime will also push, but this avoids the flicker)
       if (currency === 'coin') _wallet.coin_balance = data.balance_after;
       else                     _wallet.star_balance = data.balance_after;
-      _userUnlocks.add(`${targetType}:${targetId}`);
+      markUnlocked(targetType, targetId);
       renderTopbarCoinPill();
       close();
       toast(data.already_unlocked ? 'Already unlocked' : `Unlocked! −${data.cost} ${currency}${data.cost === 1 ? '' : 's'}`, 'success');
@@ -1119,7 +1141,7 @@ async function setupVideoMonetGate(player, sbId, video) {
         modalOpen = false;
         if (result.mode === 'permanent') {
           // Coin path — never prompt again for this video
-          _userUnlocks.add(`video:${sbId}`);
+          markUnlocked('video', sbId);
           nextThreshold = Infinity;
         } else if (result.mode === 'window') {
           // Star path — paid through end of this window; advance to next
@@ -1130,10 +1152,25 @@ async function setupVideoMonetGate(player, sbId, video) {
         // No need to call play — we never paused
       },
       onCancel: () => {
-        // Modal closed without payment. Pause now so the user has to
-        // re-engage; on next play, listener re-fires and re-prompts.
-        modalOpen = false;
+        // Modal closed without payment. Pause so the user has to re-engage;
+        // on next play, listener re-fires and re-prompts.
+        //
+        // We do NOT reset modalOpen synchronously. player.pause() doesn't
+        // take effect immediately — the browser typically fires one or two
+        // more 'timeupdate' events before the pause settles. If modalOpen
+        // flipped to false now, those queued events would see the gate
+        // clear + currentTime still past the threshold (nextThreshold
+        // doesn't advance on cancel by design) and open a fresh modal
+        // immediately. Scrubbing past N thresholds amplifies this into
+        // needing N taps to dismiss — once per timeupdate that fires
+        // before pause settles. (Bug report 2026-05-16: tap forward 15
+        // min → 2 taps to close; 30 min → 3 taps.)
+        //
+        // Instead: keep modalOpen=true while paused (listener can't fire
+        // anyway, so the guard is harmless) and clear it on the next
+        // 'play' event — at which point we WANT the listener to re-prompt.
         try { player.pause(); } catch {}
+        player.addEventListener('play', () => { modalOpen = false; }, { once: true });
       },
     });
   };
@@ -1628,7 +1665,7 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
       const { data: unlocks } = await supabase.from('unlocks')
         .select('target_type, target_id').eq('user_id', currentUser.id);
       _userUnlocks.clear();
-      for (const u of (unlocks || [])) _userUnlocks.add(`${u.target_type}:${u.target_id}`);
+      for (const u of (unlocks || [])) markUnlocked(u.target_type, u.target_id);
       renderTopbarCoinPill();
       close();
       const saved = data.cost_before_discount - data.cost;

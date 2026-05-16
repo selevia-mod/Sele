@@ -187,6 +187,11 @@ export async function fetchSupabaseVideos() {
         title: v.title,
         description: v.description || '',
         tags: v.tags || [],
+        // Codex audit (2026-05-16): `category` is fetched from Supabase but
+        // was never copied into the normalized object. searchVideos checks
+        // v.category — without this, category search silently fails for
+        // every cached video.
+        category: v.category || '',
         uploader: v.uploader_id,
         thumbnail: v.thumbnail_url,
         videoUrl: v.video_url,
@@ -229,7 +234,6 @@ export async function loadVideos() {
     });
     allVideosCache = supabaseVideos;
   }
-  window._cache = allVideosCache; // expose for debugging
 
   if (!allVideosCache.length) {
     grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
@@ -471,7 +475,7 @@ export async function runSearch() {
         const formatted = merged.map(v => ({
           $id: 'sb_' + v.id, _supabase: true, _supabaseId: v.id,
           title: v.title, description: v.description || '',
-          tags: v.tags || [], uploader: v.uploader_id,
+          tags: v.tags || [], category: v.category || '', uploader: v.uploader_id,
           thumbnail: v.thumbnail_url, videoUrl: v.video_url, uri: v.video_url,
           videoStats: { views: v.views || 0, duration: v.duration || 0 },
           is_locked: !!v.is_locked, is_monetized: !!v.is_monetized,
@@ -572,6 +576,7 @@ export async function runSearch() {
       title: v.title,
       description: v.description || '',
       tags: v.tags || [],
+      category: v.category || '',
       uploader: v.uploader_id,
       thumbnail: v.thumbnail_url,
       videoUrl: v.video_url,
@@ -760,11 +765,12 @@ export function renderVideoCard(video, uploader) {
     const tempVid = document.createElement('video');
     tempVid.preload = 'metadata';
     tempVid.muted = true;
-    if (video.videoUrl.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !tempVid.canPlayType('application/vnd.apple.mpegurl')) {
-      const tempHls = new Hls();
+    const HlsCtor = window.Hls;
+    if (video.videoUrl.endsWith('.m3u8') && HlsCtor && HlsCtor.isSupported() && !tempVid.canPlayType('application/vnd.apple.mpegurl')) {
+      const tempHls = new HlsCtor();
       tempHls.loadSource(video.videoUrl);
       tempHls.attachMedia(tempVid);
-      tempHls.on(Hls.Events.MANIFEST_PARSED, () => {
+      tempHls.on(HlsCtor.Events.MANIFEST_PARSED, () => {
         if (tempVid.duration && !isNaN(tempVid.duration)) {
           durationEl.textContent = _cfg.formatDuration(tempVid.duration);
         }
@@ -789,10 +795,13 @@ export function renderVideoCard(video, uploader) {
       if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
         if (previewEl.canPlayType('application/vnd.apple.mpegurl')) {
           previewEl.src = video.videoUrl;
-        } else if (window.Hls && Hls.isSupported()) {
-          hoverHls = new Hls();
-          hoverHls.loadSource(video.videoUrl);
-          hoverHls.attachMedia(previewEl);
+        } else {
+          const HlsCtor = window.Hls;
+          if (HlsCtor && HlsCtor.isSupported()) {
+            hoverHls = new HlsCtor();
+            hoverHls.loadSource(video.videoUrl);
+            hoverHls.attachMedia(previewEl);
+          }
         }
       } else {
         previewEl.src = video.videoUrl;
