@@ -99,7 +99,9 @@
 
     <div class="topbar-search" id="topbarSearch">
   <svg class="topbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-  <input type="text" id="searchInput" placeholder="Search posts and people..."/>
+  <!-- autocomplete="off" + name omitted suppresses browser autofill suggestions
+       that were overlaying our recent-searches dropdown (Stage 10 smoke test). -->
+  <input type="text" id="searchInput" placeholder="Search posts and people..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
   <button class="topbar-search-clear" id="topbarSearchClear" style="display:none">×</button>
 </div>
 <div id="searchResults" class="search-results"></div>
@@ -364,19 +366,51 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
   Book
 </button>
-          <!-- Schedule post — opens a datetime-local picker. When a
+          <!-- Schedule post — opens an inline date+time popover. When a
                future time is set, the post submits via the submit_post
                RPC with is_hidden=true + scheduled_publish_at so a
                server cron flips it live at the right moment. Same
                pattern as Studio's Share button. Mirrors the mobile
-               composer's "Schedule for later" affordance. -->
-          <button class="image-upload-btn" title="Schedule post" id="btnOpenSchedule" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><polyline points="12 9 12 13 14 15"/><path d="M5 3l-2 2"/><path d="M19 3l2 2"/></svg>
-            Schedule
-          </button>
-          <input type="datetime-local" id="composeScheduleAt"
-                 style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none"
-                 aria-hidden="true"/>
+               composer's "Schedule for later" affordance.
+               2026-05-15: replaced native <input type="datetime-local">
+               with split <input type="date"> + <input type="time"> in a
+               custom popover. Native datetime-local on Safari has no
+               calendar, no obvious close, no proper time picker. The
+               split inputs render decent native pickers on Safari and
+               Chrome, and the popover gives us explicit Set/Cancel
+               affordances + a click-outside dismiss. -->
+          <div id="composeScheduleWrap" style="position:relative;display:inline-flex">
+            <button class="image-upload-btn" title="Schedule post" id="btnOpenSchedule" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><polyline points="12 9 12 13 14 15"/><path d="M5 3l-2 2"/><path d="M19 3l2 2"/></svg>
+              Schedule
+            </button>
+            <div id="composeSchedulePopover" role="dialog" aria-label="Schedule post"
+                 style="display:none;position:absolute;top:calc(100% + 8px);left:0;z-index:100;
+                        background:var(--bg2);
+                        border:1px solid var(--border2);
+                        border-radius:10px;padding:14px;min-width:280px;
+                        box-shadow:0 10px 28px rgba(0,0,0,0.18)">
+              <div style="font-size:11px;color:var(--text2);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em">Schedule for</div>
+              <div style="display:flex;gap:6px;margin-bottom:12px">
+                <input type="date" id="composeScheduleDate"
+                       style="flex:1;padding:6px 8px;background:var(--bg3);
+                              border:1px solid var(--border2);
+                              border-radius:6px;color:var(--text);font-size:13px;font-family:inherit"/>
+                <input type="time" id="composeScheduleTime"
+                       style="flex:0 0 110px;padding:6px 8px;background:var(--bg3);
+                              border:1px solid var(--border2);
+                              border-radius:6px;color:var(--text);font-size:13px;font-family:inherit"/>
+              </div>
+              <div style="display:flex;gap:6px;justify-content:flex-end">
+                <button type="button" id="composeScheduleCancel"
+                        style="background:transparent;color:var(--text2);border:1px solid var(--border2);
+                               border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer">Cancel</button>
+                <button type="button" id="composeScheduleSet"
+                        style="background:var(--accent);color:#1a1a2e;border:none;
+                               border-radius:6px;padding:6px 14px;font-size:13px;font-weight:700;cursor:pointer">Set</button>
+              </div>
+            </div>
+          </div>
           <div class="spacer"></div>
           <!-- "Scheduled for X" chip — appears when a future time is
                set. Click × to clear and revert to "Publish now". The
@@ -1522,27 +1556,11 @@
 
       <!-- Earnings tab -->
       <div class="earnings-tab-content" data-etab-content="earnings">
-        <!-- Maintenance banner — withdrawals temporarily paused while
-             pending requests are reconciled. Shown both here and on
-             the mobile Earnings tab so creators don't think their
-             balance disappeared (e.g. Ms.Chaser case — pending
-             withdrawal not subtracted from displayed available, so
-             ₱1,500 looked "missing"). Purple-soft so it reads
-             informational rather than alarming. -->
-        <div class="author-earnings-maintenance-banner">
-          <div class="author-earnings-maintenance-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-              <path d="M9 12l2 2 4-4"/>
-            </svg>
-          </div>
-          <div class="author-earnings-maintenance-copy">
-            <div class="author-earnings-maintenance-title">Withdrawals temporarily under maintenance</div>
-            <div class="author-earnings-maintenance-body">
-              Your earnings are safe. Pending withdrawal requests are queued and will be processed as soon as maintenance is complete. Thank you for your patience 💜
-            </div>
-          </div>
-        </div>
+        <!-- (Maintenance banner removed 2026-05-16 — withdrawals are
+             live again. The post-flip code path here is intentionally
+             empty so this is just a comment marker for git history;
+             restore the prior banner block from git if a future
+             maintenance window is needed.) -->
 
         <!-- Lifetime totals — Total Earnings (gross since day one) and
              This Month. Together they answer "how much have I earned
@@ -1585,22 +1603,28 @@
               <span class="author-earnings-withdrawal-dot" aria-hidden="true"></span>
               <span class="author-earnings-withdrawal-text"></span>
             </div>
-            <!-- Withdrawals disabled while under maintenance — matches
-                 the banner copy above. `disabled` both functionally
-                 (the click handler in app.js does nothing on a
-                 disabled button) and visually (the .btn:disabled
-                 style fades it). Restore Request payout label +
-                 remove disabled when maintenance ends. -->
-            <button class="btn btn-purple author-earnings-payout-btn" id="btnRequestPayout" disabled aria-disabled="true">
+            <!-- Withdraw button — live. Click handler in
+                 js/earnings.js gates on (a) Payments Info present and
+                 (b) available balance ≥ admin-configured minimum;
+                 both failures show a friendly explainer popup rather
+                 than a silently-disabled button. syncAuthorPayoutButton
+                 sets the tooltip + keeps disabled=false on every
+                 render. Flipped live 2026-05-16 after the maintenance
+                 reconciliation work (task #126). -->
+            <button class="btn btn-purple author-earnings-payout-btn" id="btnRequestPayout">
               <span class="author-earnings-payout-btn-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                   <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                 </svg>
               </span>
-              Maintenance
+              Request payout
             </button>
-            <div class="author-earnings-foot" id="earningsMinPayoutHint">Withdrawals temporarily paused — your earnings are safe.</div>
+            <!-- Hint text is rewritten by renderAuthorEarningsBalance
+                 to "Minimum payout: ₱X.XX" once wallet config loads.
+                 The static fallback here matches that copy so first-
+                 paint doesn't flash the old maintenance message. -->
+            <div class="author-earnings-foot" id="earningsMinPayoutHint">Minimum payout: ₱100.00</div>
           </div>
           <div class="author-earnings-card author-earnings-pending">
             <div class="author-earnings-card-head">
@@ -1938,6 +1962,7 @@
               <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
             </button>
           </div>
+          <div class="profile-handle" id="profileHandle"></div>
           <div class="profile-stats">
             <button class="profile-stat" id="statFollowing"><strong>0</strong> following</button>
             <button class="profile-stat" id="statFollowers"><strong>0</strong> followers</button>
@@ -2009,8 +2034,14 @@
       <button class="modal-close-btn" id="editProfileClose">×</button>
     </div>
     <label class="form-label">Display name</label>
-    <input class="form-input" id="editUsername" placeholder="Your name" maxlength="40"/>
-    <div class="edit-profile-hint" id="editUsernameHint">Letters, numbers and basic punctuation only — no emoji. You can change this once every 60 days.</div>
+    <input class="form-input" id="editDisplayName" placeholder="Your name" maxlength="40"/>
+    <div class="edit-profile-hint" id="editDisplayNameHint">Letters, numbers and basic punctuation only — no emoji. 3 changes per month.</div>
+    <label class="form-label">Username</label>
+    <div class="edit-handle-row">
+      <span class="edit-handle-prefix">@</span>
+      <input class="form-input edit-handle-input" id="editUsername" placeholder="username" maxlength="32" autocomplete="off" spellcheck="false"/>
+    </div>
+    <div class="edit-profile-hint" id="editUsernameHint">Lowercase letters, numbers, underscore. You can change this once every 60 days.</div>
     <label class="form-label">Bio</label>
     <textarea class="form-input" id="editBio" rows="5" placeholder="Tell us about yourself..." maxlength="200"></textarea>
     <div class="edit-profile-counter"><span id="editBioCount">0 / 200</span><span id="editBioLines">1 / 5 lines</span></div>
@@ -2784,6 +2815,11 @@
     <span class="site-footer-copy">© <span id="footerYear">2026</span> TOS Web Publishing</span>
   </div>
 </footer>
+
+<!-- Floating Messages dock mount point. Stays empty until the user signs in
+     and initMessagesDock renders into it (js/messages-dock.js). Hidden on
+     mobile via CSS — full Messages page is the mobile experience. -->
+<div id="dmFloatingRoot"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>

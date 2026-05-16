@@ -80,7 +80,24 @@ script catches core-file changes.
 
 ---
 
-## Stage 1 — Extract Notifications (~2–3 hours)
+## Stage 1 — Extract Notifications (~2–3 hours) ✅
+
+**Status:** Complete (2026-05-15). Notifications now live in `js/notifications.js`,
+imported by `app.js` via a single import + a config-injection call site.
+
+**Lessons captured for stages 2–9:**
+- The first attempt used a circular ES module import (`notifications.js`
+  imported `currentUser` + nav functions from `app.js`, while `app.js`
+  imported `initNotifications` from `notifications.js`). At module-load
+  time this caused the realtime subscriber to attach `.on(postgres_changes)`
+  AFTER `.subscribe()` had already fired, triggering the
+  `cannot add postgres_changes after subscribe()` error and breaking sign-out.
+- The fix was config injection: `notifications.js` imports ONLY from
+  `supabase.js` (which is leaf-level), and `app.js` passes a `{getCurrentUser,
+  nav: {...}}` object into `initNotifications(config)` on sign-in.
+- **Use config injection as the default pattern for stages 2–9.** Any time
+  the extracted module needs to read live `currentUser` or call a navigation
+  surface that still lives in `app.js`, inject it instead of importing it.
 
 Notifications is the right first target: low cross-feature coupling, recent
 regression source, well-bounded (everything starts at `initNotifications()`).
@@ -103,44 +120,68 @@ From `js/app.js` into a new file `js/notifications.js`:
 - The bell button click handler that opens the panel — wires via an
   `import { openNotifPanel } from './notifications.js';`
 
-### How
-- [ ] Change `index.html` script tag: `<script type="module" src="js/app.js">`
-      (already `type="module"`, good).
-- [ ] Create `js/notifications.js` with `export function initNotifications() {...}`
-      etc.
-- [ ] Cut + paste the entire notifications block into the new file.
-- [ ] Add `import { supabase } from './supabase.js'` (or whichever shared
-      module exposes it — if none exists yet, that's stage 0.5).
-- [ ] Add `import { toast, escHTML } from './utils.js'` (same caveat).
-- [ ] In `app.js`, add `import { initNotifications } from './notifications.js';`
-      at the top and call it from `onSignedIn`.
+### How (as executed)
+- [x] `js/notifications.js` created with 21 functions + 16 state vars
+      moved verbatim from `app.js` lines 18369–19548.
+- [x] `escHTML` and `toast` moved into `js/supabase.js` (leaf-level shared module).
+- [x] `notifications.js` imports `supabase, escHTML, initials, timeAgo` from
+      `./supabase.js` ONLY. No imports from `./app.js`. (This is what broke
+      the first attempt.)
+- [x] `app.js` adds a single `import { initNotifications } from './notifications.js';`
+      and calls it from `onSignedIn` with a config object containing
+      `getCurrentUser` + 10 navigation function references.
+- [x] `app.js.before-stage1` kept as local-only backup (gitignored via
+      "untracked + don't add" — not committed).
 
-### Verify
-- [ ] `./scripts/pre-deploy-check.sh` passes
-- [ ] Manual: bell opens, shows grouped follows, tap routes correctly
-- [ ] Manual: new notification arrives via realtime, badge ticks, row appears
+### Verify (as executed)
+- [x] `node --check` passes on both files.
+- [x] Manual: bell opens, shows grouped follows, tap routes correctly.
+- [x] Manual: page load → no realtime subscription error in console.
+- [x] Manual: sign-out works (was broken in first attempt).
+- [ ] Smoke test post-delete delay separately — pre-existing UX issue, not
+      a Stage 1 regression. New task `fix/post-delete-optimistic`.
 
 **Stage 1 done when:** zero notification code remains in `app.js` except the
 single import line + the bell button click handler. Site works identically.
 
 ---
 
-## Stage 2 — Extract Scheduled Posts Modal (~1 hour)
+## Stage 2 — Extract Scheduled Posts Modal (~1 hour) ✅
 
-Smallest possible stage. Builds confidence in the pattern.
+**Status:** Complete (2026-05-15). Confirmed the Stage 1 config-injection
+pattern scales down cleanly to small modules.
 
-### What moves
+**Surface:** 3 functions + 5 event wirings (pill click, close button,
+backdrop click, Escape keydown, delegated row-action handler). Single
+injected dependency: `getCurrentUser`. Compare to Stage 1's 11 injected
+nav functions — Stage 2 took a fraction of the time.
+
+### What moved
 Into `js/scheduled-posts.js`:
-- `refreshScheduledPostsBadge()`
-- `openScheduledPostsModal()` + `closeScheduledPostsModal()`
-- The delegated click handler for `data-sp-act` buttons
-- The pill click + escape handlers
+- [x] `refreshScheduledPostsBadge()` (also re-exported so post-submit handler can call it)
+- [x] `openScheduledPostsModal()` + `closeScheduledPostsModal()`
+- [x] The delegated click handler for `data-sp-act` buttons
+- [x] The pill click + close button + backdrop click + escape handlers
 
-### Verify
-- [ ] Pre-deploy script passes
-- [ ] Schedule a post, see badge appear
-- [ ] Click pill, see modal with row + buttons
-- [ ] Click "Publish now" or "Cancel", verify state updates
+### How (as executed)
+- [x] Created `js/scheduled-posts.js` (~180 lines).
+- [x] Imports `supabase, escHTML, toast` from `./supabase.js` ONLY.
+- [x] No imports from `./app.js` — Stage 1 lesson preserved.
+- [x] `app.js` adds a single import + replaces the standalone
+      `refreshScheduledPostsBadge()` call in `onSignedIn` with
+      `initScheduledPosts({getCurrentUser: () => currentUser})`.
+- [x] All listeners attached at module-load time in `scheduled-posts.js`
+      (NOT inside `initScheduledPosts`) so sign-out/in doesn't accumulate
+      duplicate handlers. This matters more here than in Stage 1 because
+      the delegated handler is bound to `document` — duplicating it would
+      double-fire every click.
+
+### Verify (as executed)
+- [x] `node --check` passes on both files.
+- [x] `scripts/pre-deploy-check.sh` passes (same 5 advisory warnings).
+- [ ] Manual: schedule a post, badge appears.
+- [ ] Manual: click pill, modal opens with row + buttons.
+- [ ] Manual: "Publish now" + "Cancel" both work, badge refreshes.
 
 ---
 
@@ -247,16 +288,144 @@ Into `js/messages.js`:
 
 ---
 
-## Stage 10 — Audit `app.js` (~2 hours)
+## Stage 10 — Extract Search (~2 hours)
 
-After stages 1–9, what's left in `app.js`?
+**Why this stage exists (added 2026-05-16):** The original roadmap jumped
+from Stage 9 (Messages) straight to Stage 10 (audit), but a post-Stage-9
+audit showed `app.js` still at ~13,500 lines. Five more feature modules
+need extraction before the audit can hit its ≤1,500-line target. Stages
+10–14 are those modules. Audit moves to Stage 15.
+
+### What moves
+Into `js/search.js`:
+- `sanitizeSearchQuery()`, `normalizeForSearch()`
+- Recent searches: `getRecentSearches()`, `addRecentSearch()`,
+  `removeRecentSearch()`, `clearRecentSearches()`,
+  `renderRecentSearchesPanel()`
+- `getSearchContext()`, `updateSearchPlaceholder()`
+- The `searchInput` debounced input handler + result rendering
+- All `searchInput` / `searchResults` DOM wiring
+- (Note: `renderGlobalSearchResults` + `highlightSearchMatch` were already
+  moved to `js/messages.js` during Stage 9 because they shared mention-
+  matching helpers — leave them there for now, search.js calls them via
+  import.)
+
+### Verify
+- [ ] Pre-deploy passes
+- [ ] Type into search box → debounce fires, dropdown opens
+- [ ] Recent searches persist across reloads
+- [ ] Context-aware placeholder swaps on Videos / Books tabs
+- [ ] Results route correctly (post → feed jump, user → profile, etc.)
+
+---
+
+## Stage 11 — Extract Earnings + Withdrawals (~3 hours, biggest)
+
+The creator-facing monetization surface — biggest unextracted module at
+~1,000–1,200 lines.
+
+### What moves
+Into `js/earnings.js`:
+- `showEarnings()`, `switchEarningsTab()`
+- `loadAuthorEarnings()`, `_filterEarningsByMonthYear()`,
+  `_resolveEarningsTitles()`
+- `_fetchEarningsBreakdownSummary()`,
+  `_fetchEarningsBreakdownTransactions()`
+- `openEarningsBreakdown()` + `closeEarningsBreakdown()` +
+  `_loadMoreEarningsBreakdown()`
+- `_renderEarningsBreakdownSummary()`, `_renderEarningsBreakdownList()`
+- `renderEarningsTotals()`, `renderEarningsBreakdown()`,
+  `renderAuthorEarningsBalance()`
+- `_renderRecentEarningsPage()` + `_renderRecentEarningsPager()`
+- `renderAuthorEarningsList()`, `earningsStatusLabel()`
+- `_renderWithdrawalsPage()` + `_renderWithdrawalsPager()`
+- `renderAuthorWithdrawalsList()`
+- `_renderWithdrawalFeePreview()` + the withdrawal request flow
+- All `_BREAKDOWN_PAGE_SIZE`, earnings cache, withdrawal modal state
+
+### Verify
+- [ ] Earnings tab opens, shows balance + totals
+- [ ] Breakdown modal opens per category, pagination works
+- [ ] Month/year filter works
+- [ ] Withdrawal request modal opens, fee preview correct
+- [ ] Withdrawal submission → row appears, balance debits
+
+---
+
+## Stage 12 — Extract Engagement (comments + reactions) (~2 hours)
+
+These two touch every feed/profile/video renderer. Extracting them
+together because reactions consumes comments' `loadComments` for the
+"like + comment counts toward goal" interaction.
+
+### What moves
+Into `js/engagement.js` (or split `comments.js` + `reactions.js`):
+- `loadComments()`, `loadRepliesForComment()`, `renderComment()`,
+  `submitComment()`, `deleteComment()`, comment menu handlers
+- `INITIAL_PARENTS_VISIBLE`, comment pagination state
+- `loadReactions()`, `setReaction()`, `clearReaction()`, the reaction
+  picker UI, `openReactorListModal()`
+- `REACTIONS` constant + reaction event delegation
+
+### Verify
+- [ ] Add/delete comment on a post
+- [ ] Reply to a comment
+- [ ] Like/dislike/love reaction toggles, count updates
+- [ ] Reaction summary tap opens reactor list modal
+- [ ] Same flow works on a video and a chapter
+
+---
+
+## Stage 13 — Extract Coin Shop + Wallet (~1.5 hours)
+
+In-app currency surface. Moderate size, lower coupling.
+
+### What moves
+Into `js/wallet.js`:
+- Coin balance widget + refresh
+- Coin purchase modal, package selector
+- HitPay redirect + return handler
+- Wallet transaction list
+- IAP receipt processing (web side)
+
+### Verify
+- [ ] Open coin shop, packages render
+- [ ] Purchase flow → redirect → return → balance credited
+- [ ] Transaction list paginates
+
+---
+
+## Stage 14 — Extract Goals (~1 hour)
+
+Daily-login / engagement goals — currently scattered across feed +
+comments + profile.
+
+### What moves
+Into `js/goals.js`:
+- `tickGoalUnique()` (the cross-feature emitter)
+- Daily login goal claim
+- Goal progress modal
+- Goal achievement notification
+
+### Verify
+- [ ] Open app → daily login goal ticks
+- [ ] Like + comment same post → still counts as one engagement
+- [ ] Claim a completed goal → wallet credits
+
+---
+
+## Stage 15 — Audit `app.js` (~2 hours)
+
+After stages 1–14, what's left in `app.js`?
 
 **Should be only:**
 - App boot (`onSignedIn`, `onSignedOut`)
 - Sidebar nav + tab switching
 - Shared utilities (`escHTML`, `toast`, etc.) — or these move to `js/utils.js`
-- `supabase` client init — or moves to `js/supabase.js`
+- `supabase` client init — or moves to `js/supabase.js` (already exists,
+  consolidate)
 - `currentUser` global + auth helpers — or moves to `js/auth.js`
+- Lightbox + modal helpers (~22 fns) — likely all belong in `js/utils.js`
 
 Target: `app.js` ≤ 1,500 lines, every feature in its own file.
 
@@ -267,7 +436,7 @@ Target: `app.js` ≤ 1,500 lines, every feature in its own file.
 
 ---
 
-## Stage 11 — Observability (~2 hours)
+## Stage 16 — Observability (~2 hours)
 
 The senior didn't mention this explicitly but it's the #1 thing missing.
 
@@ -283,7 +452,7 @@ The senior didn't mention this explicitly but it's the #1 thing missing.
 
 ---
 
-## Stage 12 — Decision point: TypeScript? React?
+## Stage 17 — Decision point: TypeScript? React?
 
 After all features are modularized, you have two big optional moves:
 
@@ -294,7 +463,7 @@ After all features are modularized, you have two big optional moves:
 - Payoff: half the regressions we've hit (column-name mismatches, undefined
   function calls, wrong arg counts) become compile errors instead of runtime
   black-screens.
-- Recommendation: **yes, after Stage 10.**
+- Recommendation: **yes, after Stage 15.**
 
 ### Option B — React/Vue migration
 - Cost: 2–3 months running both stacks side-by-side.
@@ -306,7 +475,7 @@ After all features are modularized, you have two big optional moves:
 
 ---
 
-## Stage 13 — Steady state
+## Stage 18 — Steady state
 
 Every new feature lives in its own file. Every push runs the pre-deploy
 script. Every `develop → main` merge requires the smoke test. Sentry tells
@@ -321,19 +490,25 @@ notifications stays in notifications.
 
 | Stage | Status | Date | Notes |
 |-------|--------|------|-------|
-| 0     | 🟢 Complete | 2026-05-15 | Pre-deploy script, BRANCHING.md, SMOKE_TEST.md, CORE_PROTECTED.md all shipped. Charles to run the one-time `git checkout -b develop` command. |
-| 1     | ⚪ Not started | — | Notifications extraction |
-| 2     | ⚪ Not started | — | Scheduled posts modal |
-| 3     | ⚪ Not started | — | Composer |
-| 4     | ⚪ Not started | — | Studio |
-| 5     | ⚪ Not started | — | Feed |
-| 6     | ⚪ Not started | — | Profile |
-| 7     | ⚪ Not started | — | Videos page |
-| 8     | ⚪ Not started | — | Books page |
-| 9     | ⚪ Not started | — | Messages |
-| 10    | ⚪ Not started | — | app.js audit |
-| 11    | ⚪ Not started | — | Sentry per-feature tagging |
-| 12    | ⚪ Not started | — | TypeScript migration |
+| 0     | 🟢 Complete | 2026-05-15 | Pre-deploy script, BRANCHING.md, SMOKE_TEST.md, CORE_PROTECTED.md all shipped. |
+| 1     | 🟢 Complete | 2026-05-15 | Notifications → `js/notifications.js` |
+| 2     | 🟢 Complete | 2026-05-15 | Scheduled posts modal → `js/scheduled-posts.js` |
+| 3     | 🟢 Complete | 2026-05-15 | Composer → `js/composer.js` |
+| 4     | 🟢 Complete | 2026-05-15 | Studio → `js/studio.js` |
+| 5     | 🟢 Complete | 2026-05-15 | Feed → `js/feed.js` |
+| 6     | 🟢 Complete | 2026-05-15 | Profile → `js/profile.js` |
+| 7     | 🟢 Complete | 2026-05-15 | Videos page → `js/videos.js` (7A + 7B player) |
+| 8     | 🟢 Complete | 2026-05-15 | Books → `js/books.js` (8A listing + 8B reader, Codex review applied) |
+| 9     | 🟢 Complete | 2026-05-16 | Messages → `js/messages.js` (9A core + 9B extras, two Codex review rounds applied) |
+| 10    | ⚪ Not started | — | **NEW** — Search extraction |
+| 11    | ⚪ Not started | — | **NEW** — Earnings + Withdrawals extraction |
+| 12    | ⚪ Not started | — | **NEW** — Engagement (comments + reactions) extraction |
+| 13    | ⚪ Not started | — | **NEW** — Coin Shop / Wallet extraction |
+| 14    | ⚪ Not started | — | **NEW** — Goals extraction |
+| 15    | ⚪ Not started | — | app.js audit (was Stage 10) — target ≤1,500 lines |
+| 16    | ⚪ Not started | — | Sentry per-feature tagging (was Stage 11) |
+| 17    | ⚪ Not started | — | TypeScript migration decision (was Stage 12) |
+| 18    | ⚪ Not started | — | Steady state (was Stage 13) |
 
 ---
 

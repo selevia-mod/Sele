@@ -1,12 +1,175 @@
-import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction } from './supabase.js';
+import { supabase, REACTIONS, timeAgo, initials, callEdgeFunction, escHTML, toast } from './supabase.js';
+import { initNotifications, teardownNotifications } from './notifications.js';
+import { initScheduledPosts, refreshScheduledPostsBadge } from './scheduled-posts.js';
+import { initComposer } from './composer.js';
+import { initStudio, loadStudio } from './studio.js';
+import { initProfile, openProfile, setViewingProfileId, refreshProfilePostsIfViewing } from './profile.js';
+// Stage 10 — Search module. Owns the topbar search input (recent-searches
+// dropdown, context-aware placeholder, debounced fan-out to feed/videos/
+// books runners) + the People/Videos/Books/Posts dropdown for feed-context
+// searches. Re-exports the 3 pure helpers (sanitize / escape / normalize)
+// so videos.js + books.js + composer.js can keep passing them through
+// their existing _cfg blocks without churn.
+import {
+  initSearch,
+  sanitizeSearchQuery, escapeIlike, normalizeForSearch,
+} from './search.js';
+// Stage 12 — Engagement module. Owns the polymorphic reactions +
+// comments layer shared by posts + videos (+ comments-on-the-above).
+// Books have their own engagement in books.js because they use
+// different tables (chapter_likes, book_comments).
+import {
+  initEngagement,
+  bulkLoadReactions, bulkLoadCommentCounts,
+  loadComments, loadCommentCount, loadReactions,
+  handleReaction, submitComment, openReactorListModal,
+} from './engagement.js';
+// Stage 11A — Earnings read/render. Module owns showEarnings +
+// loadAuthorEarnings + breakdown drill-down + all balance/totals/list
+// rendering. KYC subsystem (Stage 11B) and withdrawal request flow
+// (Stage 11C) still live in app.js — bridged into earnings via _cfg.
+import {
+  initEarnings, showEarnings, loadAuthorEarnings,
+  openEarningsBreakdown, closeEarningsBreakdown, _loadMoreEarningsBreakdown,
+  formatPhpFromMinor,
+  // resolveEarningsTitles borrowed by the wallet-history block until
+  // Stage 13 extracts wallet. getAuthorBalance/getAuthorKyc were used by
+  // the KYC + withdrawal handlers before 11B/11C extracted them — those
+  // sites are all gone now, so dropping the getters from this import.
+  resolveEarningsTitles,
+} from './earnings.js';
+import {
+  initVideos, showVideos, loadVideos, fetchSupabaseVideos,
+  renderVideoCard, renderVideoResults, renderTagPills, runSearch,
+  getWatchHistory, addToWatchHistory, getInterestProfile,
+  getAllVideos, setAllVideos, findVideoInCache, addToVideosCache,
+  getUploader, getUploaderCache, setUploader, invalidateAllVideosCache,
+  getActiveSearchQuery, setActiveSearchQuery,
+  getActiveTagFilter, setActiveTagFilter,
+} from './videos.js';
+// Stage 5 — Feed module. Owns the For You / Following feed (loadFeed +
+// hybrid RPC + new-posts pill + post renderer + post action menu + share
+// menu + repost + pin/hide). Six functions are re-attached to `window`
+// below for inline onclick handlers in the rendered post HTML.
+import {
+  initFeed,
+  loadFeed, loadStories, loadMoreFeed,
+  renderPost, _renderHybridBookCarousel, _renderHybridVideoCard,
+  _wireUpNewPosts, setupCollapsibleBodies,
+  triggerPostLazyLoad, flushPostLazyLoad, attachHlsToPostVideo,
+  closePostActionMenu, togglePinPost, shouldHidePost, hidePostFromFeed,
+  _closePostDetailModal,
+  _fetchHybridFeedPage, _buildAndExecFeedQuery,
+  _prependFreshPosts, _applyNewPostsBuffer, _renderNewPostsPill, _pollForNewPosts,
+  deletePost, openPostActionMenu, repostPost, toggleShareMenu, shareTo,
+  FEED_SELECT,
+  getFeedMode, setFeedMode,
+  getFeedPostObserver, setFeedPostObserver,
+  getFeedVideoObserver, setFeedVideoObserver,
+  getNewPostsBuffer,
+  getRealtimeRefreshTimer, setRealtimeRefreshTimer,
+  getHasMoreFeedPosts,
+  getCachedFollowIds,
+  getFeedScrollObserver, setFeedScrollObserver,
+} from './feed.js';
 // Anti-fraud telemetry — fire-and-forget event logging used by the
 // Phase 4 detection job. All four helpers are safe to call any time;
 // signed-out callers short-circuit, network errors get swallowed.
 import { registerSessionDevice, logRead, logView, getDeviceId } from './event-log.js';
+// Floating Messages dock — Commit 1 of 2 (foundation). The dock UI itself
+// renders nothing yet; only the shared data helpers + scoped state are
+// live. Commit 2 will mount the launcher + inbox + mini-chat windows.
+// Existing full-page Messages flow is intentionally untouched.
+import {
+  initMessagesDock, teardownMessagesDock,
+  openMessagesDock, openMessagesDockToConv,
+} from './messages-dock.js';
+// Stage 8A — Books listing / discovery. Owns showBook + the four tabs
+// (For You / Discover / Ranking / Reading List), the See-All sub-view,
+// book search + writer-channel cards, normalization, and the
+// recommendation rail. Stage 8B added: book detail page +
+// chapter reader + reader watermark / anti-copy / nav-button wiring
+// (under wireBookReader). Bookmarks dispatcher stays in app.js — it
+// straddles videos + books and gets its own future module.
+import {
+  initBooks, wireBooksPage, wireBookReader,
+  showBook, loadBooksTab, _openBookSeeAll,
+  runBookSearch, prettyGenre, renderBookChips, loadBookRecommendations,
+  fetchSupabaseBooks, fetchBooksServerSearch,
+  renderBookCard, _renderBookCardV2, renderWriterChannelCard,
+  _normalizeBookRow, _normalizeBookRows,
+  openBookDetail, openChapterReader,
+  toggleBookLike, toggleBookBookmark, loadBookActionState,
+  applyReaderWatermark, flushReadClose,
+  getActiveBookTab, setActiveBookTab,
+  getActiveBookSearchQuery, setActiveBookSearchQuery,
+  resetBooksSessionState,
+} from './books.js';
+// Stage 9A — Direct Messages core. Owns the full-page Messenger flow:
+// conversation list, thread render, message send/edit/delete/react,
+// realtime + presence + typing channels, inbox unread badge. The
+// floating dock (messages-dock.js) factored out the shared data layer
+// earlier; this is the full-page UI on top. Stage 9B (queued) moves the
+// remaining extras — emoji picker, attach menu, GIF picker, secret
+// lock IIFE, reply state, conv menu, group admin, search, mention
+// dropdown. Until 9B, those still-in-app.js helpers read/write
+// dmState + _renderedMessageIds via the live-binding exports.
+import {
+  initMessages,
+  showMessages, openConversation, openConversationWithUser,
+  loadConversationList, renderConversationList,
+  loadMessages, renderMessages,
+  sendDmMessage, sendDmThumbsUp,
+  updateSendButton, resizeDmInput,
+  scrollMessagesToBottom, isDmAtBottom,
+  fetchReactionsForConversation,
+  toggleReaction, deleteMessage,
+  startEditMessage, saveEditMessage,
+  openHoverMenu, closeHoverMenu,
+  openReactionPicker, closeReactionPicker,
+  copyMessageText,
+  subscribeToThread, subscribeToPresenceAndTyping,
+  updateThreadPresenceUI, broadcastTyping,
+  subscribeToInbox,
+  computeDmUnreadTotal, updateUnreadBadge, bootstrapDmBadge,
+  dmState, _renderedMessageIds,
+  // ─── Stage 9B exports ─────────────────────────────────────────
+  // Functions used by app.js's DM page event-listener block (lines
+  // ~13270+) and notification routing.
+  openScopedEmojiPicker, insertEmojiIntoComposer, closeDmEmojiPicker,
+  openNewConvModal, openSecretChatPicker, openAddMembersModal,
+  closeConvMenu, openConvActionsMenu,
+  archiveConversation, confirmDeleteConversation, confirmLeaveGroup,
+  toggleConvMute, showGroupMembersDialog,
+  startReplyToMessage, showReplyPreview, hideReplyPreview,
+  closeMentionDropdown, maybeShowMentionDropdown, renderMentionDropdown, selectMention,
+  handleMentionKeydown,
+  closeDmAttachMenu, showDmAttachPreview, hideDmAttachPreview, sendDmAttachment,
+  fileToDataUrl, compressImageToJpeg, formatBytes,
+  closeDmGifPicker, openDmGifPicker, sendDmGif,
+  renderDmLinkPreview, hydrateDmInternalPreviews,
+  renderGlobalSearchResults, highlightSearchMatch,
+  dmIsMutualFollow, dmGetOrCreateSecretConv,
+  // Read-only IIFE export — SECRET_LOCK.isUnlocked() + .onVisibilityChange()
+  // are called from app.js's secret-tab boot wiring at line ~13127.
+  SECRET_LOCK,
+  // Accessor pairs for 9B mutable state — app.js's DM page wiring
+  // block reassigns these and ES module `let` exports are read-only on
+  // the import side. Wrap reads/writes in get/set calls.
+  // Follow-up: move the wiring block itself into a wireMessagesPage()
+  // inside messages.js, the way Stage 8 did with wireBooksPage().
+  getDmAttachMenuEl, setDmAttachMenuEl,
+  getDmPendingAttachment, setDmPendingAttachment,
+  getDmSearchTimer, setDmSearchTimer,
+  // Codex P2/#213 — page-leave cleanup. Calls supabase.removeChannel on
+  // realtime + presence subscriptions so they don't keep the connection
+  // open in the background when the user navigates away from Messages.
+  teardownActiveConversation,
+} from './messages.js';
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
-const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, pioneer_at, created_at';
+const PROFILE_DISPLAY_COLS = 'id, username, display_name, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, pioneer_at, created_at';
 
 // ─── Role-verified seal badge (Facebook-style) ──────────────────────────────────
 // Renders a 12-bump scalloped seal SVG with per-role colors (outer circle, inner
@@ -122,34 +285,16 @@ function closeAllModals(selector = '.modal-backdrop') {
   document.querySelectorAll(selector).forEach(m => m.remove());
 }
 
-let currentUser = null;
+// Exported as a live `let` binding (Stage 1, 2026-05-15). When this
+// module reassigns currentUser (sign-in/sign-out), every other module
+// that imported it sees the new value automatically. DON'T change to
+// const or to a getter — both break the live binding.
+export let currentUser = null;
 
-// ── Anti-fraud telemetry state for the book reader ───────────────────────
-// Tracks the currently-open chapter so the close event can include
-// real dwell_ms + max scroll_pct. _readChapterOpenTs is 0 when no
-// chapter is open. flushReadClose() drains + resets the state and
-// emits the matching close record_read_event. Called from anywhere
-// that exits a chapter (next/prev nav, back button, route change).
-let _readChapterOpenTs = 0;
-let _readChapterOpenId = null;
-let _readChapterOpenBookId = null;
-let _readMaxScrollPct = 0;
-
-function flushReadClose(completed = null) {
-  if (!_readChapterOpenTs || !_readChapterOpenId) return;
-  const dwellMs = Date.now() - _readChapterOpenTs;
-  logRead({
-    chapterId: _readChapterOpenId,
-    bookId:    _readChapterOpenBookId,
-    dwellMs,
-    scrollPct: _readMaxScrollPct,
-    completed,
-  });
-  _readChapterOpenTs = 0;
-  _readChapterOpenId = null;
-  _readChapterOpenBookId = null;
-  _readMaxScrollPct = 0;
-}
+// (flushReadClose moved into js/books.js as part of Stage 8B — it pairs
+// with _readChapterOpenTs / _readChapterOpenId / _readChapterOpenBookId /
+// _readMaxScrollPct, which all live in books.js now. The import at the
+// top of this file makes it available to hideAllMainPages.)
 
 // ── Anti-fraud telemetry state for the video player ───────────────────────
 // Tracks the currently-playing video so we can emit play / pause / end
@@ -264,13 +409,8 @@ let _walletConfigDefaults = {     // mirrors app_config; loaded once on signin
 };
 let _walletChannel = null;
 
-function toast(msg, type = '') {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'toast' + (type ? ' ' + type : '');
-  el.style.display = 'block';
-  setTimeout(() => el.style.display = 'none', 3000);
-}
+// toast() moved to js/supabase.js (Stage 1 prep, 2026-05-15).
+// Imported at the top of this file alongside supabase + timeAgo + initials.
 
 async function uploadImage(file) {
   if (!file) return null;
@@ -287,9 +427,76 @@ async function uploadImage(file) {
 window.openLightbox = (url) => {
   document.getElementById('lightboxImg').src = url;
   document.getElementById('lightbox').classList.add('open');
+  // Reset gallery state when opening single-image so prev/next from a
+  // prior gallery don't bleed through.
+  _lightboxGallery = null;
+  _lightboxIndex = 0;
+  _renderLightboxNav();
 };
+
+// Gallery mode — open a list of urls starting at startIndex. Each open
+// renders the current url + prev/next arrows that cycle through the
+// list. Used by message image groups (2-up, 3-up, 4-up grids) so users
+// can swipe through the whole group instead of getting stuck on the
+// one they clicked. Codex review 2026-05-16 (#284).
+let _lightboxGallery = null;
+let _lightboxIndex   = 0;
+window.openLightboxGallery = (urls, startIndex = 0) => {
+  const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
+  if (!list.length) return;
+  _lightboxGallery = list;
+  _lightboxIndex   = Math.max(0, Math.min(startIndex, list.length - 1));
+  document.getElementById('lightboxImg').src = list[_lightboxIndex];
+  document.getElementById('lightbox').classList.add('open');
+  _renderLightboxNav();
+};
+
+function _renderLightboxNav() {
+  const lb = document.getElementById('lightbox');
+  if (!lb) return;
+  let nav = lb.querySelector('.lightbox-nav');
+  // Single image → hide nav entirely.
+  if (!_lightboxGallery || _lightboxGallery.length <= 1) {
+    nav?.remove();
+    return;
+  }
+  if (!nav) {
+    nav = document.createElement('div');
+    nav.className = 'lightbox-nav';
+    nav.innerHTML = `
+      <button type="button" class="lightbox-prev" aria-label="Previous image">‹</button>
+      <span class="lightbox-counter"></span>
+      <button type="button" class="lightbox-next" aria-label="Next image">›</button>
+    `;
+    nav.addEventListener('click', (ev) => ev.stopPropagation());
+    nav.querySelector('.lightbox-prev').addEventListener('click', () => _stepLightbox(-1));
+    nav.querySelector('.lightbox-next').addEventListener('click', () => _stepLightbox(+1));
+    lb.appendChild(nav);
+  }
+  nav.querySelector('.lightbox-counter').textContent = `${_lightboxIndex + 1} / ${_lightboxGallery.length}`;
+}
+
+function _stepLightbox(delta) {
+  if (!_lightboxGallery?.length) return;
+  const n = _lightboxGallery.length;
+  _lightboxIndex = (_lightboxIndex + delta + n) % n;
+  document.getElementById('lightboxImg').src = _lightboxGallery[_lightboxIndex];
+  _renderLightboxNav();
+}
+
+// Keyboard nav (arrows) — only active while the lightbox is open.
+document.addEventListener('keydown', (e) => {
+  if (!document.getElementById('lightbox')?.classList.contains('open')) return;
+  if (e.key === 'ArrowLeft')  _stepLightbox(-1);
+  else if (e.key === 'ArrowRight') _stepLightbox(+1);
+  else if (e.key === 'Escape')     document.getElementById('lightbox').classList.remove('open');
+});
+
 document.getElementById('lightbox').addEventListener('click', (e) => {
-  if (e.target.id === 'lightbox' || e.target.id === 'lightboxClose') document.getElementById('lightbox').classList.remove('open');
+  if (e.target.id === 'lightbox' || e.target.id === 'lightboxClose') {
+    document.getElementById('lightbox').classList.remove('open');
+    _lightboxGallery = null;
+  }
 });
 
 // ── Auth ──
@@ -326,6 +533,10 @@ async function initAuth() {
     } else if (event === 'SIGNED_OUT') {
       // showAuth() touches DOM only — safe to call directly.
       showAuth();
+      // Nuke any orphan "new posts" pill so it doesn't outlive the
+      // session (Charles 2026-05-16 — feature retired; this is belt
+      // + suspenders on top of the no-op renderer in feed.js).
+      document.getElementById('feedNewPill')?.remove();
     }
     // TOKEN_REFRESHED / USER_UPDATED / PASSWORD_RECOVERY: intentional no-op.
   });
@@ -339,12 +550,16 @@ async function onSignedIn(user) {
   // last_seen; cost is one RPC ~100ms, doesn't block anything below.
   // See js/event-log.js for the full registerSessionDevice contract.
   registerSessionDevice();
-  // Books page: invalidate the user-scoped tab cache (Reading List) so a
-  // fresh sign-in re-fetches it instead of reusing the previous user's
-  // (or the signed-out) state.
-  if (typeof _bookTabLoaded !== 'undefined') {
-    _bookTabLoaded.readinglist = false;
-  }
+  // Books page: invalidate user-scoped state (Reading List gate +
+  // user-taste cache + recs cache) so a fresh sign-in re-fetches
+  // instead of reusing the previous user's (or the signed-out) state.
+  // The public listing pool stays — it's not user-scoped, no reason to
+  // make the new user wait through another trending fetch.
+  resetBooksSessionState();
+  // Home: clear cache + restore skeletons so admin-only UI (the inline
+  // "replace cover" pencil on home book cards) from the prior session
+  // doesn't linger into a regular user's view.
+  resetHomeSessionState();
   // Defensive: if the profile row doesn't exist yet (rare race on first sign-in),
   // keep currentProfile null so downstream code can short-circuit cleanly.
   const { data: profile, error: profileErr } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', user.id).single();
@@ -361,12 +576,458 @@ async function onSignedIn(user) {
   // when ready.
   loadWalletState();
 
-  // Notifications — fetch initial batch + start realtime subscription
-  initNotifications();
+  // Notifications — fetch initial batch + start realtime subscription.
+  // Config-inject the current user getter + navigation functions so
+  // notifications.js stays decoupled from app.js (no circular import).
+  initNotifications({
+    getCurrentUser: () => currentUser,
+    nav: {
+      profile:        openProfile,
+      post:           openPostFromSearch,
+      video:          playVideo,
+      book:           openBookDetail,
+      conversation:   openConversation,
+      messages:       showMessages,
+      feed:           showFeed,
+      home:           showHomeLanding,
+      earnings:       showEarnings,
+      sidebarActive:  setSidebarActive,
+    },
+  });
 
-  // Refresh the "X scheduled" pill near the composer's Post button so
-  // returning users see their queued posts on load. Fire-and-forget.
-  refreshScheduledPostsBadge();
+  // Scheduled posts module — wires the "X scheduled" pill, modal, and
+  // row-action handlers. Config-injected getCurrentUser so the module
+  // reads live state without importing from app.js (Stage 2 pattern).
+  // Fire-and-forget; the initial badge refresh happens inside init.
+  initScheduledPosts({
+    getCurrentUser: () => currentUser,
+  });
+
+  // Studio module — wires the creator-studio grid + edit/share modals +
+  // monetize/delete/thumbnail flows. Config-injects what app.js owns:
+  // currentUser getter, wallet config, thumbnail uploader, format
+  // helpers, confirmDialog, the earnings nav, the allVideosCache reset,
+  // and a refresh-feed-if-visible helper. loadStudio is exported so
+  // showStudio (sidebar nav entry, still in app.js) can call it.
+  initStudio({
+    getCurrentUser:            () => currentUser,
+    getWalletConfig:           () => _walletConfigDefaults,
+    uploadThumbnail:           _vuUploadThumbnailFile,
+    uploadImage,                                      // for share-modal photo attach (2026-05-15)
+    formatPhpFromMinor,
+    formatDuration,
+    confirmDialog,
+    showEarnings,
+    invalidateAllVideosCache:  () => { invalidateAllVideosCache(); },
+    refreshFeedIfVisible:      () => {
+      if (feedEl && feedEl.style.display !== 'none') loadFeed();
+    },
+  });
+
+  // Profile module — wires the profile page + edit modal + sub-tabs.
+  // Stage 6 (2026-05-15) — widest injection surface yet (~24 callbacks).
+  // openProfile is exported from profile.js + imported at top so existing
+  // callers throughout app.js keep working.
+  initProfile({
+    getCurrentUser:           () => currentUser,
+    getCurrentProfile:        () => currentProfile,
+    setCurrentProfile:        (p) => { currentProfile = p; },
+    getPosts:                 () => posts,
+    setPosts:                 (arr) => { posts = arr; },
+    PROFILE_DISPLAY_COLS,
+    hideAllMainPages,
+    stopVideoPlayer,
+    scrollToTop,
+    closeAllModals,
+    closePostActionMenu,
+    updateTopbarUser,
+    setSidebarActive,
+    // Codex audit 2026-05-16 — Stage 6 was calling these bare; profile.js
+    // now reaches them through _cfg.
+    openProfileActionMenu,
+    closeProfileActionMenu,
+    shouldHidePost,
+    renderRoleSeal,
+    renderPost,
+    _wireUpNewPosts,
+    setupCollapsibleBodies,
+    renderVideoCard,
+    renderBookCard,
+    triggerPostLazyLoad,
+    attachHlsToPostVideo,
+    uploadImage,
+    openCropModal,
+    showMessages,
+    tickGoalUnique,
+    // Feed observers live in js/feed.js now (Stage 5); profile.js still
+    // reads them when hydrating posts, so we pass the shared accessors
+    // straight through (shorthand — imported names match the keys).
+    getFeedPostObserver,
+    getFeedVideoObserver,
+    feedEl,
+    storiesEl,
+    composeEl,
+  });
+
+// ─── engagement.js (Stage 12) ──────────────────────────────────
+// Wires the polymorphic reactions + comments layer. Bridges 11 cross-
+// feature handles — most live in app.js (linkify, renderLinkPreview,
+// confirmDialog, etc.). tickGoalUnique will become a direct import
+// once Stage 14 extracts goals.
+initEngagement({
+  getCurrentUser:           () => currentUser,
+  getCurrentProfile:        () => currentProfile,
+  tickGoalUnique,
+  openProfile,
+  closeAllModals,
+  renderRoleSeal,
+  uploadImage,
+  confirmDialog,
+  linkify,
+  renderLinkPreview,
+  firstUrlInText,
+});
+
+// ─── earnings.js (Stage 11A) ───────────────────────────────────
+// Wires the Earnings page read/render layer. Bridges still here for
+// the KYC subsystem (Stage 11B #250) and the withdrawal request flow
+// (Stage 11C #251); both will become intra-module calls once those
+// stages land in earnings.js.
+initEarnings({
+  getCurrentUser:           () => currentUser,
+  getCurrentProfile:        () => currentProfile,
+  getWalletConfig:          () => _walletConfigDefaults,
+  setSidebarActive,
+  hideAllMainPages,
+});
+
+// ─── search.js (Stage 10) ─────────────────────────────────────
+// Wires the topbar input + recent-searches dropdown. Module-load-time
+// listeners attach when search.js imports above; initSearch only injects
+// cross-feature handles (currentUser getter, profile/post openers,
+// videos/books runners + active-query setters).
+initSearch({
+  getCurrentUser:           () => currentUser,
+  renderRoleSeal,
+  openProfile,
+  openPostFromSearch,
+  // Result-click openers (Stage 10 smoke test fix #247)
+  playVideo,
+  openBookDetail,
+  // Videos page search
+  setActiveSearchQuery,
+  runSearch,
+  // Books page search
+  setActiveBookSearchQuery,
+  runBookSearch,
+  getActiveBookTab,
+});
+
+// ─── videos.js (Stage 7A) ──────────────────────────────
+initVideos({
+  getCurrentUser:      () => currentUser,
+  hideAllMainPages,
+  stopVideoPlayer,
+  playVideo,
+  openProfile,
+  getResumeTime,
+  formatDuration,
+  formatCompact,
+  normalizeForSearch,
+  sanitizeSearchQuery,
+  escapeIlike,
+});
+
+// ─── books.js (Stage 8A — listing/discovery + Stage 8B — detail/reader) ─
+// Both halves of the books surface now live in books.js. Detail page +
+// chapter reader (8B) added: currentProfile getter (Editor's-Pick admin
+// gate), wallet config getter (book_bulk_unlock_discount_pct read),
+// unlock/paywall bridges (openUnlockDialog, openBulkBookUnlockDialog,
+// isUnlocked, resolveUnlockCost — all shared with feed/videos), and
+// engagement counters (tickGoalUnique, flushReadClose, logRead).
+//
+// `openBookDetail` is intentionally NOT in this object — it now lives
+// in books.js (the import at the top of the file gives us access). The
+// Stage 8A bridge that routed book cards through `_cfg.openBookDetail`
+// becomes a direct intra-module call once books.js owns the function.
+initBooks({
+  // Identity
+  getCurrentUser:           () => currentUser,
+  getCurrentProfile:        () => currentProfile,
+
+  // Navigation
+  hideAllMainPages,
+  stopVideoPlayer,
+  openProfile,
+  // (openBookDetail dropped from the bridge in Stage 8B Codex review —
+  // it lives in books.js now, intra-module call, no bridge needed.)
+
+  // Formatters + search-input sanitisers
+  formatCompact,
+  sanitizeSearchQuery,
+  escapeIlike,
+  normalizeForSearch,
+
+  // CDN URL helpers (8A — used by _renderBookCardV2)
+  _cleanCdnUrl,
+  _supabaseRatioCrop,
+
+  // ─ 8B bridges ─────────────────────────────────────────────────
+  // Wallet config — books.js reads `_cfg.getWalletConfig().X` for the
+  // bulk-unlock discount percentage. App.js owns the live object so
+  // the realtime app_config subscription keeps everyone in sync.
+  getWalletConfig:          () => _walletConfigDefaults,
+
+  // Unlock / paywall — same surface as feed.js + videos.js.
+  openUnlockDialog,
+  openBulkBookUnlockDialog,
+  isUnlocked,
+  resolveUnlockCost,
+
+  // Engagement counters + anti-fraud telemetry — chapter open ticks
+  // the "Read N chapters" goal and emits a logRead open event.
+  // flushReadClose lives inside books.js now (Stage 8B) — it owns the
+  // open-state vars so there's no bridge needed for the close emit.
+  tickGoalUnique,
+  logRead,
+});
+// Page-level DOM wiring — split into two functions:
+//   • wireBooksPage()  — listing tab clicks, See-All delegation, See-All back
+//   • wireBookReader() — back-to-books, reader anti-copy IIFE, theme-toggle
+//                        watermark sync, reader prev/next/font/back nav
+// Both stay in books.js but get called from here so app.js remains the
+// single place that decides "this runs at boot time".
+wireBooksPage();
+wireBookReader();
+
+// ─── messages.js (Stage 9A — DM core) ──────────────────────
+// Full-page Messenger UI on top of messages-dock.js's shared data layer.
+// 9A's bridge surface is narrower than feed/books because most DM logic
+// is self-contained (one canonical dmState object, internal helpers
+// call siblings directly). The bridges below cover (a) cross-feature
+// navigation (hideAllMainPages, openProfile, setSidebarActive,
+// stopVideoPlayer), (b) shared dialogs (confirmDialog, closeAllModals,
+// uploadImage), (c) shared formatters (formatCompact, linkify), and
+// (d) Stage 9B-territory helpers that still live in app.js — emoji
+// picker, attach menu, GIF picker, secret lock, reply state, conv
+// menu, group admin, search, mention dropdown. Each 9B target gets a
+// bridge entry so 9A code can call into it; when 9B lands the bridge
+// drops and the call becomes intra-module.
+initMessages({
+  // Identity
+  getCurrentUser:    () => currentUser,
+  getCurrentProfile: () => currentProfile,
+
+  // Navigation
+  hideAllMainPages,
+  openProfile,
+  setSidebarActive,
+  stopVideoPlayer,
+
+  // Shared dialogs
+  confirmDialog,
+  closeAllModals,
+  uploadImage,
+
+  // Formatters
+  formatCompact,
+  linkify,
+
+  // The ONLY 9B-era bridge that survived — firstUrlInText is shared
+  // with the general feed renderLinkPreview (which stays in app.js)
+  // so messages.js's renderDmLinkPreview can't import it without a
+  // cycle. Every other 9B bridge dropped because the function moved
+  // into messages.js alongside its callers (emoji picker, attach
+  // menu, GIF picker, secret lock IIFE, reply state, conv menu,
+  // group admin, mention dropdown, DM link preview).
+  firstUrlInText,
+  // Two more bridges caught in the Codex Stage 9 review pass:
+  //   • openReportUserModal — shared with post/video/profile reports
+  //   • renderLinkPreview   — the general feed link-preview renderer,
+  //     called by sendDmMessage's optimistic non-internal URL rendering
+  openReportUserModal,
+  renderLinkPreview,
+});
+
+// ─── feed.js (Stage 5) ──────────────────────────────────
+// Widest config surface yet (~25 callbacks) because feed touches
+// everything: navigation, unlocks, dialogs, formatters, the shared
+// posts[] array, the last-seen-at watermark, role seals, and the
+// profile-tab refresher. All injections are getter/setter pairs where
+// the value is mutable — that keeps app.js the single source of truth
+// for state that other modules (composer, profile) also mutate.
+initFeed({
+  // Identity / session
+  getCurrentUser:               () => currentUser,
+  getCurrentProfile:            () => currentProfile,
+
+  // Navigation / page switching
+  hideAllMainPages,
+  setSidebarActive,
+  openProfile,
+  openBookDetail,
+  openChapterReader,
+  playVideo,
+  // openPostDetail is in the _cfg default surface as a no-op — the
+  // modal opener doesn't actually exist as a top-level fn in app.js
+  // (the post-detail modal is handled elsewhere by event delegation).
+  closeAllModals,
+
+  // Dialogs / prompts
+  confirmDialog,
+  uploadImage,
+  openUnlockDialog,
+  showStore,
+
+  // Unlock / paywall
+  isUnlocked,
+  resolveUnlockCost,
+
+  // Engagement counters / goals
+  tickGoal,
+  tickGoalUnique,
+  loadReactions,
+  loadCommentCount,
+  loadComments,
+
+  // Search / read-close
+  flushReadClose,
+  getActiveSearchQuery,
+
+  // Formatters
+  formatCompact,
+  formatDuration,
+
+  // Shared posts[] — owned by app.js, also mutated by composer + profile.
+  getPosts:                     () => posts,
+  setPosts:                     (arr) => { posts = arr; },
+
+  // Last-seen-at watermark + bumper used by the new-posts pill.
+  getFeedLastSeenAt:            () => _feedLastSeenAt,
+  setFeedLastSeenAt:            (ts) => { _feedLastSeenAt = ts; },
+  _bumpFeedLastSeenAt,
+
+  // Role / verified seal renderer (top-level fn in app.js).
+  renderRoleSeal,
+
+  // Profile-tab refresher after pin/unpin.
+  refreshProfilePostsIfViewing,
+
+  // Pagination + filter-aware over-fetch + scroll observer setup. All
+  // three live in app.js because they're referenced by app.js code paths
+  // outside the feed (composer, realtime channel, scroll-restore).
+  FEED_PAGE_SIZE,
+  _feedFetchLimitWithFilters,
+  setupFeedInfiniteScroll,
+
+  // Lazy-load + view-tracking + row-processing helpers (app.js internals
+  // that touch wider state — videos cache, view observer, content filters).
+  setupFeedLazyLoaders,
+  _ensureViewObserver,
+  _processFeedRows,
+  _feedFriendlyError,
+  _formatDuration,
+  _getWebBookPool,
+
+  // Bulk loaders for reactions + comment counts (single roundtrip per page).
+  bulkLoadReactions,
+  bulkLoadCommentCounts,
+
+  // Body-text linkifier + link-preview renderer.
+  linkify,
+  renderLinkPreview,
+
+  // Background poller control (paired with visibilitychange listener).
+  _startFeedPolling,
+  _stopFeedPolling,
+
+  // Author safety actions + cross-page invalidation hooks.
+  openReportModal,
+  blockAuthor,
+  snoozeAuthor,
+  invalidateAllVideosCache,
+  loadVideos,
+
+  // User content filter sets (hidden/snoozed/blocked) — read by shouldHidePost.
+  getUserContentFilters: () => userContentFilters,
+  // Whether the videos page is currently the visible main pane (deletePost
+  // uses this to decide whether to refresh the videos grid post-deletion).
+  // videosPage is a top-level const document.getElementById('videosPage').
+  isVideosPageVisible: () => videosPage?.style.display === 'block',
+  // Repost target — app.js owns the modal submit handler that reads it.
+  setRepostTargetId: (id) => { repostTargetId = id; },
+});
+
+// Re-attach the six post-card handlers to window so inline onclick=""
+// attributes in renderPost / openPostActionMenu's rendered HTML resolve
+// at user-click time. ESM module scope isn't reachable from inline event
+// attributes; window is. (Same pattern as Stage 7B's playVideo, Stage 8's
+// openBookDetail, etc.)
+window.loadFeed = loadFeed;
+window.deletePost = deletePost;
+window.openPostActionMenu = openPostActionMenu;
+window.repostPost = repostPost;
+window.toggleShareMenu = toggleShareMenu;
+window.shareTo = shareTo;
+
+  // Composer module — wires the textbox / image preview / schedule
+  // popover / submit handler. Config-injects everything it needs from
+  // app.js: currentUser getter, image uploader, FEED_SELECT constant,
+  // and two callbacks for the "post created" hand-off (one for success,
+  // one for the rare RPC-succeeded-but-refetch-empty safety net).
+  // Stage 3 pattern: composer.js imports ONLY from supabase.js +
+  // scheduled-posts.js. The injected callbacks let it stay decoupled
+  // from app.js's internal posts[] array + render fns.
+  initComposer({
+    getCurrentUser: () => currentUser,
+    uploadImage,
+    feedSelect: FEED_SELECT,
+    onPostCreated: (post) => {
+      // Dedup: if the post somehow already lives in posts[] (rapid
+      // re-clicks past the composer's _submitting guard, or a realtime
+      // INSERT that beat the optimistic prepend), skip the prepend so
+      // we don't double-render the card.
+      if (post?.id && posts.some(p => p?.id === post.id)) return;
+      posts = [post, ...posts];
+      const feedEl = document.getElementById('feed');
+      if (feedEl) {
+        const el = renderPost(post);
+        el.style.animationDelay = '0s';
+        feedEl.insertBefore(el, feedEl.firstChild);
+        _wireUpNewPosts(feedEl);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+      _bumpFeedLastSeenAt([post]);
+    },
+    onPostCreateFallback: () => loadFeed(),
+  });
+
+  // ─── messages-dock.js (Commit 1 of 2) ──────────────────────────────
+  // Foundation only — shared data helpers + scoped state are live, no
+  // visible UI yet. Commit 2 will mount #dmFloatingRoot and render the
+  // launcher / inbox / mini chats. Wired now so the import isn't dead
+  // and so smoke testing surfaces any boot-order issues early.
+  initMessagesDock({
+    getCurrentUser:        () => currentUser,
+    getCurrentProfile:     () => currentProfile,  // for launcher avatar
+    openScopedEmojiPicker,      // shared picker — used by mini-chats
+    openProfile,
+    showMessages,               // hand-off to full-page Messages
+    closeAllModals,
+    uploadImage,                // for + button + drag-drop attach
+    openDmGifPicker,            // shared GIF picker — mini-chats pass an
+                                // { anchor, onPick } pair so the picker
+                                // anchors to the mini composer + sends
+                                // through the dock's send path (#257).
+    confirmDialog,              // shared confirm modal — used by dock
+                                // Delete action for parity with full
+                                // page (#268).
+    openConversation,           // dock expand → full-page navigation
+                                // targets a specific conv id (works for
+                                // groups too, where showMessages(userId)
+                                // alone can't resolve the thread). Codex
+                                // review 2026-05-16 (#279).
+  });
 
   // Daily-goal: tick "Log in today". Dedupe key is the date so
   // multiple signed-in sessions in one calendar day count ONCE.
@@ -395,15 +1056,21 @@ async function onSignedIn(user) {
     // to a hash form. This keeps the URL bar clean and shareable.
     setSidebarActive('btnBook');
     const bookId = (bookChapterPath || bookOnlyPath)[1];
-    // openBookDetail will canonicalize the URL via replaceState so it
-    // matches whatever path shape it loaded under.
-    openBookDetail(bookId);
+    // openBookDetail canonicalizes the URL via replaceState so it
+    // matches whatever path shape it loaded under. The optional
+    // { chapter } hint deep-link-opens the matching chapter once the
+    // chapters list resolves (Stage 8B Codex P1 — was set as
+    // _pendingChapterFromUrl but never read).
     if (bookChapterPath) {
-      // Chapter restoration is best-effort — _openChapterFromUrl reads
-      // the path again once the book's chapter list has loaded.
-      _pendingChapterFromUrl = bookChapterPath[2];
+      openBookDetail(bookId, { chapter: bookChapterPath[2] });
+    } else {
+      openBookDetail(bookId);
     }
-    // Fall through still loads the home shell (sidebar / header / etc.).
+    // RETURN here — without this we'd fall through to the no-hash
+    // default branch below and call showHomeLanding(), which hides
+    // the detail page we just opened. (Codex P1.) Path-based deep
+    // links own the route on their own.
+    return;
   }
 
   // Check URL hash for routing
@@ -529,14 +1196,19 @@ async function signOut() {
 
   // Wallet
   teardown(_walletChannel);              _walletChannel = null;
-  // Notifications
-  teardown(_notifChannel);               _notifChannel = null;
+  // Notifications — _notifChannel moved into js/notifications.js as part
+  // of Stage 1 (2026-05-15). We call the exported teardown so the same
+  // cleanup happens, without app.js reaching across modules for a private.
+  teardownNotifications();
   // DMs (inbox + per-thread + presence)
   if (typeof dmState !== 'undefined' && dmState) {
     teardown(dmState.inboxChannel);      dmState.inboxChannel = null;
     teardown(dmState.realtimeChannel);   dmState.realtimeChannel = null;
     teardown(dmState.presenceChannel);   dmState.presenceChannel = null;
   }
+  // Floating dock — tears down any open mini-chat subscriptions + clears
+  // the openThreads Map. No-op if Commit 2 hasn't rendered anything yet.
+  teardownMessagesDock();
 
   await supabase.auth.signOut();
 
@@ -547,31 +1219,17 @@ async function signOut() {
   posts = [];
   _wallet = { coin_balance: 0, star_balance: 0 };
   _userUnlocks.clear();
-  // Reset book caches so the next user doesn't see prior browsing state.
-  if (typeof allBooksCache !== 'undefined') allBooksCache = [];
-  if (typeof allBooksRaw   !== 'undefined') allBooksRaw   = [];
-  if (typeof _booksLoadedSort  !== 'undefined') _booksLoadedSort  = null;
-  if (typeof _booksLoadedGenre !== 'undefined') _booksLoadedGenre = null;
-  // Reset the v2 tabbed-books "first-visit" flags so the personal tab
-  // (Reading List) re-fetches when the user signs back in. Otherwise it'd
-  // stay stuck showing "Sign in to see your reading list" until a hard reload.
-  if (typeof _bookTabLoaded !== 'undefined') {
-    _bookTabLoaded.foryou      = false;
-    _bookTabLoaded.discover    = false;
-    _bookTabLoaded.ranking     = false;
-    _bookTabLoaded.readinglist = false;
-  }
-  // Reset user-taste cache (book reads + likes) — would otherwise show
-  // previous user's reading interests in the Discover ribbon.
-  if (typeof _userBookTasteCache !== 'undefined') {
-    _userBookTasteCache = null;
-    _userBookTasteAt = 0;
-  }
-  // Personalised book recs cache is also user-scoped
-  if (typeof _bookRecsCache !== 'undefined') {
-    _bookRecsCache = null;
-    _bookRecsTimestamp = 0;
-  }
+  // Reset books-module session state — public listing pool + per-tab gates
+  // + user-taste cache + recs cache. clearPublic:true so memory is fully
+  // released on sign-out. (Stage 8A pre-Codex used `typeof X !== 'undefined'`
+  // guards that silently returned undefined in an ES module — Codex P1
+  // catch. Moved into the books.js owner module so the next mover
+  // doesn't have to re-derive what's user-scoped.)
+  resetBooksSessionState({ clearPublic: true });
+  // Home: same reset on sign-out so cached data + DOM (including the
+  // admin pencil) is fully released. Next showHomeLanding() will trigger
+  // a fresh loadHomeVideos and the skeletons paint immediately.
+  resetHomeSessionState();
   // Earnings/withdrawal/bookmarks page-load timestamps so the next user
   // doesn't inherit "we already loaded this" stale gates.
   ['_earningsLoadedAt', '_authorLoadedAt', '_bookmarksLoadedAt', '_dmListLoadedAt'].forEach(k => {
@@ -599,7 +1257,7 @@ async function loadWalletState() {
 
   _userUnlocks.clear();
   for (const u of (unlocksRes.data || [])) {
-    _userUnlocks.add(`${u.target_type}:${u.target_id}`);
+    markUnlocked(u.target_type, u.target_id);
   }
 
   for (const c of (configRes.data || [])) {
@@ -634,9 +1292,31 @@ function formatBalance(n) {
   return n.toLocaleString();
 }
 
+// Normalize an unlock target id BEFORE storing or looking up in _userUnlocks.
+// Codex audit (2026-05-16, bug #192): videos can carry either a bare
+// Supabase UUID or an 'sb_<uuid>' prefixed id depending on which call path
+// produced them — playVideo() uses the prefixed form for the player but
+// strips it down to the bare uuid (`sbId`) before passing to isUnlocked /
+// unlock_content. If we store one shape and look up the other, isUnlocked
+// returns false after a successful unlock and the paywall re-shows.
+// Everything is normalized to the bare server id here.
+function normalizeUnlockTargetId(targetType, targetId) {
+  const id = String(targetId || '');
+  if (targetType === 'video' && id.startsWith('sb_')) return id.slice(3);
+  return id;
+}
+
+// Always add to _userUnlocks through this — keeps the key shape consistent
+// with what isUnlocked() will look up later.
+function markUnlocked(targetType, targetId) {
+  const normalized = normalizeUnlockTargetId(targetType, targetId);
+  _userUnlocks.add(`${targetType}:${normalized}`);
+}
+
 // Has the current user unlocked this content?
 function isUnlocked(targetType, targetId) {
-  return _userUnlocks.has(`${targetType}:${targetId}`);
+  const normalized = normalizeUnlockTargetId(targetType, targetId);
+  return _userUnlocks.has(`${targetType}:${normalized}`);
 }
 
 // Resolve cost: per-row override → app_config default
@@ -755,7 +1435,7 @@ function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
       // Local state update (Realtime will also push, but this avoids the flicker)
       if (currency === 'coin') _wallet.coin_balance = data.balance_after;
       else                     _wallet.star_balance = data.balance_after;
-      _userUnlocks.add(`${targetType}:${targetId}`);
+      markUnlocked(targetType, targetId);
       renderTopbarCoinPill();
       close();
       toast(data.already_unlocked ? 'Already unlocked' : `Unlocked! −${data.cost} ${currency}${data.cost === 1 ? '' : 's'}`, 'success');
@@ -830,7 +1510,7 @@ async function setupVideoMonetGate(player, sbId, video) {
         modalOpen = false;
         if (result.mode === 'permanent') {
           // Coin path — never prompt again for this video
-          _userUnlocks.add(`video:${sbId}`);
+          markUnlocked('video', sbId);
           nextThreshold = Infinity;
         } else if (result.mode === 'window') {
           // Star path — paid through end of this window; advance to next
@@ -841,10 +1521,25 @@ async function setupVideoMonetGate(player, sbId, video) {
         // No need to call play — we never paused
       },
       onCancel: () => {
-        // Modal closed without payment. Pause now so the user has to
-        // re-engage; on next play, listener re-fires and re-prompts.
-        modalOpen = false;
+        // Modal closed without payment. Pause so the user has to re-engage;
+        // on next play, listener re-fires and re-prompts.
+        //
+        // We do NOT reset modalOpen synchronously. player.pause() doesn't
+        // take effect immediately — the browser typically fires one or two
+        // more 'timeupdate' events before the pause settles. If modalOpen
+        // flipped to false now, those queued events would see the gate
+        // clear + currentTime still past the threshold (nextThreshold
+        // doesn't advance on cancel by design) and open a fresh modal
+        // immediately. Scrubbing past N thresholds amplifies this into
+        // needing N taps to dismiss — once per timeupdate that fires
+        // before pause settles. (Bug report 2026-05-16: tap forward 15
+        // min → 2 taps to close; 30 min → 3 taps.)
+        //
+        // Instead: keep modalOpen=true while paused (listener can't fire
+        // anyway, so the guard is harmless) and clear it on the next
+        // 'play' event — at which point we WANT the listener to re-prompt.
         try { player.pause(); } catch {}
+        player.addEventListener('play', () => { modalOpen = false; }, { once: true });
       },
     });
   };
@@ -905,7 +1600,16 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
         </div>`}
     </div>
   `;
-  document.body.appendChild(modal);
+  // Scope the monet paywall to the video player wrap, not the whole page.
+  // The upfront `#videoPaywall` got this treatment in fix #196, but the
+  // time-based gate (this dynamically-created modal) was still being
+  // appended to document.body, inheriting `position: fixed; inset: 0`
+  // from .unlock-modal-backdrop — so it covered the entire screen instead
+  // of just the player. Mount inside .video-player-wrap and override the
+  // positioning in CSS (.video-monet-backdrop block) to position absolute.
+  // Falls back to body if the wrap can't be found (defensive).
+  const monetParent = document.querySelector('#videoPlayerPage .video-player-wrap') || document.body;
+  monetParent.appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('open'));
 
   // ── 5-second auto-coin countdown ──────────────────────────────────
@@ -1339,7 +2043,7 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
       const { data: unlocks } = await supabase.from('unlocks')
         .select('target_type, target_id').eq('user_id', currentUser.id);
       _userUnlocks.clear();
-      for (const u of (unlocks || [])) _userUnlocks.add(`${u.target_type}:${u.target_id}`);
+      for (const u of (unlocks || [])) markUnlocked(u.target_type, u.target_id);
       renderTopbarCoinPill();
       close();
       const saved = data.cost_before_discount - data.cost;
@@ -1367,54 +2071,20 @@ function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, st
 document.getElementById('topbarCoinPill')?.addEventListener('click', () => showStore());
 
 // ── Earnings page (Phase 7 — own sidebar entry, tabs) ────────────────────
-function showEarnings(forceReload = false) {
-  hideAllMainPages();
-  if (!earningsPage) return;
-  earningsPage.style.display = 'block';
-  history.pushState(null, '', '#earnings');
-  setSidebarActive('btnEarnings');
-  // Default to the Earnings tab on every open
-  switchEarningsTab('earnings');
-  // Earnings reloads on every visit by default — withdrawal status changes
-  // matter and the user expects the most recent figures. But if it's a quick
-  // tab-flick (reload < 30 seconds ago), skip the network call.
-  const now = Date.now();
-  const stale = !window._earningsLoadedAt || (now - window._earningsLoadedAt) > 30_000;
-  if (forceReload || stale) {
-    loadAuthorEarnings();
-    window._earningsLoadedAt = now;
-  }
-}
-
-function switchEarningsTab(name) {
-  document.querySelectorAll('.earnings-tab').forEach(t => t.classList.toggle('active', t.dataset.etab === name));
-  document.querySelectorAll('.earnings-tab-content').forEach(s => {
-    s.style.display = s.dataset.etabContent === name ? 'block' : 'none';
-  });
-  // Pre-fill the Payments Info form when switched to (uses _authorKyc snapshot)
-  if (name === 'payments') fillPaymentsInfoForm();
-}
-
-document.querySelectorAll('.earnings-tab').forEach(t => {
-  t.addEventListener('click', () => switchEarningsTab(t.dataset.etab));
-});
-
-// Sidebar entry point
-document.getElementById('btnEarnings')?.addEventListener('click', () => showEarnings());
+// ── Earnings page (Phase 7 — own sidebar entry, tabs) ────────────────────
+// showEarnings + switchEarningsTab + boot listeners MOVED to js/earnings.js
+// (Stage 11A). The earnings module wires its own .earnings-tab + btnEarnings
+// listeners at module-load time. App.js still imports showEarnings for the
+// notification routing (nav.earnings) + Studio Share modal hand-off.
 
 // (Admin KYC tab moved to admin.html / js/admin.js — that's the
 // dedicated admin shell with Payouts → KYC review. This page is
 // creator-facing only.)
 
 
-// Month picker — wired once at page load. Changing the month re-renders
-// the "This Month" tile + breakdown row from the cached data; no
-// network round-trip needed. Both Total Earnings + Available/Under
-// review are NOT month-sensitive so they stay put.
-document.getElementById('earningsMonthPicker')?.addEventListener('change', (e) => {
-  _selectedMonthYear = e.target.value || _currentMonthYearKey();
-  _renderMonthScopedBreakdown();
-});
+// Month picker change listener MOVED to js/earnings.js (Stage 11A) —
+// it references _selectedMonthYear + _renderMonthScopedBreakdown, both
+// module-private to earnings now.
 
 // Breakdown drill-down — wire tile clicks (delegated to the page so
 // even if the tiles re-render the binding survives), the back
@@ -1559,7 +2229,7 @@ async function loadWalletHistory(currency) {
   console.log(`[wallet-history] ${table} fetched`, rows.length, 'rows');
 
   // Resolve titles for unlock debit rows (chapter / video / book).
-  // The existing _resolveEarningsTitles helper handles all three.
+  // The existing resolveEarningsTitles helper handles all three.
   // We map the ledger's reference_type → the resolver's source_type:
   //   chapter → chapter, video → video, book → book_bulk
   // (the resolver caches under "book_bulk:" for whole-book lookups).
@@ -1576,7 +2246,7 @@ async function loadWalletHistory(currency) {
     titleLookupInput.push({ source_type: refType, source_id: r.reference_id });
   }
   const titles = titleLookupInput.length
-    ? await _resolveEarningsTitles(titleLookupInput)
+    ? await resolveEarningsTitles(titleLookupInput)
     : new Map();
 
   // Map ledger rows → display events.
@@ -2242,396 +2912,6 @@ document.getElementById('signOutModal')?.addEventListener('click', (e) => {
   if (e.target.id === 'signOutModal') _closeSignOutModal();
 });
 
-// ── Compose ──
-const composeText = document.getElementById('composeText');
-const charCount = document.getElementById('charCount');
-const composeImageInput = document.getElementById('composeImageInput');
-const composeImagePreview = document.getElementById('composeImagePreview');
-let composeImageFile = null;
-// Compose scheduling state — set when user picks a future datetime via
-// the Schedule button. When non-null, the submit handler routes through
-// the submit_post RPC with is_hidden=true + scheduled_publish_at, so a
-// server cron job flips the post live at that moment. Mirrors mobile's
-// "Schedule for later" flow. See btnOpenSchedule wiring + the submit
-// handler below.
-let composeScheduledAt = null;   // Date | null
-
-// Wire the Schedule button → opens the hidden datetime-local picker.
-// On change, validate that the time is in the future, then store the
-// Date on composeScheduledAt and show the chip. Cleared via the × on
-// the chip or by submitting/posting.
-const _btnOpenSchedule = document.getElementById('btnOpenSchedule');
-const _composeScheduleAtInput = document.getElementById('composeScheduleAt');
-const _composeScheduleChip   = document.getElementById('composeScheduleChip');
-const _composeScheduleLabel  = document.getElementById('composeScheduleLabel');
-const _composeScheduleClear  = document.getElementById('composeScheduleClear');
-
-function _updateComposeScheduleUI() {
-  const btn = document.getElementById('btnPostSubmit');
-  if (composeScheduledAt) {
-    _composeScheduleChip.style.display = 'inline-flex';
-    _composeScheduleLabel.textContent = `Scheduled for ${composeScheduledAt.toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })}`;
-    if (btn) btn.textContent = 'Schedule';
-  } else {
-    _composeScheduleChip.style.display = 'none';
-    if (btn) btn.textContent = 'Post';
-  }
-}
-
-_btnOpenSchedule?.addEventListener('click', () => {
-  if (!_composeScheduleAtInput) return;
-  // Default the picker to 1 hour from now, rounded to the minute.
-  const oneHourLater = new Date(Date.now() + 60 * 60 * 1000);
-  oneHourLater.setSeconds(0, 0);
-  const tzOffMs = oneHourLater.getTimezoneOffset() * 60 * 1000;
-  _composeScheduleAtInput.value = new Date(oneHourLater.getTime() - tzOffMs).toISOString().slice(0, 16);
-  _composeScheduleAtInput.min = new Date(Date.now() - tzOffMs).toISOString().slice(0, 16);
-  // Native browser picker. Falls back to focus for older browsers
-  // that don't implement showPicker().
-  if (typeof _composeScheduleAtInput.showPicker === 'function') {
-    _composeScheduleAtInput.showPicker();
-  } else {
-    _composeScheduleAtInput.focus();
-    _composeScheduleAtInput.click();
-  }
-});
-
-_composeScheduleAtInput?.addEventListener('change', () => {
-  const v = _composeScheduleAtInput.value;
-  if (!v) { composeScheduledAt = null; _updateComposeScheduleUI(); return; }
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) { toast('Invalid date/time', 'error'); return; }
-  if (d.getTime() <= Date.now()) { toast('Schedule time must be in the future', 'error'); return; }
-  composeScheduledAt = d;
-  _updateComposeScheduleUI();
-});
-
-_composeScheduleClear?.addEventListener('click', () => {
-  composeScheduledAt = null;
-  if (_composeScheduleAtInput) _composeScheduleAtInput.value = '';
-  _updateComposeScheduleUI();
-});
-
-// ════════════════════════════════════════════════════════════════════════
-// Scheduled posts management — the "Scheduled" pill next to the
-// composer's Post button shows a count of the user's queued posts and
-// opens a modal where each row can be published-now or canceled. Lives
-// here next to the composer scheduling state so all post-scheduling
-// surfaces share one mental model.
-//
-// Pill is shown only when the count > 0 to avoid clutter for casual
-// users who never schedule. Count refreshes after every schedule (in
-// the submit handler) and after every action inside the modal.
-// ════════════════════════════════════════════════════════════════════════
-async function refreshScheduledPostsBadge() {
-  const btn = document.getElementById('btnScheduledPosts');
-  const label = document.getElementById('scheduledPostsBadgeLabel');
-  if (!btn || !currentUser?.id) return;
-  // Count of my future-scheduled, still-hidden posts.
-  const { count, error } = await supabase
-    .from('posts')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', currentUser.id)
-    .eq('is_hidden', true)
-    .gt('scheduled_publish_at', new Date().toISOString());
-  if (error) { console.warn('[scheduled-posts] badge count failed:', error.message); return; }
-  if ((count || 0) > 0) {
-    btn.style.display = 'inline-flex';
-    if (label) label.textContent = `${count} scheduled`;
-  } else {
-    btn.style.display = 'none';
-  }
-}
-
-async function openScheduledPostsModal() {
-  const backdrop = document.getElementById('scheduledPostsBackdrop');
-  const listEl   = document.getElementById('scheduledPostsList');
-  if (!backdrop || !listEl) return;
-  if (!currentUser?.id) { toast('Please sign in first', 'error'); return; }
-
-  listEl.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text2,#aaa)">Loading…</div>`;
-  backdrop.style.display = 'grid';
-
-  const { data, error } = await supabase
-    .from('posts')
-    .select('id, body, image_url, scheduled_publish_at, video_id, videos(id, title, thumbnail_url)')
-    .eq('user_id', currentUser.id)
-    .eq('is_hidden', true)
-    .gt('scheduled_publish_at', new Date().toISOString())
-    .order('scheduled_publish_at', { ascending: true })
-    .limit(100);
-
-  if (error) {
-    listEl.innerHTML = `<div style="text-align:center;padding:2rem;color:#e74c3c">${escHTML(error.message)}</div>`;
-    return;
-  }
-  if (!data?.length) {
-    listEl.innerHTML = `<div style="text-align:center;padding:2.5rem 1rem;color:var(--text2,#aaa);font-size:14px">No scheduled posts. Use the Schedule button on the composer to queue one.</div>`;
-    return;
-  }
-
-  // Per-row card. `data-post-id` carries the row id so the delegated
-  // click handler below knows which post to act on without rebinding
-  // per-row listeners.
-  listEl.innerHTML = data.map(p => {
-    const when = new Date(p.scheduled_publish_at);
-    const whenStr = when.toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' });
-    const bodySnip = p.body ? escHTML(p.body.length > 140 ? p.body.slice(0, 140) + '…' : p.body) : '<em style="color:var(--text2,#aaa)">(no caption)</em>';
-    // Media preview — image OR attached video thumbnail.
-    let media = '';
-    if (p.image_url) {
-      media = `<img src="${escHTML(p.image_url)}" alt="" style="width:64px;height:64px;border-radius:8px;object-fit:cover;flex-shrink:0"/>`;
-    } else if (p.videos?.thumbnail_url) {
-      media = `<div style="position:relative;flex-shrink:0">
-        <img src="${escHTML(p.videos.thumbnail_url)}" alt="" style="width:64px;height:64px;border-radius:8px;object-fit:cover"/>
-        <svg viewBox="0 0 24 24" width="20" height="20" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);fill:white;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5))"><polygon points="8 5 19 12 8 19 8 5"/></svg>
-      </div>`;
-    }
-    return `
-      <div style="display:flex;gap:0.85rem;padding:0.85rem;border:1px solid var(--admin-border,#2a2a3a);border-radius:10px;margin-bottom:0.6rem;align-items:flex-start">
-        ${media || ''}
-        <div style="flex:1;min-width:0">
-          <div style="font-size:12px;color:var(--accent,#7975D4);font-weight:600;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">${escHTML(whenStr)}</div>
-          <div style="font-size:14px;color:var(--text,#fff);line-height:1.4;margin-bottom:8px;overflow-wrap:break-word">${bodySnip}</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap">
-            <button type="button" data-sp-act="publish-now" data-post-id="${p.id}"
-                    style="background:var(--accent,#7975D4);color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600">Publish now</button>
-            <button type="button" data-sp-act="cancel" data-post-id="${p.id}"
-                    style="background:transparent;color:#e74c3c;border:1px solid rgba(231,76,60,0.4);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600">Cancel</button>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
-}
-
-function closeScheduledPostsModal() {
-  const bd = document.getElementById('scheduledPostsBackdrop');
-  if (bd) bd.style.display = 'none';
-}
-
-// Wire the pill + modal close button + backdrop click + Escape.
-document.getElementById('btnScheduledPosts')?.addEventListener('click', openScheduledPostsModal);
-document.getElementById('scheduledPostsClose')?.addEventListener('click', closeScheduledPostsModal);
-document.getElementById('scheduledPostsBackdrop')?.addEventListener('click', (e) => {
-  if (e.target.id === 'scheduledPostsBackdrop') closeScheduledPostsModal();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  const bd = document.getElementById('scheduledPostsBackdrop');
-  if (bd && bd.style.display !== 'none') closeScheduledPostsModal();
-});
-
-// Delegated row actions — Publish now + Cancel. Both update the row
-// server-side, then refresh the modal + the composer badge.
-document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('#scheduledPostsList button[data-sp-act]');
-  if (!btn) return;
-  const act = btn.dataset.spAct;
-  const id  = btn.dataset.postId;
-  if (!act || !id) return;
-
-  if (act === 'cancel' && !confirm('Cancel this scheduled post? It will be deleted permanently.')) return;
-
-  btn.disabled = true;
-  try {
-    if (act === 'publish-now') {
-      // Flip is_hidden=false + clear schedule. The AFTER UPDATE
-      // trigger doesn't fanout (that's gated to AFTER INSERT), but
-      // the post becomes visible in the feed immediately.
-      const { error } = await supabase
-        .from('posts')
-        .update({ is_hidden: false, scheduled_publish_at: null })
-        .eq('id', id)
-        .eq('user_id', currentUser.id);              // belt + suspenders — RLS already restricts
-      if (error) { toast(`Publish failed: ${error.message}`, 'error'); return; }
-      toast('Published.', 'success');
-    } else if (act === 'cancel') {
-      const { error } = await supabase
-        .from('posts')
-        .delete()
-        .eq('id', id)
-        .eq('user_id', currentUser.id);
-      if (error) { toast(`Cancel failed: ${error.message}`, 'error'); return; }
-      toast('Scheduled post deleted.', 'success');
-    }
-    // Refresh the modal contents + the composer badge in parallel.
-    await Promise.all([openScheduledPostsModal(), refreshScheduledPostsBadge()]);
-  } catch (err) {
-    toast(`${act} threw: ${err?.message || err}`, 'error');
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-composeText.addEventListener('input', () => {
-  const len = composeText.value.length;
-  charCount.textContent = `${len} / 5000`;
-  charCount.className = 'char-count' + (len > 4500 ? ' warn' : '') + (len >= 5000 ? ' over' : '');
-  composeText.style.height = 'auto';
-  composeText.style.height = composeText.scrollHeight + 'px';
-});
-
-composeImageInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  composeImageFile = file;
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    composeImagePreview.innerHTML = `
-      <div class="image-preview">
-        <img src="${ev.target.result}" alt="preview"/>
-        <button class="image-preview-remove" id="removeComposeImage">×</button>
-      </div>`;
-    document.getElementById('removeComposeImage').addEventListener('click', () => {
-      composeImageFile = null;
-      composeImagePreview.innerHTML = '';
-      composeImageInput.value = '';
-    });
-  };
-  reader.readAsDataURL(file);
-});
-
-// Composer submit. Selector matches the renamed id="btnPostSubmit"
-// in index.html. Was id="btnPost" originally, but that collided with
-// the sidebar Post nav button (also id="btnPost") — getElementById
-// returned the sidebar one and this listener silently never fired.
-//
-// Routes through the submit_post RPC mobile uses, which supports the
-// is_hidden + scheduled_publish_at parameters needed for scheduling.
-// The legacy raw insert path (still present in git history) didn't
-// give us scheduling; mobile users could schedule, web users couldn't.
-// The RPC handles the insert + the AFTER INSERT follower-fanout trigger
-// (which is gated on is_hidden=false so scheduled posts don't pre-spam
-// notifications).
-document.getElementById('btnPostSubmit').addEventListener('click', async () => {
-  const body = composeText.value.trim();
-  if (!body && !composeImageFile) return;
-  if (!currentUser) return toast('Please sign in first', 'error');
-
-  const isScheduled = !!composeScheduledAt;
-  const scheduledIso = isScheduled ? composeScheduledAt.toISOString() : null;
-
-  const btn = document.getElementById('btnPostSubmit');
-  btn.disabled = true;
-  btn.textContent = composeImageFile ? 'Uploading...' : (isScheduled ? 'Scheduling...' : 'Posting...');
-
-  let imageUrl = null;
-  if (composeImageFile) {
-    imageUrl = await uploadImage(composeImageFile);
-    if (!imageUrl) {
-      btn.disabled = false;
-      _updateComposeScheduleUI();
-      return;
-    }
-  }
-
-  btn.textContent = isScheduled ? 'Scheduling...' : 'Posting...';
-
-  // submit_post returns { id, status, error } (per the RPC contract).
-  // It performs the insert server-side under SECURITY DEFINER, so we
-  // don't get the inserted row back with joins like the legacy
-  // .insert().select(FEED_SELECT) did. Re-fetch via posts table after
-  // for the local prepend, mirroring what mobile's createNewPost does.
-  const { data: rpcResult, error: rpcErr } = await supabase.rpc('submit_post', {
-    p_actor_id:             currentUser.id,
-    p_body:                 body || '',
-    p_image_url:            imageUrl,
-    p_video_id:             null,
-    p_book_id:              null,
-    p_reposted_from:        null,
-    p_legacy_appwrite_id:   null,
-    p_is_hidden:            isScheduled,
-    p_scheduled_publish_at: scheduledIso,
-  });
-
-  btn.disabled = false;
-  if (rpcErr)              { toast(rpcErr.message, 'error'); _updateComposeScheduleUI(); return; }
-  if (rpcResult?.error)    { toast(rpcResult.error, 'error'); _updateComposeScheduleUI(); return; }
-  const newPostId = rpcResult?.id;
-
-  // Re-fetch the row with joins so we can prepend it locally
-  // (same shape the legacy .insert().select(FEED_SELECT) returned).
-  let created = null;
-  if (newPostId) {
-    const { data: row } = await supabase
-      .from('posts')
-      .select(FEED_SELECT)
-      .eq('id', newPostId)
-      .maybeSingle();
-    created = row;
-  }
-
-  // Reset composer state — caption, image, schedule.
-  composeText.value = '';
-  composeImageFile = null;
-  composeImagePreview.innerHTML = '';
-  composeImageInput.value = '';
-  charCount.textContent = '0 / 5000';
-  composeScheduledAt = null;
-  if (_composeScheduleAtInput) _composeScheduleAtInput.value = '';
-  _updateComposeScheduleUI();   // also resets btn text to "Post"
-
-  if (isScheduled) {
-    // Scheduled posts shouldn't appear in the feed yet — the AFTER
-    // INSERT trigger skipped fanout because is_hidden=true. Toast the
-    // confirmation with the scheduled time so the user has feedback.
-    toast(`Scheduled for ${new Date(scheduledIso).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })}`, 'success');
-    // Refresh the "X scheduled" pill so it reflects the new total
-    // (and reveals itself if this was the user's first scheduled post).
-    refreshScheduledPostsBadge();
-    return;
-  }
-
-  toast('Posted!', 'success');
-
-  // Prepend the new post locally so the user sees it at the top of the
-  // feed immediately (Facebook-style "you posted!" affordance). On the
-  // next manual refresh, feed_for_you will correctly exclude it from
-  // the For You ranking — by design — and it'll vanish from this list,
-  // but it lives forever on the user's profile/timeline.
-  if (created) {
-    posts = [created, ...posts];
-    const feedEl = document.getElementById('feed');
-    if (feedEl) {
-      const el = renderPost(created);
-      el.style.animationDelay = '0s';
-      feedEl.insertBefore(el, feedEl.firstChild);
-      _wireUpNewPosts(feedEl);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-    _bumpFeedLastSeenAt([created]);
-  } else {
-    // Safety net — if the SELECT returned nothing for some reason
-    // (RLS / shape), fall back to the legacy behavior so the user's
-    // post isn't completely invisible.
-    loadFeed();
-  }
-});
-
-// ── Stories row (users) ──
-async function loadStories() {
-  const row = document.getElementById('storiesRow');
-  // Skip the network round-trip if the row is hidden (saves 1 query per home-tab visit)
-  if (!row || row.style.display === 'none') return;
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, username, avatar_url, is_guest')
-    .order('created_at', { ascending: false })
-    .limit(20);
-
-  if (error || !data) { row.innerHTML = ''; return; }
-
-  row.innerHTML = data.map(p => {
-    const avatarHTML = p.avatar_url ? `<img src="${p.avatar_url}" alt="${p.username}"/>` : initials(p.username);
-    return `
-      <div class="story-item" onclick="filterByUser('${p.id}','${escHTML(p.username)}')">
-        <div class="story-avatar">${avatarHTML}</div>
-        <div class="story-name">${escHTML(p.username)}</div>
-      </div>
-    `;
-  }).join('');
-}
-
 // ── Filter by user ──
 window.filterByUser = async (userId, username) => {
   openProfile(userId);
@@ -2639,38 +2919,13 @@ window.filterByUser = async (userId, username) => {
 
 // ── Feed ──
 // ── Feed pagination + lazy loading ──
+// FEED_PAGE_SIZE stays in app.js (used by composer / realtime hook) and is
+// injected into feed.js via initFeed. The pagination/scroll state vars
+// (_feedOffset, _hasMoreFeedPosts, _isLoadingMoreFeed, _feedScrollObserver,
+// _feedSeq, _cachedFollowIds) moved to feed.js as part of Stage 5. App.js
+// reaches the two that it still needs (_hasMoreFeedPosts, _cachedFollowIds,
+// _feedScrollObserver) through the imported accessors.
 const FEED_PAGE_SIZE = 15;
-let _feedOffset = 0;
-let _hasMoreFeedPosts = true;
-let _isLoadingMoreFeed = false;
-let _feedScrollObserver = null;
-let _feedVideoObserver = null;
-let _feedPostObserver = null;
-
-// Sprint 2 #2 (2026-05-15): added `display_name` to both profile
-// joins so the feed renders by the creator's chosen display name with
-// @handle as a secondary fallback. Mirrors mobile's POST_SELECT.
-// Renderers should use:  profile.display_name || profile.username || 'Unknown'.
-const FEED_SELECT = `*, profiles!user_id(id, username, display_name, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, display_name, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration))`;
-
-// Feed mode — 'foryou' (default), 'following', or 'discover'
-let _feedMode = 'foryou';
-
-// Stale-query guard. Every loadFeed/loadMoreFeed call increments this; results
-// are only applied if their captured seq still matches. Makes rapid tab-flicks
-// and overlapping pagination requests safe.
-let _feedSeq = 0;
-
-// Cached follow set per loadFeed run — avoids a second fetch when For You needs
-// it for the boost AND Discover needed it for the exclusion. Reset each loadFeed.
-let _cachedFollowIds = null;
-
-// Pending debounce timer for realtime-triggered feed refreshes. Declared up
-// here so loadFeed can cancel it (a user-initiated load supersedes any
-// pending auto-refresh). The function and Supabase channel that USE this
-// timer live further down — by the time a realtime WS event actually fires,
-// every dependency is initialized.
-let _realtimeRefreshTimer = null;
 
 // Facebook-pattern feed delta. `_feedLastSeenAt` is the newest
 // created_at across the rendered feed. refreshFeedAdditive() fetches
@@ -2680,12 +2935,8 @@ let _realtimeRefreshTimer = null;
 // updated again on each successful additive refresh.
 let _feedLastSeenAt = null;
 
-// Buffer of posts found by the background poller but not yet applied
-// to the feed. Tapping the "↑ N new posts" pill flushes this into the
-// top of the feed without a fresh DB call. Polled every 60s while the
-// tab is foregrounded; pauses when hidden.
-let _newPostsBuffer = [];          // hydrated post objects
-let _newPostsBufferIds = new Set(); // dedup against live + repeat polls
+// _newPostsBufferIds moved to feed.js (Stage 5) — it's the dedup partner of
+// _newPostsBuffer and only the poller / pill-apply touch it.
 let _feedPollTimer = null;
 
 // Update _feedLastSeenAt to the max created_at across an array of posts.
@@ -2699,106 +2950,6 @@ function _bumpFeedLastSeenAt(rows) {
     if (t && (!newest || t > newest)) newest = t;
   }
   if (newest && newest !== _feedLastSeenAt) _feedLastSeenAt = newest;
-}
-
-// Prepend a list of hydrated posts to the feed (state + DOM). Shared
-// between the background-poll buffer apply and the additive refresh
-// below. Returns the number of rows actually inserted (after dedup).
-function _prependFreshPosts(fresh) {
-  if (!fresh?.length) return 0;
-  const existing = new Set(posts.map(p => p?.id).filter(Boolean));
-  const toInsert = fresh.filter(p => p?.id && !existing.has(p.id));
-  if (!toInsert.length) return 0;
-  posts = [...toInsert, ...posts];
-  const feedEl = document.getElementById('feed');
-  if (feedEl) {
-    const frag = document.createDocumentFragment();
-    toInsert.forEach((post, i) => {
-      const el = renderPost(post);
-      el.style.animationDelay = `${(i * 0.04).toFixed(3)}s`;
-      frag.appendChild(el);
-    });
-    feedEl.insertBefore(frag, feedEl.firstChild);
-    _wireUpNewPosts(feedEl);
-  }
-  _bumpFeedLastSeenAt(toInsert);
-  return toInsert.length;
-}
-
-// Apply the background-polled buffer to the feed. Used by both the pill
-// tap and pull-to-refresh-style gestures — same effect, no DB call.
-function _applyNewPostsBuffer() {
-  if (!_newPostsBuffer.length) return 0;
-  const inserted = _prependFreshPosts(_newPostsBuffer);
-  _newPostsBuffer = [];
-  _newPostsBufferIds = new Set();
-  _renderNewPostsPill();
-  if (inserted > 0) {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-  return inserted;
-}
-
-// Render / update / hide the "↑ N new posts" pill. Idempotent — safe to
-// call after every buffer change. The pill is created lazily once and
-// then just toggled visible.
-function _renderNewPostsPill() {
-  let pill = document.getElementById('feedNewPill');
-  if (!_newPostsBuffer.length) {
-    if (pill) pill.classList.remove('is-visible');
-    return;
-  }
-  if (!pill) {
-    pill = document.createElement('button');
-    pill.id = 'feedNewPill';
-    pill.className = 'feed-new-pill';
-    pill.type = 'button';
-    pill.onclick = () => _applyNewPostsBuffer();
-    document.body.appendChild(pill);
-  }
-  const n = _newPostsBuffer.length;
-  pill.textContent = n === 1 ? '↑ 1 new post' : `↑ ${n} new posts`;
-  pill.classList.add('is-visible');
-}
-
-// Background poller — every 60s while the tab is visible, calls
-// feed_new_since to discover posts created after _feedLastSeenAt.
-// New posts are stashed in _newPostsBuffer; the pill renders/updates
-// based on the buffer size. NO mutation of the live feed until the
-// user taps the pill (or pull-to-refresh applies the buffer).
-async function _pollForNewPosts() {
-  if (document.hidden) return;
-  if (!currentUser?.id) return;
-  if (_feedMode !== 'foryou' || !_feedLastSeenAt) return;
-  try {
-    const { data, error } = await supabase.rpc('feed_new_since', {
-      p_user_id: currentUser.id,
-      p_since: _feedLastSeenAt,
-      p_limit: 30,
-    });
-    if (error) throw error;
-    const ids = (data || []).map(r => r.id).filter(Boolean);
-    if (!ids.length) return;
-    // Skip ids already in the buffer or in the live feed.
-    const liveIds = new Set(posts.map(p => p?.id).filter(Boolean));
-    const newIds = ids.filter(id => !_newPostsBufferIds.has(id) && !liveIds.has(id));
-    if (!newIds.length) return;
-    // Hydrate the new ones through FEED_SELECT.
-    const { data: hydrated, error: hydErr } = await supabase
-      .from('posts').select(FEED_SELECT).in('id', newIds);
-    if (hydErr) throw hydErr;
-    const byId = new Map((hydrated || []).map(p => [p.id, p]));
-    const ordered = newIds.map(id => byId.get(id)).filter(Boolean);
-    const filtered = ordered.filter(p => !shouldHidePost(p));
-    if (!filtered.length) return;
-    // Buffer (newest first to match feed ordering).
-    _newPostsBuffer = [...filtered, ..._newPostsBuffer];
-    for (const p of filtered) _newPostsBufferIds.add(p.id);
-    _renderNewPostsPill();
-  } catch (err) {
-    // Polling errors are non-fatal — the next tick will retry.
-    console.warn('[feed] poll error:', err?.message);
-  }
 }
 
 // Start / restart the polling timer. Safe to call many times — clears
@@ -2834,11 +2985,11 @@ document.addEventListener('visibilitychange', () => {
 // Web equivalent of mobile's onRefresh logic in app/(tabs)/home.jsx.
 async function refreshFeedAdditive() {
   if (!currentUser?.id) return;
-  if (_feedMode !== 'foryou' || !_feedLastSeenAt) {
+  if (getFeedMode() !== 'foryou' || !_feedLastSeenAt) {
     return loadFeed();
   }
   // Fast path — buffer has new posts from the poller, just apply them.
-  if (_newPostsBuffer.length > 0) {
+  if (getNewPostsBuffer().length > 0) {
     _applyNewPostsBuffer();
     return;
   }
@@ -2884,179 +3035,8 @@ function _feedFetchLimitWithFilters(logicalLimit) {
   return hasFilters ? Math.ceil(logicalLimit * 1.5) : logicalLimit;
 }
 
-async function _buildAndExecFeedQuery({ offset }) {
-  if (!currentUser?.id) return { data: [], scoreClientSide: false, followIds: null };
-
-  // For You + Discover now go through the same Postgres RPCs mobile
-  // uses (feed_for_you / feed_discover). The server-side algorithm:
-  //   • Reads the viewer's interest profile (likes, comments, follows)
-  //   • Excludes posts in the viewer's post_views (last 24h) — the
-  //     "always fresh" feed UX shipped May 2
-  //   • Returns rows in score order
-  // Client-side scoring is preserved as a fallback path in case the
-  // RPC is missing (early dev DBs without migration_feed_v2_rpcs.sql)
-  // — set RPC_FAIL = true at the bottom of the catch to verify.
-  // Cached follow set still drives the Following tab filter.
-  if (_cachedFollowIds === null) {
-    const { data: f } = await supabase.from('follows')
-      .select('following_id').eq('follower_id', currentUser.id);
-    _cachedFollowIds = (f || []).map(r => r.following_id);
-  }
-  const followIds = _cachedFollowIds;
-
-  if (_feedMode === 'following') {
-    if (!followIds.length) return { data: [], scoreClientSide: false, followIds, emptyReason: 'no-follows' };
-    const fetchLimit = _feedFetchLimitWithFilters(FEED_PAGE_SIZE);
-    let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
-    q = q.in('user_id', followIds).order('created_at', { ascending: false });
-    const { data, error } = await q.range(offset, offset + fetchLimit - 1);
-    if (error) throw error;
-    return { data: data || [], scoreClientSide: false, followIds, fetchLimit };
-  }
-
-  // For You — Sprint 2 #1 (2026-05-15): switched to fetch_hybrid_feed,
-  // the same RPC mobile uses. Returns mixed items (post / book_carousel
-  // / video_card) on a 6:1 cadence so the feed gets discovery items
-  // injected like mobile. Falls through to legacy feed_for_you on RPC
-  // error so a server hiccup doesn't black-screen the home tab.
-  if (_feedMode === 'foryou') {
-    try {
-      const result = await _fetchHybridFeedPage({ offset });
-      return { ...result, followIds, scoreClientSide: false, isHybrid: true };
-    } catch (err) {
-      console.warn('[feed] hybrid feed RPC failed, falling back to legacy:', err?.message);
-      // intentional fall-through to the legacy path below
-    }
-  }
-
-  // discover (and foryou — legacy path): RPC path
-  const rpcName = _feedMode === 'discover' ? 'feed_discover' : 'feed_for_you';
-  try {
-    const fetchLimit = _feedFetchLimitWithFilters(FEED_PAGE_SIZE);
-    const { data: ranked, error: rpcErr } = await supabase.rpc(rpcName, {
-      p_user_id: currentUser.id,
-      p_limit: fetchLimit,
-      p_offset: offset,
-    });
-    if (rpcErr) throw rpcErr;
-    const orderedIds = (ranked || []).map(r => r.id).filter(Boolean);
-    if (!orderedIds.length) return { data: [], scoreClientSide: false, followIds, fetchLimit };
-    // Hydrate through FEED_SELECT to get profiles/videos/original join.
-    const { data: hydrated, error: hydErr } = await supabase
-      .from('posts')
-      .select(FEED_SELECT)
-      .in('id', orderedIds);
-    if (hydErr) throw hydErr;
-    // Re-establish RPC ordering — IN-clause query returns arbitrary order.
-    const byId = new Map((hydrated || []).map(p => [p.id, p]));
-    const ordered = orderedIds.map(id => byId.get(id)).filter(Boolean);
-    return { data: ordered, scoreClientSide: false, followIds, fetchLimit };
-  } catch (err) {
-    // Fallback path — only kicks in if the RPC itself is missing/broken.
-    // Logs once and switches the tab to client-side scoring (same code
-    // we used before the migration). Future cleanup: drop the fallback
-    // once we trust the RPCs in production.
-    console.warn('[feed] RPC failed, falling back to client-side scoring:', err?.message);
-    let q = supabase.from('posts').select(FEED_SELECT).eq('is_hidden', false);
-    if (_feedMode === 'discover') {
-      const exclude = [...followIds, currentUser.id];
-      if (exclude.length) {
-        q = q.not('user_id', 'in', `(${exclude.map(id => `"${id}"`).join(',')})`);
-      }
-    }
-    q = q.gt('created_at', new Date(Date.now() - 14 * 86400_000).toISOString())
-         .order('created_at', { ascending: false });
-    const fetchLimit = FEED_PAGE_SIZE * 3;
-    const { data, error } = await q.range(offset, offset + fetchLimit - 1);
-    if (error) throw error;
-    return { data: data || [], scoreClientSide: true, followIds, fetchLimit };
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════
-// Hybrid feed (Sprint 2 #1, 2026-05-15) — calls the fetch_hybrid_feed
-// RPC mobile uses. Returns mixed items on a 6:1 cadence so the For You
-// feed gets discovery items (book carousels, video cards) injected
-// alongside posts. Pagination is cursor-based: the RPC returns a
-// next_cursor jsonb that we pass back on the next call.
-//
-// Result shape (consumed by loadFeed/loadMoreFeed):
-//   {
-//     items: [
-//       { kind: 'post',           data: <hydrated post> },
-//       { kind: 'book_carousel',  data: { books: [...] } },
-//       { kind: 'video_card',     data: { ... } },
-//     ],
-//     data: <flat list of just posts — for view tracking + buffer dedup>,
-//     fetchLimit: <number>,
-//     hasMore: <boolean>,
-//   }
-//
-// _feedHybridCursor is the cursor returned from the previous page;
-// loadFeed resets it to {} on every fresh load.
-// ════════════════════════════════════════════════════════════════════════
-let _feedHybridCursor = {};
-let _feedHybridSessionSeed = null;
-
-async function _fetchHybridFeedPage({ offset }) {
-  // offset === 0 means "fresh load" — reset cursor + roll a new
-  // session seed so the bucket ordering shuffles between sessions.
-  if (offset === 0) {
-    _feedHybridCursor = {};
-    _feedHybridSessionSeed = String(Math.floor(Math.random() * 0xffffffff));
-  }
-  const limit = FEED_PAGE_SIZE;
-  const { data, error } = await supabase.rpc('fetch_hybrid_feed', {
-    p_user_id:      currentUser.id,
-    p_cursor:       _feedHybridCursor || {},
-    p_limit:        limit,
-    p_session_seed: _feedHybridSessionSeed,
-  });
-  if (error) throw error;
-
-  const rawItems = Array.isArray(data?.items) ? data.items : [];
-  _feedHybridCursor = data?.next_cursor || {};
-
-  // Hydrate posts (FEED_SELECT joins) in one batch. Carousel + video
-  // card items pass through as-is (their data payloads are server-built).
-  const postIds = rawItems.filter(it => it?.type === 'post' && it.post_id).map(it => it.post_id);
-  let postById = new Map();
-  if (postIds.length) {
-    const { data: hydrated, error: hydErr } = await supabase
-      .from('posts').select(FEED_SELECT).in('id', postIds);
-    if (hydErr) throw hydErr;
-    postById = new Map((hydrated || []).map(p => [p.id, p]));
-  }
-
-  // Walk in server order. Drop posts that fail RLS / hide-list / hydration;
-  // pass injected items through unchanged.
-  const items = [];
-  const flatPosts = [];
-  for (const it of rawItems) {
-    if (it?.type === 'post' && it.post_id) {
-      const p = postById.get(it.post_id);
-      if (!p) continue;
-      if (shouldHidePost(p)) continue;
-      items.push({ kind: 'post', data: p });
-      flatPosts.push(p);
-    } else if (it?.type === 'book_carousel') {
-      items.push({ kind: 'book_carousel', data: it.data || it });
-    } else if (it?.type === 'video_card') {
-      items.push({ kind: 'video_card', data: it.data || it });
-    }
-  }
-
-  // hasMore — server returns next_cursor with `done: true` when exhausted,
-  // OR the items array length is below the requested limit.
-  const hasMore = !data?.next_cursor?.done && items.length > 0;
-
-  return {
-    items,
-    data: flatPosts,           // legacy `data` slot used by view tracking + bumpLastSeenAt
-    fetchLimit: limit,
-    hasMore,
-  };
-}
+// _feedHybridSessionSeed moved to feed.js (Stage 5) — only the hybrid-feed
+// page fetcher reads it, and the reset happens inside the moved loadFeed().
 
 // Session-cached pool of trending books to PAD each hybrid feed
 // carousel out to ~30 books on web. The server-side fetch_book_carousel
@@ -3097,334 +3077,6 @@ function _getWebBookPool() {
       .catch((err) => { console.warn('[book-pool] threw:', err?.message); return []; });
   }
   return _webBookPoolPromise;
-}
-
-// ── Render helpers for injected hybrid-feed items ─────────────────────
-//
-// Book carousel — premium desktop card carousel with prev/next arrows.
-// Server returns data.books as an array of { id, title, cover_url,
-// author_display_name, ... }. Tap a cover → open book detail. Mobile
-// has its own touch-scroll version (BookCarousel.jsx); this is the
-// web-only desktop pattern (arrow paginated, no horizontal scrollbar).
-//
-// Prefixed with `_renderHybrid` to avoid colliding with any existing
-// renderBookCarousel/renderVideoCard in the codebase (the video one
-// already collided once and black-screened the site).
-function _renderHybridBookCarousel(payload) {
-  const books = Array.isArray(payload?.books) ? payload.books : [];
-  if (!books.length) return null;
-  const wrap = document.createElement('div');
-  wrap.className = 'feed-hybrid-carousel feed-hybrid-book-carousel';
-  // Inline CSS is here intentionally so this carousel ships as a
-  // self-contained unit — we don't have to touch css/styles.css to
-  // get the look right. The :hover effects are wired via a one-time
-  // injected <style> below (idempotent — `data-hbc-style` guard).
-  wrap.style.cssText = [
-    'margin:12px 0',
-    'padding:18px 0 18px',
-    'background:linear-gradient(135deg, rgba(121,117,212,0.06) 0%, rgba(121,117,212,0.02) 100%)',
-    'border-radius:16px',
-    'border:1px solid rgba(121,117,212,0.20)',
-    'position:relative',
-    'overflow:hidden',
-  ].join(';');
-
-  const headerHtml = `
-    <div class="hbc-header" style="display:flex;align-items:center;justify-content:space-between;padding:0 20px;margin-bottom:14px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:16px">📚</span>
-        <span style="font-size:13px;font-weight:700;color:var(--accent,#7975D4);text-transform:uppercase;letter-spacing:0.08em">Books worth reading</span>
-      </div>
-      <div style="display:flex;gap:8px">
-        <button type="button" class="hbc-arrow hbc-prev" aria-label="Previous">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-        </button>
-        <button type="button" class="hbc-arrow hbc-next" aria-label="Next">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-        </button>
-      </div>
-    </div>`;
-
-  // Each tile is a fixed 144px wide so we can math the page size off
-  // the viewport width below. Cover is 2:3 aspect. Title clamped to a
-  // single line + ellipsis (Charles's preference for desktop — keeps
-  // every row in the carousel the exact same height). Author single
-  // line. Rating row shows ★ + numeric only when a rating field is
-  // present + non-zero. Hover lifts the tile with a shadow.
-  const tilesHtml = books.map(b => {
-    const cover  = b.cover_url || b.thumbnail_url || '';
-    const title  = escHTML(b.title || 'Untitled');
-    const author = escHTML(b.author_display_name || b.author_name || b.author_username || '');
-    // Rating — server may put it on any of these fields depending on
-    // which fetch path emitted the card. Fall through gracefully.
-    const ratingRaw = Number(b.rating ?? b.average_rating ?? b.avg_rating ?? 0);
-    const hasRating = ratingRaw > 0;
-    const ratingStr = hasRating ? ratingRaw.toFixed(1) : '';
-    const ratingCount = Number(b.rating_count ?? b.ratings_count ?? 0);
-    return `
-      <div class="hbc-tile" data-book-id="${escHTML(b.id || '')}">
-        <div class="hbc-cover">
-          ${cover ? `<img src="${escHTML(cover)}" alt="" loading="lazy"/>` : ''}
-          <div class="hbc-cover-overlay"></div>
-        </div>
-        <div class="hbc-title" title="${title}">${title}</div>
-        ${author ? `<div class="hbc-author">${author}</div>` : ''}
-        ${hasRating
-          ? `<div class="hbc-rating">
-               <svg viewBox="0 0 24 24" width="11" height="11" style="fill:#f5b50a"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
-               <span class="hbc-rating-val">${ratingStr}</span>
-               ${ratingCount > 0 ? `<span class="hbc-rating-count">(${ratingCount.toLocaleString()})</span>` : ''}
-             </div>`
-          : ''}
-      </div>`;
-  }).join('');
-
-  wrap.innerHTML = `
-    ${headerHtml}
-    <div class="hbc-viewport" style="overflow:hidden;padding:4px 20px">
-      <div class="hbc-track" style="display:flex;gap:16px;transition:transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);will-change:transform">
-        ${tilesHtml}
-      </div>
-    </div>`;
-
-  // Inject the supporting styles once. Idempotent guard: a data attr
-  // on <head> means subsequent carousels skip the duplicate <style>
-  // injection. Doing it this way avoids touching css/styles.css.
-  if (!document.documentElement.dataset.hbcStyle) {
-    const s = document.createElement('style');
-    s.textContent = `
-      /* Glass-style navigation arrows — frosted background with
-         backdrop blur. Picks up whatever colour is behind them so the
-         arrows are visible against light AND dark page backgrounds.
-         The icon uses the accent purple so it's never washed out. */
-      .feed-hybrid-book-carousel .hbc-arrow {
-        width: 38px; height: 38px;
-        border-radius: 50%;
-        border: 1px solid rgba(121, 117, 212, 0.35);
-        background: rgba(255, 255, 255, 0.55);
-        -webkit-backdrop-filter: blur(14px) saturate(180%);
-        backdrop-filter: blur(14px) saturate(180%);
-        color: var(--accent, #7975D4);
-        cursor: pointer;
-        display: flex; align-items: center; justify-content: center;
-        transition: all 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
-        box-shadow: 0 2px 10px rgba(121, 117, 212, 0.12),
-                    inset 0 0 0 1px rgba(255, 255, 255, 0.5);
-      }
-      body[data-theme="dark"] .feed-hybrid-book-carousel .hbc-arrow {
-        background: rgba(30, 30, 45, 0.55);
-        border-color: rgba(121, 117, 212, 0.45);
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3),
-                    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-      }
-      .feed-hybrid-book-carousel .hbc-arrow:hover:not([disabled]) {
-        background: var(--accent, #7975D4);
-        border-color: var(--accent, #7975D4);
-        color: #fff;
-        transform: translateY(-1px) scale(1.04);
-        box-shadow: 0 6px 18px rgba(121, 117, 212, 0.40);
-      }
-      .feed-hybrid-book-carousel .hbc-arrow:active:not([disabled]) {
-        transform: translateY(0) scale(0.98);
-      }
-      .feed-hybrid-book-carousel .hbc-arrow[disabled] {
-        opacity: 0.35; cursor: not-allowed;
-        transform: none !important;
-        box-shadow: none !important;
-      }
-
-      /* Tile — 144px wide, hover lifts it up with a deeper shadow */
-      .feed-hybrid-book-carousel .hbc-tile {
-        flex: 0 0 144px;
-        cursor: pointer;
-        transition: transform 0.22s ease;
-      }
-      .feed-hybrid-book-carousel .hbc-tile:hover {
-        transform: translateY(-3px);
-      }
-      .feed-hybrid-book-carousel .hbc-tile:hover .hbc-cover {
-        box-shadow: 0 10px 28px rgba(121, 117, 212, 0.28),
-                    0 2px 6px rgba(0, 0, 0, 0.18);
-      }
-      .feed-hybrid-book-carousel .hbc-cover {
-        aspect-ratio: 2/3;
-        border-radius: 10px;
-        overflow: hidden;
-        background: var(--surface-2, #222);
-        position: relative;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-        transition: box-shadow 0.22s ease;
-      }
-      .feed-hybrid-book-carousel .hbc-cover img {
-        width: 100%; height: 100%; object-fit: cover; display: block;
-      }
-      .feed-hybrid-book-carousel .hbc-cover-overlay {
-        position: absolute; inset: 0;
-        background: linear-gradient(180deg, transparent 60%, rgba(0, 0, 0, 0.35) 100%);
-        pointer-events: none;
-      }
-
-      /* Text rows — single-line title + author + rating */
-      .feed-hybrid-book-carousel .hbc-title {
-        font-size: 13px;
-        font-weight: 600;
-        line-height: 1.35;
-        color: var(--text, #fff);
-        margin-top: 10px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .feed-hybrid-book-carousel .hbc-author {
-        font-size: 11.5px;
-        color: var(--text2, #aaa);
-        margin-top: 3px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .feed-hybrid-book-carousel .hbc-rating {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        margin-top: 5px;
-        font-size: 11px;
-        color: var(--text, #fff);
-      }
-      .feed-hybrid-book-carousel .hbc-rating-val {
-        font-weight: 600;
-      }
-      .feed-hybrid-book-carousel .hbc-rating-count {
-        color: var(--text2, #aaa);
-        font-weight: 400;
-      }
-    `;
-    document.head.appendChild(s);
-    document.documentElement.dataset.hbcStyle = '1';
-  }
-
-  // Pagination — translate the track by N tiles per click. Tile width
-  // (144px) + gap (16px) = 160px per slot. Page size = floor(viewport
-  // width / 160), measured after the carousel mounts so the count
-  // adapts to the actual rendered width (sidebar collapsed vs not).
-  const track = wrap.querySelector('.hbc-track');
-  const viewport = wrap.querySelector('.hbc-viewport');
-  const prevBtn = wrap.querySelector('.hbc-prev');
-  const nextBtn = wrap.querySelector('.hbc-next');
-  const SLOT = 160;             // 144px tile + 16px gap
-  let offset = 0;
-
-  function _updateArrows() {
-    const maxOffset = Math.max(0, books.length * SLOT - viewport.clientWidth);
-    prevBtn.disabled = offset <= 0;
-    nextBtn.disabled = offset >= maxOffset - 1;
-  }
-  function _stepBy(direction) {
-    const pageSize = Math.max(1, Math.floor((viewport.clientWidth - 40) / SLOT));
-    const maxOffset = Math.max(0, books.length * SLOT - viewport.clientWidth);
-    offset = Math.max(0, Math.min(maxOffset, offset + direction * pageSize * SLOT));
-    track.style.transform = `translateX(-${offset}px)`;
-    _updateArrows();
-  }
-  prevBtn.addEventListener('click', () => _stepBy(-1));
-  nextBtn.addEventListener('click', () => _stepBy(1));
-
-  // Initial arrow state — needs viewport.clientWidth, which is 0 until
-  // the element is attached to the DOM. Defer the first update to next
-  // tick (microtask) when loadFeed has appended the wrap into #feed.
-  Promise.resolve().then(_updateArrows);
-
-  // Tile click → openBookDetail (delegated so it survives re-renders).
-  track.addEventListener('click', (e) => {
-    const tile = e.target.closest('.hbc-tile[data-book-id]');
-    if (tile && typeof openBookDetail === 'function') openBookDetail(tile.dataset.bookId);
-  });
-
-  // Pad up to 30 books from the session-cached trending pool. The
-  // initial 5 books (with role labels) render immediately; the rest
-  // arrive after the pool fetch resolves and get appended to the track.
-  // Re-runs _updateArrows so prev/next correctly reflect the new
-  // length. Deduped by id against the books already rendered.
-  const TARGET_COUNT = 30;
-  if (books.length < TARGET_COUNT) {
-    const existingIds = new Set(books.map(b => b.id).filter(Boolean));
-    _getWebBookPool().then((pool) => {
-      const extras = pool.filter(b => b.id && !existingIds.has(b.id)).slice(0, TARGET_COUNT - books.length);
-      if (!extras.length) return;
-      // Build the HTML for the new tiles using the same template as
-      // the inline tilesHtml block above. Extracted to a tiny helper
-      // here so we don't duplicate the markup.
-      const extraHtml = extras.map(b => {
-        const cover  = b.cover_url || b.thumbnail_url || '';
-        const title  = escHTML(b.title || 'Untitled');
-        const author = escHTML(b.author_display_name || b.author_name || b.author_username || '');
-        const ratingRaw = Number(b.rating ?? b.average_rating ?? b.avg_rating ?? 0);
-        const hasRating = ratingRaw > 0;
-        const ratingStr = hasRating ? ratingRaw.toFixed(1) : '';
-        const ratingCount = Number(b.rating_count ?? b.ratings_count ?? 0);
-        return `
-          <div class="hbc-tile" data-book-id="${escHTML(b.id || '')}">
-            <div class="hbc-cover">
-              ${cover ? `<img src="${escHTML(cover)}" alt="" loading="lazy"/>` : ''}
-              <div class="hbc-cover-overlay"></div>
-            </div>
-            <div class="hbc-title" title="${title}">${title}</div>
-            ${author ? `<div class="hbc-author">${author}</div>` : ''}
-            ${hasRating
-              ? `<div class="hbc-rating">
-                   <svg viewBox="0 0 24 24" width="11" height="11" style="fill:#f5b50a"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
-                   <span class="hbc-rating-val">${ratingStr}</span>
-                   ${ratingCount > 0 ? `<span class="hbc-rating-count">(${ratingCount.toLocaleString()})</span>` : ''}
-                 </div>`
-              : ''}
-          </div>`;
-      }).join('');
-      track.insertAdjacentHTML('beforeend', extraHtml);
-      // Recompute arrow state since track is wider now.
-      _updateArrows();
-    });
-  }
-
-  return wrap;
-}
-
-// Video card — single featured video tile, larger than a thumbnail.
-// Server returns one video per card with id, title, thumbnail_url,
-// duration, creator info. Tap → open the video player.
-//
-// Named with the `_renderHybridVideoCard` prefix to avoid colliding
-// with the legacy `renderVideoCard(video, uploader)` at line ~17370
-// which renders a different surface (videos tab tile). The naming
-// collision broke the whole script with "Identifier already declared".
-function _renderHybridVideoCard(payload) {
-  const v = payload?.video || payload || {};
-  if (!v.id) return null;
-  const wrap = document.createElement('div');
-  wrap.className = 'feed-video-card';
-  wrap.style.cssText = 'margin:12px 0;border-radius:12px;overflow:hidden;background:var(--surface,#1a1a24);border:1px solid var(--border,#2a2a3a);cursor:pointer';
-  const thumb = v.thumbnail_url || '';
-  const title = escHTML(v.title || 'Untitled video');
-  const creator = escHTML(v.creator_display_name || v.creator_name || v.creator_username || '');
-  const dur = v.duration ? _formatDuration(v.duration) : '';
-  wrap.innerHTML = `
-    <div style="position:relative;aspect-ratio:16/9;background:#000">
-      ${thumb ? `<img src="${escHTML(thumb)}" alt="" style="width:100%;height:100%;object-fit:cover" loading="lazy"/>` : ''}
-      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">
-        <div style="background:rgba(0,0,0,0.55);border-radius:50%;width:64px;height:64px;display:flex;align-items:center;justify-content:center">
-          <svg viewBox="0 0 24 24" width="28" height="28" style="fill:white;margin-left:3px"><polygon points="8 5 19 12 8 19 8 5"/></svg>
-        </div>
-      </div>
-      ${dur ? `<div style="position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,0.75);color:white;font-size:12px;font-weight:600;padding:2px 6px;border-radius:4px">${dur}</div>` : ''}
-      <div style="position:absolute;top:10px;left:10px;background:var(--accent,#7975D4);color:white;font-size:11px;font-weight:700;padding:3px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">▶ Featured video</div>
-    </div>
-    <div style="padding:12px 14px">
-      <div style="font-size:14px;font-weight:600;color:var(--text,#fff);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${title}</div>
-      ${creator ? `<div style="font-size:12px;color:var(--text2,#aaa)">${creator}</div>` : ''}
-    </div>`;
-  wrap.addEventListener('click', () => {
-    if (typeof playVideo === 'function') playVideo('sb_' + v.id);
-  });
-  return wrap;
 }
 
 // Best-effort duration formatter for video card tile. Mobile's helper
@@ -3496,148 +3148,6 @@ function _feedDiversify(arr) {
   }
   return out;
 }
-
-window.loadFeed = async function() {
-  const feed = document.getElementById('feed');
-  const sentinel = document.getElementById('feedSentinel');
-  if (!feed) return;
-
-  // Bump the seq — any in-flight loadFeed/loadMoreFeed from a previous tap
-  // will see its captured seq no longer matches and bail out before touching
-  // the DOM. Eliminates the "fast tab-flick shows wrong tab" race.
-  const seq = ++_feedSeq;
-
-  // Cancel any pending realtime debounce — a user-triggered load supersedes
-  // a "platform got a new post" auto-refresh. Saves one redundant DB round-trip.
-  if (_realtimeRefreshTimer) {
-    clearTimeout(_realtimeRefreshTimer);
-    _realtimeRefreshTimer = null;
-  }
-
-  feed.innerHTML = '<div class="loading">Loading feed...</div>';
-  if (sentinel) sentinel.style.display = 'none';
-
-  // Reset pagination state
-  _feedOffset = 0;
-  _hasMoreFeedPosts = true;
-  _isLoadingMoreFeed = false;
-  _cachedFollowIds = null;
-  if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
-  if (_feedVideoObserver)  { _feedVideoObserver.disconnect();  _feedVideoObserver = null; }
-  if (_feedPostObserver)   { _feedPostObserver.disconnect();   _feedPostObserver = null; }
-
-  // Guard: feed needs an authenticated user (the follow query depends on it).
-  // Without this, an early-firing realtime listener could call loadFeed before
-  // sign-in resolves and crash on `currentUser.id`.
-  if (!currentUser?.id) {
-    feed.innerHTML = '<div class="empty"><h3>Sign in to see your feed</h3></div>';
-    return;
-  }
-
-  let queryResult;
-  try {
-    queryResult = await _buildAndExecFeedQuery({ offset: 0 });
-  } catch (err) {
-    if (seq !== _feedSeq) return;
-    console.error('Feed query failed:', err);
-    const msg = _feedFriendlyError(err);
-    feed.innerHTML = `<div class="empty" id="feedRetry" style="cursor:pointer"><p>${escHTML(msg)}</p></div>`;
-    document.getElementById('feedRetry')?.addEventListener('click', () => loadFeed());
-    return;
-  }
-
-  // Stale-query guard — user switched tabs / refreshed mid-flight.
-  if (seq !== _feedSeq) return;
-  // Sign-out mid-flight — currentUser may have flipped to null while we awaited.
-  if (!currentUser?.id) {
-    feed.innerHTML = '<div class="empty"><h3>Sign in to see your feed</h3></div>';
-    return;
-  }
-
-  // Following tab with no follows → friendly empty state (special-case)
-  if (queryResult.emptyReason === 'no-follows') {
-    feed.innerHTML = `
-      <div class="empty">
-        <h3>You're not following anyone yet</h3>
-        <p>Switch to <strong>Discover</strong> or <strong>For You</strong> to find creators worth following.</p>
-      </div>`;
-    return;
-  }
-
-  // Hybrid feed (For You) — items array contains mixed kinds. Skip
-  // _processFeedRows (no client-side scoring; server handles ordering).
-  // Walk items in server order and dispatch to the right renderer.
-  // Posts still go into the `posts` array so view tracking + the
-  // background poller + the buffer-pill all keep working.
-  let result;
-  if (queryResult.isHybrid) {
-    result = queryResult.data;                      // already filtered + post-only
-    posts = result;
-    _hasMoreFeedPosts = !!queryResult.hasMore;
-    _feedOffset = result.length;                    // soft-tracked; cursor is the real pagination key
-    if (!queryResult.items?.length) {
-      feed.innerHTML = `<div class="empty"><h3>No posts yet</h3><p>Check back soon — new content drops daily.</p></div>`;
-      return;
-    }
-    feed.innerHTML = '';
-    let postIdx = 0;
-    queryResult.items.forEach((it, i) => {
-      let el = null;
-      if (it.kind === 'post') {
-        el = renderPost(it.data);
-        if (el) el.style.animationDelay = `${(postIdx * 0.04).toFixed(3)}s`;
-        postIdx += 1;
-      } else if (it.kind === 'book_carousel') {
-        el = _renderHybridBookCarousel(it.data);
-      } else if (it.kind === 'video_card') {
-        el = _renderHybridVideoCard(it.data);
-      }
-      if (el) feed.appendChild(el);
-    });
-  } else {
-    result = _processFeedRows(queryResult);
-    posts = result;
-    // Pagination state — for scored modes, _feedOffset advances by the WIDER
-    // fetch so we don't refetch the same rows we just trimmed away.
-    const advance = queryResult.data.length;
-    if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
-    _feedOffset = advance;
-
-    if (!posts.length) {
-      const emptyMsg = _feedMode === 'discover'
-        ? '<h3>No fresh posts to discover</h3><p>Check back soon — new content drops daily.</p>'
-        : '<h3>No posts yet</h3><p>Be the first to share something!</p>';
-      feed.innerHTML = `<div class="empty">${emptyMsg}</div>`;
-      return;
-    }
-
-    feed.innerHTML = '';
-    posts.forEach((post, i) => {
-      const el = renderPost(post);
-      el.style.animationDelay = `${(i * 0.04).toFixed(3)}s`;
-      feed.appendChild(el);
-    });
-  }
-
-  // Facebook-pattern feed: track the newest created_at across this initial
-  // page so refreshFeedAdditive / the background poller can fetch only
-  // posts since then. Reset to null first so an old session's lastSeenAt
-  // doesn't bleed into a different user's session. Also drop the "↑ N
-  // new posts" buffer + hide the pill — a full reload absorbs them.
-  _feedLastSeenAt = null;
-  _bumpFeedLastSeenAt(posts);
-  _newPostsBuffer = [];
-  _newPostsBufferIds = new Set();
-  _renderNewPostsPill();
-
-  _wireUpNewPosts(feed);
-  if (_hasMoreFeedPosts) setupFeedInfiniteScroll();
-
-  // Kick off the background poller for the For You tab. Other tabs
-  // don't need it — they're chronological and the user pulls to refresh.
-  if (_feedMode === 'foryou') _startFeedPolling();
-  else _stopFeedPolling();
-};
 
 // ── Post-view tracking — feeds Supabase `post_views` so feed_for_you
 //    can dedupe seen posts on next refresh. Mirrors mobile's
@@ -3735,231 +3245,37 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) _flushPendingViews();
 });
 
-// Fold the post-render setup into one helper. Two callers (initial load and
-// load-more) used to call these as separate steps — easy to forget one.
-function _wireUpNewPosts(container) {
-  setupFeedLazyLoaders(container);
-  setupCollapsibleBodies(container);
-  // Register every freshly-rendered post-card with the view tracker so
-  // when the user scrolls past it (≥50% visible for ≥800ms), the id
-  // gets queued for the debounced track_post_views RPC flush.
-  const observer = _ensureViewObserver();
-  if (observer) {
-    container.querySelectorAll('.post-card[data-postid]').forEach(el => observer.observe(el));
-  }
-}
-
 // ── Collapsible post bodies (Facebook-style "See more / less") ──
 // Auto-detects bodies that overflow ~6 lines and lets users tap the text
 // itself to expand/collapse. Short posts get no toggle. Per-session state
 // in `_expandedPosts` so toggle persists while scrolling but resets on refresh.
 const _expandedPosts = new Set();
-function setupCollapsibleBodies(root) {
-  if (!root) return;
-  const bodies = root.querySelectorAll('.collapsible-body:not([data-collapse-checked])');
-  bodies.forEach(el => {
-    el.dataset.collapseChecked = '1';
-    const id = el.dataset.postId;
-
-    // Measure overflow against a cap computed from the element's own line-height,
-    // so the threshold automatically adapts if .post-body styling changes later.
-    //
-    // CRITICAL: idempotent guard at the top. Because we run this in BOTH a
-    // requestAnimationFrame AND a document.fonts.ready callback (cached fonts
-    // make the latter resolve before rAF), without this guard we'd attach two
-    // toggles + two click handlers — and clicks would cancel each other out
-    // (toggle state flips twice on the same click), so the post looked frozen.
-    const measureAndDecide = () => {
-      if (el.dataset.collapseDone === '1') return; // already configured — no-op
-      if (el.querySelector('.collapsible-toggle')) {
-        el.dataset.collapseDone = '1';
-        return;
-      }
-
-      const cs = getComputedStyle(el);
-      const lineHeight = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) * 1.5);
-      const cap = lineHeight * 6; // matches the 6-ish lines visible at max-height: 9.9em
-      const naturalHeight = el.scrollHeight;
-      const overflows = naturalHeight > cap + 4; // small fudge for sub-pixel layout
-
-      if (!overflows) {
-        // Short post → no toggle ever needed; mark done so a later font-load
-        // pass doesn't second-guess this decision.
-        el.dataset.collapseDone = '1';
-        return;
-      }
-
-      // Default to collapsed; restore previously-expanded state for this session
-      if (id && _expandedPosts.has(id)) {
-        el.classList.add('is-expanded');
-      } else {
-        el.classList.add('is-collapsed');
-      }
-
-      // Append the See more / See less label inside the body itself
-      const more = document.createElement('span');
-      more.className = 'collapsible-toggle';
-      more.textContent = el.classList.contains('is-expanded') ? 'See less' : 'See more';
-      el.appendChild(more);
-      el.dataset.collapseDone = '1';
-
-      // Tap anywhere on the body toggles — but ignore real links/buttons/images.
-      // stopImmediatePropagation (vs stopPropagation) is belt-and-braces: even
-      // if a stray duplicate listener somehow gets attached, only one fires.
-      el.addEventListener('click', (e) => {
-        const t = e.target;
-        if (t.tagName === 'A'      || t.closest('a'))      return;
-        if (t.tagName === 'BUTTON' || t.closest('button')) return;
-        if (t.tagName === 'IMG'    || t.closest('img'))    return;
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        const expanded = !el.classList.contains('is-expanded');
-        el.classList.toggle('is-expanded', expanded);
-        el.classList.toggle('is-collapsed', !expanded);
-        more.textContent = expanded ? 'See less' : 'See more';
-        if (id) {
-          if (expanded) _expandedPosts.add(id);
-          else          _expandedPosts.delete(id);
-        }
-      });
-    };
-
-    // Two-stage measure: once now (rAF after layout), once after fonts load.
-    // Both paths are safe to call repeatedly thanks to the idempotent guard above.
-    requestAnimationFrame(measureAndDecide);
-    if (document.fonts && typeof document.fonts.ready?.then === 'function') {
-      document.fonts.ready.then(measureAndDecide);
-    }
-  });
-}
 
 // Wire feed mode tabs (For You / Following / Discover)
 document.querySelectorAll('#feedTabs .feed-tab').forEach(tab => {
   tab.addEventListener('click', () => {
     const mode = tab.dataset.feed;
-    if (mode === _feedMode) return;
+    if (mode === getFeedMode()) return;
     document.querySelectorAll('#feedTabs .feed-tab').forEach(t => t.classList.toggle('active', t === tab));
-    _feedMode = mode;
+    setFeedMode(mode);
     loadFeed();
   });
 });
-
-async function loadMoreFeed() {
-  if (_isLoadingMoreFeed || !_hasMoreFeedPosts) return;
-  // Guard: only run when the feed is the current page. Without this, an
-  // IntersectionObserver fire during navigation (or any leftover scroll
-  // observer between page changes) re-shows the sentinel and re-fetches
-  // posts even when the user is on /profile, /videos, /books, etc. The
-  // visible symptom is a "Loading more posts…" pill stuck on top of an
-  // unrelated page.
-  const feedIsVisible = feedEl && feedEl.style.display !== 'none' && feedEl.offsetParent !== null;
-  if (!feedIsVisible) return;
-  _isLoadingMoreFeed = true;
-
-  // Capture the seq at the START. If a tab switch (or fresh loadFeed) bumps
-  // the seq while we're awaiting, the response is stale and we discard it
-  // instead of appending posts from the wrong mode to the new feed.
-  const seq = _feedSeq;
-
-  const sentinel = document.getElementById('feedSentinel');
-  if (sentinel) {
-    sentinel.style.display = 'block';
-    sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
-  }
-
-  try {
-    // Reuse the same query-builder loadFeed uses. Pagination now respects the
-    // active mode — Following stays Following, For You keeps its scoring, etc.
-    const queryResult = await _buildAndExecFeedQuery({ offset: _feedOffset });
-
-    if (seq !== _feedSeq) return; // user switched tabs while we were waiting
-
-    if (queryResult.isHybrid) {
-      // Hybrid feed pagination — server returns mixed items; walk in
-      // order and dispatch to the right renderer. Pagination key is
-      // _feedHybridCursor (mutated inside _fetchHybridFeedPage), not
-      // _feedOffset, so don't bump _feedOffset here.
-      _hasMoreFeedPosts = !!queryResult.hasMore;
-      const feed = document.getElementById('feed');
-      const presentIds = new Set(Array.from(feed.querySelectorAll('.post-card')).map(c => c.dataset.postid));
-      const freshPosts = [];
-      let postIdx = 0;
-      (queryResult.items || []).forEach((it) => {
-        let el = null;
-        if (it.kind === 'post') {
-          if (presentIds.has(it.data?.id)) return;     // dedup against already-rendered posts
-          el = renderPost(it.data);
-          if (el) {
-            el.style.animationDelay = `${(postIdx * 0.03).toFixed(3)}s`;
-            postIdx += 1;
-            freshPosts.push(it.data);
-            if (_feedPostObserver) _feedPostObserver.observe(el);
-            el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
-          }
-        } else if (it.kind === 'book_carousel') {
-          el = _renderHybridBookCarousel(it.data);
-        } else if (it.kind === 'video_card') {
-          el = _renderHybridVideoCard(it.data);
-        }
-        if (el) feed.appendChild(el);
-      });
-      if (freshPosts.length) {
-        setupCollapsibleBodies(feed);
-        posts = posts.concat(freshPosts);
-      }
-    } else {
-      const rawMore = queryResult.data;
-      const more = _processFeedRows(queryResult);
-      const advance = rawMore.length;
-      if (advance < (queryResult.fetchLimit || FEED_PAGE_SIZE)) _hasMoreFeedPosts = false;
-      _feedOffset += advance;
-
-      if (more.length) {
-        const feed = document.getElementById('feed');
-        const presentIds = new Set(Array.from(feed.querySelectorAll('.post-card')).map(c => c.dataset.postid));
-        const fresh = more.filter(p => !presentIds.has(p.id));
-        fresh.forEach((post, i) => {
-          const el = renderPost(post);
-          el.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
-          feed.appendChild(el);
-          // Hand off to the existing observers so the new cards lazy-load too
-          if (_feedPostObserver) _feedPostObserver.observe(el);
-          el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
-        });
-        setupCollapsibleBodies(feed);
-        posts = posts.concat(fresh);
-      }
-    }
-
-    if (sentinel) {
-      if (_hasMoreFeedPosts) {
-        sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more posts…</div>';
-      } else {
-        sentinel.innerHTML = `<div class="book-grid-end-msg">You're all caught up · ${posts.length.toLocaleString()} posts</div>`;
-        if (_feedScrollObserver) { _feedScrollObserver.disconnect(); _feedScrollObserver = null; }
-      }
-    }
-  } catch (err) {
-    if (seq !== _feedSeq) return;
-    console.error('Failed to load more feed:', err);
-    if (sentinel) sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more — try refreshing</div>';
-  } finally {
-    _isLoadingMoreFeed = false;
-  }
-}
 
 function setupFeedInfiniteScroll() {
   const sentinel = document.getElementById('feedSentinel');
   if (!sentinel) return;
   sentinel.style.display = 'block';
 
-  if (_feedScrollObserver) _feedScrollObserver.disconnect();
+  const prevObs = getFeedScrollObserver();
+  if (prevObs) prevObs.disconnect();
   if (!('IntersectionObserver' in window)) return;
 
-  _feedScrollObserver = new IntersectionObserver((entries) => {
+  const obs = new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting) loadMoreFeed();
   }, { root: null, rootMargin: '600px 0px', threshold: 0.01 });
-  _feedScrollObserver.observe(sentinel);
+  setFeedScrollObserver(obs);
+  obs.observe(sentinel);
 }
 
 // One-shot lazy loaders: HLS for videos, reactions/comments per post-card.
@@ -3972,283 +3288,68 @@ function setupFeedLazyLoaders(container) {
     return;
   }
 
-  if (_feedVideoObserver) _feedVideoObserver.disconnect();
-  _feedVideoObserver = new IntersectionObserver((entries) => {
+  // Observer state lives in feed.js now (Stage 5). Bind locals before
+  // constructing so the IntersectionObserver callbacks capture this exact
+  // observer (rather than re-reading from feed.js, which would see the
+  // newest observer if this fn is invoked twice in rapid succession).
+  const prevVideoObs = getFeedVideoObserver();
+  if (prevVideoObs) prevVideoObs.disconnect();
+  const videoObs = new IntersectionObserver((entries) => {
     for (const e of entries) {
       if (!e.isIntersecting) continue;
       attachHlsToPostVideo(e.target);
-      _feedVideoObserver.unobserve(e.target);
+      videoObs.unobserve(e.target);
     }
   }, { root: null, rootMargin: '300px 0px', threshold: 0.01 });
+  setFeedVideoObserver(videoObs);
 
-  if (_feedPostObserver) _feedPostObserver.disconnect();
-  _feedPostObserver = new IntersectionObserver((entries) => {
+  const prevPostObs = getFeedPostObserver();
+  if (prevPostObs) prevPostObs.disconnect();
+  const postObs = new IntersectionObserver((entries) => {
     for (const e of entries) {
       if (!e.isIntersecting) continue;
       triggerPostLazyLoad(e.target);
-      _feedPostObserver.unobserve(e.target);
+      postObs.unobserve(e.target);
     }
   }, { root: null, rootMargin: '500px 0px', threshold: 0.01 });
+  setFeedPostObserver(postObs);
 
-  container.querySelectorAll('.post-video').forEach(v => _feedVideoObserver.observe(v));
-  container.querySelectorAll('.post-card').forEach(c => _feedPostObserver.observe(c));
-}
-
-function attachHlsToPostVideo(wrap) {
-  const url = wrap.dataset.videoUrl;
-  const video = wrap.querySelector('.post-video-player');
-  if (!url || !video || video.dataset.attached) return;
-  video.dataset.attached = '1';
-  if (url.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !video.canPlayType('application/vnd.apple.mpegurl')) {
-    const hls = new Hls();
-    hls.loadSource(url);
-    hls.attachMedia(video);
-  } else {
-    video.src = url;
-  }
+  container.querySelectorAll('.post-video').forEach(v => videoObs.observe(v));
+  container.querySelectorAll('.post-card').forEach(c => postObs.observe(c));
 }
 
 // Batch lazy-loads via a short debounce so 30 visible cards = 2 queries
 // (one for reactions, one for comment counts) instead of 60 round-trips.
 const _pendingLazyPostIds = new Set();
 let _pendingLazyPostTimer = null;
-function triggerPostLazyLoad(card) {
-  if (card.dataset.lazyLoaded === '1') return;
-  card.dataset.lazyLoaded = '1';
-  const id = card.dataset.postid;
-  if (!id) return;
-  _pendingLazyPostIds.add(id);
-  if (_pendingLazyPostTimer) clearTimeout(_pendingLazyPostTimer);
-  _pendingLazyPostTimer = setTimeout(flushPostLazyLoad, 80);
-}
-async function flushPostLazyLoad() {
-  const ids = [..._pendingLazyPostIds];
-  _pendingLazyPostIds.clear();
-  _pendingLazyPostTimer = null;
-  if (!ids.length) return;
-  // Both fetches can run in parallel.
-  await Promise.all([
-    bulkLoadReactions(ids, 'post'),
-    bulkLoadCommentCounts(ids),
-  ]);
-}
 
 // Bulk fetch reactions for many targets in one query, then update each row's UI.
-async function bulkLoadReactions(targetIds, targetType) {
-  if (!targetIds.length) return;
-  const { data } = await supabase
-    .from('reactions')
-    .select('target_id, emoji, user_id')
-    .in('target_id', targetIds)
-    .eq('target_type', targetType);
-  if (!data) return;
-  const grouped = {};
-  data.forEach(r => {
-    if (!grouped[r.target_id]) grouped[r.target_id] = { counts: {}, userReaction: null };
-    grouped[r.target_id].counts[r.emoji] = (grouped[r.target_id].counts[r.emoji] || 0) + 1;
-    if (currentUser && r.user_id === currentUser.id) grouped[r.target_id].userReaction = r.emoji;
-  });
-  // Update each target — empty groups still call updateReactionUI to clear stale state
-  for (const id of targetIds) {
-    const g = grouped[id] || { counts: {}, userReaction: null };
-    updateReactionUI(id, targetType, g.counts, g.userReaction);
-  }
-}
-
-// Bulk fetch comment counts via single rows-then-group (no count queries).
-async function bulkLoadCommentCounts(postIds) {
-  if (!postIds.length) return;
-  const { data } = await supabase
-    .from('comments')
-    .select('post_id')
-    .in('post_id', postIds);
-  if (!data) return;
-  const counts = {};
-  data.forEach(c => { counts[c.post_id] = (counts[c.post_id] || 0) + 1; });
-  postIds.forEach(id => {
-    const count = counts[id] || 0;
-    const text = count > 0 ? `${count} comment${count !== 1 ? 's' : ''}` : '';
-    document.querySelectorAll(`#ccount-${id}`).forEach(el => { el.textContent = text; });
-  });
-}
+// ════════════════════════════════════════════════════════════════════════
+// Batch engagement loaders MOVED to js/engagement.js (Stage 12).
+// Was lines 3215-3251 pre-extraction. See engagement.js
+// for the implementation. App.js re-imports the exported functions so
+// the feed.js _cfg passthroughs (bulkLoadReactions, bulkLoadCommentCounts,
+// loadComments, loadReactions, loadCommentCount) keep receiving the real
+// impls.
+// ════════════════════════════════════════════════════════════════════════
 
 // Backwards-compatibility shim — older code still calls this.
 function attachFeedVideoPlayers() {
   document.querySelectorAll('.post-video').forEach(attachHlsToPostVideo);
 }
 
-function renderPost(post) {
-  const div = document.createElement('div');
-  div.className = 'post-card' + (post.pinned_at ? ' is-pinned' : '');
-  div.dataset.postid  = post.id;
-  div.dataset.authorId = post.user_id || '';
-  if (post.pinned_at) div.dataset.pinned = '1';
-
-  const profile = post.profiles || {};
-  // Display name (Sprint 2 #2). Show the creator's chosen display
-  // name if they set one; otherwise fall back to @username; otherwise
-  // 'Unknown' for orphaned posts whose author row went missing.
-  const name = profile.display_name || profile.username || 'Unknown';
-  const isGuest = profile.is_guest;
-  const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}" alt="${name}"/>` : initials(name);
-  const isOwn = currentUser && currentUser.id === post.user_id;
-
-  div.innerHTML = `
-    ${post.pinned_at ? `
-      <div class="post-pinned-tag" title="Pinned to profile">
-        <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12"><path d="M16 2l-1.4 1.4 1.6 1.6-5.4 5.4-3-1.5L6 11.3l3.7 3.7L4 21l1.4 1.4 5.7-5.7 3.7 3.7 1.4-1.4-1.5-3 5.4-5.4 1.6 1.6L23 9l-7-7z"/></svg>
-        Pinned
-      </div>
-    ` : ''}
-    <div class="post-header">
-      <div class="avatar profile-link" data-user-id="${post.user_id}" title="View profile">${avatarHTML}</div>
-      <div style="flex:1">
-        <div style="display:flex;align-items:center">
-          <span class="post-author profile-link" data-user-id="${post.user_id}" title="View profile">${escHTML(name)}${renderRoleSeal(post.profiles)}</span>
-          ${isGuest ? '<span class="post-guest">Guest</span>' : ''}
-        </div>
-        <div class="post-time">${timeAgo(post.created_at)}</div>
-      </div>
-      ${currentUser ? `
-        <button class="post-menu-btn"
-                onclick="openPostActionMenu(event, this)"
-                data-post-id="${post.id}"
-                data-is-own="${isOwn ? '1' : '0'}"
-                data-is-pinned="${post.pinned_at ? '1' : '0'}"
-                data-author-id="${post.user_id}"
-                data-author-name="${escHTML(name)}"
-                title="${isOwn ? 'Post options' : 'Post options'}"
-                aria-label="Post options">
-          <span class="post-menu-glyph">⋮</span>
-        </button>
-      ` : ''}
-    </div>
-
-    ${post.reposted_from && post.original ? `
-      <div class="reposted-banner">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-        Reposted
-      </div>
-    ` : ''}
-
-    ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id}">${linkify(post.body)}</div>` : ''}
-    ${post.body ? renderLinkPreview(post.body) : ''}
-    ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
-    ${post.videos ? `
-      <div class="post-video" data-video-url="${escHTML(post.videos.video_url || '')}" data-video-id="${escHTML(post.videos.id || '')}">
-        <video class="post-video-player" poster="${escHTML(post.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
-      </div>
-    ` : ''}
-
-    ${post.reposted_from && post.original ? `
-      <div class="reposted-card">
-        <div class="post-header">
-          <div class="avatar profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${post.original.profiles?.avatar_url ? `<img src="${post.original.profiles.avatar_url}"/>` : initials(post.original.profiles?.username || 'U')}</div>
-          <div>
-            <span class="post-author profile-link" data-user-id="${post.original.user_id || ''}" title="View profile">${escHTML(post.original.profiles?.username || 'Unknown')}${renderRoleSeal(post.original.profiles)}</span>
-            <div class="post-time">${timeAgo(post.original.created_at)}</div>
-          </div>
-        </div>
-        ${post.original.body ? `<div class="post-body collapsible-body" data-post-id="${post.original.id}">${linkify(post.original.body)}</div>` : ''}
-        ${post.original.body ? renderLinkPreview(post.original.body) : ''}
-        ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
-        ${post.original.videos ? `
-          <div class="post-video" data-video-url="${escHTML(post.original.videos.video_url || '')}" data-video-id="${escHTML(post.original.videos.id || '')}">
-            <video class="post-video-player" poster="${escHTML(post.original.videos.thumbnail_url || '')}" muted playsinline preload="none" controls></video>
-          </div>
-        ` : ''}
-       </div>
-      ` : ''}
-
-    <div class="post-stats">
-      <div class="rcount" id="rsummary-${post.id}" data-target="${post.id}" data-type="post"></div>
-      <div class="ccount" id="ccount-${post.id}" data-postid="${post.id}"></div>
-    </div>
-
-    <div class="post-actions">
-      <div class="reaction-wrap" data-target="${post.id}" data-type="post">
-        <button class="action-btn reaction-trigger" data-target="${post.id}" data-type="post">
-          <span class="r-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-          </span>
-          <span class="r-label-text">Like</span>
-        </button>
-        <div class="reaction-picker">
-          ${REACTIONS.map(r => `
-            <button class="reaction-option" data-key="${r.key}" data-target="${post.id}" data-type="post" title="${r.label}">
-              <span class="r-emoji">${r.emoji}</span>
-              <span class="r-label">${r.label}</span>
-            </button>
-          `).join('')}
-        </div>
-      </div>
-
-      <button class="action-btn comment-toggle" data-postid="${post.id}">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-        <span>Comments</span>
-      </button>
-
-      <button class="action-btn" onclick="repostPost('${post.id}')" title="Repost">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-        <span>Repost</span>
-      </button>
-
-      <div class="reaction-wrap" style="position:relative">
-        <button class="action-btn" onclick="toggleShareMenu(event, '${post.id}')" title="Share">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
-          <span>Share</span>
-        </button>
-        <div class="share-menu" id="sharemenu-${post.id}">
-          <button class="share-option" onclick="shareTo('facebook','${post.id}')">📘 Facebook</button>
-          <button class="share-option" onclick="shareTo('twitter','${post.id}')">🐦 Twitter / X</button>
-          <button class="share-option" onclick="shareTo('whatsapp','${post.id}')">💬 WhatsApp</button>
-          <button class="share-option" onclick="shareTo('copy','${post.id}')">🔗 Copy link</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="comments-section" id="comments-${post.id}" style="display:none"></div>
-  `;
-  // Reactions and comment count are now loaded lazily by setupFeedLazyLoaders
-  // when the post-card scrolls into view (saves ~2 queries per off-screen post)
-  return div;
-}
-
-function escHTML(str) {
-  const d = document.createElement('div');
-  d.textContent = str || '';
-  return d.innerHTML;
-}
+// escHTML() moved to js/supabase.js (Stage 1 prep, 2026-05-15).
+// Imported at the top of this file.
 function linkify(str) {
   const escaped = escHTML(str);
   return escaped.replace(/(https?:\/\/[^\s<>"']+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
 }
 
 // ── Search helpers ────────────────────────────────────────────────────────────
-// PostgREST's .or() filter splits on commas and uses parens for grouping.
-// If those characters end up inside the user's query, the entire OR clause
-// breaks (causing "no results" for searches like `Romeo, Juliet` or `What's up?`).
-// Strip them defensively — users still get matches on the remaining tokens.
-function sanitizeSearchQuery(raw) {
-  return (raw || '')
-    .replace(/[,\(\)"]/g, ' ')   // PostgREST or() splitters / quote chars
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-// Escape ilike wildcards (% _ \) so a literal underscore doesn't match every char.
-function escapeIlike(s) {
-  return (s || '').replace(/[\\%_]/g, m => '\\' + m);
-}
-// Strip diacritics + lowercase, so "café" matches "cafe" on local cache filters.
-// (Server-side ilike is bytewise; full diacritic-insensitive search would need
-// a Postgres `unaccent` index — tracked as a future improvement.)
-function normalizeForSearch(s) {
-  return (s || '')
-    .toString()
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase();
-}
+// sanitizeSearchQuery / escapeIlike / normalizeForSearch moved to
+// js/search.js (Stage 10). The names are still imported at the top of
+// this file so existing _cfg.sanitizeSearchQuery bridges into books.js
+// and videos.js continue to receive the real implementation.
 
 // Translate vertical mouse-wheel scrolling into horizontal scroll on chip rails
 // (Trackpads already do this natively; this fixes mouse-wheel users.)
@@ -4328,147 +3429,6 @@ function renderLinkPreview(text) {
   } catch { return ''; }
 }
 
-// ── DM-specific link preview: Selebox-internal links get rich cards ──
-// Detects URLs of the form `…#video/UUID`, `…#book/UUID`, `…#profile/UUID`
-// and renders an in-app card with thumbnail/title/author. Async hydration
-// runs after renderMessages via hydrateDmInternalPreviews().
-function parseSeleboxInternalUrl(url) {
-  if (!url) return null;
-  const m = url.match(/#(video|book|profile)\/([a-z0-9-]+)/i);
-  if (!m) return null;
-  return { type: m[1].toLowerCase(), id: m[2] };
-}
-
-// In-memory cache so we don't refetch the same item on every render
-const _dmInternalPreviewCache = new Map(); // key = type:id, value = {title, thumb, sub}
-
-function renderDmLinkPreview(body) {
-  const url = firstUrlInText(body);
-  if (!url) return '';
-
-  // Selebox-internal: render placeholder, hydrator fills it in
-  const internal = parseSeleboxInternalUrl(url);
-  if (internal) {
-    const cacheKey = `${internal.type}:${internal.id}`;
-    const cached = _dmInternalPreviewCache.get(cacheKey);
-    return renderInternalPreviewCard(internal, cached);
-  }
-
-  // External: existing YouTube/generic preview (just wrap in dm-link-preview class for spacing)
-  const html = renderLinkPreview(body);
-  return html ? `<div class="dm-link-preview-wrap">${html}</div>` : '';
-}
-
-function renderInternalPreviewCard(internal, data) {
-  const { type, id } = internal;
-  const typeLabel = type === 'video' ? '🎬 Video' : type === 'book' ? '📖 Book' : '👤 Profile';
-  if (data) {
-    const thumb = data.thumb
-      ? `<img src="${escHTML(data.thumb)}" alt="" loading="lazy"/>`
-      : `<div class="dm-internal-placeholder">${type === 'profile' ? initials(data.title || '?') : (type === 'book' ? '📖' : '🎬')}</div>`;
-    const sub = data.sub ? `<div class="dm-internal-sub">${escHTML(data.sub)}</div>` : '';
-    return `
-      <button class="dm-internal-preview" data-internal-type="${type}" data-internal-id="${escHTML(id)}" type="button">
-        <div class="dm-internal-thumb">${thumb}</div>
-        <div class="dm-internal-meta">
-          <div class="dm-internal-platform">${typeLabel} on Selebox</div>
-          <div class="dm-internal-title">${escHTML(data.title || 'Untitled')}</div>
-          ${sub}
-        </div>
-        <div class="dm-internal-arrow">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-        </div>
-      </button>
-    `;
-  }
-  // Placeholder skeleton — gets filled in by hydrateDmInternalPreviews
-  return `
-    <button class="dm-internal-preview is-loading" data-internal-type="${type}" data-internal-id="${escHTML(id)}" data-pending="1" type="button">
-      <div class="dm-internal-thumb dm-internal-skel"></div>
-      <div class="dm-internal-meta">
-        <div class="dm-internal-platform">${typeLabel} on Selebox</div>
-        <div class="dm-internal-title dm-internal-skel-line"></div>
-        <div class="dm-internal-sub dm-internal-skel-line dm-internal-skel-line-short"></div>
-      </div>
-    </button>
-  `;
-}
-
-// Async fetch the actual content for any pending preview cards in the DOM.
-// Called after each renderMessages — only hits the network for unhydrated cards.
-async function hydrateDmInternalPreviews() {
-  const pending = document.querySelectorAll('.dm-internal-preview[data-pending="1"]');
-  if (!pending.length) return;
-
-  // Group by type for batched fetch
-  const byType = { video: new Set(), book: new Set(), profile: new Set() };
-  pending.forEach(el => {
-    const t = el.dataset.internalType;
-    const id = el.dataset.internalId;
-    if (byType[t]) byType[t].add(id);
-  });
-
-  // Fetch in parallel
-  const tasks = [];
-  if (byType.video.size) tasks.push(
-    supabase.from('videos')
-      .select('id, title, thumbnail_url, profiles!videos_uploader_id_fkey(username)')
-      .in('id', [...byType.video])
-      .then(({ data }) => (data || []).forEach(v => {
-        _dmInternalPreviewCache.set(`video:${v.id}`, {
-          title: v.title || 'Untitled video',
-          thumb: v.thumbnail_url,
-          sub: v.profiles?.username ? `by @${v.profiles.username}` : '',
-        });
-      }))
-  );
-  if (byType.book.size) tasks.push(
-    supabase.from('books')
-      .select('id, title, cover_url, profiles!books_author_id_fkey(username)')
-      .in('id', [...byType.book])
-      .then(({ data }) => (data || []).forEach(b => {
-        _dmInternalPreviewCache.set(`book:${b.id}`, {
-          title: b.title || 'Untitled book',
-          thumb: b.cover_url,
-          sub: b.profiles?.username ? `by @${b.profiles.username}` : '',
-        });
-      }))
-  );
-  if (byType.profile.size) tasks.push(
-    supabase.from('profiles')
-      .select('id, username, avatar_url, bio')
-      .in('id', [...byType.profile])
-      .then(({ data }) => (data || []).forEach(p => {
-        _dmInternalPreviewCache.set(`profile:${p.id}`, {
-          title: '@' + (p.username || 'unknown'),
-          thumb: p.avatar_url,
-          sub: (p.bio || '').slice(0, 60),
-        });
-      }))
-  );
-
-  await Promise.all(tasks);
-
-  // Snapshot scroll position BEFORE we mutate — if the user was at the bottom,
-  // we re-pin AFTER the swap so the latest message stays in view (the
-  // skeleton→full-card replacement can grow each bubble by a few px).
-  const wrap = document.getElementById('dmMessages');
-  const wasAtBottom = wrap ? isDmAtBottom(wrap) : false;
-
-  // Now swap each pending placeholder with the real card
-  pending.forEach(el => {
-    const t = el.dataset.internalType;
-    const id = el.dataset.internalId;
-    const data = _dmInternalPreviewCache.get(`${t}:${id}`);
-    if (!data) return;
-    const replacement = document.createElement('div');
-    replacement.innerHTML = renderInternalPreviewCard({ type: t, id }, data).trim();
-    el.parentNode.replaceChild(replacement.firstChild, el);
-  });
-
-  if (wasAtBottom) scrollMessagesToBottom();
-}
-
 // Click handler for internal preview cards (delegated)
 document.addEventListener('click', (e) => {
   const card = e.target.closest('.dm-internal-preview');
@@ -4530,77 +3490,6 @@ function confirmDialog({ title = 'Are you sure?', body = '', confirmLabel = 'Con
 // Expose globally so any onclick="..." handlers can use it too
 window.confirmDialog = confirmDialog;
 
-window.deletePost = async (postId) => {
-  const ok = await confirmDialog({
-    title: 'Delete this post?',
-    body: 'This permanently removes the post from your feed. If it includes a video, the video file will also be deleted from storage. This can\'t be undone.',
-    confirmLabel: 'Delete forever',
-  });
-  if (!ok) return;
-
-  // Check if this post has a video — if so, also delete the video & Bunny file
-  const { data: post, error: lookupError } = await supabase
-    .from('posts')
-    .select('video_id')
-    .eq('id', postId)
-    .single();
-
-  if (lookupError) {
-    toast('Failed to find post: ' + lookupError.message, 'error');
-    return;
-  }
-
-  if (post?.video_id) {
-    try {
-      await callEdgeFunction('bunny-delete', { videoId: post.video_id });
-    } catch (err) {
-      toast('Failed to delete video file: ' + err.message, 'error');
-      return;
-    }
-  }
-
-  const { error } = await supabase.from('posts').delete().eq('id', postId);
-  if (error) {
-    toast(error.message, 'error');
-    return;
-  }
-
-  toast('Deleted', 'success');
-  loadFeed();
-
-  // Always invalidate videos cache so next visit to videos page is fresh
-  allVideosCache = [];
-  if (videosPage.style.display === 'block') {
-    loadVideos();
-  }
-};
-
-// Pin/unpin a post to your profile (max 3 enforced server-side)
-async function togglePinPost(postId, currentlyPinned) {
-  const newPinnedAt = currentlyPinned ? null : new Date().toISOString();
-  const { error } = await supabase
-    .from('posts')
-    .update({ pinned_at: newPinnedAt })
-    .eq('id', postId)
-    .eq('user_id', currentUser.id); // belt-and-suspenders — RLS already enforces
-
-  if (error) {
-    if (/up to 3|max/i.test(error.message)) {
-      toast('You can only pin 3 posts. Unpin one first.', 'error');
-    } else {
-      toast(error.message, 'error');
-    }
-    return;
-  }
-
-  toast(currentlyPinned ? 'Unpinned' : 'Pinned to profile', 'success');
-
-  // If we're on the profile, refresh the posts tab so order updates
-  if (viewingProfileId === currentUser.id) {
-    loadProfilePosts(currentUser.id);
-  }
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // POST ACTION MENU — kebab menu on posts (own: Pin/Delete · others: Report/Hide/Snooze/Block)
 // ════════════════════════════════════════════════════════════════════════════
@@ -4632,101 +3521,10 @@ async function loadUserContentFilters() {
 }
 window.loadUserContentFilters = loadUserContentFilters;
 
-function shouldHidePost(post) {
-  if (!post) return false;
-  if (post.profiles?.is_banned)                            return true;
-  if (userContentFilters.hiddenPostIds.has(post.id))      return true;
-  if (userContentFilters.snoozedUserIds.has(post.user_id))return true;
-  if (userContentFilters.blockedUserIds.has(post.user_id))return true;
-  return false;
-}
 window.shouldHidePost = shouldHidePost;
 
-let _postActionMenuEl = null;
-function closePostActionMenu() {
-  if (_postActionMenuEl) { _postActionMenuEl.remove(); _postActionMenuEl = null; }
-}
-
-window.openPostActionMenu = (e, btn) => {
-  e.stopPropagation();
-  e.preventDefault();
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-
-  const postId     = btn.dataset.postId;
-  const isOwn      = btn.dataset.isOwn === '1';
-  const authorId   = btn.dataset.authorId;
-  const authorName = btn.dataset.authorName || 'this user';
-  const isPinned   = btn.dataset.isPinned === '1';
-
-  closePostActionMenu();
-  _postActionMenuEl = document.createElement('div');
-  _postActionMenuEl.className = 'post-action-menu';
-  _postActionMenuEl.innerHTML = isOwn ? `
-    <button data-pam-action="${isPinned ? 'unpin' : 'pin'}">${isPinned ? 'Unpin from profile' : 'Pin to profile'}</button>
-    <button data-pam-action="delete" class="pam-danger">Delete post</button>
-  ` : `
-    <button data-pam-action="report">Report</button>
-    <button data-pam-action="hide">Hide post</button>
-    <button data-pam-action="snooze">Snooze · 30 days</button>
-    <button data-pam-action="block" class="pam-danger">Block</button>
-  `;
-  document.body.appendChild(_postActionMenuEl);
-
-  // Position: below button, right-aligned to button's right edge
-  const r = btn.getBoundingClientRect();
-  _postActionMenuEl.style.position = 'fixed';
-  _postActionMenuEl.style.top      = `${Math.min(r.bottom + 6, window.innerHeight - 240)}px`;
-  _postActionMenuEl.style.right    = `${Math.max(window.innerWidth - r.right, 12)}px`;
-
-  _postActionMenuEl.querySelectorAll('[data-pam-action]').forEach(b => {
-    b.onclick = (ev) => {
-      ev.stopPropagation();
-      const action = b.dataset.pamAction;
-      closePostActionMenu();
-      if      (action === 'report') openReportModal(postId);
-      else if (action === 'hide')   hidePostFromFeed(postId);
-      else if (action === 'snooze') snoozeAuthor(authorId, authorName);
-      else if (action === 'block')  blockAuthor(authorId, authorName);
-      else if (action === 'pin')    togglePinPost(postId, false);
-      else if (action === 'unpin')  togglePinPost(postId, true);
-      else if (action === 'delete') window.deletePost(postId);
-    };
-  });
-
-  // Click anywhere else / Escape → close
-  setTimeout(() => {
-    const onDocClick = (ev) => {
-      if (!_postActionMenuEl?.contains(ev.target)) {
-        closePostActionMenu();
-        document.removeEventListener('click',  onDocClick);
-        document.removeEventListener('keydown', onKey);
-      }
-    };
-    const onKey = (ev) => { if (ev.key === 'Escape') { closePostActionMenu(); document.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocClick); } };
-    document.addEventListener('click',  onDocClick);
-    document.addEventListener('keydown', onKey);
-  }, 0);
-};
-
-async function hidePostFromFeed(postId) {
-  const { error } = await supabase.from('post_hides').upsert({
-    user_id: currentUser.id,
-    post_id: postId,
-  }, { onConflict: 'user_id,post_id' });
-  if (error) { toast(error.message, 'error'); return; }
-
-  userContentFilters.hiddenPostIds.add(postId);
-
-  // Smooth fade out, then remove from DOM
-  const card = document.querySelector(`.post-card[data-postid="${postId}"]`);
-  if (card) {
-    card.style.transition = 'opacity 0.25s, transform 0.25s, max-height 0.3s';
-    card.style.opacity = '0';
-    card.style.transform = 'scale(0.97)';
-    setTimeout(() => card.remove(), 280);
-  }
-  toast('Post hidden', 'success');
-}
+// _postActionMenuEl moved to feed.js (Stage 5) — only openPostActionMenu /
+// closePostActionMenu touch it, and both are in feed.js now.
 
 async function snoozeAuthor(targetId, targetName) {
   const expires = new Date();
@@ -4859,7 +3657,11 @@ function closeProfileActionMenu() {
   if (_profileActionMenuEl) { _profileActionMenuEl.remove(); _profileActionMenuEl = null; }
 }
 
-window.openProfileActionMenu = (e, btn, ctx) => {
+// Codex audit 2026-05-16: extracted to a named declaration so profile.js
+// can take it via the initProfile config shorthand. Still re-attached to
+// window because inline onclick=""-style call sites (if any are added
+// later in rendered HTML) need a global handle.
+function openProfileActionMenu(e, btn, ctx) {
   e.stopPropagation();
   e.preventDefault();
   if (!currentUser) { toast('Please sign in', 'error'); return; }
@@ -4914,7 +3716,8 @@ window.openProfileActionMenu = (e, btn, ctx) => {
     document.addEventListener('click',  onDocClick);
     document.addEventListener('keydown', onKey);
   }, 0);
-};
+}
+window.openProfileActionMenu = openProfileActionMenu;
 
 // Share profile — modal with copy link, native share, X/Facebook
 async function shareProfile(userId, username) {
@@ -5091,647 +3894,41 @@ function openReportUserModal(targetUserId, targetUsername) {
   };
 }
 
-async function loadCommentCount(postId, videoId = null) {
-  if (videoId) {
-    const { count } = await supabase.from('comments').select('*', { count: 'exact', head: true }).eq('video_id', videoId);
-    const el = document.getElementById('videoCommentsCount');
-    if (el) el.textContent = count ? `· ${count}` : '';
-    return count || 0;
-  }
-  const { count } = await supabase.from('comments').select('*', { count: 'exact', head: true }).eq('post_id', postId);
-  // Update ALL matches — same post can be present in multiple pages (feed + profile)
-  const text = count > 0 ? `${count} comment${count !== 1 ? 's' : ''}` : '';
-  document.querySelectorAll(`#ccount-${postId}`).forEach(el => { el.textContent = text; });
-  return count || 0;
-}
+// ════════════════════════════════════════════════════════════════════════
+// loadCommentCount helper MOVED to js/engagement.js (Stage 12).
+// Was lines 3814-3826 pre-extraction. See engagement.js
+// for the implementation. App.js re-imports the exported functions so
+// the feed.js _cfg passthroughs (bulkLoadReactions, bulkLoadCommentCounts,
+// loadComments, loadReactions, loadCommentCount) keep receiving the real
+// impls.
+// ════════════════════════════════════════════════════════════════════════
 
-// ── Reactions ──
-async function loadReactions(targetId, targetType) {
-  const { data } = await supabase.from('reactions').select('emoji, user_id').eq('target_id', targetId).eq('target_type', targetType);
-  if (!data) return;
-  const counts = {};
-  let userReaction = null;
-  data.forEach(r => {
-    counts[r.emoji] = (counts[r.emoji] || 0) + 1;
-    if (currentUser && r.user_id === currentUser.id) userReaction = r.emoji;
-  });
-  updateReactionUI(targetId, targetType, counts, userReaction);
-}
-
-function updateReactionUI(targetId, targetType, counts, userReaction) {
-  // Update ALL matching wraps — same post may exist in multiple pages
-  // (home feed cached as display:none + profile rendering it fresh).
-  const wraps = document.querySelectorAll(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
-  if (!wraps.length) return;
-
-  const total = Object.values(counts).reduce((a,b) => a+b, 0);
-  const activeR = userReaction ? REACTIONS.find(r => r.key === userReaction) : null;
-  const heartSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
-
-  wraps.forEach(wrap => {
-    const trigger = wrap.querySelector('.reaction-trigger');
-    if (!trigger) return;
-
-    const iconEl = trigger.querySelector('.r-icon');
-    const labelEl = trigger.querySelector('.r-label-text');
-
-    if (activeR) {
-      iconEl.innerHTML = `<span>${activeR.emoji}</span>`;
-      if (labelEl) labelEl.textContent = activeR.label;
-      trigger.classList.add('reacted');
-    } else {
-      iconEl.innerHTML = heartSvg;
-      if (labelEl) labelEl.textContent = 'Like';
-      trigger.classList.remove('reacted');
-    }
-
-    wrap.querySelectorAll('.reaction-option').forEach(btn =>
-      btn.classList.toggle('active', btn.dataset.key === userReaction));
-  });
-
-  // Summary stats above action bar — also update ALL matches
-  if (targetType === 'post') {
-    const sortedEmojis = REACTIONS.filter(r => counts[r.key] > 0).sort((a,b) => counts[b.key] - counts[a.key]);
-    const summaryHtml = sortedEmojis.length === 0 ? ''
-      : `<span class="rcount-emojis">${sortedEmojis.map(r => r.emoji).join('')}</span> ${total}`;
-    document.querySelectorAll(`#rsummary-${targetId}`).forEach(el => { el.innerHTML = summaryHtml; });
-  }
-}
-
-async function handleReaction(targetId, targetType, emojiKey) {
-  if (!currentUser) return toast('Sign in to react', 'error');
-
-  // Optimistic UI update: flip the trigger label/icon immediately so the
-  // user sees their reaction land instantly. loadReactions() reconciles
-  // with the server result a moment later.
-  try {
-    const wraps = document.querySelectorAll(`.reaction-wrap[data-target="${targetId}"][data-type="${targetType}"]`);
-    const r = REACTIONS.find(x => x.key === emojiKey);
-    wraps.forEach(wrap => {
-      const trigger = wrap.querySelector('.reaction-trigger');
-      if (!trigger || !r) return;
-      const icon = trigger.querySelector('.r-icon');
-      const label = trigger.querySelector('.r-label-text');
-      if (icon)  icon.innerHTML = `<span>${r.emoji}</span>`;
-      if (label) label.textContent = r.label;
-      trigger.classList.add('reacted');
-    });
-  } catch {}
-
-  // Read existing reaction to decide add vs change vs remove. SELECT is
-  // RLS-permitted (true), so this works under any session state.
-  const { data: existing, error: lookupErr } = await supabase
-    .from('reactions')
-    .select('id, emoji')
-    .eq('user_id', currentUser.id)
-    .eq('target_id', targetId)
-    .eq('target_type', targetType)
-    .maybeSingle();
-
-  if (lookupErr) {
-    toast('Reaction failed: ' + lookupErr.message, 'error');
-    loadReactions(targetId, targetType);
-    return;
-  }
-
-  // Route through SECURITY DEFINER RPCs — same path mobile uses. Direct
-  // `.insert/.update/.delete` was rejected by RLS whenever auth.uid()
-  // was null (stale session / not yet bootstrapped), which made likes
-  // silently never land in the database. The RPC validates the actor
-  // parameter against profiles and bypasses RLS internally.
-  let mutErr = null;
-  if (existing && existing.emoji === emojiKey) {
-    // Toggle off — remove the reaction.
-    const { error } = await supabase.rpc('submit_unreaction', {
-      p_actor_id: currentUser.id,
-      p_target_type: targetType,
-      p_target_id: String(targetId),
-    });
-    mutErr = error;
-  } else {
-    // Add or change emoji — submit_reaction handles both atomically.
-    const { error } = await supabase.rpc('submit_reaction', {
-      p_actor_id: currentUser.id,
-      p_target_type: targetType,
-      p_target_id: String(targetId),
-      p_emoji: emojiKey,
-    });
-    mutErr = error;
-  }
-
-  if (mutErr) {
-    toast('Reaction failed: ' + mutErr.message, 'error');
-  } else if (targetType === 'post' && !(existing && existing.emoji === emojiKey)) {
-    // Daily-goal: tick "Like & comment N posts". Dedup key is per-post
-    // so like + comment on the same post still counts as ONE engagement
-    // (mirrors mobile's PostInformation.jsx:249, PostCommentModal:1982).
-    // Toggle-off branch skipped — only ADDS count toward the goal.
-    try { tickGoalUnique('like_comment', `like_comment:${targetId}`); } catch {}
-  }
-  loadReactions(targetId, targetType);
-}
-
-// ── Comments ──
-// Facebook-style truncation. Showing every parent comment expanded made
-// long threads (200+ comments on a popular post) unscrollable — the
-// reactions row at the bottom of the post effectively never reached
-// the viewport. Now we show only the most recent N parents plus a
-// "View N previous comments" link that expands the older ones.
-const INITIAL_PARENTS_VISIBLE = 2;
-
-async function loadComments(postId, videoId = null) {
-  const containerId = videoId ? 'videoComments' : `comments-${postId}`;
-  const section = document.getElementById(containerId);
-  if (!section) return;
-  section.innerHTML = '<div class="loading" style="padding:1rem">Loading...</div>';
-  // Fetch BOTH parents AND replies in a single query to eliminate the N+1
-  // pattern where each parent triggered its own reply lookup. We group
-  // client-side and pass replies down to renderComment so it doesn't refetch.
-  let q = supabase.from('comments')
-    .select(`*, profiles(id, username, avatar_url, is_guest)`)
-    .order('created_at', { ascending: true });
-  if (videoId) q = q.eq('video_id', videoId);
-  else q = q.eq('post_id', postId);
-  const { data, error } = await q;
-  if (error) { section.innerHTML = `<p style="color:var(--text3);font-size:0.85rem">${error.message}</p>`; return; }
-  // Split into parents + group replies by parent_id
-  const parents = [];
-  const repliesByParent = {};
-  (data || []).forEach(c => {
-    if (c.parent_id) {
-      if (!repliesByParent[c.parent_id]) repliesByParent[c.parent_id] = [];
-      repliesByParent[c.parent_id].push(c);
-    } else {
-      parents.push(c);
-    }
-  });
-  section.innerHTML = '';
-
-  // UX fix: comment input lives at the TOP of the section so users don't
-  // have to scroll past every comment to reply. Earlier layout appended
-  // the input after the parents list, which made replying on long threads
-  // genuinely painful — especially on the video player where the comments
-  // section can run hundreds of rows. Build the input first, append it,
-  // then add the comments below.
-  const previewKey = videoId ? `cimgpreview-v-${videoId}` : `cimgpreview-${postId}`;
-  const inputWrap = document.createElement('div');
-  inputWrap.className = 'comment-input-wrap';
-  inputWrap.style.flexDirection = 'column';
-  inputWrap.style.gap = '0.5rem';
-  // Sticky position so the input stays in view while the user scrolls
-  // through long comment threads. `--bg-card` matches the surrounding
-  // card so it doesn't appear to float.
-  inputWrap.style.position = 'sticky';
-  inputWrap.style.top = '0';
-  inputWrap.style.zIndex = '5';
-  inputWrap.style.background = 'var(--bg-card, #fff)';
-  inputWrap.style.paddingBottom = '0.5rem';
-  inputWrap.style.borderBottom = '1px solid var(--border, #eee)';
-  inputWrap.style.marginBottom = '0.75rem';
-  inputWrap.innerHTML = `
-    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
-      <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
-      <textarea class="comment-input" placeholder="Write a comment…" rows="1"></textarea>
-      <button class="btn-send">Send</button>
-    </div>
-    <div id="${previewKey}" style="margin-left:40px"></div>
-    <div style="margin-left:40px;margin-top:-4px">
-      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        Add photo
-        <input type="file" accept="image/*" class="cimg-input"/>
-      </label>
-    </div>
-  `;
-  section.appendChild(inputWrap);
-
-  // Facebook-style truncation. Order is oldest→newest already (matches the
-  // query above), so the "tail" of the array is the most recent N parents.
-  // Show only those by default; expose a "View N previous comments" link
-  // that fills in the rest.
-  const visibleParents = parents.length > INITIAL_PARENTS_VISIBLE
-    ? parents.slice(parents.length - INITIAL_PARENTS_VISIBLE)
-    : parents;
-  const hiddenParents = parents.length > INITIAL_PARENTS_VISIBLE
-    ? parents.slice(0, parents.length - INITIAL_PARENTS_VISIBLE)
-    : [];
-
-  if (hiddenParents.length > 0) {
-    const viewMoreBtn = document.createElement('button');
-    viewMoreBtn.className = 'comment-view-more';
-    viewMoreBtn.type = 'button';
-    viewMoreBtn.textContent = `View ${hiddenParents.length} previous comment${hiddenParents.length === 1 ? '' : 's'}`;
-    viewMoreBtn.addEventListener('click', async () => {
-      viewMoreBtn.disabled = true;
-      // Insert hidden parents in their original (oldest-first) order
-      // BEFORE the first currently-visible comment. We have to capture
-      // the anchor node first because appendChild on the button itself
-      // would push them out of order.
-      const anchor = viewMoreBtn.nextSibling;
-      for (const c of hiddenParents) {
-        const el = await renderComment(c, postId, false, null, videoId, repliesByParent);
-        section.insertBefore(el, anchor);
-      }
-      viewMoreBtn.remove();
-    });
-    section.appendChild(viewMoreBtn);
-  }
-
-  for (const c of visibleParents) {
-    section.appendChild(await renderComment(c, postId, false, null, videoId, repliesByParent));
-  }
-
-  const ta = inputWrap.querySelector('textarea');
-  ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, null, ta, previewKey, videoId); }});
-  inputWrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, null, ta, previewKey, videoId));
-  inputWrap.querySelector('.cimg-input').addEventListener('change', (e) => handleCommentImageSelect(e.target, previewKey));
-
-  // Realtime — subscribe to comments INSERT / UPDATE / DELETE for this
-  // post or video so the section updates live when someone else
-  // (mobile or web) comments. The subscribe is idempotent — calling
-  // ensureCommentsRealtime for an already-subscribed container is a
-  // no-op, so the loadComments → channel-event → loadComments cycle
-  // doesn't tear down and re-create channels (which would open a
-  // small window where new events go unheard).
-  ensureCommentsRealtime({ postId, videoId, section });
-}
-
-// Persistent comment-realtime subscriber. One channel per container,
-// kept alive until something removes the listener entry. The earlier
-// version recreated the channel on every loadComments() call, which:
-//   1. Wasted bandwidth subscribing+unsubscribing
-//   2. Opened a ~100ms window where events were lost during the
-//      tear-down → resubscribe handoff
-// Now: idempotent. Same containerId → reuse the existing channel.
-//
-// Refresh trigger is debounced (250ms) so a burst of comments doesn't
-// fire N round-trips of loadComments for the same data.
-let __commentsChannelSeq = 0;
-const _commentsChannelByContainer = new Map();   // containerId → { channel, postId, videoId, refreshTimer }
-
-function ensureCommentsRealtime({ postId, videoId, section }) {
-  if (!section) return;
-  const containerId = section.id;
-  const filterCol = videoId ? 'video_id' : 'post_id';
-  const filterId = videoId || postId;
-
-  const existing = _commentsChannelByContainer.get(containerId);
-  if (existing && existing.postId === postId && existing.videoId === videoId) {
-    // Already subscribed for the same target — nothing to do.
-    return;
-  }
-  if (existing) {
-    // Container was repurposed for a different post/video. Tear down.
-    try { supabase.removeChannel(existing.channel); } catch (_) { /* swallow */ }
-    if (existing.refreshTimer) clearTimeout(existing.refreshTimer);
-    _commentsChannelByContainer.delete(containerId);
-  }
-
-  const state = { postId, videoId, channel: null, refreshTimer: null };
-  const scheduleRefresh = () => {
-    if (state.refreshTimer) return; // a refresh is already pending
-    state.refreshTimer = setTimeout(() => {
-      state.refreshTimer = null;
-      // Only refresh if the section is still in the DOM. The original
-      // section reference may be stale (innerHTML replacement keeps
-      // the same node, but a removal would orphan it).
-      if (document.getElementById(containerId)) loadComments(postId, videoId);
-    }, 250);
-  };
-
-  const channelName = `comments-${filterCol}:${filterId}:${++__commentsChannelSeq}`;
-  const channel = supabase
-    .channel(channelName)
-    .on('postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'comments', filter: `${filterCol}=eq.${filterId}` },
-      scheduleRefresh,
-    )
-    .on('postgres_changes',
-      { event: 'UPDATE', schema: 'public', table: 'comments', filter: `${filterCol}=eq.${filterId}` },
-      scheduleRefresh,
-    )
-    .on('postgres_changes',
-      { event: 'DELETE', schema: 'public', table: 'comments', filter: `${filterCol}=eq.${filterId}` },
-      scheduleRefresh,
-    )
-    .subscribe();
-
-  state.channel = channel;
-  _commentsChannelByContainer.set(containerId, state);
-}
-
-async function renderComment(comment, postId, isReply = false, topLevelId = null, videoId = null, repliesByParent = null) {
-  // Auto-detect video comments by inspecting the row
-  if (!videoId && comment.video_id) videoId = comment.video_id;
-  const div = document.createElement('div');
-  div.className = isReply ? 'reply-item' : 'comment-item';
-  const profile = comment.profiles || {};
-  // display_name preferred; falls back to @handle. Sprint 2 #2.
-  const name = profile.display_name || profile.username || 'Unknown';
-  const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
-  const replyTargetId = isReply ? topLevelId : comment.id;
-  const replyToName = isReply ? name : null;
-
-  div.innerHTML = `
-    <div class="avatar sm">${avatarHTML}</div>
-    <div class="comment-body">
-      <div class="comment-meta">
-        <span class="comment-author">${escHTML(name)}${renderRoleSeal(profile)}</span>
-        <span class="comment-time">${timeAgo(comment.created_at)}</span>
-        ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
-      </div>
-      ${comment.body ? `<div class="comment-bubble">${linkify(comment.body)}</div>` : ''}
-      ${comment.body ? renderLinkPreview(comment.body) : ''}
-      ${comment.image_url ? `<div class="comment-image" onclick="openLightbox('${comment.image_url}')"><img src="${comment.image_url}" loading="lazy"/></div>` : ''}
-      <div class="comment-actions">
-        <div class="reaction-wrap" data-target="${comment.id}" data-type="comment" style="position:relative">
-          <button class="reaction-trigger comment-action-btn" data-target="${comment.id}" data-type="comment">
-            <span class="r-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></span>
-            <span class="r-label-text">Like</span>
-          </button>
-          <div class="reaction-picker">
-            ${REACTIONS.map(r => `
-              <button class="reaction-option" data-key="${r.key}" data-target="${comment.id}" data-type="comment" title="${r.label}">
-                <span class="r-emoji">${r.emoji}</span>
-                <span class="r-label">${r.label}</span>
-              </button>
-            `).join('')}
-          </div>
-        </div>
-        <button class="comment-action-btn reply-btn" data-commentid="${replyTargetId}" data-postid="${postId || ''}" data-videoid="${videoId || ''}" data-replyto="${escHTML(replyToName || '')}">Reply</button>
-        ${currentUser && currentUser.id === comment.user_id ? `<button class="comment-action-btn" onclick="deleteComment('${comment.id}','${postId || ''}','${videoId || ''}')">Delete</button>` : ''}
-      </div>
-      ${!isReply ? `<div class="replies" id="replies-${comment.id}"></div>` : ''}
-    </div>
-  `;
-
-  loadReactions(comment.id, 'comment');
-  if (!isReply) {
-    let replies;
-    if (repliesByParent) {
-      // Use the pre-grouped replies from loadComments (no extra fetch — N+1 fixed)
-      replies = repliesByParent[comment.id] || [];
-    } else {
-      // Fallback for callers that don't pre-group (e.g. realtime add)
-      const { data } = await supabase
-        .from('comments')
-        .select(`*, profiles(id, username, avatar_url, is_guest)`)
-        .eq('parent_id', comment.id)
-        .order('created_at', { ascending: true });
-      replies = data || [];
-    }
-    if (replies.length) {
-      const container = div.querySelector(`#replies-${comment.id}`);
-      // Facebook-style: replies hidden by default behind a "View N replies"
-      // toggle. Big threads on web were rendering hundreds of nested
-      // reply rows on every parent — visually overwhelming and slow.
-      // Click to expand, click again on the rendered toggle (now "Hide
-      // replies") to collapse. New replies you post yourself auto-expand
-      // on the next loadComments cycle (realtime triggers a refresh).
-      const viewBtn = document.createElement('button');
-      viewBtn.className = 'comment-view-replies';
-      viewBtn.type = 'button';
-      viewBtn.textContent = `View ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`;
-      let expanded = false;
-      const renderedReplies = [];
-      viewBtn.addEventListener('click', async () => {
-        if (expanded) {
-          // Collapse — remove the rendered reply nodes.
-          renderedReplies.forEach((node) => node.remove());
-          renderedReplies.length = 0;
-          viewBtn.textContent = `View ${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`;
-          expanded = false;
-          return;
-        }
-        viewBtn.disabled = true;
-        for (const r of replies) {
-          const el = await renderComment(r, postId, true, comment.id, videoId, repliesByParent);
-          container.appendChild(el);
-          renderedReplies.push(el);
-        }
-        viewBtn.disabled = false;
-        viewBtn.textContent = 'Hide replies';
-        expanded = true;
-      });
-      container.appendChild(viewBtn);
-    }
-  }
-  return div;
-}
-
-const pendingCommentImages = {};
-function handleCommentImageSelect(input, previewId) {
-  const file = input.files[0];
-  if (!file) return;
-  if (!file.type.startsWith('image/')) { toast('Please select an image', 'error'); return; }
-  if (file.size > 5 * 1024 * 1024) { toast('Image must be smaller than 5MB', 'error'); return; }
-  pendingCommentImages[previewId] = file;
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    const preview = document.getElementById(previewId);
-    if (!preview) return;
-    preview.innerHTML = `<div class="image-preview" style="max-width:240px"><img src="${ev.target.result}"/><button class="image-preview-remove">×</button></div>`;
-    preview.querySelector('.image-preview-remove').addEventListener('click', () => {
-      delete pendingCommentImages[previewId];
-      preview.innerHTML = '';
-      input.value = '';
-    });
-  };
-  reader.readAsDataURL(file);
-}
-
-async function submitComment(postId, parentId, textarea, previewId, videoId = null) {
-  const body = textarea.value.trim();
-  const file = previewId ? pendingCommentImages[previewId] : null;
-  if (!body && !file) return;
-  if (!currentUser) return toast('Sign in to comment', 'error');
-  let imageUrl = null;
-  if (file) {
-    textarea.disabled = true;
-    imageUrl = await uploadImage(file);
-    textarea.disabled = false;
-    if (!imageUrl) return;
-  }
-  const insertRow = {
-    user_id: currentUser.id,
-    parent_id: parentId || null,
-    body: body || '',
-    image_url: imageUrl,
-  };
-  if (videoId) insertRow.video_id = videoId;
-  else insertRow.post_id = postId;
-  const { error } = await supabase.from('comments').insert(insertRow);
-  if (error) { toast(error.message, 'error'); return; }
-  // Daily-goal: tick "Like & comment N posts". Same dedup key as the
-  // reaction path so commenting + liking the same post counts ONCE.
-  // Skipped for video comments (videoId set) since the daily quest is
-  // post-specific per the spec.
-  if (!videoId) {
-    try { tickGoalUnique('like_comment', `like_comment:${postId}`); } catch {}
-  }
-  textarea.value = '';
-  textarea.style.height = 'auto';
-  if (previewId) {
-    delete pendingCommentImages[previewId];
-    const preview = document.getElementById(previewId);
-    if (preview) preview.innerHTML = '';
-  }
-  loadComments(postId, videoId);
-  loadCommentCount(postId, videoId);
-}
-
-window.deleteComment = async (commentId, postId, videoId = null) => {
-  const ok = await confirmDialog({
-    title: 'Delete this comment?',
-    body: 'This comment will be removed permanently and can\'t be recovered.',
-    confirmLabel: 'Delete',
-  });
-  if (!ok) return;
-  await supabase.from('comments').delete().eq('id', commentId);
-  // postId or videoId may arrive as the empty string from the inline onclick — normalize
-  const pid = postId || null;
-  const vid = videoId || null;
-  loadComments(pid, vid);
-  loadCommentCount(pid, vid);
-};
-
-function showReplyInput(commentId, postId, replyToName = '', videoId = null) {
-  document.querySelectorAll('.reply-input-wrap').forEach(el => el.remove());
-  const container = document.getElementById(`replies-${commentId}`);
-  if (!container) return;
-  const previewId = `rimgpreview-${commentId}-${Date.now()}`;
-  const wrap = document.createElement('div');
-  wrap.className = 'comment-input-wrap reply-input-wrap';
-  wrap.style.marginTop = '0.5rem';
-  wrap.style.flexDirection = 'column';
-  wrap.style.gap = '0.5rem';
-  const placeholder = replyToName ? `Reply to ${replyToName}…` : 'Write a reply…';
-  wrap.innerHTML = `
-    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
-      <div class="avatar sm">${currentProfile?.avatar_url ? `<img src="${currentProfile.avatar_url}"/>` : initials(currentProfile?.username || 'G')}</div>
-      <textarea class="comment-input" placeholder="${placeholder}" rows="1"></textarea>
-      <button class="btn-send">Reply</button>
-    </div>
-    <div id="${previewId}" style="margin-left:40px"></div>
-    <div style="margin-left:40px;margin-top:-4px">
-      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        Add photo
-        <input type="file" accept="image/*" class="rimg-input"/>
-      </label>
-    </div>
-  `;
-  const ta = wrap.querySelector('textarea');
-  if (replyToName) ta.value = `@${replyToName} `;
-  ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, commentId, ta, previewId, videoId); }});
-  wrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, commentId, ta, previewId, videoId));
-  wrap.querySelector('.rimg-input').addEventListener('change', (e) => handleCommentImageSelect(e.target, previewId));
-  container.appendChild(wrap);
-  ta.focus();
-  ta.setSelectionRange(ta.value.length, ta.value.length);
-}
-
-// ── Global delegated click handlers ──
-document.addEventListener('click', (e) => {
-  const option = e.target.closest('.reaction-option');
-  if (option) {
-    e.preventDefault(); e.stopPropagation();
-    option.closest('.reaction-picker')?.classList.remove('visible');
-    handleReaction(option.dataset.target, option.dataset.type, option.dataset.key);
-    return;
-  }
-  const trigger = e.target.closest('.reaction-trigger');
-  if (trigger) {
-    e.preventDefault(); e.stopPropagation();
-    const picker = trigger.closest('.reaction-wrap')?.querySelector('.reaction-picker');
-    document.querySelectorAll('.reaction-picker.visible').forEach(p => { if (p !== picker) p.classList.remove('visible'); });
-    picker?.classList.toggle('visible');
-    return;
-  }
-  const ct = e.target.closest('.comment-toggle');
-  if (ct) {
-    const postId = ct.dataset.postid;
-    const section = document.getElementById(`comments-${postId}`);
-    // Defensive: if the section element is missing (post recently
-    // re-rendered, dataset typo, etc.), bail loudly instead of
-    // throwing on `section.style` and silently dropping the click.
-    if (!section) {
-      console.warn('[comment-toggle] comments section not found for post', postId);
-      return;
-    }
-    if (section.style.display === 'none' || section.style.display === '') {
-      section.style.display = 'block';
-      // Scroll the comment input into view after the layout settles.
-      // Without this, the section opens BELOW the post and the user
-      // doesn't see the input — looks like "nothing happened".
-      loadComments(postId).then(() => {
-        const inputEl = section.querySelector('.comment-input');
-        if (inputEl && typeof inputEl.scrollIntoView === 'function') {
-          inputEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }).catch((err) => {
-        console.error('[comment-toggle] loadComments failed', err);
-      });
-    } else {
-      section.style.display = 'none';
-    }
-    return;
-  }
-  const replyBtn = e.target.closest('.reply-btn');
-  if (replyBtn) {
-    const pid = replyBtn.dataset.postid || null;
-    const vid = replyBtn.dataset.videoid || null;
-    showReplyInput(replyBtn.dataset.commentid, pid, replyBtn.dataset.replyto, vid);
-    return;
-  }
-  if (!e.target.closest('.reaction-wrap')) {
-    document.querySelectorAll('.reaction-picker.visible').forEach(p => p.classList.remove('visible'));
-  }
-  if (!e.target.closest('.share-wrap') && !e.target.closest('[onclick*="toggleShareMenu"]')) {
-    document.querySelectorAll('.share-menu.visible').forEach(m => m.classList.remove('visible'));
-  }
-  if (!e.target.closest('.topbar-search')) {
-    document.getElementById('searchResults').classList.remove('visible');
-  }
-});
-
-document.addEventListener('mouseover', (e) => {
-  const trigger = e.target.closest('.reaction-trigger');
-  if (trigger) trigger.closest('.reaction-wrap')?.querySelector('.reaction-picker')?.classList.add('visible');
-});
-document.addEventListener('mouseout', (e) => {
-  const wrap = e.target.closest('.reaction-wrap');
-  if (!wrap || wrap.contains(e.relatedTarget)) return;
-  setTimeout(() => { if (!wrap.matches(':hover')) wrap.querySelector('.reaction-picker')?.classList.remove('visible'); }, 200);
-});
-
+// ════════════════════════════════════════════════════════════════════════
+// Reactions block MOVED to js/engagement.js (Stage 12).
+// Was lines 3828-3953 pre-extraction. See engagement.js
+// for the implementation. App.js re-imports the exported functions so
+// the feed.js _cfg passthroughs (bulkLoadReactions, bulkLoadCommentCounts,
+// loadComments, loadReactions, loadCommentCount) keep receiving the real
+// impls.
+// ════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════
+// Comments block MOVED to js/engagement.js (Stage 12).
+// Was lines 3954-4355 pre-extraction. See engagement.js
+// for the implementation. App.js re-imports the exported functions so
+// the feed.js _cfg passthroughs (bulkLoadReactions, bulkLoadCommentCounts,
+// loadComments, loadReactions, loadCommentCount) keep receiving the real
+// impls.
+// ════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════
+// Global delegated click handlers MOVED to js/engagement.js (Stage 12).
+// Was lines 4356-4440 pre-extraction. See engagement.js
+// for the implementation. App.js re-imports the exported functions so
+// the feed.js _cfg passthroughs (bulkLoadReactions, bulkLoadCommentCounts,
+// loadComments, loadReactions, loadCommentCount) keep receiving the real
+// impls.
+// ════════════════════════════════════════════════════════════════════════
 // ── Repost modal ──
 let repostTargetId = null;
-window.repostPost = (postId) => {
-  if (!currentUser) return toast('Sign in to repost', 'error');
-  const post = posts.find(p => p.id === postId);
-  if (!post) return;
-  repostTargetId = postId;
-  const profile = post.profiles || {};
-  // display_name preferred; falls back to @handle. Sprint 2 #2.
-  const name = profile.display_name || profile.username || 'Unknown';
-  const avatarHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(name);
-  document.getElementById('repostPreview').innerHTML = `
-    <div class="post-header">
-      <div class="avatar">${avatarHTML}</div>
-      <div><span class="post-author">${escHTML(name)}${renderRoleSeal(profile)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
-    </div>
-    ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id || post.$id || ''}">${linkify(post.body)}</div>` : ''}
-    ${post.body ? renderLinkPreview(post.body) : ''}
-    ${post.image_url ? `<div style="border-radius:8px;overflow:hidden;margin-top:0.5rem"><img src="${post.image_url}"/></div>` : ''}
-  `;
-  document.getElementById('repostCaption').value = '';
-  document.getElementById('repostModal').classList.add('open');
-  document.body.style.overflow = 'hidden';
-  setTimeout(() => document.getElementById('repostCaption').focus(), 100);
-};
 function closeRepostModal() {
   document.getElementById('repostModal').classList.remove('open');
   document.body.style.overflow = '';
@@ -5769,25 +3966,6 @@ document.getElementById('repostSubmit').addEventListener('click', async () => {
   loadFeed();
 });
 
-// ── Share menu ──
-window.toggleShareMenu = (e, postId) => {
-  e.stopPropagation();
-  document.querySelectorAll('.share-menu.visible').forEach(m => { if (m.id !== `sharemenu-${postId}`) m.classList.remove('visible'); });
-  document.getElementById(`sharemenu-${postId}`).classList.toggle('visible');
-};
-window.shareTo = (platform, postId) => {
-  const url = `${window.location.origin}?post=${postId}`;
-  const text = 'Check out this post on Selebox';
-  const urls = {
-    facebook: `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(url)}`,
-    twitter: `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
-    whatsapp: `https://wa.me/?text=${encodeURIComponent(text + ' ' + url)}`
-  };
-  if (platform === 'copy') navigator.clipboard.writeText(url).then(() => toast('Link copied!', 'success'));
-  else if (urls[platform]) window.open(urls[platform], '_blank');
-  document.getElementById(`sharemenu-${postId}`).classList.remove('visible');
-};
-
 // ── Realtime ──
 // Debounced + scoped feed refresh. The old version reloaded the WHOLE feed on
 // every INSERT or DELETE platform-wide — which on a busy site meant constant
@@ -5798,15 +3976,18 @@ window.shareTo = (platform, postId) => {
 //   • Both go through a debounce so a burst of changes coalesces into one reload.
 //   • Reload only fires when the home feed is the active page.
 //
-// The `_realtimeRefreshTimer` itself is declared up top with the other feed
-// state so loadFeed can cancel it cleanly.
+// The realtime-refresh debounce timer lives in feed.js (Stage 5) alongside
+// the rest of the feed state. We reach for it through accessors so the
+// single timer slot stays the source of truth between app.js (this fn,
+// which sets it) and feed.js (loadFeed, which clears it on user-driven
+// loads).
 function _scheduleRealtimeFeedRefresh() {
-  if (_realtimeRefreshTimer) return; // already pending
-  _realtimeRefreshTimer = setTimeout(() => {
-    _realtimeRefreshTimer = null;
+  if (getRealtimeRefreshTimer()) return; // already pending
+  setRealtimeRefreshTimer(setTimeout(() => {
+    setRealtimeRefreshTimer(null);
     const feedVisible = feedEl && feedEl.style.display !== 'none' && !document.hidden;
     if (feedVisible && currentUser?.id) loadFeed();
-  }, 800);
+  }, 800));
 }
 
 supabase.channel('public-feed')
@@ -5816,8 +3997,9 @@ supabase.channel('public-feed')
     // Always refresh on the viewer's own posts
     if (newPost.user_id === currentUser.id) return _scheduleRealtimeFeedRefresh();
     // For Following tab, only refresh if the author is one the viewer follows
-    if (_feedMode === 'following') {
-      if (_cachedFollowIds && _cachedFollowIds.includes(newPost.user_id)) {
+    if (getFeedMode() === 'following') {
+      const followIds = getCachedFollowIds();
+      if (followIds && followIds.includes(newPost.user_id)) {
         _scheduleRealtimeFeedRefresh();
       }
       return;
@@ -5836,11 +4018,9 @@ supabase.channel('public-feed')
   .subscribe();
 
 // ── Profile page ──
-const profilePage = document.getElementById('profilePage');
 const feedEl = document.getElementById('feed');
 const storiesEl = document.getElementById('storiesRow');
 const composeEl = document.querySelector('.compose');
-let viewingProfileId = null;
 
 // ── Home landing — data wiring ──────────────────────────────────────
 //
@@ -5883,7 +4063,7 @@ async function _resolveDearJenUploaderId() {
       .maybeSingle();
     if (data?.id) {
       _dearJenUploaderId = data.id;
-      console.log(`[home] Dear Jen uploader resolved: "${data.username}" id=${data.id}`);
+      // (Resolution-success log removed — runs once per session, no signal value.)
     } else {
       console.warn('[home] No profile matched username ILIKE "%Dear Jen%" — featured slot will stay empty');
     }
@@ -5891,6 +4071,39 @@ async function _resolveDearJenUploaderId() {
     console.warn('[home] Dear Jen profile lookup failed:', err?.message || err);
   }
   return _dearJenUploaderId;
+}
+
+// ─── Home session-state reset (called from sign-in / sign-out paths) ─────
+// Clears the 60s TTL cache + book shelf pools + in-flight promise so an
+// admin-rendered home (with the inline "replace cover" pencils) doesn't
+// linger across an auth flip into a regular user's session. Without this,
+// signing out then signing in within 60s reused the cached HTML — the
+// regular user briefly saw the previous admin's pencils because
+// `_homeDataLoadedAt` was still fresh and showHomeLanding returned early
+// without re-rendering. (Codex P1 catch.)
+function resetHomeSessionState() {
+  _homeDataLoadedAt = 0;
+  _homeDataInFlight = null;
+  _bookShelfPools.trending = [];
+  _bookShelfPools.recent = [];
+  _bookShelfPages.trending = 0;
+  _bookShelfPages.recent = 0;
+  // Restore skeletons so the next showHomeLanding renders fresh state
+  // immediately instead of carrying over the prior user's cards. The
+  // `.home-skeleton-card` class is the default look from index.html.
+  ['homeHeroVideo', 'homeFeaturedPost'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.classList.add('home-skeleton-card');
+      el.innerHTML = '';
+      el.onclick = null;
+    }
+  });
+  document.querySelectorAll('.home-video-medium, .home-video-trending, .home-book-card').forEach(el => {
+    el.classList.add('home-skeleton-card');
+    el.innerHTML = '';
+    el.onclick = null;
+  });
 }
 
 // Short-form view-count formatter — "4,213" → "4.2K", "1,580,000" → "1.6M"
@@ -6141,8 +4354,16 @@ async function _replaceBookCoverFromHome(bookId) {
     if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
 
     openCropModal(file, {
-      aspectRatio: NaN, // no aspect lock — admin keeps full aspect or freely re-crops
-      title: 'Replace book cover',
+      // Lock to 2:3 — the canonical book-cover ratio that mobile uses
+      // and that every display surface (For You, Discover, Ranking,
+      // detail page, home shelves) renders into. Pre-fix this was NaN
+      // (no aspect lock), which is why old covers landed at random
+      // ratios and the display side kept fighting CSS object-fit to
+      // make them look right. Charles flagged this directly: "this
+      // cropper always [a] problem". Locking the aspect at upload
+      // time means we never have to chase the display side again.
+      aspectRatio: 2 / 3,
+      title: 'Replace book cover (2:3)',
       onSave: async (croppedFile) => {
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) { toast('Sign in first', 'error'); return; }
@@ -6156,11 +4377,34 @@ async function _replaceBookCoverFromHome(bookId) {
         const { data: { publicUrl } } = supabase.storage
           .from('book-covers')
           .getPublicUrl(path);
-        const { error: updErr } = await supabase
-          .from('books')
-          .update({ cover_url: publicUrl, updated_at: new Date().toISOString() })
-          .eq('id', bookId);
-        if (updErr) { toast('Saved file but DB update failed: ' + updErr.message, 'error'); return; }
+        // Server-side admin gate (#231). The previous direct
+        // .update() relied on a client-side role check for visibility
+        // and on books-table RLS for enforcement — neither is a true
+        // moderation gate. admin_replace_book_cover RPC verifies the
+        // caller is admin/moderator inside Postgres and rejects
+        // forbidden / invalid / missing-book cases with structured
+        // JSON so we can show actionable toasts.
+        const { data: result, error: rpcErr } = await supabase.rpc('admin_replace_book_cover', {
+          p_book_id:   bookId,
+          p_cover_url: publicUrl,
+        });
+        if (rpcErr) {
+          toast('Saved file but DB update failed: ' + rpcErr.message, 'error');
+          return;
+        }
+        if (!result?.ok) {
+          const errCode = result?.error || 'unknown';
+          const friendly = {
+            not_authenticated: 'Please sign in again',
+            forbidden:         'Only admins can replace covers from here',
+            missing_book_id:   'Could not identify the book',
+            missing_cover_url: 'Cover URL was empty',
+            invalid_cover_url: 'Cover URL was rejected by the server',
+            book_not_found:    'This book no longer exists',
+          }[errCode] || `Server rejected the update (${errCode})`;
+          toast(friendly, 'error');
+          return;
+        }
 
         toast('Cover replaced', 'success');
 
@@ -6324,11 +4568,15 @@ const _wireHomeVideoCard = (el, video) => {
         avatar: video.profiles.avatar_url,
       } : null,
     };
-    if (typeof allVideosCache !== 'undefined' && !allVideosCache.find(x => x.$id === formatted.$id)) {
-      allVideosCache.push(formatted);
+    // Hydrate the Videos page caches so a later showVideos() finds this
+    // row instantly. `addToVideosCache` + `setUploader` are no-ops if the
+    // entry already exists. (Stage 7A: was a defensive `typeof` guard
+    // back when these caches lived in app.js — now they're module-owned.)
+    if (!findVideoInCache(formatted.$id)) {
+      addToVideosCache(formatted);
     }
-    if (video.profiles && typeof allUploadersCache !== 'undefined' && !allUploadersCache[video.uploader_id]) {
-      allUploadersCache[video.uploader_id] = formatted._uploaderInfo;
+    if (video.profiles && !getUploader(video.uploader_id)) {
+      setUploader(video.uploader_id, formatted._uploaderInfo);
     }
     playVideo(formatted.$id);
   };
@@ -6401,10 +4649,9 @@ async function loadHomeVideos({ force = false } = {}) {
     .order('views', { ascending: false })
     .limit(60);
 
-  // Recent row was removed from the home layout (May 2026). Keep a
-  // minimal stub here so the destructure below doesn't break — the
-  // resolved data is never used.
-  const recentPromise = Promise.resolve({ data: [], error: null });
+  // (Recent video row was removed from the home layout in May 2026.
+  // The recentPromise stub + matching recentRes destructure slot +
+  // render block were dead code; cleaned up in the Codex home review.)
 
   // Featured Posts — most-recent visible posts (Discover-feed
   // convention). We render up to 10 stacked vertically in the panel,
@@ -6440,10 +4687,18 @@ async function loadHomeVideos({ force = false } = {}) {
     profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
   `;
 
+  // Mirror books.js list filters — visibility gates (is_public/is_hidden)
+  // + status whitelist (ongoing/completed). Without these, a book that
+  // was unpublished server-side or hidden by moderation but still has
+  // its `published_at` set would surface on Home's Trending shelf.
+  // (Codex P1 catch.)
   const trendingBooksPromise = supabase
     .from('books')
     .select(BOOK_HOME_SELECT)
     .not('published_at', 'is', null)
+    .eq('is_public', true)
+    .eq('is_hidden', false)
+    .in('status', ['ongoing', 'completed'])
     .order('views_count', { ascending: false, nullsFirst: false })
     .limit(20); // overfetch — keep 14 after banned-author filter for 2 pages of 7
 
@@ -6461,39 +4716,28 @@ async function loadHomeVideos({ force = false } = {}) {
     .limit(80); // overfetch — need ~14 unique book_ids for 2 pages of 7
 
   _homeDataInFlight = Promise.all([
-    heroPromise, trendingPromise, recentPromise, featuredPostPromise,
+    heroPromise, trendingPromise, featuredPostPromise,
     trendingBooksPromise, recentChaptersPromise,
   ])
-    .then(async ([heroRes, trendingRes, recentRes, featuredPostRes, trendingBooksRes, recentChaptersRes]) => {
+    .then(async ([heroRes, trendingRes, featuredPostRes, trendingBooksRes, recentChaptersRes]) => {
       if (heroRes.error)     console.warn('[home] hero (Dear Jen) query failed:', heroRes.error.message);
       if (trendingRes.error) console.warn('[home] trending (views>=100) query failed:', trendingRes.error.message);
-      if (recentRes.error)   console.warn('[home] recent query failed:', recentRes.error.message);
       if (featuredPostRes.error) console.warn('[home] featured post query failed:', featuredPostRes.error.message);
       if (trendingBooksRes.error) console.warn('[home] trending books query failed:', trendingBooksRes.error.message);
       if (recentChaptersRes.error) console.warn('[home] recent chapters query failed:', recentChaptersRes.error.message);
 
-      // Quick visibility — strip these logs once the home page is
-      // observed populating reliably across browsers.
-      console.log('[home] hero pool (Dear Jen channel):', heroRes.data?.length ?? 0);
-      console.log('[home] trending pool (views>=100):', trendingRes.data?.length ?? 0);
-      console.log('[home] recent pool:', recentRes.data?.length ?? 0);
-      console.log('[home] featured post pool:', featuredPostRes.data?.length ?? 0);
-      console.log('[home] trending books pool:', trendingBooksRes.data?.length ?? 0);
-      console.log('[home] recent-chapter rows pool:', recentChaptersRes.data?.length ?? 0);
+      // (Pool-size console logs removed in the Codex home review — they
+      // were "strip once the home page is observed populating reliably"
+      // markers that overstayed their welcome.)
 
       // Drop banned-uploader rows post-fetch (RLS can't see is_banned).
       const heroPool = (heroRes.data || []).filter(v => !v.profiles?.is_banned);
       const trendingPool = (trendingRes.data || []).filter(v => !v.profiles?.is_banned);
-      const recentPool = (recentRes.data || []).filter(v => !v.profiles?.is_banned);
 
       // Pick the hero first so we can exclude it from the other slots.
       const hero = heroPool.length > 0 ? _shuffle(heroPool)[0] : null;
       const usedIds = new Set();
       if (hero) usedIds.add(hero.id);
-
-      // Recent row was removed from the home layout. Skip — recentPool
-      // is intentionally empty.
-      const recent = [];
 
       // Trending list — shuffled pool, take the first 5 that aren't
       // the hero. Variety on every refresh. 4 slots — capped at 4 after
@@ -6504,7 +4748,15 @@ async function loadHomeVideos({ force = false } = {}) {
         .slice(0, 4);
 
       // ── Render hero ──
+      // Reset to skeleton state before fill so a no-hero refresh (Dear
+      // Jen lookup failed, channel empty) doesn't keep the previous
+      // hero clickable. Same Codex P2 pattern as the Trending stack.
       const heroEl = document.getElementById('homeHeroVideo');
+      if (heroEl) {
+        heroEl.classList.add('home-skeleton-card');
+        heroEl.innerHTML = '';
+        heroEl.onclick = null;
+      }
       if (heroEl && hero) {
         heroEl.innerHTML = _renderHomeVideoCard(hero, 'hero');
         _wireHomeVideoCard(heroEl, hero);
@@ -6518,23 +4770,24 @@ async function loadHomeVideos({ force = false } = {}) {
         }
       }
 
-      // ── Render Recent row ──
-      const recentRow = document.getElementById('homeVideoMediumRow');
-      if (recentRow) {
-        const cards = recentRow.querySelectorAll('.home-video-medium');
-        cards.forEach((el, i) => {
-          const v = recent[i];
-          if (!v) return; // leave skeleton if no data for this slot
-          el.innerHTML = _renderHomeVideoCard(v, 'recent');
-          _wireHomeVideoCard(el, v);
-        });
-      }
+      // (Render Recent row block removed in the Codex home review —
+      // homeVideoMediumRow was deleted from the May 2026 redesign;
+      // this loop iterated an empty `recent` array and was a no-op.)
 
       // ── Render Trending stack ──
+      // Codex P2 — reset every slot to skeleton state BEFORE filling, so
+      // a refresh that returns fewer rows (or zero rows) clears prior
+      // cards instead of leaving them clickable. Without this, a stale
+      // card from the previous fetch would still respond to clicks even
+      // though its underlying video might no longer match the new
+      // ranking pool.
       const trendingStack = document.getElementById('homeVideoSide');
       if (trendingStack) {
         const cards = trendingStack.querySelectorAll('.home-video-trending');
         cards.forEach((el, i) => {
+          el.classList.add('home-skeleton-card');
+          el.innerHTML = '';
+          el.onclick = null;
           const v = trending[i];
           if (!v) return;
           el.innerHTML = _renderHomeVideoCard(v, 'trending');
@@ -6559,7 +4812,25 @@ async function loadHomeVideos({ force = false } = {}) {
         featuredPostEl.classList.remove('home-skeleton-card');
         featuredPosts.forEach((post) => {
           try {
-            const postCardEl = renderPost(post);
+            // Pass idScope='home' so renderPost stamps namespaced IDs
+            // (e.g. `home-comments-XYZ`, `home-sharemenu-XYZ`) instead
+            // of the unscoped variants the Discover feed uses. Without
+            // this, since #homeLanding is earlier in the DOM than
+            // #feed, document.getElementById('sharemenu-XYZ') and
+            // document.getElementById('comments-XYZ') would resolve to
+            // the Home copy and the feed's share/comment buttons would
+            // operate on a hidden element.
+            //
+            // We previously fixed this with a post-render mutation that
+            // prefixed every stamped id with `home-` — kept working but
+            // was fragile because any new id added to renderPost had to
+            // be remembered by the walker. The idScope parameter makes
+            // the namespacing structural (Codex P2 / task #232).
+            //
+            // The Home copy stays read-only — inner buttons fall through
+            // to openPostFromSearch via the outer click handler below.
+            const postCardEl = renderPost(post, 'home');
+
             // Click anywhere outside the inner interactive elements
             // opens the full post (same fallback pattern as the
             // Discover feed). Inner handlers (profile link, lightbox,
@@ -6609,11 +4880,19 @@ async function loadHomeVideos({ force = false } = {}) {
         if (orderedBookIds.length >= _BOOKS_PER_PAGE * 2 + 4) break; // a few extras for banned drop-off
       }
       if (orderedBookIds.length > 0) {
+        // Same visibility/status filter as trendingBooksPromise — a chapter
+        // can be published on a book that itself is no longer public/visible
+        // (author hid the book post-publish, mod removed it, status flipped
+        // to draft). Without the gate, Recent Update could leak such books.
+        // (Codex P1 catch.)
         const { data: recentBooksData, error: recentBooksErr } = await supabase
           .from('books')
           .select(BOOK_HOME_SELECT)
           .in('id', orderedBookIds)
-          .not('published_at', 'is', null);
+          .not('published_at', 'is', null)
+          .eq('is_public', true)
+          .eq('is_hidden', false)
+          .in('status', ['ongoing', 'completed']);
         if (recentBooksErr) {
           console.warn('[home] recent-update books query failed:', recentBooksErr.message);
         } else {
@@ -6696,14 +4975,14 @@ const _wireHomeTopHeightSync = () => {
 // row + Trending stack + Featured post + Book shelves). Lives parallel
 // to showFeed (the Post tab) so each sidebar item targets its own
 // surface.
-function showHomeLanding() {
+export function showHomeLanding() {
   hideAllMainPages();
   const homeLanding = document.getElementById('homeLanding');
   if (homeLanding) homeLanding.style.display = '';
   // Opt into a body class so .main-wrap goes full-bleed (the default
   // 900px reading column is wrong for this mosaic).
   document.body.classList.add('on-home-landing');
-  viewingProfileId = null;
+  setViewingProfileId(null);
   stopVideoPlayer();
   if (window.location.hash) history.pushState(null, '', window.location.pathname);
   // Kick the data load. Fire-and-forget — the function is internally
@@ -6711,7 +4990,7 @@ function showHomeLanding() {
   loadHomeVideos();
 }
 
-function showFeed() {
+export function showFeed() {
   hideAllMainPages();
   feedEl.style.display = '';
   // storiesEl intentionally untouched — inline display:none in HTML keeps it hidden.
@@ -6722,11 +5001,11 @@ function showFeed() {
   if (feedTabs) feedTabs.style.display = '';
   // Restore the feed sentinel only when there's actually more to load and posts already rendered
   const feedSentinel = document.getElementById('feedSentinel');
-  if (feedSentinel && _hasMoreFeedPosts && feedEl.querySelector('.post-card')) {
+  if (feedSentinel && getHasMoreFeedPosts() && feedEl.querySelector('.post-card')) {
     feedSentinel.style.display = 'block';
   }
   document.body.classList.remove('on-videos');
-  viewingProfileId = null;
+  setViewingProfileId(null);
   stopVideoPlayer();
   if (window.location.hash) history.pushState(null, '', window.location.pathname);
 
@@ -6736,1097 +5015,9 @@ function showFeed() {
   }
 }
 
-function showProfileView() {
-  hideAllMainPages();   // also hides feedSentinel (and any future sibling overlays)
-  profilePage.style.display = 'block';
-  document.body.classList.remove('on-videos');
-  stopVideoPlayer();
-}
-
-async function openProfile(userId) {
-  showProfileView();
-  viewingProfileId = userId;
-  // Set URL hash so refresh keeps user on profile
-  if (window.location.hash !== `#profile/${userId}`) {
-    history.pushState(null, '', `#profile/${userId}`);
-  }
-
-  // Scroll to top — the previous page's scroll position lingers otherwise.
-  scrollToTop();
-
-  // Close any modals/menus from a previous profile (rapid-nav safety)
-  closeAllModals('.modal-backdrop[data-modal="follow-list"], .modal-backdrop[data-modal="share-profile"], .modal-backdrop[data-modal="report-user"]');
-  closeProfileActionMenu?.();
-  closePostActionMenu?.();
-
-  // ── Paint skeleton instantly so the page never feels frozen ──
-  paintProfileSkeleton();
-
-  const isOwn = !!(currentUser && currentUser.id === userId);
-
-  // ── Fire ALL queries in parallel (was sequential — now ~5x faster) ──
-  // Mutuals RPC is included here so it doesn't add a sequential round-trip later.
-  // Video/book counts apply the SAME filters as loadProfileVideos/Books for
-  // non-owners — otherwise the tab pill ("Videos · 7") disagrees with what
-  // the user actually sees in the tab ("No videos yet").
-  const profileP   = fetchProfileWithRetry(userId);
-  const followersP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', userId);
-  const followingP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId);
-  const postsP     = supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId);
-
-  // Filter to status='ready' for EVERYONE — including the owner.
-  // Pre-fix the owner's count included processing/uploading rows,
-  // which made the "Videos N" tab count on their own profile
-  // disagree with the grid below (which only renders ready ones
-  // once we tighten the next query). Creator Studio (the studio
-  // grid) is the surface that shows non-ready uploads with proper
-  // lifecycle chips; the public profile shouldn't surface them.
-  // Match the loadProfileVideos filter — both 'ready' and 'published'
-  // count as visible. The previous .eq('status','ready') under-counted
-  // the videos badge on profile tabs because fresh uploads land with
-  // status='published'.
-  const videosP = supabase.from('videos').select('*', { count: 'exact', head: true })
-    .eq('uploader_id', userId)
-    .in('status', ['ready', 'published']);
-
-  let booksQ = supabase.from('books').select('*', { count: 'exact', head: true }).eq('author_id', userId);
-  if (!isOwn) booksQ = booksQ.eq('is_public', true).in('status', ['ongoing', 'completed']);
-  const booksP = booksQ;
-
-  const badgesP    = supabase.from('user_badges').select('badge').eq('user_id', userId);
-  const followP    = (!isOwn && currentUser)
-    ? supabase.from('follows').select('follower_id').eq('follower_id', currentUser.id).eq('following_id', userId).maybeSingle()
-    : Promise.resolve({ data: null });
-  const mutualsP   = (!isOwn && currentUser)
-    ? supabase.rpc('get_mutual_followers', { p_target_id: userId, p_viewer_id: currentUser.id, p_limit: 6 })
-    : Promise.resolve({ data: null });
-
-  const [profile, fRes, gRes, pRes, vRes, bRes, badgesRes, followRes, mutualsRes] = await Promise.all([
-    profileP, followersP, followingP, postsP, videosP, booksP, badgesP, followP, mutualsP
-  ]);
-
-  if (!profile) {
-    toast('Could not load profile', 'error');
-    clearProfileSkeleton();
-    return;
-  }
-
-  const followers = fRes.count || 0;
-  const following = gRes.count || 0;
-  const postCount = pRes.count || 0;
-  const videoCount = vRes.count || 0;
-  const bookCount  = bRes.count || 0;
-  const badges    = (badgesRes?.data || []).map(b => b.badge);
-
-  // Banner (preserve the edit button!)
-  const banner = document.getElementById('profileBanner');
-  const existingBtn = document.getElementById('editBannerBtn');
-  banner.innerHTML = profile.banner_url ? `<img src="${profile.banner_url}" alt="banner"/>` : '';
-  if (existingBtn) banner.appendChild(existingBtn);
-
-  // Avatar
-  const avatarBig = document.getElementById('profileAvatarBig');
-  avatarBig.innerHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(profile.username);
-
-  // Name / badge / bio
-  document.getElementById('profileName').innerHTML = `${escHTML(profile.username)}${renderRoleSeal(profile, 20)}`;
-  renderProfileBadges(profile, badges);
-  document.getElementById('profileBio').textContent = profile.bio || '';
-
-  // Joined date
-  const joined = new Date(profile.created_at);
-  const joinedStr = joined.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-  document.getElementById('profileJoined').textContent = joinedStr;
-
-  // Stats
-  document.getElementById('statFollowers').innerHTML = `<strong>${followers}</strong> followers`;
-  document.getElementById('statFollowing').innerHTML = `<strong>${following}</strong> following`;
-  document.getElementById('statPosts').innerHTML     = `<strong>${postCount}</strong> posts`;
-  // Wire the followers/following stats to open the list modal
-  document.getElementById('statFollowers').onclick = () => openFollowListModal(userId, profile.username, 'followers');
-  document.getElementById('statFollowing').onclick = () => openFollowListModal(userId, profile.username, 'following');
-  document.getElementById('statPosts').onclick     = () => switchProfileTab('posts');
-
-  // Tab counts
-  setProfileTabCount('posts',  postCount);
-  setProfileTabCount('videos', videoCount);
-  setProfileTabCount('books',  bookCount);
-
-  // About tab
-  document.getElementById('aboutUsername').textContent = profile.username;
-  document.getElementById('aboutBio').textContent = profile.bio || '—';
-  document.getElementById('aboutLocation').textContent = profile.location || '—';
-  document.getElementById('aboutWebsite').innerHTML = profile.website ? `<a href="${profile.website}" target="_blank">${profile.website}</a>` : '—';
-  document.getElementById('aboutJoined').textContent = joined.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-  document.getElementById('aboutType').textContent = profile.is_guest ? 'Guest account' : 'Member';
-
-  // Action button + edit controls (isOwn already computed above)
-  const actionBtn = document.getElementById('profileActionBtn');
-  const editAvatarBtn = document.getElementById('editAvatarBtn');
-  const editBannerBtn = document.getElementById('editBannerBtn');
-
-  // Show "Message" button only on others' profiles
-  const messageBtn = document.getElementById('profileMessageBtn');
-  if (isOwn) {
-    actionBtn.textContent = '⚙️ Edit profile';
-    actionBtn.onclick = () => openEditProfile(profile);
-    editAvatarBtn.style.display = 'flex';
-    editAvatarBtn.style.visibility = 'visible';
-    editBannerBtn.style.display = 'flex';
-    editBannerBtn.style.visibility = 'visible';
-    if (messageBtn) messageBtn.style.display = 'none';
-  } else {
-    const isFollowing = !!followRes.data;
-    actionBtn.textContent = isFollowing ? 'Unfollow' : 'Follow';
-    actionBtn.onclick = () => toggleFollow(userId, isFollowing);
-    editAvatarBtn.style.display = 'none';
-    editBannerBtn.style.display = 'none';
-    if (messageBtn) {
-      messageBtn.style.display = '';
-      messageBtn.onclick = () => showMessages(userId);
-    }
-  }
-
-  // Wire profile menu (kebab) — share / report / snooze / block
-  const menuBtn = document.getElementById('profileMenuBtn');
-  if (menuBtn) {
-    menuBtn.onclick = (e) => openProfileActionMenu(e, menuBtn, {
-      isOwn,
-      userId,
-      username: profile.username || 'this user',
-    });
-  }
-
-  // Mutual followers strip — render from the RPC result we already fetched
-  renderMutualFollowers(userId, isOwn, mutualsRes?.data || null);
-
-  // Reset tab to Posts and load
-  document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'posts'));
-  ['profilePosts', 'profileVideos', 'profileBooks', 'profileAbout'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = id === 'profilePosts' ? '' : 'none';
-  });
-  // Reset the lazy-load markers so a fresh openProfile re-fetches
-  ['profileVideos', 'profileBooks'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) delete el.dataset.loadedFor;
-  });
-
-  loadProfilePosts(userId);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// PROFILE — helpers (skeleton, badges, tab counts, switch, follow list modal)
-// ════════════════════════════════════════════════════════════════════════════
-
-// Retry profile fetch up to 3 times — protects against just-created accounts.
-// Exponential backoff (200ms → 500ms → 1.2s) so transient misses don't waste
-// 600ms in a tight loop; existing accounts return immediately on attempt 1.
-async function fetchProfileWithRetry(userId, attempts = 3) {
-  const delays = [0, 200, 500];
-  for (let i = 0; i < attempts; i++) {
-    if (delays[i]) await new Promise(r => setTimeout(r, delays[i]));
-    const { data } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', userId).single();
-    if (data) return data;
-  }
-  return null;
-}
-
-// Paint shimmer placeholders so the page looks alive while parallel queries run
-function paintProfileSkeleton() {
-  const banner = document.getElementById('profileBanner');
-  if (banner && !banner.querySelector('img')) banner.classList.add('skeleton-banner');
-  const avatarBig = document.getElementById('profileAvatarBig');
-  if (avatarBig) { avatarBig.classList.add('skeleton-avatar'); avatarBig.innerHTML = ''; }
-  document.getElementById('profileName').textContent = ' ';
-  document.getElementById('profileName').classList.add('skeleton-text');
-  document.getElementById('profileBio').textContent = ' ';
-  document.getElementById('profileBio').classList.add('skeleton-text', 'skeleton-text-wide');
-  ['statFollowing','statFollowers','statPosts'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) { el.innerHTML = '&nbsp;'; el.classList.add('skeleton-text'); }
-  });
-  // Hide stale badges so previous profile's "Member"/Creator/etc. don't flash
-  const baseBadge = document.getElementById('profileBadge');
-  if (baseBadge) baseBadge.style.visibility = 'hidden';
-  const badgeWrap = document.getElementById('profileBadgesExtra');
-  if (badgeWrap) badgeWrap.innerHTML = '';
-  // Hide stale mutuals strip from previous profile
-  const mutuals = document.getElementById('profileMutuals');
-  if (mutuals) { mutuals.style.display = 'none'; mutuals.innerHTML = ''; }
-}
-
-function clearProfileSkeleton() {
-  const banner = document.getElementById('profileBanner');
-  if (banner) banner.classList.remove('skeleton-banner');
-  const avatarBig = document.getElementById('profileAvatarBig');
-  if (avatarBig) avatarBig.classList.remove('skeleton-avatar');
-  ['profileName','profileBio','statFollowing','statFollowers','statPosts'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.classList.remove('skeleton-text', 'skeleton-text-wide');
-  });
-}
-
-// Render the user's badge identification. Replaces the old "Member"
-// pill (which was redundant on every signed-up account) with whatever
-// badges the user has actually earned (Creator, Verified, Writer,
-// Pioneer, Staff). The base pill now only surfaces for guest accounts
-// — which IS a meaningful identification distinct from any earned
-// badge.
-function renderProfileBadges(profile, badges) {
-  clearProfileSkeleton();
-
-  const baseBadge = document.getElementById('profileBadge');
-  if (profile.is_guest) {
-    // Guest is still meaningful — keep the pill.
-    baseBadge.textContent     = 'Guest';
-    baseBadge.className       = 'profile-badge guest';
-    baseBadge.style.visibility = '';
-    baseBadge.style.display    = '';
-  } else {
-    // Regular member — hide the generic "Member" pill entirely. The
-    // earned badges below tell the user's real story (Creator,
-    // Verified, etc.).
-    baseBadge.textContent     = '';
-    baseBadge.className       = 'profile-badge';
-    baseBadge.style.display    = 'none';
-  }
-
-  // Earned badges live in a sibling container so they sit inline with username
-  let extra = document.getElementById('profileBadgesExtra');
-  if (!extra) {
-    extra = document.createElement('span');
-    extra.id = 'profileBadgesExtra';
-    extra.className = 'profile-badges-extra';
-    baseBadge.insertAdjacentElement('afterend', extra);
-  }
-  extra.innerHTML = '';
-
-  // Badge identification — only show pills for users who have actually
-  // earned one of these four roles. Plain "user" accounts (no role)
-  // get nothing rendered here, and the generic "Member" pill is hidden
-  // for them too (handled above) so the row stays empty rather than
-  // showing a meaningless badge.
-  const META = {
-    creator:   { label: 'Creator',   icon: '🎬', cls: 'badge-creator',   title: 'Creator — earned by sharing original videos' },
-    writer:    { label: 'Writer',    icon: '✍️', cls: 'badge-writer',    title: 'Writer — earned by publishing books on Selebox' },
-    pioneer:   { label: 'Pioneer',   icon: '⭐', cls: 'badge-pioneer',   title: 'Pioneer — early Selebox community member' },
-    moderator: { label: 'Moderator', icon: '🛡', cls: 'badge-moderator', title: 'Moderator — Selebox community team' },
-  };
-
-  // Resolve the user's badge set from the SAME source as the inline
-  // role seal (profile.role / profile.roles), not from the separate
-  // user_badges table the badges parameter reads. The two sources
-  // were drifting — the inline seal would show "Creator" while the
-  // pills row showed nothing because the badges table was empty.
-  // Unifying on profile.role(s) means whatever role makes the gold
-  // seal appear also makes the pill appear.
-  const rolesArr = Array.isArray(profile.roles) ? profile.roles : [];
-  const roleStr  = typeof profile.role === 'string' ? profile.role : '';
-  const userRoleSet = new Set([
-    ...rolesArr.map(r => String(r).toLowerCase()),
-    roleStr ? roleStr.toLowerCase() : null,
-    // Keep the legacy `badges` array as a secondary source so accounts
-    // that have entries in user_badges but no role column still light up.
-    ...(Array.isArray(badges) ? badges.map(b => String(b).toLowerCase()) : []),
-  ].filter(Boolean));
-
-  // Stable display order (higher-status first). Picks the FIRST
-  // matching role only — mirrors the mobile app's behavior of showing
-  // a single text label next to the name (Moderator / Pioneer /
-  // Creator / Writer), not a pill stack with icons.
-  const order = ['moderator','pioneer','creator','writer'];
-  for (const key of order) {
-    if (!userRoleSet.has(key)) continue;
-    const m = META[key];
-    const el = document.createElement('span');
-    el.className = 'profile-role-text';
-    el.title = m.title;
-    el.textContent = m.label;
-    extra.appendChild(el);
-    break; // only one label, like mobile
-  }
-}
-
-function setProfileTabCount(tab, n) {
-  const btn = document.querySelector(`.profile-tab[data-tab="${tab}"]`);
-  if (!btn) return;
-  let pill = btn.querySelector('.tab-count');
-  if (!pill) {
-    pill = document.createElement('span');
-    pill.className = 'tab-count';
-    btn.appendChild(pill);
-  }
-  pill.textContent = n > 999 ? `${(n/1000).toFixed(1)}k` : String(n);
-}
-
-function switchProfileTab(tab) {
-  const btn = document.querySelector(`.profile-tab[data-tab="${tab}"]`);
-  if (btn) btn.click();
-}
-
-// "Followed by alice, bob, +12 others you follow" social-proof strip
-// Data is pre-fetched in openProfile's Promise.all — this just renders it.
-function renderMutualFollowers(userId, isOwn, data) {
-  const wrap = document.getElementById('profileMutuals');
-  if (!wrap) return;
-  if (isOwn || !currentUser || !data || !data.length) {
-    // Hide silently — no mutuals, viewing own, signed-out, or RPC missing
-    wrap.style.display = 'none';
-    wrap.innerHTML = '';
-    return;
-  }
-  wrap.style.display = '';
-
-  const total = Number(data[0]?.total_count || data.length);
-  const shown = data.slice(0, 3);
-  const extra = Math.max(0, total - shown.length);
-
-  // Stacked avatars
-  const avatars = shown.map(p => {
-    const safeName = escHTML(p.username || '');
-    const safeAvatar = p.avatar_url ? escHTML(p.avatar_url) : '';
-    return `
-    <button class="mutual-avatar" data-uid="${p.id}" title="@${safeName}" aria-label="View @${safeName}">
-      ${safeAvatar ? `<img src="${safeAvatar}" alt="@${safeName}"/>` : `<span>${initials(p.username)}</span>`}
-    </button>
-  `;}).join('');
-
-  // Names line
-  const nameStrs = shown.map(p =>
-    `<button class="mutual-name" data-uid="${p.id}">@${escHTML(p.username || '')}</button>`
-  );
-  let namesPart;
-  if (nameStrs.length === 1) namesPart = nameStrs[0];
-  else if (nameStrs.length === 2) namesPart = `${nameStrs[0]} and ${nameStrs[1]}`;
-  else namesPart = `${nameStrs[0]}, ${nameStrs[1]}, and ${nameStrs[2]}`;
-
-  const tail = extra > 0
-    ? ` <button class="mutual-more">+${extra} other${extra === 1 ? '' : 's'} you follow</button>`
-    : ' you follow';
-
-  wrap.innerHTML = `
-    <div class="mutual-avatars">${avatars}</div>
-    <div class="mutual-text">Followed by ${namesPart}${tail}</div>
-  `;
-
-  // Click handlers — avatars + names → that profile; "+N others" → followers modal
-  wrap.querySelectorAll('[data-uid]').forEach(el => {
-    el.onclick = () => openProfile(el.dataset.uid);
-  });
-  const moreBtn = wrap.querySelector('.mutual-more');
-  if (moreBtn) {
-    moreBtn.onclick = () => {
-      const uname = document.getElementById('profileName')?.textContent || 'user';
-      openFollowListModal(userId, uname, 'followers');
-    };
-  }
-}
-
-// ── Followers/Following list modal ──────────────────────────────────────────
-async function openFollowListModal(userId, username, mode) {
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-  // mode: 'followers' (people who follow userId) | 'following' (people userId follows)
-
-  closeAllModals('.modal-backdrop[data-modal="follow-list"]');
-
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'follow-list';
-  const safeUser = escHTML(username);
-  modal.innerHTML = `
-    <div class="modal-card follow-list-modal" role="dialog" aria-labelledby="follow-list-title">
-      <div class="follow-list-header">
-        <h2 id="follow-list-title">${mode === 'followers' ? 'Followers' : 'Following'}</h2>
-        <p class="modal-sub">@${safeUser} · ${mode === 'followers' ? 'people who follow' : 'people followed by'}</p>
-      </div>
-      <input type="text" class="follow-list-search" placeholder="Search by username…" />
-      <div class="follow-list-body" id="followListBody">
-        ${'<div class="follow-list-row skeleton-row"></div>'.repeat(6)}
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">Close</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-  document.addEventListener('keydown', function onKey(ev) {
-    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
-  });
-
-  // Fetch the relevant follows + each side's profile, then who *I* follow (for follow-back state)
-  const followsCol = mode === 'followers' ? 'follower_id' : 'following_id';
-  const matchCol   = mode === 'followers' ? 'following_id' : 'follower_id';
-
-  // Get the list of user ids
-  const { data: edges, error: edgeErr } = await supabase
-    .from('follows')
-    .select(`${followsCol}, created_at`)
-    .eq(matchCol, userId)
-    .order('created_at', { ascending: false })
-    .limit(500);
-
-  if (edgeErr) { toast(edgeErr.message, 'error'); return; }
-  const ids = (edges || []).map(e => e[followsCol]).filter(Boolean);
-
-  if (!ids.length) {
-    document.getElementById('followListBody').innerHTML = `
-      <div class="follow-list-empty">
-        <div class="follow-list-empty-icon">👥</div>
-        <div>${mode === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}</div>
-      </div>`;
-    return;
-  }
-
-  // Hydrate profiles + my own follows in parallel
-  const [{ data: profiles }, { data: myFollows }] = await Promise.all([
-    supabase.from('profiles').select('id, username, avatar_url, is_guest, bio').in('id', ids),
-    supabase.from('follows').select('following_id').eq('follower_id', currentUser.id).in('following_id', ids),
-  ]);
-
-  const myFollowSet = new Set((myFollows || []).map(f => f.following_id));
-  const profileMap  = new Map((profiles || []).map(p => [p.id, p]));
-
-  // Render in the original follow order (most recent first)
-  const rows = ids.map(id => profileMap.get(id)).filter(Boolean);
-  const body = document.getElementById('followListBody');
-  body.innerHTML = rows.map(p => {
-    const safeName = escHTML(p.username || '');
-    const safeBio  = escHTML((p.bio || '').slice(0, 80));
-    const safeAvatar = p.avatar_url ? escHTML(p.avatar_url) : '';
-    return `
-    <div class="follow-list-row" data-username="${(p.username || '').toLowerCase().replace(/"/g, '')}">
-      <button class="follow-list-avatar" data-uid="${p.id}">
-        ${safeAvatar ? `<img src="${safeAvatar}"/>` : initials(p.username)}
-      </button>
-      <div class="follow-list-info">
-        <button class="follow-list-name" data-uid="${p.id}">@${safeName}</button>
-        <div class="follow-list-bio">${safeBio}</div>
-      </div>
-      ${p.id === currentUser.id ? '<span class="follow-list-you">You</span>' :
-        `<button class="follow-list-btn ${myFollowSet.has(p.id) ? 'is-following' : ''}" data-uid="${p.id}">
-          ${myFollowSet.has(p.id) ? 'Following' : 'Follow'}
-        </button>`}
-    </div>
-  `;}).join('');
-
-  // Click avatar/name → open profile
-  body.querySelectorAll('[data-uid]').forEach(el => {
-    if (el.classList.contains('follow-list-btn')) return;
-    el.onclick = () => { close(); openProfile(el.dataset.uid); };
-  });
-
-  // Follow toggle
-  body.querySelectorAll('.follow-list-btn').forEach(btn => {
-    btn.onclick = async (ev) => {
-      ev.stopPropagation();
-      const uid = btn.dataset.uid;
-      const wasFollowing = btn.classList.contains('is-following');
-      btn.disabled = true;
-      btn.textContent = wasFollowing ? 'Unfollowing…' : 'Following…';
-      let error;
-      if (wasFollowing) {
-        ({ error } = await supabase.from('follows').delete().eq('follower_id', currentUser.id).eq('following_id', uid));
-      } else {
-        ({ error } = await supabase.from('follows').insert({ follower_id: currentUser.id, following_id: uid }));
-      }
-      btn.disabled = false;
-      if (error) {
-        toast(error.message, 'error');
-        btn.textContent = wasFollowing ? 'Following' : 'Follow';
-        return;
-      }
-      btn.classList.toggle('is-following', !wasFollowing);
-      btn.textContent = wasFollowing ? 'Follow' : 'Following';
-    };
-  });
-
-  // Search filter
-  const search = modal.querySelector('.follow-list-search');
-  search.oninput = () => {
-    const q = search.value.trim().toLowerCase();
-    body.querySelectorAll('.follow-list-row').forEach(row => {
-      row.style.display = !q || row.dataset.username.includes(q) ? '' : 'none';
-    });
-  };
-  search.focus();
-}
-
-async function loadProfilePosts(userId) {
-  const wrap = document.getElementById('profilePosts');
-  wrap.innerHTML = '<div class="loading">Loading posts...</div>';
-  // Fetch by created_at; sort pinned-first client-side. Bulletproof if pinned_at
-  // column doesn't exist yet (works pre-migration, just won't have pinning).
-  const { data } = await supabase
-    .from('posts')
-    .select(`*, profiles!user_id(id, username, avatar_url, is_guest, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, role), videos(id, video_url, thumbnail_url, title, duration))`)
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(40);
-  posts = (data || []).slice().sort((a, b) => {
-    if (a.pinned_at && !b.pinned_at) return -1;
-    if (!a.pinned_at && b.pinned_at) return 1;
-    if (a.pinned_at && b.pinned_at) return new Date(b.pinned_at) - new Date(a.pinned_at);
-    return new Date(b.created_at) - new Date(a.created_at);
-  });
-  wrap.innerHTML = '';
-  if (!posts.length) {
-    wrap.innerHTML = `
-      <div class="profile-empty">
-        <div class="profile-empty-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
-        </div>
-        <h3>No posts yet</h3>
-        <p>When this user shares something, it will appear here.</p>
-      </div>`;
-    return;
-  }
-
-  // Inject "Pinned" + "Posts" section dividers when the pinned/unpinned boundary is crossed
-  let pinnedShown = false, postsShown = false;
-  const hasAnyPinned = posts.some(p => p.pinned_at);
-  posts.forEach(p => {
-    if (p.pinned_at && !pinnedShown) {
-      const hdr = document.createElement('div');
-      hdr.className = 'profile-section-header';
-      hdr.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M16 2l-1.4 1.4 1.6 1.6-5.4 5.4-3-1.5L6 11.3l3.7 3.7L4 21l1.4 1.4 5.7-5.7 3.7 3.7 1.4-1.4-1.5-3 5.4-5.4 1.6 1.6L23 9l-7-7z"/></svg> <span>Pinned</span>`;
-      wrap.appendChild(hdr);
-      pinnedShown = true;
-    }
-    if (!p.pinned_at && !postsShown && hasAnyPinned) {
-      const hdr = document.createElement('div');
-      hdr.className = 'profile-section-header';
-      hdr.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg> <span>Posts</span>`;
-      wrap.appendChild(hdr);
-      postsShown = true;
-    }
-    const el = renderPost(p);
-    wrap.appendChild(el);
-    // Lazy-load reactions/comments for these too
-    if (_feedPostObserver) _feedPostObserver.observe(el);
-    el.querySelectorAll('.post-video').forEach(v => _feedVideoObserver?.observe(v));
-  });
-  // Apply Facebook-style collapsing to long post bodies
-  setupCollapsibleBodies(wrap);
-  // Fall back: if no observers (first time), load eagerly
-  if (!_feedPostObserver) {
-    wrap.querySelectorAll('.post-card').forEach(c => triggerPostLazyLoad(c));
-    wrap.querySelectorAll('.post-video').forEach(v => attachHlsToPostVideo(v));
-  }
-}
-
-// ── Profile: Videos tab ──
-async function loadProfileVideos(userId) {
-  const wrap = document.getElementById('profileVideos');
-  if (!wrap) return;
-  if (wrap.dataset.loadedFor === userId) return;       // already loaded for this user
-  wrap.innerHTML = '<div class="loading">Loading videos...</div>';
-
-  const isOwn = currentUser && currentUser.id === userId;
-
-  // Supabase videos uploaded by this user
-  let q = supabase
-    .from('videos')
-    .select(`id, title, description, thumbnail_url, video_url, views, likes, duration, created_at, status, tags, category, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url )`)
-    .eq('uploader_id', userId)
-    .order('created_at', { ascending: false });
-  // Filter to status='ready' for EVERYONE — owner included. The
-  // earlier `if (!isOwn)` carve-out let processing/uploading rows
-  // leak into the owner's own profile grid, where they rendered as
-  // black-thumbnail cards (Bunny hadn't generated the still image
-  // yet). The creator's "see my pending uploads" need is owned by
-  // the Studio surface (studioGrid in this file), which loads
-  // without a status filter and renders proper lifecycle chips.
-  //
-  // Accept BOTH 'ready' and 'published' — the canonical
-  // post-upload status. Server-side fetch_video_card uses
-  // coalesce(status, 'published')='published' and recent uploads
-  // are landing with status='published' directly. Filtering only
-  // 'ready' made fresh uploads invisible on profile pages even
-  // though they showed as Published in the Studio. Same defensive
-  // filter the mobile fetchVideos uses.
-  q = q.in('status', ['ready', 'published']);
-
-  const { data, error } = await q.limit(60);
-
-  if (error) {
-    wrap.innerHTML = `<div class="profile-empty"><h3>Couldn't load videos</h3><p>${escHTML(error.message || '')}</p></div>`;
-    return;
-  }
-
-  const list = data || [];
-  if (!list.length) {
-    wrap.innerHTML = `
-      <div class="profile-empty">
-        <div class="profile-empty-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="13.5" height="12" rx="2.5"/><path d="M16 10.5l5-2.5v8l-5-2.5z" fill="currentColor" stroke="none"/></svg>
-        </div>
-        <h3>No videos yet</h3>
-        <p>${isOwn ? 'Upload your first video from the home feed or Studio.' : 'When this creator uploads, videos will appear here.'}</p>
-      </div>`;
-    wrap.dataset.loadedFor = userId;
-    return;
-  }
-
-  wrap.innerHTML = '<div class="profile-video-grid"></div>';
-  const grid = wrap.querySelector('.profile-video-grid');
-  list.forEach((v, i) => {
-    // Adapt to the existing renderVideoCard shape (mirrors fetchSupabaseVideos)
-    const formatted = {
-      $id: 'sb_' + v.id,
-      _supabase: true,
-      _supabaseId: v.id,
-      title: v.title,
-      description: v.description || '',
-      tags: v.tags || [],
-      uploader: v.uploader_id,
-      thumbnail: v.thumbnail_url,
-      videoUrl: v.video_url,
-      uri: v.video_url,
-      videoStats: { views: v.views || 0, duration: v.duration || 0 },
-      // Monetization fields — without these, clicking a video from a user's
-      // wall doesn't trigger setupVideoMonetGate (auto-deduct at 3:00 fails).
-      is_locked:          !!v.is_locked,
-      is_monetized:       !!v.is_monetized,
-      duration:           v.duration || 0,
-      unlock_cost_coins:  v.unlock_cost_coins ?? null,
-      unlock_cost_stars:  v.unlock_cost_stars ?? null,
-      status: v.status || 'ready',
-      $createdAt: v.created_at,
-      _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
-    };
-    const uploader = v.profiles ? { username: v.profiles.username, avatar: v.profiles.avatar_url } : null;
-    const card = renderVideoCard(formatted, uploader);
-    card.style.animationDelay = `${(i * 0.03).toFixed(3)}s`;
-    grid.appendChild(card);
-  });
-  wrap.dataset.loadedFor = userId;
-}
-
-// ── Profile: Books tab ──
-async function loadProfileBooks(userId) {
-  const wrap = document.getElementById('profileBooks');
-  if (!wrap) return;
-  if (wrap.dataset.loadedFor === userId) return;
-  wrap.innerHTML = '<div class="loading">Loading books...</div>';
-
-  const isOwn = currentUser && currentUser.id === userId;
-
-  let q = supabase
-    .from('books')
-    .select(`id, title, description, cover_url, genre, tags, views_count, likes_count, chapters_count, word_count, status, is_public, published_at, created_at, updated_at, author_id, profiles!books_author_id_fkey ( id, username, avatar_url )`)
-    .eq('author_id', userId)
-    .order('updated_at', { ascending: false });
-  // Non-owners only see public, non-draft books
-  if (!isOwn) {
-    q = q.eq('is_public', true).in('status', ['ongoing', 'completed']);
-  }
-
-  const { data, error } = await q.limit(60);
-
-  if (error) {
-    wrap.innerHTML = `<div class="profile-empty"><h3>Couldn't load books</h3><p>${escHTML(error.message || '')}</p></div>`;
-    return;
-  }
-
-  const list = data || [];
-  if (!list.length) {
-    wrap.innerHTML = `
-      <div class="profile-empty">
-        <div class="profile-empty-icon">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>
-        </div>
-        <h3>No books yet</h3>
-        <p>${isOwn ? 'Head to Author to publish your first manuscript.' : 'When this writer publishes, their books will appear here.'}</p>
-      </div>`;
-    wrap.dataset.loadedFor = userId;
-    return;
-  }
-
-  wrap.innerHTML = '<div class="profile-book-grid"></div>';
-  const grid = wrap.querySelector('.profile-book-grid');
-  list.forEach((b, i) => {
-    const formatted = {
-      ...b,
-      id: b.id,
-      $id: 'sb_' + b.id,
-      _supabase: true,
-      author: b.profiles ? { id: b.profiles.id, username: b.profiles.username, avatar: b.profiles.avatar_url } : null,
-    };
-    const card = renderBookCard(formatted);
-    card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
-    grid.appendChild(card);
-  });
-  wrap.dataset.loadedFor = userId;
-}
-
-async function toggleFollow(userId, currentlyFollowing) {
-  // Earlier draft fired the supabase call without checking the result, so
-  // RLS rejections / dupe-key errors silently produced "nothing happens"
-  // even though the toast claimed success. Capture + surface the error.
-  if (!currentUser?.id) {
-    toast('Sign in first', 'error');
-    return;
-  }
-  if (userId === currentUser.id) {
-    toast("You can't follow yourself", 'error');
-    return;
-  }
-  try {
-    if (currentlyFollowing) {
-      const { error } = await supabase.from('follows')
-        .delete()
-        .eq('follower_id', currentUser.id)
-        .eq('following_id', userId);
-      if (error) throw error;
-      toast('Unfollowed', 'success');
-    } else {
-      const { error } = await supabase.from('follows')
-        .insert({ follower_id: currentUser.id, following_id: userId });
-      // 23505 = unique_violation. Treat as already-following → no-op success.
-      if (error && error.code !== '23505') throw error;
-      toast('Following!', 'success');
-      // Daily-goal: tick "Follow N new users". Deduped by target id so
-      // follow → unfollow → re-follow within a day counts ONCE. Mirrors
-      // mobile at components/Profile.jsx:199 + user-connections:365.
-      try { tickGoalUnique('follow_user', `follow:${userId}`); } catch {}
-    }
-  } catch (err) {
-    console.error('[toggleFollow]', err);
-    toast(err?.message || 'Could not update follow', 'error');
-    return;
-  }
-  openProfile(userId);
-}
-
-// Profile tabs (Posts / Videos / Books / About)
-document.querySelectorAll('.profile-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    const tabName = tab.dataset.tab;
-    document.querySelectorAll('.profile-tab').forEach(t => t.classList.toggle('active', t === tab));
-
-    const ids = { posts: 'profilePosts', videos: 'profileVideos', books: 'profileBooks', about: 'profileAbout' };
-    Object.entries(ids).forEach(([key, id]) => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = key === tabName ? '' : 'none';
-    });
-
-    // Lazy-load the heavy tabs only when first opened
-    if (tabName === 'videos' && viewingProfileId) loadProfileVideos(viewingProfileId);
-    else if (tabName === 'books' && viewingProfileId) loadProfileBooks(viewingProfileId);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Edit profile modal — display-name cooldown, emoji-free, bio char/line limits
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Tunables loaded from app_config — falls back to sensible defaults so the
-// modal works even if the migration hasn't been applied yet.
-const _profileEditDefaults = {
-  max_bio_characters: 200,
-  max_bio_lines: 5,
-  display_name_change_cooldown_days: 60,
-};
-async function loadProfileEditDefaults() {
-  try {
-    const { data } = await supabase.from('app_config')
-      .select('key, value_int')
-      .in('key', Object.keys(_profileEditDefaults));
-    for (const r of (data || [])) {
-      if (r.value_int != null) _profileEditDefaults[r.key] = Number(r.value_int);
-    }
-  } catch {}
-  return _profileEditDefaults;
-}
-
-// Reject anything in pictographic/emoji Unicode blocks. Allows accented letters,
-// digits, and common punctuation — international names work fine.
-function stripEmoji(s) {
-  return (s || '').replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}]/gu, '');
-}
-function hasEmoji(s) {
-  return /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}]/u.test(s || '');
-}
-
-// ── Country / City lists ─────────────────────────────────────────────
-// Philippines is the primary market — its cities are pre-listed for a clean
-// dropdown UX. Other countries fall back to a free-text city input.
-const COUNTRY_LIST = [
-  'Philippines','United States','Canada','United Kingdom','Australia','Singapore','Malaysia','Indonesia','Thailand','Vietnam','Japan','South Korea','China','Hong Kong','Taiwan','India','Pakistan','Bangladesh','United Arab Emirates','Saudi Arabia','Qatar','Kuwait','Bahrain','Oman','Israel','Turkey','Germany','France','Spain','Italy','Portugal','Netherlands','Belgium','Switzerland','Sweden','Norway','Denmark','Finland','Ireland','Poland','Russia','Ukraine','Greece','Czechia','Austria','Hungary','Romania','New Zealand','Mexico','Brazil','Argentina','Chile','Colombia','Peru','South Africa','Egypt','Nigeria','Kenya','Morocco','Other'
-];
-const PH_CITIES = [
-  'Manila','Quezon City','Caloocan','Pasig','Taguig','Makati','Parañaque','Las Piñas','Muntinlupa','Mandaluyong','San Juan','Marikina','Pasay','Valenzuela','Malabon','Navotas','Pateros',
-  'Cebu City','Mandaue','Lapu-Lapu','Davao City','Iloilo City','Bacolod','Cagayan de Oro','Zamboanga City','General Santos','Baguio','Antipolo','Dasmariñas','Bacoor','Imus','Calamba','Santa Rosa','Lipa','Batangas City','Tarlac City','Angeles','San Fernando (Pampanga)','Olongapo','Naga','Legazpi','Tacloban','Butuan','Cotabato City','Iligan','Tagum','Puerto Princesa','Malolos','Meycauayan','San Jose del Monte','Other'
-];
-
-function populateCountryDropdown() {
-  const sel = document.getElementById('editCountry');
-  if (!sel || sel.dataset.populated === '1') return;
-  for (const c of COUNTRY_LIST) {
-    const opt = document.createElement('option');
-    opt.value = c; opt.textContent = c;
-    sel.appendChild(opt);
-  }
-  sel.dataset.populated = '1';
-}
-function populatePhCityDropdown() {
-  const sel = document.getElementById('editCity');
-  if (!sel || sel.dataset.populated === '1') return;
-  for (const c of PH_CITIES) {
-    const opt = document.createElement('option');
-    opt.value = c; opt.textContent = c;
-    sel.appendChild(opt);
-  }
-  sel.dataset.populated = '1';
-}
-
-function applyCountryUI(country) {
-  // Country = Philippines → show city dropdown. Anything else → show city text input.
-  const citySel  = document.getElementById('editCity');
-  const cityInp  = document.getElementById('editCityInput');
-  if (!citySel || !cityInp) return;
-  if (country === 'Philippines') {
-    citySel.style.display = '';
-    cityInp.style.display = 'none';
-  } else {
-    citySel.style.display = 'none';
-    cityInp.style.display = '';
-  }
-}
-
-function getCurrentCity() {
-  const country = document.getElementById('editCountry').value || '';
-  if (country === 'Philippines') {
-    const v = document.getElementById('editCity').value || '';
-    return v === 'Other' ? '' : v;
-  }
-  return (document.getElementById('editCityInput').value || '').trim();
-}
-
-// Parse a stored location string ("City, Country") into {country, city}.
-// Tolerates older free-form values — falls back to dumping the whole string
-// into city if we can't match the country.
-function parseLocation(loc) {
-  if (!loc) return { country: '', city: '' };
-  const parts = loc.split(',').map(s => s.trim()).filter(Boolean);
-  if (parts.length >= 2) {
-    const tail = parts[parts.length - 1];
-    const matchedCountry = COUNTRY_LIST.find(c => c.toLowerCase() === tail.toLowerCase());
-    if (matchedCountry) {
-      const city = parts.slice(0, -1).join(', ');
-      return { country: matchedCountry, city };
-    }
-  }
-  // Fallback — country unknown
-  return { country: '', city: loc };
-}
-
-async function openEditProfile(profile) {
-  const cfg = await loadProfileEditDefaults();
-  const usernameEl = document.getElementById('editUsername');
-  const bioEl      = document.getElementById('editBio');
-  const hintEl     = document.getElementById('editUsernameHint');
-
-  // Strip emoji on initial load too — old saved values (from before the emoji
-  // rule shipped) would otherwise re-display in the input.
-  usernameEl.value = stripEmoji(profile.username || '');
-  // Clamp bio on initial load to the line limit (in case it was saved before
-  // the limit existed)
-  bioEl.value      = clampBioLines(profile.bio || '');
-  document.getElementById('editWebsite').value  = profile.website  || '';
-
-  // ── Country + City ──
-  populateCountryDropdown();
-  populatePhCityDropdown();
-  const { country, city } = parseLocation(profile.location);
-  document.getElementById('editCountry').value = country;
-  applyCountryUI(country);
-  if (country === 'Philippines') {
-    const phMatch = PH_CITIES.find(c => c.toLowerCase() === (city || '').toLowerCase());
-    document.getElementById('editCity').value = phMatch || '';
-    document.getElementById('editCityInput').value = '';
-  } else {
-    document.getElementById('editCityInput').value = city || '';
-    document.getElementById('editCity').value = '';
-  }
-
-  // ── Display-name cooldown UI ──
-  // Fetch the cooldown timestamp on-demand. Tolerates the column being absent
-  // (returns null) so the rest of the app still works before the migration runs.
-  let dnChangedAt = profile.display_name_changed_at || null;
-  if (!dnChangedAt) {
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('display_name_changed_at')
-        .eq('id', currentUser.id)
-        .single();
-      if (!error && data) dnChangedAt = data.display_name_changed_at || null;
-    } catch {} // column doesn't exist yet — treat as never-changed
-  }
-  const lastChange = dnChangedAt ? new Date(dnChangedAt) : null;
-  const cooldownMs = (cfg.display_name_change_cooldown_days || 60) * 86400 * 1000;
-  const nextAllowed = lastChange ? new Date(lastChange.getTime() + cooldownMs) : null;
-  const onCooldown = nextAllowed && nextAllowed > new Date();
-
-  if (onCooldown) {
-    usernameEl.disabled = true;
-    hintEl.classList.add('is-locked');
-    const dateStr = nextAllowed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-    const days = Math.ceil((nextAllowed - new Date()) / 86400000);
-    hintEl.textContent = `Display name is locked. You can change it again on ${dateStr} (${days} day${days===1?'':'s'} from now).`;
-  } else {
-    usernameEl.disabled = false;
-    hintEl.classList.remove('is-locked');
-    hintEl.textContent = `Letters, numbers and basic punctuation only — no emoji. You can change this once every ${cfg.display_name_change_cooldown_days || 60} days.`;
-  }
-
-  // ── Bio counters ──
-  updateBioCounter();
-
-  document.getElementById('editProfileModal').classList.add('open');
-  document.body.style.overflow = 'hidden';
-}
-
-function closeEditProfile() {
-  document.getElementById('editProfileModal').classList.remove('open');
-  document.body.style.overflow = '';
-}
-
-function updateBioCounter() {
-  const el = document.getElementById('editBio');
-  const countEl = document.getElementById('editBioCount');
-  const linesEl = document.getElementById('editBioLines');
-  if (!el || !countEl || !linesEl) return;
-  const v = el.value || '';
-  const maxC = _profileEditDefaults.max_bio_characters || 200;
-  const maxL = _profileEditDefaults.max_bio_lines || 5;
-  const lines = v ? (v.split('\n').length) : 1;
-  countEl.textContent = `${v.length} / ${maxC}`;
-  linesEl.textContent = `${lines} / ${maxL} lines`;
-  countEl.classList.remove('is-warn','is-bad');
-  linesEl.classList.remove('is-warn','is-bad');
-  if (v.length > maxC) countEl.classList.add('is-bad');
-  else if (v.length > maxC * 0.9) countEl.classList.add('is-warn');
-  if (lines > maxL) linesEl.classList.add('is-bad');
-  else if (lines === maxL) linesEl.classList.add('is-warn');
-}
-
-document.getElementById('editProfileClose').addEventListener('click', closeEditProfile);
-document.getElementById('editProfileCancel').addEventListener('click', closeEditProfile);
-document.getElementById('editProfileModal').addEventListener('click', (e) => { if (e.target.id === 'editProfileModal') closeEditProfile(); });
-
-// Live: strip emoji as user types into display name
-document.getElementById('editUsername').addEventListener('input', (e) => {
-  const cleaned = stripEmoji(e.target.value);
-  if (cleaned !== e.target.value) e.target.value = cleaned;
-});
-
-// Hard-cap bio at the configured line count. Blocks Enter past the limit and
-// trims pasted multi-line text down to N lines.
-function clampBioLines(text) {
-  const max = _profileEditDefaults.max_bio_lines || 5;
-  const lines = (text || '').split('\n');
-  if (lines.length <= max) return text || '';
-  return lines.slice(0, max).join('\n');
-}
-
-const _bioEl = document.getElementById('editBio');
-_bioEl.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter') return;
-  const max = _profileEditDefaults.max_bio_lines || 5;
-  const lines = (e.target.value || '').split('\n').length;
-  if (lines >= max) e.preventDefault();   // refuse new line at the cap
-});
-_bioEl.addEventListener('paste', (e) => {
-  // Re-clamp after paste so pasting a 12-line block gets trimmed to 5
-  setTimeout(() => {
-    const clamped = clampBioLines(e.target.value);
-    if (clamped !== e.target.value) e.target.value = clamped;
-    updateBioCounter();
-  }, 0);
-});
-
-// Live: bio counter updates
-_bioEl.addEventListener('input', updateBioCounter);
-
-// Country change: swap city UI between dropdown (PH) and free-text input
-document.getElementById('editCountry').addEventListener('change', (e) => {
-  applyCountryUI(e.target.value);
-  // Clear stale city value on country swap
-  document.getElementById('editCity').value = '';
-  document.getElementById('editCityInput').value = '';
-});
-
-document.getElementById('editProfileSave').addEventListener('click', async () => {
-  const btn = document.getElementById('editProfileSave');
-  const usernameEl = document.getElementById('editUsername');
-
-  // Client-side guards — server still re-validates as source of truth
-  let username = stripEmoji(usernameEl.value).trim();
-  const bio    = (document.getElementById('editBio').value || '').trim();
-  const country = (document.getElementById('editCountry').value || '').trim();
-  const city   = getCurrentCity();
-  // Compose location: "City, Country" if both present, just country if no city,
-  // empty string to clear.
-  const loc = (city && country) ? `${city}, ${country}` : (country || '');
-  // Website field removed from the form — pass null to preserve any existing
-  // value in the DB (the RPC's coalesce-style update won't overwrite when null).
-  const web    = null;
-
-  if (!username) { toast('Display name is required', 'error'); return; }
-  if (hasEmoji(username)) { toast('Display name cannot contain emoji', 'error'); return; }
-
-  const maxC = _profileEditDefaults.max_bio_characters || 200;
-  const maxL = _profileEditDefaults.max_bio_lines || 5;
-  if (bio.length > maxC) { toast(`Bio is too long (max ${maxC} characters)`, 'error'); return; }
-  if (bio && bio.split('\n').length > maxL) { toast(`Bio has too many lines (max ${maxL})`, 'error'); return; }
-
-  btn.disabled = true; btn.textContent = 'Saving...';
-
-  // If display name field is disabled (cooldown), don't try to send it
-  const sendUsername = usernameEl.disabled ? null : username;
-
-  const { data, error } = await supabase.rpc('update_profile', {
-    p_username: sendUsername,
-    p_bio: bio,
-    p_location: loc,
-    p_website: web,
-  });
-
-  btn.disabled = false; btn.textContent = 'Save';
-
-  if (error) { toast(error.message, 'error'); return; }
-  if (!data || data.ok === false) {
-    const code = data?.error;
-    const msg = {
-      not_authenticated:    'Please sign in again',
-      username_required:    'Display name is required',
-      emoji_not_allowed:    'Display name cannot contain emoji',
-      name_change_cooldown: data?.next_allowed_at
-        ? `You can change your name again on ${new Date(data.next_allowed_at).toLocaleDateString()}`
-        : `Display name is locked for ${data?.cooldown_days || 60} days between changes`,
-      bio_too_long:         `Bio is too long (max ${data?.max_chars || maxC} characters)`,
-      bio_too_many_lines:   `Bio has too many lines (max ${data?.max_lines || maxL})`,
-    }[code] || (code || 'Could not save profile');
-    toast(msg, 'error');
-    return;
-  }
-
-  toast('Profile updated!', 'success');
-  closeEditProfile();
-  const { data: updated } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
-  if (updated) currentProfile = updated;   // keep stale on fetch fail rather than nulling
-  updateTopbarUser();
-  openProfile(currentUser.id);
-});
-
-// ── Image cropper ──
+// ════════════════════════════════════════════════════════════════════════
+// Profile page bulk (showProfileView through end of pre-crop section) moved to js/profile.js (Stage 6, 2026-05-15).
+// ════════════════════════════════════════════════════════════════════════
 let cropperInstance = null;
 let cropField = null; // 'avatar_url' or 'banner_url'
 
@@ -7927,49 +5118,12 @@ document.getElementById('cropSave').addEventListener('click', async () => {
   }, 'image/jpeg', 0.92);
 });
 
-// Avatar upload
-document.getElementById('editAvatarBtn').addEventListener('click', () => document.getElementById('avatarInput').click());
-document.getElementById('avatarInput').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  openCropModal(file, 1, 'avatar_url', 'Crop your avatar');
-  e.target.value = '';
-});
-
-// Banner upload
-document.getElementById('editBannerBtn').addEventListener('click', () => document.getElementById('bannerInput').click());
-document.getElementById('bannerInput').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  openCropModal(file, 3, 'banner_url', 'Crop your cover photo');
-  e.target.value = '';
-});
-// Open own profile from sidebar
-async function openMyProfile() {
-  if (!currentUser) {
-    toast('Loading your profile...', '');
-    return;
-  }
-  // Make sure profile is loaded before opening
-  if (!currentProfile) {
-    const { data: profile, error } = await supabase.from('profiles').select(PROFILE_DISPLAY_COLS).eq('id', currentUser.id).single();
-    if (error) { toast('Could not load your profile', 'error'); return; }
-    currentProfile = profile || null;
-    if (!currentProfile) { toast('Profile not found', 'error'); return; }
-  }
-  openProfile(currentUser.id);
-}
-document.getElementById('btnProfile').addEventListener('click', () => {
-  setSidebarActive('btnProfile');
-  openMyProfile();
-});
-document.getElementById('topbarAvatar').addEventListener('click', () => {
-  setSidebarActive('btnProfile');
-  openMyProfile();
-});
+// ════════════════════════════════════════════════════════════════════════
+// Profile avatar/banner uploads + openMyProfile + topbarAvatar handler moved to js/profile.js (Stage 6, 2026-05-15).
+// ════════════════════════════════════════════════════════════════════════
 
 // ── Sidebar active state syncing ──
-function setSidebarActive(buttonId) {
+export function setSidebarActive(buttonId) {
   document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
   const btn = document.getElementById(buttonId);
   if (btn) btn.classList.add('active');
@@ -8018,220 +5172,12 @@ window.addEventListener('popstate', () => {
 });
 
 // ── Smart context-aware search ──
-const searchInput = document.getElementById('searchInput');
-const searchResultsEl = document.getElementById('searchResults');
-const topbarSearchClear = document.getElementById('topbarSearchClear');
-let searchDebounce = null;
-
-// ── Recent searches (web parity with mobile lib/recent-searches.js) ──
-// Local-only history of recent search queries. Capped at 10 entries.
-// Persists in localStorage across sessions; wiped only when the user
-// taps Clear all in the dropdown. Per-user keying so signing in/out
-// doesn't show another user's history.
-const RECENT_SEARCHES_LIMIT = 10;
-const recentSearchesKey = () => {
-  const uid = currentUser?.id || 'anon';
-  return `selebox.recentSearches.${uid}`;
-};
-function getRecentSearches() {
-  try {
-    const raw = localStorage.getItem(recentSearchesKey());
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((q) => typeof q === 'string' && q.trim()) : [];
-  } catch (_) {
-    return [];
-  }
-}
-function addRecentSearch(q) {
-  const trimmed = (q || '').trim();
-  if (!trimmed) return;
-  const existing = getRecentSearches();
-  // Move-to-front semantics: drop any existing match (case-insensitive)
-  // then prepend, so the same term searched twice doesn't duplicate.
-  const filtered = existing.filter((x) => x.toLowerCase() !== trimmed.toLowerCase());
-  const next = [trimmed, ...filtered].slice(0, RECENT_SEARCHES_LIMIT);
-  try { localStorage.setItem(recentSearchesKey(), JSON.stringify(next)); } catch (_) { /* swallow */ }
-}
-function removeRecentSearch(q) {
-  const trimmed = (q || '').trim();
-  if (!trimmed) return;
-  const existing = getRecentSearches();
-  const next = existing.filter((x) => x.toLowerCase() !== trimmed.toLowerCase());
-  try { localStorage.setItem(recentSearchesKey(), JSON.stringify(next)); } catch (_) { /* swallow */ }
-}
-function clearRecentSearches() {
-  try { localStorage.removeItem(recentSearchesKey()); } catch (_) { /* swallow */ }
-}
-
-// Render the recent-searches dropdown when the input is focused with
-// empty value. Tapping a recent re-runs the search; tapping the X
-// removes that entry.
-function renderRecentSearchesPanel() {
-  const recents = getRecentSearches();
-  if (!recents.length) {
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-  const html = `
-    <div class="search-result-section" style="display:flex;align-items:center;justify-content:space-between">
-      <span>Recent searches</span>
-      <button class="search-recent-clear" type="button" style="font-size:0.75rem;background:none;border:none;color:var(--text3);cursor:pointer">Clear all</button>
-    </div>
-    ${recents.map((q) => `
-      <div class="search-result-item search-recent-item" data-recent="${escHTML(q)}">
-        <div class="search-result-info" style="display:flex;align-items:center;gap:8px;flex:1">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text3);flex-shrink:0">
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
-          <div class="search-result-title" style="flex:1">${escHTML(q)}</div>
-        </div>
-        <button class="search-recent-remove" data-remove="${escHTML(q)}" type="button" aria-label="Remove" style="background:none;border:none;color:var(--text3);cursor:pointer;padding:4px">×</button>
-      </div>
-    `).join('')}
-  `;
-  searchResultsEl.innerHTML = html;
-  searchResultsEl.classList.add('open');
-
-  searchResultsEl.querySelector('.search-recent-clear')?.addEventListener('click', () => {
-    clearRecentSearches();
-    searchResultsEl.classList.remove('open');
-  });
-  searchResultsEl.querySelectorAll('.search-recent-item').forEach((el) => {
-    el.addEventListener('click', (ev) => {
-      // X button propagates here too — ignore if the click target is
-      // the remove control, since its own handler runs first.
-      if (ev.target.closest('.search-recent-remove')) return;
-      const q = el.dataset.recent;
-      if (!q) return;
-      searchInput.value = q;
-      if (topbarSearchClear) topbarSearchClear.style.display = 'flex';
-      runFeedSearch(q);
-    });
-  });
-  searchResultsEl.querySelectorAll('.search-recent-remove').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      removeRecentSearch(btn.dataset.remove);
-      renderRecentSearchesPanel();
-    });
-  });
-}
-
-// Search context decides which renderer the topbar search input feeds.
-//   'videos' → renders into the videos page grid
-//   'books'  → renders into the books page See-All view
-//   default  → home-feed dropdown (People / Videos / Books / Posts)
-//
-// Important: book DETAIL pages (#book/<uuid>) used to be 'books' too, which
-// meant typing in search tried to render into a hidden bookPage and the
-// search results vanished into the void. We now route detail pages to the
-// feed dropdown, so users can find another book without leaving the reader.
-function getSearchContext() {
-  const hash = window.location.hash;
-  if (hash === '#videos' || hash.startsWith('#video/')) return 'videos';
-  if (hash === '#book') return 'books'; // listing only — detail pages use the feed dropdown
-  return 'feed';
-}
-
-let _lastSearchContext = null;
-function updateSearchPlaceholder() {
-  const ctx = getSearchContext();
-  if (ctx === 'videos')      searchInput.placeholder = 'Search videos · creator · tags · category…';
-  else if (ctx === 'books')  searchInput.placeholder = 'Search books · author · tags · genre…';
-  else                       searchInput.placeholder = 'Search posts and people…';
-
-  // Reset any active query when moving between contexts (videos ↔ books ↔ feed)
-  if (_lastSearchContext && _lastSearchContext !== ctx) {
-    searchInput.value = '';
-    if (topbarSearchClear) topbarSearchClear.style.display = 'none';
-    activeSearchQuery = '';
-    activeBookSearchQuery = '';
-    searchResultsEl.classList.remove('open');
-  }
-  _lastSearchContext = ctx;
-}
-
-searchInput.addEventListener('input', (e) => {
-  const value = e.target.value;
-  if (topbarSearchClear) topbarSearchClear.style.display = value ? 'flex' : 'none';
-
-  const ctx = getSearchContext();
-
-  if (ctx === 'videos') {
-    activeSearchQuery = value;
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => runSearch(), 200);
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-
-  if (ctx === 'books') {
-    activeBookSearchQuery = value;
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => runBookSearch(), 200);
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-
-  // Feed (default): show dropdown of matching people + posts
-  clearTimeout(searchDebounce);
-  if (!value.trim()) {
-    // Empty value while focused → show recent-searches dropdown so the
-    // user can re-run a previous query without retyping.
-    if (document.activeElement === searchInput) {
-      renderRecentSearchesPanel();
-    } else {
-      searchResultsEl.classList.remove('open');
-    }
-    return;
-  }
-  searchDebounce = setTimeout(() => runFeedSearch(value), 250);
-});
-
-// On focus with empty input, surface recent searches.
-searchInput.addEventListener('focus', () => {
-  if (!searchInput.value.trim() && getSearchContext() === 'feed') {
-    renderRecentSearchesPanel();
-  }
-});
-
-// On Enter, persist the term as a recent search. Same trigger on
-// clicking a result handled below.
-searchInput.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter') return;
-  const v = searchInput.value.trim();
-  if (v) addRecentSearch(v);
-});
-
-if (topbarSearchClear) {
-  topbarSearchClear.addEventListener('click', () => {
-    searchInput.value = '';
-    topbarSearchClear.style.display = 'none';
-    searchResultsEl.classList.remove('open');
-    const ctx = getSearchContext();
-    if (ctx === 'videos') {
-      activeSearchQuery = '';
-      runSearch();
-    } else if (ctx === 'books') {
-      activeBookSearchQuery = '';
-      // Close the See-All search view and return to the active tab panel.
-      // (No "restore the cached grid" step — the v2 books page is tabbed.)
-      const seeAll = document.getElementById('bookSeeAllView');
-      if (seeAll) seeAll.style.display = 'none';
-      document.querySelectorAll('.book-tab-panel').forEach(p => {
-        const isActive = p.dataset.bookPanel === _activeBookTab;
-        p.style.display = isActive ? '' : 'none';
-        p.classList.toggle('active', isActive);
-      });
-    }
-  });
-}
-
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
-    searchResultsEl.classList.remove('open');
-  }
-});
+// MOVED to js/search.js (Stage 10). Topbar input wiring, recent-searches
+// dropdown, context-aware placeholder, hashchange listener, runFeedSearch,
+// and all 5 search helpers (sanitize / escape / normalize / getRecent /
+// renderRecentSearchesPanel) live in search.js now. The import at the
+// top of this file pulls in the 3 pure helpers so existing _cfg
+// passthroughs into books.js + videos.js keep receiving the real impls.
 
 // Document-level delegation: clicking any profile avatar/name in the feed
 // (or future cards) opens that user's profile.
@@ -8245,150 +5191,14 @@ document.addEventListener('click', (e) => {
   openProfile(uid);
 });
 
-async function runFeedSearch(query) {
-  const raw = (query || '').trim();
-  if (!raw) { searchResultsEl.classList.remove('open'); return; }
-
-  // Sanitize FIRST so commas / parens / quotes in the user's query don't
-  // break the PostgREST .or() filter (the silent root cause behind
-  // "search returns nothing" reports).
-  const safeQ = sanitizeSearchQuery(raw);
-  if (!safeQ) { searchResultsEl.classList.remove('open'); return; }
-  const term = `%${escapeIlike(safeQ)}%`;
-
-  searchResultsEl.classList.add('open');
-  searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
-
-  // YouTube-style: a single search bar reaches People, Posts, Videos, AND Books.
-  // Profiles overfetched (20) so substring matches like "Ligaya" pull users like
-  // "LIGAYA_ba1f" too — explicit username ordering for predictability.
-  const [profilesRes, postsRes, videosRes, booksRes] = await Promise.all([
-    supabase.from('profiles')
-      .select('id, username, avatar_url, bio, is_guest, is_banned, role')
-      .ilike('username', term)
-      .eq('is_banned', false)
-      .order('username', { ascending: true })
-      .limit(20),
-    supabase.from('posts')
-      .select('*, profiles!user_id(username, avatar_url, is_guest, is_banned, role)')
-      .eq('is_hidden', false)
-      .ilike('body', term)
-      .order('created_at', { ascending: false })
-      .limit(6),
-    supabase.from('videos')
-      .select('id, title, thumbnail_url, uploader_id, profiles!videos_uploader_id_fkey(username, avatar_url, is_banned, role)')
-      .eq('status', 'ready').eq('is_hidden', false)
-      .or(`title.ilike.${term},description.ilike.${term}`)
-      .order('created_at', { ascending: false })
-      .limit(5),
-    supabase.from('books')
-      .select('id, title, cover_url, author_id, profiles!books_author_id_fkey(username, avatar_url, is_banned, role)')
-      .eq('is_public', true).eq('is_hidden', false).in('status', ['ongoing', 'completed'])
-      .or(`title.ilike.${term},description.ilike.${term}`)
-      .limit(5),
-  ]);
-
-  // Stale-query guard — user kept typing, abandon this run.
-  if ((searchInput.value || '').trim() !== raw) return;
-
-  const profiles = profilesRes?.data || [];
-  const posts    = (postsRes?.data || []).filter(p => !p.profiles?.is_banned);
-  const videos   = (videosRes?.data || []).filter(v => !v.profiles?.is_banned);
-  const books    = (booksRes?.data || []).filter(b => !b.profiles?.is_banned);
-
-  let html = '';
-  if (profiles.length) {
-    html += `<div class="search-result-section">People</div>`;
-    profiles.forEach(p => {
-      const avatar = p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username);
-      html += `
-        <div class="search-result-item" data-type="profile" data-id="${p.id}">
-          <div class="avatar">${avatar}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(p.username)}${renderRoleSeal(p)}</div>
-            <div class="search-result-meta">${p.is_guest ? 'Guest' : 'Member'}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (videos.length) {
-    html += `<div class="search-result-section">Videos</div>`;
-    videos.forEach(v => {
-      const thumb = v.thumbnail_url
-        ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>`
-        : '';
-      html += `
-        <div class="search-result-item" data-type="video" data-id="${v.id}">
-          <div class="search-result-thumb">${thumb}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(v.title || 'Untitled')}</div>
-            <div class="search-result-meta">by ${escHTML(v.profiles?.username || 'Unknown')}${renderRoleSeal(v.profiles)}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (books.length) {
-    html += `<div class="search-result-section">Books</div>`;
-    books.forEach(b => {
-      const cover = b.cover_url
-        ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
-        : `<span class="search-creator-initials">${escHTML((b.title || '?').charAt(0).toUpperCase())}</span>`;
-      html += `
-        <div class="search-result-item" data-type="book" data-id="${b.id}">
-          <div class="search-result-thumb search-result-thumb-book">${cover}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(b.title || 'Untitled')}</div>
-            <div class="search-result-meta">by ${escHTML(b.profiles?.username || 'Unknown')}${renderRoleSeal(b.profiles)}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (posts.length) {
-    html += `<div class="search-result-section">Posts</div>`;
-    posts.forEach(p => {
-      const author = p.profiles || {};
-      const avatar = author.avatar_url ? `<img src="${escHTML(author.avatar_url)}"/>` : initials(author.username || 'U');
-      const snippet = (p.body || '').slice(0, 80);
-      html += `
-        <div class="search-result-item" data-type="post" data-id="${p.id}">
-          <div class="avatar">${avatar}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(snippet)}${p.body && p.body.length > 80 ? '...' : ''}</div>
-            <div class="search-result-meta">by ${escHTML(author.username || 'Unknown')}${renderRoleSeal(author)}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (!html) html = '<div style="padding:1rem;color:var(--text3);text-align:center">No results found</div>';
-
-  searchResultsEl.innerHTML = html;
-
-  searchResultsEl.querySelectorAll('.search-result-item').forEach(item => {
-    item.onclick = () => {
-      const type = item.dataset.type;
-      const id = item.dataset.id;
-      // Persist the term that produced this result. Successful clicks
-      // (the user found what they wanted) are the strongest signal
-      // for "remember this query."
-      const termAtClick = (searchInput.value || '').trim();
-      if (termAtClick) addRecentSearch(termAtClick);
-
-      searchResultsEl.classList.remove('open');
-      searchInput.value = '';
-      if (topbarSearchClear) topbarSearchClear.style.display = 'none';
-
-      if (type === 'profile')      openProfile(id);
-      else if (type === 'post')    openPostFromSearch(id);
-      else if (type === 'video')   { location.hash = `#video/sb_${id}`; }
-      else if (type === 'book')    { location.hash = `#book/${id}`; }
-    };
-  });
-}
+// runFeedSearch MOVED to js/search.js (Stage 10). Comment kept as a
+// breadcrumb so grep-driven audits land in the right place. The function
+// is exported from search.js; nothing in app.js calls it directly.
 
 // Open a focused post detail modal — works for ANY post, even old ones not
 // in the loaded feed. Reuses renderPost so the post stays visually identical
 // to the feed version (same actions, same comments, same look).
-async function openPostFromSearch(postId) {
+export async function openPostFromSearch(postId) {
   const modal = document.getElementById('postDetailModal');
   const body  = document.getElementById('postDetailBody');
   if (!modal || !body) return;
@@ -8429,24 +5239,13 @@ async function openPostFromSearch(postId) {
   }
 }
 
-// Wire close handlers for the post detail modal
-function _closePostDetailModal() {
-  const m = document.getElementById('postDetailModal');
-  if (!m) return;
-  m.classList.remove('open');
-  m.style.display = 'none';
-  document.body.style.overflow = '';
-  // Clear the body so the next open shows the loading state, not stale content
-  const body = document.getElementById('postDetailBody');
-  if (body) body.innerHTML = '<div class="loading">Loading post…</div>';
-}
 document.getElementById('postDetailClose')?.addEventListener('click', _closePostDetailModal);
 document.getElementById('postDetailModal')?.addEventListener('click', (e) => {
   if (e.target.id === 'postDetailModal') _closePostDetailModal();
 });
 
-window.addEventListener('hashchange', updateSearchPlaceholder);
-updateSearchPlaceholder();
+// hashchange listener + updateSearchPlaceholder boot call MOVED to
+// js/search.js (Stage 10). search.js wires both at module-load time.
 
 // ── Videos title click behavior ──
 const videosTitle = document.querySelector('.videos-title');
@@ -8461,10 +5260,10 @@ if (videosTitle) {
       clearTimeout(clickTimer);
       clickTimer = null;
       // Refresh: clear cache and reload
-      allVideosCache = [];
-      allUploadersCache = {};
-      activeSearchQuery = '';
-      activeTagFilter = null;
+      invalidateAllVideosCache();
+      
+      setActiveSearchQuery('');
+      setActiveTagFilter(null);
       const searchInput = document.getElementById('searchInput');
       if (searchInput) searchInput.value = '';
       loadVideos();
@@ -9320,7 +6119,7 @@ async function vuStartUpload() {
     next.textContent = 'Done';
     next.onclick = () => {
       closeVideoUploadModal();
-      if (videosPage.style.display === 'block') { allVideosCache = []; loadVideos(); }
+      if (videosPage.style.display === 'block') { invalidateAllVideosCache(); loadVideos(); }
       if (feedEl.style.display !== 'none') window.loadFeed?.();
     };
 
@@ -9408,7 +6207,7 @@ document.getElementById('vuSuccessViewStudio')?.addEventListener('click', () => 
   }
   // Last resort — at least refresh the Videos list so the new row shows up.
   if (videosPage?.style.display === 'block') {
-    allVideosCache = [];
+    invalidateAllVideosCache();
     loadVideos();
   }
 });
@@ -9461,55 +6260,6 @@ function uploadFileToBunny(file, info, onProgress) {
 
 initAuth();
 
-// ── Watch history & smart recommendations ──
-const WATCH_HISTORY_KEY = 'selebox_watch_history';
-
-function getWatchHistory() {
-  try {
-    const raw = localStorage.getItem(WATCH_HISTORY_KEY);
-    if (!raw) return [];
-    const history = JSON.parse(raw);
-    // Filter out entries older than 30 days
-    const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
-    return history.filter(h => h.timestamp > cutoff);
-  } catch { return []; }
-}
-
-function addToWatchHistory(video, uploader) {
-  const history = getWatchHistory();
-  // Remove if already exists (we'll add to top)
-  const filtered = history.filter(h => h.id !== video.$id);
-  filtered.unshift({
-    id: video.$id,
-    tags: video.tags || [],
-    uploader: video.uploader,
-    uploaderName: uploader?.username || '',
-    timestamp: Date.now()
-  });
-  // Keep only last 50
-  const trimmed = filtered.slice(0, 50);
-  try { localStorage.setItem(WATCH_HISTORY_KEY, JSON.stringify(trimmed)); } catch {}
-}
-
-function getInterestProfile() {
-  const history = getWatchHistory();
-  const recent = history.slice(0, 5); // last 5 videos
-
-  // Weight tags: most recent = highest weight
-  const tagWeights = {};
-  const weights = [0.4, 0.25, 0.15, 0.1, 0.1];
-  recent.forEach((entry, idx) => {
-    const w = weights[idx] || 0.05;
-    (entry.tags || []).forEach(tag => {
-      tagWeights[tag] = (tagWeights[tag] || 0) + w;
-    });
-  });
-
-  const watchedIds = new Set(history.map(h => h.id));
-  const recentUploaders = [...new Set(recent.map(h => h.uploader).filter(Boolean))];
-
-  return { tagWeights, watchedIds, recentUploaders };
-}
 
 async function loadUpNext(currentVideo) {
   const list = document.getElementById('upNextList');
@@ -9678,7 +6428,17 @@ function hideAllMainPages() {
   if (bookDetailPage) bookDetailPage.style.display = 'none';
   if (chapterReaderPage) chapterReaderPage.style.display = 'none';
   if (bookmarksPage) bookmarksPage.style.display = 'none';
-  if (messagesPage) messagesPage.style.display = 'none';
+  if (messagesPage) {
+    // Codex P2/#213 fix — tear down the active conversation's realtime
+    // + presence channels when the Messages page leaves the screen.
+    // Without this, switching to any other tab (Home, Books, etc.) left
+    // the Supabase subscriptions running in the background until the
+    // tab was closed. Safe no-op when no conversation was active.
+    if (messagesPage.style.display !== 'none') {
+      try { teardownActiveConversation(); } catch {}
+    }
+    messagesPage.style.display = 'none';
+  }
   if (storePage) storePage.style.display = 'none';
   if (earningsPage) earningsPage.style.display = 'none';
   // Sibling sentinels (live outside the page divs) — also hide
@@ -9726,18 +6486,6 @@ function stopVideoPlayer() {
   }
 }
 
-function showVideos(forceReload = false) {
-  const wasOnVideosPage = videosPage.style.display === 'block';
-  hideAllMainPages();
-  videosPage.style.display = 'block';
-  document.body.classList.add('on-videos');
-  stopVideoPlayer();
-  history.pushState(null, '', '#videos');
-  // Only reload if cache is empty or forced
-  if (forceReload || !allVideosCache.length) {
-    loadVideos();
-  }
-}
 
 function showStudio(forceReload = false) {
   hideAllMainPages();
@@ -9758,1361 +6506,17 @@ function showStudio(forceReload = false) {
   }
 }
 
-// ════════════════════════════════════════
-// BOOK / READER
-// ════════════════════════════════════════
-let allBooksCache = [];     // filtered + sorted view (what's rendered)
-let allBooksRaw   = [];     // unfiltered raw books fetched from server (for fast tab switching)
-let bookGenreFilter = '';
-let bookSortBy = 'trending';
-let activeBookSearchQuery = '';
-let currentBookDetail = null;       // { book, chapters }
-let currentChapterIndex = 0;
-let readerFontSize = parseFloat(localStorage.getItem('selebox_reader_font') || '1.05');
+// (Tab switching, See-All click delegation, and See-All back wiring all
+// migrated to wireBooksPage() in js/books.js as part of Stage 8A. The
+// initBooks({…}) + wireBooksPage() pair near the top of this file owns
+// the boot-time attach now.)
 
-// ── Books page (mirrors mobile-app shape: tabbed sections of curated rows) ──
-//
-// Tabs:
-//   foryou      → Weekly Featured (editor's picks) / Fresh Reads / Completed & Excellent
-//   discover    → Genre-grouped rows of top books
-//   ranking     → Most Loved / Most Read / Trending This Week
-//   readinglist → User's bookmarks
-//
-// (Library was dropped from web — the sidebar's existing Bookmarks page
-// already plays that role; mobile app's "Library" maps to web's Bookmarks.)
-//
-// Each section has a See All link that opens an in-page list view with
-// infinite scroll, sorted/filtered the same way that section was populated.
-// ────────────────────────────────────────────────────────────────────────────
-let _activeBookTab = 'foryou';
-const _bookTabLoaded = { foryou: false, discover: false, ranking: false, readinglist: false };
-
-function showBook(force = false) {
-  hideAllMainPages();
-  bookPage.style.display = 'block';
-  // Wider canvas: 7 covers per row needs the full viewport, not the 900px
-  // home-feed column. The body class is removed by hideAllMainPages on nav.
-  document.body.classList.add('on-books');
-  stopVideoPlayer();
-  history.pushState(null, '', '#book');
-  // Hide See-All sub-view if it was open from a previous visit.
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (seeAll) seeAll.style.display = 'none';
-  // Show the active tab's panel; hide the rest.
-  document.querySelectorAll('.book-tab-panel').forEach(p => {
-    const isActive = p.dataset.bookPanel === _activeBookTab;
-    p.style.display = isActive ? '' : 'none';
-    p.classList.toggle('active', isActive);
-  });
-  loadBooksTab(_activeBookTab, force);
-}
-
-function loadBooksTab(tab, force = false) {
-  _activeBookTab = tab;
-  if (!force && _bookTabLoaded[tab]) return;
-  _bookTabLoaded[tab] = true;
-  if (tab === 'foryou')      return _loadForYouTab();
-  if (tab === 'discover')    return _loadDiscoverTab();
-  if (tab === 'ranking')     return _loadRankingTab();
-  if (tab === 'readinglist') return _loadReadingListTab();
-}
-
-// (The old fire-and-render `_loadBookSection` was removed when For You and
-// Ranking moved to the parallel-fetch + claim-by-priority pattern below.
-// `_renderBookSection` is the new render-only helper.)
-
-// ── For You tab — 10 Wattpad-inspired rails ────────────────────────────────
-//
-// Strategy: fetch all rails in parallel (each overfetches 2× for dedup
-// headroom), then walk them in priority order and CLAIM books — once a
-// book lands in an earlier rail, later rails skip it. This guarantees
-// every book appears at most once across the whole For You tab, while
-// keeping the parallel speed (no sequential wait between waves).
-//
-// Order is the priority order: curated → personal → fresh activity →
-// discovery → format → all-time → completed. Edit this array to reorder.
-const _SECTION_ROW_SIZE = 7;
-const _FORYOU_SECTIONS = [
-  { key: 'weeklyFeatured',     fetch: (n) => _fetchWeeklyFeaturedWithFallback(n),                       empty: 'No featured books yet' },
-  { key: 'recommended',        fetch: (n) => _fetchRecommendedForUser(n),                               empty: 'Read a few books to get personalised picks' },
-  { key: 'trending',           fetch: (n) => fetchSupabaseBooks(0, n, 'trending'),                      empty: 'Nothing trending yet' },
-  { key: 'freshReads',         fetch: (n) => fetchSupabaseBooks(0, n, 'recent'),                        empty: 'No fresh reads' },
-  { key: 'justUpdated',        fetch: (n) => fetchSupabaseBooks(0, n, 'just-updated'),                  empty: 'No recent updates' },
-  { key: 'hiddenGems',         fetch: (n) => _fetchHiddenGems(n),                                       empty: 'No hidden gems found' },
-  { key: 'quickReads',         fetch: (n) => _fetchQuickReads(n),                                       empty: 'No quick reads yet' },
-  { key: 'mostLoved',          fetch: (n) => fetchSupabaseBooks(0, n, 'most-liked'),                    empty: 'Nothing here yet' },
-  { key: 'mostRead',           fetch: (n) => fetchSupabaseBooks(0, n, 'most-read'),                     empty: 'Nothing here yet' },
-  { key: 'completedExcellent', fetch: (n) => fetchSupabaseBooks(0, n, 'completed'),                     empty: 'No completed books yet' },
-];
-
-async function _loadForYouTab() {
-  // Scope all DOM queries to this panel. Several keys (mostLoved / mostRead /
-  // trending) are reused by the Ranking tab — without this scope, querySelector
-  // would write to whichever copy comes first in the DOM.
-  const panel = document.getElementById('bookTabForYou');
-  if (!panel) return;
-  // Show a loading state on every track immediately so the page never looks empty.
-  for (const s of _FORYOU_SECTIONS) {
-    const track = panel.querySelector(`.book-section-track[data-track="${s.key}"]`);
-    if (track) track.innerHTML = '<div class="loading">Loading…</div>';
-  }
-
-  // Overfetch 3× — gives the dedup pass plenty of headroom even when later
-  // rails get most of their top picks claimed by earlier rails.
-  const FETCH = _SECTION_ROW_SIZE * 3;
-  const results = await Promise.all(
-    _FORYOU_SECTIONS.map(s =>
-      s.fetch(FETCH).catch(err => {
-        console.warn(`[For You] section "${s.key}" failed:`, err);
-        return [];
-      })
-    )
-  );
-
-  // Claim books in priority order with SOFT dedup:
-  //   1. First pass: take un-claimed books only (the strict dedup).
-  //   2. If a rail ends up too sparse to be useful (< MIN_PER_RAIL), top it
-  //      up with its own already-claimed books — better to repeat a great
-  //      book in a category showcase than to leave the rail empty.
-  // This is the right trade for "category" rails like Most Loved / Completed,
-  // where the rail's whole job is "show me the best of this slice", and dies
-  // visually if dedup steals all its top picks.
-  const seen = new Set();
-  const MIN_PER_RAIL = 4;
-  results.forEach((books, i) => {
-    const pool = books || [];
-    const claimed = [];
-    const claimedIds = new Set();
-    // Pass 1 — strict dedup
-    for (const b of pool) {
-      if (!b || seen.has(b.id) || claimedIds.has(b.id)) continue;
-      claimed.push(b);
-      claimedIds.add(b.id);
-      seen.add(b.id);
-      if (claimed.length >= _SECTION_ROW_SIZE) break;
-    }
-    // Pass 2 — soft fill if the rail came up short
-    if (claimed.length < MIN_PER_RAIL) {
-      for (const b of pool) {
-        if (!b || claimedIds.has(b.id)) continue;
-        claimed.push(b);
-        claimedIds.add(b.id);
-        if (claimed.length >= _SECTION_ROW_SIZE) break;
-      }
-    }
-    _renderBookSection(_FORYOU_SECTIONS[i].key, claimed, _FORYOU_SECTIONS[i].empty, panel);
-  });
-}
-
-// Render-only helper — paints already-fetched books into a section track.
-// `scope` defaults to `document` but should be the parent tab panel when
-// the same section key exists in multiple tabs (For You and Ranking both
-// use mostLoved / mostRead / trending). Without scoping, the loaders write
-// to the first matching track in DOM order — usually the wrong tab.
-function _renderBookSection(sectionKey, books, emptyMsg, scope) {
-  const root = scope || document;
-  const track = root.querySelector(`.book-section-track[data-track="${sectionKey}"]`);
-  if (!track) return;
-  if (!books || !books.length) {
-    track.innerHTML = `<div class="book-section-empty">${escHTML(emptyMsg || 'Nothing here yet')}</div>`;
-    return;
-  }
-  track.innerHTML = '';
-  books.forEach(b => track.appendChild(_renderBookCardV2(b)));
-}
-
-// Hidden Gems: high engagement RATE, not absolute likes. A book with 8 likes
-// and 12 views is more of a "gem" than one with 50 likes and 600 views — the
-// first signals "almost everyone who reads it loves it". Server filter is
-// the same (low-views floor), but we re-rank client-side by likes/views ratio
-// to pick the *true* gems out of that pool.
-async function _fetchHiddenGems(limit = _SECTION_ROW_SIZE) {
-  // Overfetch — we need headroom because we re-rank below.
-  const raw = await fetchSupabaseBooks(0, Math.max(limit * 3, 24), 'most-liked', {
-    filter: q => q.gte('likes_count', 3).lt('views_count', 500),
-  });
-  return [...raw].sort((a, b) => {
-    // Smoothed ratio: floor views at 10 so a 5-view, 5-like fluke doesn't
-    // win over a 50-view, 40-like consistent favourite.
-    const rateA = (a.likes_count || 0) / Math.max(a.views_count || 0, 10);
-    const rateB = (b.likes_count || 0) / Math.max(b.views_count || 0, 10);
-    if (rateB !== rateA) return rateB - rateA;
-    return (b.likes_count || 0) - (a.likes_count || 0);
-  }).slice(0, limit);
-}
-
-// Quick Reads: short stories ranked by likes-PER-CHAPTER so a 1-chapter
-// masterpiece beats a 5-chapter draft. Density of love > sheer count.
-async function _fetchQuickReads(limit = _SECTION_ROW_SIZE) {
-  const raw = await fetchSupabaseBooks(0, Math.max(limit * 3, 24), 'most-liked', {
-    filter: q => q.gte('chapters_count', 1).lte('chapters_count', 5),
-  });
-  return [...raw].sort((a, b) => {
-    const densityA = (a.likes_count || 0) / Math.max(a.chapters_count || 0, 1);
-    const densityB = (b.likes_count || 0) / Math.max(b.chapters_count || 0, 1);
-    if (densityB !== densityA) return densityB - densityA;
-    return (b.likes_count || 0) - (a.likes_count || 0);
-  }).slice(0, limit);
-}
-
-// Weekly Featured = editor's picks first; if too few, top up with trending
-// (last-7-day hot) and finally with high-likes recent books, so the row
-// always feels alive even before a moderator curates anything.
-async function _fetchWeeklyFeaturedWithFallback(limit = _SECTION_ROW_SIZE) {
-  const target = limit;
-  const picks = await fetchSupabaseBooks(0, target, 'editors-pick');
-  if (picks.length >= target) return picks;
-
-  // Top up with trending (most likely to feel "weekly featured" without curation)
-  const fillers = await fetchSupabaseBooks(0, target, 'trending');
-  const seen = new Set(picks.map(b => b.id));
-  for (const b of fillers) {
-    if (picks.length >= target) break;
-    if (!seen.has(b.id)) { picks.push(b); seen.add(b.id); }
-  }
-  if (picks.length >= 3) return picks;
-
-  // Final fallback: most-loved books overall — guarantees a populated row.
-  const safetyNet = await fetchSupabaseBooks(0, target, 'most-liked');
-  for (const b of safetyNet) {
-    if (picks.length >= target) break;
-    if (!seen.has(b.id)) { picks.push(b); seen.add(b.id); }
-  }
-  return picks;
-}
-
-// "Recommended for You" — picks books matching the tags/genres the user has
-// previously read or liked. For brand-new users (no signal), gracefully
-// falls back to trending so the rail is always populated.
-async function _fetchRecommendedForUser(limit = _SECTION_ROW_SIZE) {
-  if (!currentUser?.id) {
-    return await fetchSupabaseBooks(0, limit, 'most-liked');
-  }
-  try {
-    // Pull a small sample of the user's recent reads + likes to derive their taste.
-    const [{ data: reads }, { data: likes }] = await Promise.all([
-      supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(20),
-      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(20),
-    ]);
-    const seedIds = [...new Set([...(reads || []), ...(likes || [])].map(r => r.book_id))];
-    if (!seedIds.length) {
-      return await fetchSupabaseBooks(0, limit, 'trending');
-    }
-    // Build a tag-weight map from those books.
-    const { data: seedBooks } = await supabase.from('books')
-      .select('genre, tags').in('id', seedIds);
-    const tagWeights = {};
-    for (const b of (seedBooks || [])) {
-      if (b.genre) tagWeights[b.genre] = (tagWeights[b.genre] || 0) + 2;
-      for (const t of (b.tags || [])) {
-        if (t) tagWeights[t] = (tagWeights[t] || 0) + 1;
-      }
-    }
-    const topTag = Object.entries(tagWeights).sort((a,b) => b[1] - a[1])[0]?.[0];
-    if (!topTag) return await fetchSupabaseBooks(0, limit, 'trending');
-
-    // Fetch top books in that taste, excluding ones the user already read/liked.
-    // Overfetch so we have headroom after excluding their seedlist.
-    const exclude = new Set(seedIds);
-    const candidates = await fetchSupabaseBooks(0, Math.max(limit * 2, 14), 'most-liked', { genre: topTag });
-    const fresh = candidates.filter(b => !exclude.has(b.id)).slice(0, limit);
-    if (fresh.length >= 3) return fresh;
-    return await fetchSupabaseBooks(0, limit, 'trending');
-  } catch (err) {
-    console.warn('Recommended-for-you failed, falling back:', err);
-    return await fetchSupabaseBooks(0, _SECTION_ROW_SIZE, 'trending');
-  }
-}
-
-// ── Ranking tab — Top-100 leaderboard with genre filter (App-aligned) ──────
-// One ranked vertical list per genre, numbered ribbons on each row. The
-// chip rail at the top filters by genre; "All" shows the platform-wide Top 100.
-// Sort is by likes_count (the canonical "Most Loved" axis) — the same axis
-// the mobile app uses for its single ranking score.
-const _RANKING_GENRES = [
-  { slug: '',                  label: 'All' },
-  { slug: 'dark-romance',      label: 'Dark Romance' },
-  { slug: 'mafia-boss',        label: 'Mafia Boss' },
-  { slug: 'billionaire',       label: 'Billionaire' },
-  { slug: 'enemies-to-lovers', label: 'Enemies to Lovers' },
-  { slug: 'forbidden-love',    label: 'Forbidden Love' },
-  { slug: 'hot-romance',       label: 'Hot Romance' },
-  { slug: 'sci-fi',            label: 'Sci-fi' },
-  { slug: 'teen-fiction',      label: 'Teen Fiction' },
-  { slug: 'general-fiction',   label: 'General Fiction' },
-];
-let _rankingActiveGenre = '';
-let _rankingSeq = 0;
-
-async function _loadRankingTab() {
-  const panel = document.getElementById('bookTabRanking');
-  if (!panel) return;
-  _renderRankGenreChips();
-  await _loadRankingForGenre(_rankingActiveGenre);
-}
-
-function _renderRankGenreChips() {
-  const wrap = document.getElementById('rankGenreChips');
-  if (!wrap) return;
-  wrap.innerHTML = '';
-  for (const g of _RANKING_GENRES) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'rank-genre-chip' + (g.slug === _rankingActiveGenre ? ' active' : '');
-    btn.dataset.genre = g.slug;
-    btn.textContent = g.label;
-    btn.addEventListener('click', () => {
-      if (g.slug === _rankingActiveGenre) return;
-      _rankingActiveGenre = g.slug;
-      // Update active chip styling without a full chip-rail rebuild
-      wrap.querySelectorAll('.rank-genre-chip').forEach(c => {
-        c.classList.toggle('active', c.dataset.genre === g.slug);
-      });
-      _loadRankingForGenre(g.slug);
-    });
-    wrap.appendChild(btn);
-  }
-}
-
-async function _loadRankingForGenre(genreSlug) {
-  const list = document.getElementById('rankList');
-  if (!list) return;
-  const seq = ++_rankingSeq;
-  list.innerHTML = '<div class="loading">Loading rankings…</div>';
-
-  let books;
-  try {
-    // Top 100 by all-time VIEWS — highest read count wins #1, matching the
-    // mobile App. Genre filter is optional (empty string = All).
-    books = await fetchSupabaseBooks(0, 100, 'most-read', genreSlug ? { genre: genreSlug } : {});
-  } catch (err) {
-    if (seq !== _rankingSeq) return;
-    console.warn('[Ranking] load failed:', err);
-    list.innerHTML = '<div class="rank-empty">Couldn\'t load rankings. Try again.</div>';
-    return;
-  }
-  if (seq !== _rankingSeq) return; // user switched genre mid-flight
-
-  if (!books.length) {
-    list.innerHTML = '<div class="rank-empty">No books in this category yet.</div>';
-    return;
-  }
-
-  list.innerHTML = '';
-  books.forEach((book, idx) => {
-    list.appendChild(_renderRankCard(book, idx + 1));
-  });
-}
-
-// Single ranked-list row — cover left with numbered ribbon, info right.
-// Mirrors the mobile app's leaderboard card: title, description, status
-// badge, paid/free badge, and an icon-stats row.
-function _renderRankCard(book, rank) {
-  const card = document.createElement('button');
-  card.type = 'button';
-  card.className = 'rank-card';
-  card.dataset.rank = String(rank);
-  card.dataset.bookId = book.id;
-  card.onclick = () => openBookDetail(book.id);
-
-  const initial = (book.title || '?').trim().charAt(0).toUpperCase();
-  const cover = book.cover_url
-    ? `<img src="${escHTML(book.cover_url)}" alt="" loading="lazy"/>`
-    : `<div class="rank-card-cover-placeholder">${escHTML(initial)}</div>`;
-
-  const isCompleted = (book.status || '').toLowerCase() === 'completed';
-  const isPaid = (book.lock_from_chapter || 0) > 0;
-
-  // Synthesised rating (same scale as the v2 card so numbers stay consistent).
-  const rating = Math.min(5, (book.likes_count || 0) / 5).toFixed(2);
-  const views  = formatCompact(book.views_count || 0);
-  const likes  = formatCompact(book.likes_count || 0);
-  const chapters = book.chapters_count || 0;
-
-  const desc = (book.description || '').trim() || 'No description yet.';
-
-  card.innerHTML = `
-    <div class="rank-card-ribbon">${rank}</div>
-    <div class="rank-card-cover">${cover}</div>
-    <div class="rank-card-body">
-      <h3 class="rank-card-title">${escHTML(book.title || 'Untitled')}</h3>
-      <p class="rank-card-desc">${escHTML(desc)}</p>
-      <div class="rank-card-badges">
-        ${isCompleted
-          ? '<span class="rank-card-badge rank-card-badge-completed">Completed</span>'
-          : '<span class="rank-card-badge rank-card-badge-ongoing">Ongoing</span>'}
-        ${isPaid ? '<span class="rank-card-badge rank-card-badge-paid">Paid</span>' : ''}
-      </div>
-      <div class="rank-card-stats">
-        <span class="rank-card-stat rank-card-stat-rating"><span class="rank-card-stat-icon">★</span>${rating}</span>
-        <span class="rank-card-stat rank-card-stat-views"><span class="rank-card-stat-icon">👁</span>${views}</span>
-        <span class="rank-card-stat rank-card-stat-likes"><span class="rank-card-stat-icon">♥</span>${likes}</span>
-        <span class="rank-card-stat"><span class="rank-card-stat-icon">📋</span>${chapters}</span>
-      </div>
-    </div>`;
-  return card;
-}
-
-// ── Discover tab — genre-grouped rows ──────────────────────────────────────
-const _DISCOVER_GENRES = [
-  'hot-romance', 'dark-romance', 'mafia-boss', 'enemies-to-lovers',
-  'forbidden-love', 'sci-fi', 'teen-fiction', 'general-fiction',
-];
-async function _loadDiscoverTab() {
-  const wrap = document.getElementById('bookDiscoverGenres');
-  if (!wrap) return;
-  // Build the section skeletons so each row gets its own loading state.
-  wrap.innerHTML = '';
-  _DISCOVER_GENRES.forEach(g => {
-    const sec = document.createElement('div');
-    sec.className = 'book-section';
-    const safeG = escHTML(g);
-    const pretty = escHTML(prettyGenre(g));
-    // Same head markup as For You / Ranking — keeps "See All" right-aligned
-    // and the title styling consistent across every tab.
-    sec.innerHTML = `
-      <div class="book-section-head">
-        <h2 class="book-section-title">${pretty}</h2>
-        <button class="book-section-see-all" data-see-all="genre:${safeG}" type="button">See All</button>
-      </div>
-      <div class="book-section-track" data-track="genre:${safeG}"><div class="loading">Loading…</div></div>`;
-    wrap.appendChild(sec);
-  });
-  // Hydrate each row in parallel.
-  await Promise.all(_DISCOVER_GENRES.map(g => _loadDiscoverGenreRow(g)));
-}
-
-async function _loadDiscoverGenreRow(genre) {
-  // Find the entire section (not just the track) so we can hide it if empty —
-  // mobile-app parity: a genre with zero books shouldn't take up space.
-  const section = document.querySelector(`.book-section-track[data-track="genre:${genre}"]`)?.closest('.book-section');
-  const track = section?.querySelector(`.book-section-track[data-track="genre:${genre}"]`);
-  if (!track) return;
-  try {
-    const books = await fetchSupabaseBooks(0, _SECTION_ROW_SIZE, 'most-liked', { genre });
-    if (!books.length) {
-      // Hide the section entirely — cleaner than an empty-state placeholder.
-      if (section) section.style.display = 'none';
-      return;
-    }
-    track.innerHTML = '';
-    books.forEach(b => track.appendChild(_renderBookCardV2(b)));
-  } catch (err) {
-    console.warn(`Discover genre "${genre}" failed:`, err);
-    track.innerHTML = '<div class="book-section-empty">Couldn\'t load.</div>';
-  }
-}
-
-// ── Reading List tab (user-scoped collection grid) ────────────────────────
-async function _loadCollectionTab({ table, fkName, gridId, emptyId, signedOutMsg, orderColumn }) {
-  const grid = document.getElementById(gridId);
-  const empty = document.getElementById(emptyId);
-  if (!grid) return;
-  if (!currentUser?.id) {
-    grid.innerHTML = `<div class="book-collection-empty"><h3>${escHTML(signedOutMsg)}</h3></div>`;
-    if (empty) empty.style.display = 'none';
-    return;
-  }
-  grid.innerHTML = '<div class="loading">Loading…</div>';
-  if (empty) empty.style.display = 'none';
-  try {
-    // Join through the user's pivot table (book_reads / book_bookmarks) so we
-    // both fetch the book row AND keep the user's own "latest first" order.
-    //
-    // CRITICAL: book_reads's timestamp column is `last_read_at`, NOT
-    // `created_at` — ordering by created_at on book_reads throws "column
-    // does not exist" and the whole tab errors out. The orderColumn arg
-    // lets each caller name its own.
-    const col = orderColumn || 'created_at';
-    const { data, error } = await supabase.from(table)
-      .select(`book_id, ${col}, books!${fkName}(${BOOK_CARD_SELECT})`)
-      .eq('user_id', currentUser.id)
-      .order(col, { ascending: false })
-      .limit(60);
-    if (error) throw error;
-    const books = _normalizeBookRows((data || []).map(r => r.books));
-    if (!books.length) {
-      grid.innerHTML = '';
-      if (empty) empty.style.display = 'block';
-      return;
-    }
-    // v2 cards (corner ribbon + rating + views) so Reading List looks
-    // identical to every other rail across the books page.
-    grid.innerHTML = '';
-    books.forEach((b, i) => {
-      const card = _renderBookCardV2(b);
-      card.style.animationDelay = `${(i * 0.025).toFixed(3)}s`;
-      grid.appendChild(card);
-    });
-  } catch (err) {
-    console.error(`${table} load failed:`, err);
-    grid.innerHTML = '<div class="book-collection-empty"><p>Couldn\'t load. Try again.</p></div>';
-  }
-}
-// (Library tab loader was removed alongside its DOM. The web's existing
-// sidebar Bookmarks page is the canonical "Library" experience here.)
-function _loadReadingListTab() {
-  return _loadCollectionTab({
-    table: 'book_bookmarks',
-    fkName: 'book_bookmarks_book_id_fkey',
-    gridId: 'bookReadingListGrid',
-    emptyId: 'bookReadingListEmpty',
-    signedOutMsg: 'Sign in to see your reading list',
-    orderColumn: 'created_at',
-  });
-}
-
-// ── v2 book card (matches mobile look: cover + corner badge + stats) ───────
-function _renderBookCardV2(b) {
-  const card = document.createElement('button');
-  card.type = 'button';
-  card.className = 'book-card-v2';
-  card.dataset.bookId = b.id;
-  card.onclick = () => openBookDetail(b.id);
-
-  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
-  // Use Supabase's server-side image transform to crop the cover to a
-  // clean 2:3 (400x600 px) — same trick the home shelves use. Without
-  // this, 9:16 video-shaped source covers would render in their
-  // native tall aspect inside our 2:3 container, looking stretched.
-  // Pass-through for non-Supabase URLs (Appwrite/Bunny).
-  const croppedCover = b.cover_url
-    ? _supabaseRatioCrop(_cleanCdnUrl(b.cover_url), { width: 400, height: 600 })
-    : null;
-  const cover = croppedCover
-    ? `<img src="${escHTML(croppedCover)}" alt="" loading="lazy" onerror="this.style.display='none'"/>`
-    : `<div class="book-card-v2-cover-placeholder">${escHTML(initialLetter)}</div>`;
-  const isPaid = (b.lock_from_chapter || 0) > 0;
-  const author = b.author?.username || b.profiles?.username || 'Unknown';
-  // Visual rating that mirrors the mobile-app card. We don't have a real
-  // ratings table yet, so we synthesise a 0-5 star from likes_count using
-  // the same scale the mobile UI seems to apply: ~25 likes → 5.0 stars.
-  const rating = Math.min(5, (b.likes_count || 0) / 5).toFixed(1);
-  const views = formatCompact(b.views_count || 0);
-
-  card.innerHTML = `
-    <div class="book-card-v2-cover">
-      ${cover}
-      <div class="book-card-v2-badge ${isPaid ? 'book-card-v2-badge-paid' : 'book-card-v2-badge-free'}">${isPaid ? 'Paid' : 'Free'}</div>
-    </div>
-    <div class="book-card-v2-body">
-      <h3 class="book-card-v2-title">${escHTML(b.title || 'Untitled')}</h3>
-      <p class="book-card-v2-author">by ${escHTML(author)}</p>
-      <div class="book-card-v2-stats">
-        <span class="book-card-v2-stat book-card-v2-stat-rating">★ ${rating}</span>
-        <span class="book-card-v2-stat book-card-v2-stat-views">👁 ${views}</span>
-      </div>
-    </div>`;
-  return card;
-}
-
-// ── Tab switching (event delegation) ───────────────────────────────────────
-// One listener on the tab bar instead of one-per-button — robust if the bar
-// is ever rebuilt (e.g., by a future feature flag) and one less DOM walk.
-document.getElementById('bookTabs')?.addEventListener('click', (e) => {
-  const tabBtn = e.target.closest('.book-tab');
-  if (!tabBtn) return;
-  const t = tabBtn.dataset.bookTab;
-  if (!t || t === _activeBookTab) return;
-  _activeBookTab = t;
-  document.querySelectorAll('#bookTabs .book-tab').forEach(x => {
-    const isActive = x === tabBtn;
-    x.classList.toggle('active', isActive);
-    x.setAttribute('aria-selected', isActive ? 'true' : 'false');
-  });
-  document.querySelectorAll('.book-tab-panel').forEach(p => {
-    const isActive = p.dataset.bookPanel === t;
-    p.style.display = isActive ? '' : 'none';
-    p.classList.toggle('active', isActive);
-  });
-  // Close any open See-All sub-view when switching tabs.
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (seeAll) seeAll.style.display = 'none';
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-  loadBooksTab(t);
-  window.scrollTo({ top: 0, behavior: 'instant' });
-});
-
-// ── See All sub-view ───────────────────────────────────────────────────────
-let _seeAllSeq = 0;
-let _seeAllOffset = 0;
-let _seeAllSort = '';
-let _seeAllGenre = null;
-// Optional custom predicate for See-All — set when the section had a `filter`
-// in _SEE_ALL_MAP (Hidden Gems, Quick Reads). Threaded through to fetchSupabaseBooks.
-let _seeAllFilter = null;
-let _seeAllHasMore = false;
-let _seeAllLoading = false;
-let _seeAllObserver = null;
-
-const _SEE_ALL_MAP = {
-  weeklyFeatured:     { sort: 'editors-pick',  title: 'Weekly Featured' },
-  recommended:        { sort: 'most-liked',    title: 'Recommended for You' },
-  trending:           { sort: 'trending',      title: 'Trending This Week' },
-  freshReads:         { sort: 'recent',        title: 'Fresh Reads' },
-  justUpdated:        { sort: 'just-updated',  title: 'Just Updated' },
-  hiddenGems:         { sort: 'most-liked',    title: 'Hidden Gems',
-                        filter: q => q.gte('likes_count', 3).lt('views_count', 500) },
-  quickReads:         { sort: 'most-liked',    title: 'Quick Reads',
-                        filter: q => q.gte('chapters_count', 1).lte('chapters_count', 5) },
-  mostLoved:          { sort: 'most-liked',    title: 'Most Loved' },
-  mostRead:           { sort: 'most-read',     title: 'Most Read' },
-  completedExcellent: { sort: 'completed',     title: 'Completed & Excellent Works' },
-};
-
-document.getElementById('bookPage')?.addEventListener('click', (e) => {
-  const seeAllBtn = e.target.closest('.book-section-see-all');
-  if (!seeAllBtn) return;
-  e.preventDefault();
-  _openBookSeeAll(seeAllBtn.dataset.seeAll);
-});
-
-document.getElementById('btnBookSeeAllBack')?.addEventListener('click', () => {
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (seeAll) seeAll.style.display = 'none';
-  document.querySelectorAll('.book-tab-panel').forEach(p => {
-    const isActive = p.dataset.bookPanel === _activeBookTab;
-    p.style.display = isActive ? '' : 'none';
-    p.classList.toggle('active', isActive);
-  });
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-  window.scrollTo({ top: 0, behavior: 'instant' });
-});
-
-async function _openBookSeeAll(key) {
-  let cfg = _SEE_ALL_MAP[key];
-  let genre = null;
-  if (!cfg && key && key.startsWith('genre:')) {
-    genre = key.slice('genre:'.length).replace(/[^a-z0-9-]/gi, '');
-    cfg = { sort: 'most-liked', title: prettyGenre(genre) };
-  }
-  if (!cfg) return;
-
-  _seeAllSeq++;
-  _seeAllSort = cfg.sort;
-  _seeAllGenre = genre;
-  _seeAllFilter = cfg.filter || null;
-  _seeAllOffset = 0;
-  _seeAllHasMore = true;
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-
-  document.querySelectorAll('.book-tab-panel').forEach(p => p.style.display = 'none');
-  const seeAll = document.getElementById('bookSeeAllView');
-  if (!seeAll) return;
-  seeAll.style.display = 'block';
-  document.getElementById('bookSeeAllTitle').textContent = cfg.title;
-  document.getElementById('bookSeeAllGrid').innerHTML = '<div class="loading">Loading…</div>';
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  if (sentinel) sentinel.style.display = 'none';
-
-  window.scrollTo({ top: 0, behavior: 'instant' });
-  await _loadMoreSeeAllBooks(true);
-}
-
-async function _loadMoreSeeAllBooks(initial = false) {
-  if (_seeAllLoading || (!_seeAllHasMore && !initial)) return;
-  _seeAllLoading = true;
-  const seq = _seeAllSeq;
-  const grid = document.getElementById('bookSeeAllGrid');
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  const limit = 40;
-
-  try {
-    // One fetcher path, three optional shapes — sort-only, genre-filtered, or
-    // predicate-filtered (Hidden Gems / Quick Reads). All three combine cleanly.
-    const opts = {};
-    if (_seeAllGenre)  opts.genre  = _seeAllGenre;
-    if (_seeAllFilter) opts.filter = _seeAllFilter;
-    const books = await fetchSupabaseBooks(_seeAllOffset, limit, _seeAllSort, opts);
-
-    if (seq !== _seeAllSeq) return; // user opened a different See-All
-
-    if (initial) grid.innerHTML = '';
-    if (initial && !books.length) {
-      grid.innerHTML = '<div class="book-collection-empty"><p>Nothing here yet.</p></div>';
-      _seeAllHasMore = false;
-      if (sentinel) sentinel.style.display = 'none';
-      return;
-    }
-
-    books.forEach((b, i) => {
-      const card = renderBookCard(b);
-      card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
-      grid.appendChild(card);
-    });
-    _seeAllOffset += books.length;
-
-    if (books.length < limit) {
-      _seeAllHasMore = false;
-      if (sentinel) {
-        sentinel.style.display = 'block';
-        sentinel.innerHTML = `<div class="book-grid-end-msg">You've reached the end · ${_seeAllOffset.toLocaleString()} books</div>`;
-      }
-      if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-    } else {
-      if (sentinel) {
-        sentinel.style.display = 'block';
-        sentinel.innerHTML = '<div class="book-grid-loadmore">Loading more books…</div>';
-      }
-      _setupSeeAllInfiniteScroll();
-    }
-  } catch (err) {
-    if (seq !== _seeAllSeq) return;
-    console.error('See-all load failed:', err);
-    if (initial) grid.innerHTML = '<div class="book-collection-empty"><p>Couldn\'t load. Try again.</p></div>';
-    if (sentinel) sentinel.innerHTML = '<div class="book-grid-end-msg">Couldn\'t load more.</div>';
-  } finally {
-    _seeAllLoading = false;
-  }
-}
-
-function _setupSeeAllInfiniteScroll() {
-  if (_seeAllObserver || !('IntersectionObserver' in window)) return;
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  if (!sentinel) return;
-  _seeAllObserver = new IntersectionObserver(entries => {
-    if (entries[0].isIntersecting) _loadMoreSeeAllBooks(false);
-  }, { root: null, rootMargin: '600px 0px', threshold: 0.01 });
-  _seeAllObserver.observe(sentinel);
-}
-
-// ── Pagination state for the See All sub-view (back-compat shims kept for
-// any older code paths that still reference these names) ──
-const BOOKS_PAGE_SIZE = 80;
-let _booksOffset = 0;
 let _hasMoreBooks = true;
 let _isLoadingMoreBooks = false;
 let _bookScrollObserver = null;
 let _booksSeq = 0;
 let _booksLoadedSort = null;
 let _booksLoadedGenre = null;
-
-// (loadBooks / loadMoreBooks removed — the books page is now tabbed, with
-// curated sections rendered by _loadForYouTab / _loadDiscoverTab / etc., and
-// the See-All sub-view's pagination is handled by _loadMoreSeeAllBooks.)
-
-// applyBookFilter — kept as a small helper. Currently unused by the v2 flow
-// (server-side genre filter handles it for the See-All view), but cheap to
-// keep around for future call sites.
-function applyBookFilter(list, genre) {
-  const filter = genre || '';
-  if (!filter) return [...list];
-  const filterLower = filter.toLowerCase();
-  const filterWords = filterLower.replace(/-/g, ' ');
-  return list.filter(b => {
-    if (b.genre === filter) return true;
-    return (b.tags || []).some(t => {
-      const tagLower = (t || '').toLowerCase();
-      return tagLower === filterLower || tagLower === filterWords;
-    });
-  });
-}
-
-// ── Book search (filters the currently-loaded book cache) ──
-// Searches: title, description, tags, genre, author/uploader name.
-// `#tag` prefix restricts to tag-only matches. Suspends infinite scroll while active.
-function searchBooks(query) {
-  query = (query || '').trim();
-  if (!query) return allBooksCache;
-
-  const hashtagMatch = query.match(/^#(\w+)/);
-  const isHashtag = !!hashtagMatch;
-  const cleanQuery = normalizeForSearch(isHashtag ? hashtagMatch[1] : query);
-
-  return allBooksCache.filter(b => {
-    if (isHashtag) {
-      return (b.tags || []).some(t => normalizeForSearch(t).includes(cleanQuery));
-    }
-
-    const title  = normalizeForSearch(b.title);
-    const desc   = normalizeForSearch(b.description);
-    const tags   = normalizeForSearch((b.tags || []).join(' '));
-    const genre  = normalizeForSearch((b.genre || '').replace(/-/g, ' '));
-    const author = normalizeForSearch(b.profiles?.username || b.author?.username || '');
-
-    return title.includes(cleanQuery)
-        || desc.includes(cleanQuery)
-        || tags.includes(cleanQuery)
-        || genre.includes(cleanQuery)
-        || author.includes(cleanQuery);
-  });
-}
-
-async function runBookSearch() {
-  // The v2 books page has no flat grid — search results render into the
-  // See-All sub-view, which already has its own grid + infinite scroll.
-  const grid = document.getElementById('bookSeeAllGrid');
-  const seeAllRoot = document.getElementById('bookSeeAllView');
-  const titleEl = document.getElementById('bookSeeAllTitle');
-  if (!grid || !seeAllRoot || !titleEl) return;
-
-  // Defensive: only render into the books page when it's actually visible.
-  // (getSearchContext now restricts books-context to the listing page, but
-  // this is a belt-and-braces check in case future code changes that.)
-  if (bookPage && bookPage.style.display === 'none') return;
-
-  if (!activeBookSearchQuery.trim()) {
-    // Empty query → close the search view and return to the active tab panel
-    seeAllRoot.style.display = 'none';
-    document.querySelectorAll('.book-tab-panel').forEach(p => {
-      const isActive = p.dataset.bookPanel === _activeBookTab;
-      p.style.display = isActive ? '' : 'none';
-      p.classList.toggle('active', isActive);
-    });
-    return;
-  }
-
-  // Show the See-All view and treat search as its own kind of "list"
-  document.querySelectorAll('.book-tab-panel').forEach(p => p.style.display = 'none');
-  seeAllRoot.style.display = 'block';
-  titleEl.textContent = `Search: "${activeBookSearchQuery}"`;
-  // Disable any pending see-all infinite scroll — search isn't paginated here
-  if (_seeAllObserver) { _seeAllObserver.disconnect(); _seeAllObserver = null; }
-  _seeAllHasMore = false;
-  const sentinel = document.getElementById('bookSeeAllSentinel');
-  if (sentinel) sentinel.style.display = 'none';
-  grid.innerHTML = '<div class="loading">Searching books…</div>';
-
-  const savedQuery = activeBookSearchQuery;
-  const { books: serverHits, writers } = await fetchBooksServerSearch(savedQuery)
-    .catch(() => ({ books: [], writers: [] }));
-
-  // Stale-query guard: ignore if user kept typing
-  if (activeBookSearchQuery !== savedQuery) return;
-
-  grid.innerHTML = '';
-
-  // ── Writer channel cards (YouTube-style, above the books) ──
-  if (writers && writers.length) {
-    const header = document.createElement('div');
-    header.className = 'video-creators-header';
-    header.style.gridColumn = '1 / -1';
-    header.textContent = writers.length === 1 ? 'Writer' : 'Writers';
-    grid.appendChild(header);
-
-    const row = document.createElement('div');
-    row.className = 'video-creators-row';
-    row.style.gridColumn = '1 / -1';
-    writers.forEach(w => row.appendChild(renderWriterChannelCard(w)));
-    grid.appendChild(row);
-
-    if (serverHits.length) {
-      const booksHeader = document.createElement('div');
-      booksHeader.className = 'video-creators-header';
-      booksHeader.style.gridColumn = '1 / -1';
-      booksHeader.textContent = 'Books';
-      grid.appendChild(booksHeader);
-    }
-  }
-
-  if (!serverHits.length) {
-    const emptyEl = document.createElement('div');
-    emptyEl.className = 'book-collection-empty';
-    emptyEl.style.gridColumn = '1 / -1';
-    emptyEl.innerHTML = (writers && writers.length)
-      ? '<h3>No books found</h3><p>The writers above match — open one of their pages to see their work.</p>'
-      : '<h3>No books found</h3><p>Try a different keyword, author, or #tag.</p>';
-    grid.appendChild(emptyEl);
-    return;
-  }
-
-  serverHits.forEach((b, i) => {
-    const card = renderBookCard(b);
-    card.style.animationDelay = `${(i * 0.02).toFixed(3)}s`;
-    grid.appendChild(card);
-  });
-}
-
-// Writer channel card — same shape as the video creator card so the books
-// page reuses the existing .creator-channel-card styling.
-function renderWriterChannelCard(writer) {
-  const card = document.createElement('button');
-  card.className = 'creator-channel-card';
-  card.type = 'button';
-  card.onclick = () => openProfile(writer.id);
-
-  const initial = (writer.username || '?').trim().charAt(0).toUpperCase();
-  const avatar = writer.avatar_url
-    ? `<img src="${escHTML(writer.avatar_url)}" alt=""/>`
-    : `<div class="creator-channel-avatar-placeholder">${initial}</div>`;
-
-  const booksLabel = writer.books_count === 1 ? '1 book' : `${(writer.books_count || 0).toLocaleString()} books`;
-
-  card.innerHTML = `
-    <div class="creator-channel-avatar">${avatar}</div>
-    <div class="creator-channel-info">
-      <div class="creator-channel-name">${escHTML(writer.username || 'Unknown')}</div>
-      <div class="creator-channel-meta">${booksLabel}</div>
-      ${writer.bio ? `<div class="creator-channel-bio">${escHTML(writer.bio.slice(0, 90))}${writer.bio.length > 90 ? '…' : ''}</div>` : ''}
-    </div>
-    <div class="creator-channel-cta">View profile →</div>
-  `;
-  return card;
-}
-
-// (setupBooksInfiniteScroll removed — the See-All sub-view uses
-// _setupSeeAllInfiniteScroll instead. Other tabs render fixed-size sections.)
-
-// ── Supabase books ──
-// ────────────────────────────────────────────────────────────────────────
-// Adaptive book chip rail — YouTube-style: tags from user's reads + platform popular
-// Re-renders on each books-page open so it adapts as reading habits evolve.
-// ────────────────────────────────────────────────────────────────────────
-const PRETTY_GENRE = {
-  'hot-romance':         'Hot Romance',
-  'dark-romance':        'Dark Romance',
-  'mafia-boss':          'Mafia Boss',
-  'enemies-to-lovers':   'Enemies to Lovers',
-  'forbidden-love':      'Forbidden Love',
-  'arranged-marriage':   'Arranged Marriage',
-  'contract-marriage':   'Contract Marriage',
-  'second-chance':       'Second Chance',
-  'boy-love-bl':         'Boy Love',
-  'girl-love-gl':        'Girl Love',
-  'sci-fi':              'Sci-fi',
-  'teen-fiction':        'Teen Fiction',
-  'general-fiction':     'General Fiction',
-  'slice-of-life':       'Slice of Life',
-  'one-shot-story':      'One Shot Story',
-  'valentines-special':  'Valentines Special',
-};
-function prettyGenre(slug) {
-  if (!slug) return '';
-  if (PRETTY_GENRE[slug]) return PRETTY_GENRE[slug];
-  return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
-
-// Cache for user's book reading taste (reads + likes) — used by both
-// renderBookChips() and loadBookRecommendations() in the same page load.
-// 60-second TTL so stale-but-fresh-enough data doesn't trigger 2 round-trips.
-let _userBookTasteCache = null;
-let _userBookTasteAt = 0;
-async function getUserBookTaste() {
-  if (!currentUser) return { reads: [], likes: [] };
-  const now = Date.now();
-  if (_userBookTasteCache && (now - _userBookTasteAt) < 60_000) {
-    return _userBookTasteCache;
-  }
-  const [{ data: reads }, { data: likes }] = await Promise.all([
-    supabase.from('book_reads').select('book_id').eq('user_id', currentUser.id).order('last_read_at', { ascending: false }).limit(50),
-    supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).order('created_at', { ascending: false }).limit(50),
-  ]);
-  _userBookTasteCache = { reads: reads || [], likes: likes || [] };
-  _userBookTasteAt = now;
-  return _userBookTasteCache;
-}
-
-async function renderBookChips() {
-  const wrap = document.getElementById('bookGenreChips');
-  if (!wrap) return;
-
-  // Build a candidate set from BOTH platform popularity + user's reading taste
-  let userTags = {};
-  let platformGenres = {};
-
-  // Platform popularity — count genres + tags across the books we already loaded
-  const allLoadedBooks = (typeof allBooks !== 'undefined' && Array.isArray(allBooks))
-    ? allBooks
-    : (Array.isArray(window._latestBooksList) ? window._latestBooksList : []);
-  for (const b of allLoadedBooks) {
-    if (b.genre) platformGenres[b.genre] = (platformGenres[b.genre] || 0) + 1;
-    for (const t of (b.tags || [])) {
-      const slug = String(t).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      if (slug) platformGenres[slug] = (platformGenres[slug] || 0) + 1;
-    }
-  }
-
-  // User reading taste (only for signed-in users)
-  if (currentUser) {
-    try {
-      const { reads, likes } = await getUserBookTaste();
-      const seedIds = [...new Set([...reads, ...likes].map(r => r.book_id))].slice(0, 30);
-      if (seedIds.length) {
-        const { data: seedBooks } = await supabase
-          .from('books').select('id, genre, tags').in('id', seedIds);
-        for (const b of (seedBooks || [])) {
-          if (b.genre) userTags[b.genre] = (userTags[b.genre] || 0) + 2;
-          for (const t of (b.tags || [])) {
-            const slug = String(t).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-            if (slug) userTags[slug] = (userTags[slug] || 0) + 1;
-          }
-        }
-      }
-    } catch {}
-  }
-
-  const userRanked = Object.entries(userTags)
-    .filter(([t]) => platformGenres[t]) // only show tags that have content
-    .sort((a, b) => b[1] - a[1])
-    .map(([t]) => t);
-
-  const platformRanked = Object.entries(platformGenres)
-    .sort((a, b) => b[1] - a[1])
-    .map(([t]) => t);
-
-  // Blend: 70% from interest, 30% platform discovery (or 100% platform for new users)
-  const limit = 22;
-  let chips = [];
-  if (userRanked.length) {
-    const userQuota = Math.ceil(limit * 0.7);
-    const seen = new Set(userRanked.slice(0, userQuota));
-    for (const t of platformRanked) { if (seen.size >= limit) break; seen.add(t); }
-    chips = [...seen].slice(0, limit);
-  } else {
-    chips = platformRanked.slice(0, limit);
-  }
-
-  // Fallback if we still have nothing (e.g. on first page open before any books load)
-  if (!chips.length) {
-    chips = ['romance', 'hot-romance', 'dark-romance', 'mafia-boss', 'billionaire', 'werewolf', 'vampire', 'thriller', 'horror', 'fantasy', 'comedy', 'drama'];
-  }
-
-  // Render — "All" chip first, then adaptive list
-  const activeAll = !bookGenreFilter ? 'active' : '';
-  let html = `<button class="book-chip ${activeAll}" data-genre="">All</button>`;
-  html += chips.map(g =>
-    `<button class="book-chip ${g === bookGenreFilter ? 'active' : ''}" data-genre="${escHTML(g)}">${escHTML(prettyGenre(g))}</button>`
-  ).join('');
-  wrap.innerHTML = html;
-}
-
-let _bookRecsCache = null;
-let _bookRecsTimestamp = 0;
-const BOOK_RECS_TTL = 5 * 60 * 1000; // 5 min
-
-async function loadBookRecommendations() {
-  const rail = document.getElementById('bookRecommendRail');
-  const track = document.getElementById('bookRecommendTrack');
-  const sub   = document.getElementById('bookRecommendSub');
-  if (!rail || !track) return;
-
-  // Only show for signed-in users
-  if (!currentUser) { rail.style.display = 'none'; return; }
-
-  // Use cache if fresh
-  if (_bookRecsCache && (Date.now() - _bookRecsTimestamp) < BOOK_RECS_TTL) {
-    renderBookRecsRail(_bookRecsCache);
-    return;
-  }
-
-  try {
-    // Pull user's reading taste from shared cache (avoids duplicate fetch
-    // since renderBookChips() already pulled this seconds ago)
-    const { reads, likes } = await getUserBookTaste();
-    const readIds  = new Set(reads.map(r => r.book_id));
-    const likedIds = new Set(likes.map(l => l.book_id));
-    const seedIds  = [...new Set([...readIds, ...likedIds])].slice(0, 30);
-
-    // Fetch a candidate pool (most recent public books)
-    const { data: pool } = await supabase
-      .from('books')
-      .select(`
-        id, title, cover_url, genre, tags,
-        views_count, likes_count, chapters_count,
-        author_id, created_at,
-        profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
-      `)
-      .eq('is_public', true)
-      .eq('is_hidden', false)
-      .order('created_at', { ascending: false })
-      .limit(200);
-
-    if (!pool || !pool.length) { rail.style.display = 'none'; return; }
-
-    // Build interest profile from seed books (tags + authors)
-    let tagWeights = {};
-    let authorWeights = {};
-    if (seedIds.length) {
-      const { data: seedBooks } = await supabase
-        .from('books')
-        .select('id, genre, tags, author_id')
-        .in('id', seedIds);
-      for (const sb of (seedBooks || [])) {
-        for (const t of (sb.tags || [])) tagWeights[t] = (tagWeights[t] || 0) + 1;
-        if (sb.genre) tagWeights[sb.genre] = (tagWeights[sb.genre] || 0) + 1;
-        if (sb.author_id) authorWeights[sb.author_id] = (authorWeights[sb.author_id] || 0) + 1;
-      }
-    }
-
-    const hasInterest = Object.keys(tagWeights).length > 0;
-
-    // Score each candidate
-    const scored = pool
-      .filter(b => !readIds.has(b.id))                  // skip already-read
-      .filter(b => !b.profiles?.is_banned)              // skip banned authors
-      .map(b => {
-        let score = 0;
-        // Tag overlap with user's interests
-        for (const t of (b.tags || [])) {
-          if (tagWeights[t]) score += tagWeights[t] * 12;
-        }
-        // Genre match
-        if (b.genre && tagWeights[b.genre]) score += tagWeights[b.genre] * 10;
-        // Same-author bonus
-        if (authorWeights[b.author_id]) score += authorWeights[b.author_id] * 18;
-        // Engagement boost
-        score += Math.log10((b.views_count || 0) + 1) * 1.5;
-        score += Math.log10((b.likes_count || 0) + 1) * 2;
-        // Recency boost (last 60 days)
-        const ageDays = (Date.now() - new Date(b.created_at).getTime()) / 86400000;
-        if (ageDays < 60) score += Math.max(0, 6 - ageDays / 10);
-        // Random freshness
-        score += Math.random() * 4;
-        return { book: b, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 12)
-      .map(x => x.book);
-
-    _bookRecsCache = scored;
-    _bookRecsTimestamp = Date.now();
-
-    if (sub) sub.textContent = hasInterest ? 'Based on your reading taste' : 'Trending this week';
-    renderBookRecsRail(scored);
-  } catch (e) {
-    console.warn('[recs] failed', e);
-    rail.style.display = 'none';
-  }
-}
-
-function renderBookRecsRail(books) {
-  const rail = document.getElementById('bookRecommendRail');
-  const track = document.getElementById('bookRecommendTrack');
-  if (!rail || !track) return;
-  if (!books || !books.length) { rail.style.display = 'none'; return; }
-
-  track.innerHTML = '';
-  for (const b of books) {
-    const a = document.createElement('a');
-    a.href = `#book/${b.id}`;
-    a.className = 'recommend-card';
-    a.onclick = (e) => { e.preventDefault(); openBookDetail(b.id, b); };
-
-    const initial = (b.title || '?').trim().charAt(0).toUpperCase();
-    a.innerHTML = `
-      <div class="recommend-card-cover">
-        ${b.cover_url
-          ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
-          : `<div class="recommend-card-cover-empty">${escHTML(initial)}</div>`}
-      </div>
-      <div class="recommend-card-title">${escHTML(b.title || 'Untitled')}</div>
-      <div class="recommend-card-author">${escHTML(b.profiles?.username || 'Unknown')}</div>
-      <div class="recommend-card-meta">${(b.views_count || 0).toLocaleString()} reads · ${(b.likes_count || 0).toLocaleString()} ♥</div>
-    `;
-    track.appendChild(a);
-  }
-  rail.style.display = 'block';
-}
-
-// ── Book row helpers ──────────────────────────────────────────────────────
-// One source of truth for the columns the UI needs from the books table.
-// Used by every fetcher so adding/removing a column is a one-line change.
-const BOOK_LIST_SELECT = `
-  id, title, description, cover_url, genre, tags, status,
-  views_count, likes_count, chapters_count, word_count,
-  views_last_7d, likes_last_7d, trending_score,
-  is_editors_pick, editors_pick_at, editors_pick_note,
-  lock_from_chapter, published_at, created_at, author_id,
-  profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
-`;
-// Slimmer projection — used by the home-feed dropdown and other places where
-// only cover/title/author are needed.
-const BOOK_CARD_SELECT = `
-  id, title, cover_url, genre, status, views_count, likes_count,
-  chapters_count, lock_from_chapter, published_at, created_at, author_id,
-  profiles!books_author_id_fkey ( id, username, avatar_url, is_banned )
-`;
-
-// Normalise a raw row into the shape the rest of the app expects.
-// Filters out banned-author rows; returns null for those (caller filters).
-function _normalizeBookRow(row) {
-  if (!row) return null;
-  if (row.profiles?.is_banned) return null;
-  return {
-    ...row,
-    $id: 'sb_' + row.id,
-    author: row.profiles
-      ? { id: row.profiles.id, username: row.profiles.username, avatar: row.profiles.avatar_url }
-      : null,
-  };
-}
-function _normalizeBookRows(rows) {
-  return (rows || []).map(_normalizeBookRow).filter(Boolean);
-}
-
-// Server-side sort matrix. Each entry returns the chained query so callers
-// can range() it. Keeping the per-sort logic centralised here means
-// every code path that lists books paginates the same axis as page 1.
-const _BOOK_SORT_PIPELINES = {
-  // Trending: precomputed by refresh_book_trending_stats() (indexed).
-  trending:      (q) => q.order('trending_score', { ascending: false, nullsFirst: false })
-                          .order('likes_count',  { ascending: false })
-                          .order('created_at',   { ascending: false }),
-  recent:        (q) => q.order('published_at', { ascending: false, nullsFirst: false })
-                          .order('created_at',  { ascending: false }),
-  'most-liked':  (q) => q.order('likes_count', { ascending: false })
-                          .order('created_at', { ascending: false }),
-  'most-read':   (q) => q.order('views_count', { ascending: false })
-                          .order('created_at', { ascending: false }),
-  // Completed: filter then sort (likes_count index covers exactly this case).
-  completed:     (q) => q.eq('status', 'completed').order('likes_count', { ascending: false }),
-  // Editor's Pick: filter then sort by editors_pick_at (indexed).
-  'editors-pick':(q) => q.eq('is_editors_pick', true).order('editors_pick_at', { ascending: false, nullsFirst: false }),
-  // Just Updated: surfaces ongoing series with recent chapter drops.
-  'just-updated':(q) => q.order('updated_at', { ascending: false, nullsFirst: false })
-                          .order('created_at', { ascending: false }),
-};
-
-// Single fetcher for every browse-style book list. Supports server-side
-// sort (via _BOOK_SORT_PIPELINES) and an optional genre filter that matches
-// against either the genre column or the tags array.
-//
-//   fetchSupabaseBooks(0, 12, 'most-liked')                  → top 12 by likes
-//   fetchSupabaseBooks(0, 12, 'most-liked', { genre: 'sci-fi' }) → top 12 sci-fi
-async function fetchSupabaseBooks(offset = 0, limit = 80, sortBy = bookSortBy, opts = {}) {
-  try {
-    let q = supabase.from('books').select(BOOK_LIST_SELECT)
-      .eq('is_public', true).eq('is_hidden', false);
-
-    // The Completed and Editor's-Pick pipelines apply their own status filter,
-    // so only add the public-status filter for the OTHER sorts (otherwise
-    // .in('status', [...]) would override .eq('status', 'completed')).
-    if (sortBy !== 'completed' && sortBy !== 'editors-pick') {
-      q = q.in('status', ['ongoing', 'completed']);
-    }
-
-    // Optional genre filter — matches either the dedicated `genre` column or
-    // a tag in the `tags` array. Strip anything but [a-z0-9-] defensively so
-    // a malformed genre slug can't break the .or() clause.
-    if (opts.genre) {
-      const safeG = String(opts.genre).toLowerCase().replace(/[^a-z0-9-]/g, '');
-      if (safeG) q = q.or(`genre.eq.${safeG},tags.cs.{${safeG}}`);
-    }
-
-    // Optional custom predicate — caller-supplied function that adds extra
-    // filters before the sort + range are applied. Used by Hidden Gems
-    // (low-views + min-likes) and Quick Reads (short chapter count) so
-    // those callers don't need their own duplicated query function.
-    if (typeof opts.filter === 'function') q = opts.filter(q);
-
-    const pipeline = _BOOK_SORT_PIPELINES[sortBy] || _BOOK_SORT_PIPELINES.trending;
-    const { data, error } = await pipeline(q).range(offset, offset + limit - 1);
-    if (error) {
-      console.error('Supabase books fetch error:', error);
-      return [];
-    }
-    return _normalizeBookRows(data);
-  } catch (err) {
-    console.error('fetchSupabaseBooks failed:', err);
-    return [];
-  }
-}
-
-// Server-side book search — hits both content (title/description) AND
-// matching author usernames. Used as a fallback when the local cache misses
-// because pagination only loaded the first 80 books.
-async function fetchBooksServerSearch(query) {
-  // Sanitize FIRST — strips comma/parens/quotes that break PostgREST .or() —
-  // THEN escape ilike wildcards. Without sanitize, queries like `Romeo, Juliet`
-  // or `What's next?` returned 0 rows because the OR clause was malformed.
-  const safeQ = sanitizeSearchQuery(query);
-  if (!safeQ) return { books: [], writers: [] };
-  const q = escapeIlike(safeQ);
-  try {
-    // Two parallel queries: content match + author username match
-    const [contentRes, authorRes] = await Promise.all([
-      supabase.from('books').select(BOOK_LIST_SELECT)
-        .eq('is_public', true).eq('is_hidden', false)
-        .in('status', ['ongoing', 'completed'])
-        .or(`title.ilike.%${q}%,description.ilike.%${q}%`)
-        .limit(40),
-      // Find matching author profiles (also surfaced as the YouTube-style writers row)
-      supabase.from('profiles')
-        .select('id, username, avatar_url, bio, is_banned')
-        .ilike('username', `%${q}%`).eq('is_banned', false)
-        .limit(8)
-    ]);
-
-    let authorBooks = [];
-    const matchingWriters = authorRes.data || [];
-    if (matchingWriters.length) {
-      const ids = matchingWriters.map(p => p.id);
-      const { data } = await supabase.from('books').select(BOOK_LIST_SELECT)
-        .in('author_id', ids)
-        .eq('is_public', true).eq('is_hidden', false)
-        .in('status', ['ongoing', 'completed'])
-        .limit(40);
-      authorBooks = data || [];
-    }
-
-    // Merge + dedupe + normalise (drops banned-author rows along the way).
-    const seen = new Set();
-    const merged = [...(contentRes.data || []), ...authorBooks].filter(b => {
-      if (seen.has(b.id)) return false;
-      seen.add(b.id);
-      return true;
-    });
-    const books = _normalizeBookRows(merged);
-
-    // Decorate writers with their book count from the returned set
-    const writerStats = new Map();
-    for (const b of books) {
-      if (!b.author?.id) continue;
-      writerStats.set(b.author.id, (writerStats.get(b.author.id) || 0) + 1);
-    }
-    const writers = matchingWriters.map(p => ({
-      id: p.id,
-      username: p.username,
-      avatar_url: p.avatar_url,
-      bio: p.bio || '',
-      books_count: writerStats.get(p.id) || 0,
-    }));
-    return { books, writers };
-  } catch (err) {
-    console.warn('fetchBooksServerSearch failed:', err);
-    return { books: [], writers: [] };
-  }
-}
-
-// (renderBooks removed — the v2 books page renders into per-tab DOM targets:
-// section tracks for For You/Discover/Ranking, a dedicated grid for the
-// Reading List collection, and bookSeeAllGrid for the See-All sub-view.)
-
-function renderBookCard(b) {
-  const card = document.createElement('button');
-  card.className = 'book-card';
-  card.dataset.bookId = b.id;
-  card.onclick = () => openBookDetail(b.id);
-
-  const authorName = b.author?.username || 'Unknown author';
-  const initialLetter = (b.title || '?').trim().charAt(0).toUpperCase();
-  const cover = b.cover_url
-    ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=&quot;book-cover-placeholder&quot;>${initialLetter}</div>'"/>`
-    : `<div class="book-cover-placeholder">${initialLetter}</div>`;
-  const genreLabel = b.genre ? b.genre.replace(/-/g, ' ') : '';
-
-  const editorsPickBadge = b.is_editors_pick
-    ? `<div class="book-editors-pick-badge" title="${escHTML(b.editors_pick_note || 'Editor\'s Pick')}">
-         <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-         Editor's Pick
-       </div>`
-    : '';
-
-  card.innerHTML = `
-    <div class="book-cover">
-      ${cover}
-      ${editorsPickBadge}
-      <div class="book-stats">
-        <span title="Views" data-stat="views">👁 ${formatCompact(b.views_count || 0)}</span>
-        <span title="Likes" data-stat="likes">❤ ${formatCompact(b.likes_count || 0)}</span>
-      </div>
-    </div>
-    ${genreLabel ? `<div class="book-card-genre">${escHTML(genreLabel)}</div>` : ''}
-    <h3 class="book-card-title">${escHTML(b.title || 'Untitled')}</h3>
-    <p class="book-card-author">by ${escHTML(authorName)}</p>
-  `;
-  return card;
-}
 
 // Format a number compactly: 1234 → "1.2k", 1500000 → "1.5M"
 function formatCompact(n) {
@@ -11122,792 +6526,15 @@ function formatCompact(n) {
   return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
 }
 
-// (Old genre-chip + sort-select handlers removed alongside their DOM. The v2
-// books page expresses the same intent through tabs and curated sections —
-// "trending", "recent", "most-liked" etc. live in _SEE_ALL_MAP for the See-All
-// list view.)
+// (`_pendingChapterFromUrl` removed in Stage 8B Codex review — it was
+// set by the boot router + popstate handler but never read. Deep-linked
+// chapters are now threaded through openBookDetail(bookId, { chapter })
+// instead.)
 
-// ── Book detail page ──
-// Stale-fetch guard so rapid taps (open A → tap B before A loads) don't
-// render whichever happens to resolve last. Captures the bookId in a token
-// and only renders if it still matches when the queries return.
-let _openBookToken = null;
-// Set by the boot-time router when the inbound URL was
-// /books/<id>/chapter/<n>. Read once the chapter list has loaded so the
-// chapter is auto-opened. Cleared after use.
-let _pendingChapterFromUrl = null;
-async function openBookDetail(bookId) {
-  hideAllMainPages();
-  bookDetailPage.style.display = 'block';
-
-  // Path-based, shareable, deep-link-friendly URL. Use replaceState when
-  // the URL bar already shows the same book (e.g. boot-time inbound) so
-  // we don't add a duplicate history entry; pushState otherwise. Either
-  // way the result is `/books/<id>`, which mobile's Universal Links /
-  // App Links pick up correctly. The legacy hash form (#book/<id>) only
-  // appears as an inbound rewrite from old links — once we hit
-  // openBookDetail we always upgrade to the canonical path form.
-  const targetPath = `/books/${bookId}`;
-  const samePath = (location.pathname || '') === targetPath;
-  if (samePath) {
-    history.replaceState(null, '', targetPath);
-  } else {
-    history.pushState(null, '', targetPath);
-  }
-
-  const content = document.getElementById('bookDetailContent');
-  content.innerHTML = '<div class="loading">Loading book...</div>';
-
-  // Only the LATEST openBookDetail call gets to render. Earlier ones bail
-  // when their token no longer matches — fixes the "open A, tap B quickly,
-  // see A's cover with B's chapters" race.
-  const token = bookId;
-  _openBookToken = token;
-
-  // All books are now Supabase. Bare UUID or "sb_<uuid>" — strip the prefix if present.
-  const realId = bookId.startsWith('sb_') ? bookId.slice(3) : bookId;
-
-  // Detect ID shape — Supabase UUIDs are 36 chars with dashes
-  // (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); Appwrite hex IDs are 20 hex
-  // chars with no dashes. Mobile users share Appwrite-shaped IDs via
-  // WhatsApp/SMS because the mobile app still has books on Appwrite.
-  // Web migrated books to Supabase but kept legacy_appwrite_id, so we
-  // query the right column for whichever shape we see.
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(realId);
-  const bookFilterColumn = isUuid ? 'id' : 'legacy_appwrite_id';
-
-  let supBook, supChapters;
-  try {
-    const bookRes = await supabase.from('books')
-      .select(`
-        id, title, description, cover_url, genre, tags,
-        views_count, likes_count, chapters_count, word_count, status,
-        published_at, created_at, lock_from_chapter, locked_at,
-        author_id, profiles!books_author_id_fkey ( id, username, avatar_url )
-      `)
-      .eq(bookFilterColumn, realId)
-      .single();
-    if (bookRes.error || !bookRes.data) throw new Error(bookRes.error?.message || 'Book not found');
-    supBook = bookRes.data;
-
-    // Chapters are always keyed by the book's Supabase UUID, regardless
-    // of which shape we used to find the book.
-    const chRes = await supabase.from('chapters')
-      .select('id, chapter_number, title, word_count, views_count, is_published, is_locked, unlock_cost_coins, unlock_cost_stars, created_at')
-      .eq('book_id', supBook.id)
-      .eq('is_published', true)
-      .order('chapter_number', { ascending: true });
-    if (chRes.error) console.warn('Failed to load chapters:', chRes.error);
-    supChapters = chRes.data;
-  } catch (err) {
-    if (_openBookToken !== token) return; // user already tapped a different book
-    console.error('openBookDetail failed:', err);
-    const friendly = /timeout|canceling statement/i.test(err.message || '')
-      ? 'This book is taking too long to load. Tap to retry.'
-      : /not found/i.test(err.message || '')
-      ? 'This book isn\'t available — it may have been unpublished.'
-      : 'Couldn\'t load this book. Tap to retry.';
-    content.innerHTML = `<div class="loading" id="bookRetry" style="cursor:pointer">${escHTML(friendly)}</div>`;
-    document.getElementById('bookRetry')?.addEventListener('click', () => openBookDetail(bookId));
-    return;
-  }
-
-  if (_openBookToken !== token) return; // stale — user tapped a different book
-
-  currentBookDetail = { book: supBook, chapters: supChapters || [] };
-  renderBookDetail();
-}
-
-function renderBookDetail() {
-  if (!currentBookDetail) return;
-  const { book, chapters } = currentBookDetail;
-  const content = document.getElementById('bookDetailContent');
-
-  const authorName = book.profiles?.username || 'Unknown';
-  const authorAvatar = book.profiles?.avatar_url;
-  const initialLetter = (book.title || '?').trim().charAt(0).toUpperCase();
-  const cover = book.cover_url
-    ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
-    : `<div class="book-cover-placeholder" style="width:100%;height:100%">${initialLetter}</div>`;
-
-  const tagsHtml = (book.tags || []).map(t =>
-    `<button class="book-chip" data-tag="${escHTML(t)}" type="button">${escHTML(t)}</button>`
-  ).join('');
-
-  // Single-source lock-detection helper. Used by both the per-row lock badge
-  // AND the bulk-unlock CTA cost calculation, so the row icons and the
-  // "Unlock all N chapters" count CANNOT diverge by construction. Two-signal
-  // logic mirrors mobile's BookUnlocksService.isChapterLockedForDisplay:
-  //
-  //   • Book-level threshold: book.lock_from_chapter is set AND
-  //     chapter.chapter_number >= lock_from_chapter
-  //   • Per-chapter override:  chapter.is_locked === true
-  //
-  // …minus already-unlocked chapters (the user has already paid for them, no
-  // lock should display). No owner-bypass here — author + reader both see
-  // locks, matching what mobile now does too.
-  const lockFrom = book.lock_from_chapter || null;
-  const isChapterLockedForReader = (c) => {
-    if (!lockFrom && !c.is_locked) return false;
-    const isAtOrAfterLockPoint = lockFrom != null && c.chapter_number >= lockFrom;
-    if (!isAtOrAfterLockPoint && !c.is_locked) return false;
-    const realId = c.id.startsWith('sb_') ? c.id.slice(3) : c.id;
-    return !isUnlocked('chapter', realId);
-  };
-
-  const stillLockedChapters = chapters.filter(isChapterLockedForReader);
-  const lockedChapterCount = stillLockedChapters.length;
-
-  const chaptersHtml = chapters.length
-    ? chapters.map(c => {
-        const locked = isChapterLockedForReader(c);
-        const lockBadge = locked
-          ? `<span class="chapter-row-lock" title="Locked — tap to unlock">
-               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-             </span>`
-          : '';
-        return `
-          <div class="chapter-row${locked ? ' is-locked' : ''}" data-chapter-id="${c.id}">
-            <span class="chapter-row-num">#${c.chapter_number}</span>
-            <span class="chapter-row-title">${escHTML(c.title || `#${c.chapter_number}`)}</span>
-            ${lockBadge}
-            <span class="chapter-row-meta">${(c.word_count || 0).toLocaleString()} words</span>
-          </div>
-        `;
-      }).join('')
-    : '<div style="color:var(--text2);padding:1rem 0">No chapters published yet.</div>';
-
-  // Bulk unlock CTA — shown only when at least 1 chapter is currently locked.
-  //
-  // Cost is the SUM of each still-locked chapter's resolved price (per-chapter
-  // override OR global default), then the bulk discount applied. This mirrors
-  // what mobile does in BookChaptersUnlockModal.jsx (sumLockedChaptersCost).
-  // The previous implementation multiplied the global default by lockedChapterCount,
-  // which ignored the per-chapter overrides entirely — an author who set
-  // 3 coins per chapter saw a bulk price computed off the 25-coin global default.
-  const bulkDiscount = _walletConfigDefaults.book_bulk_unlock_discount_pct ?? 15;
-  const bulkBefore = stillLockedChapters.reduce(
-    (sum, c) => sum + (resolveUnlockCost('chapter', 'coin', c) || 0),
-    0,
-  );
-  const bulkStarBefore = stillLockedChapters.reduce(
-    (sum, c) => sum + (resolveUnlockCost('chapter', 'star', c) || 0),
-    0,
-  );
-  const bulkCoin = Math.max(1, bulkBefore - Math.floor((bulkBefore * bulkDiscount) / 100));
-  const bulkStar = Math.max(1, bulkStarBefore - Math.floor((bulkStarBefore * bulkDiscount) / 100));
-  const bulkUnlockCard = lockedChapterCount > 0 ? `
-    <div class="book-bulk-unlock">
-      <div class="book-bulk-unlock-icon">📚</div>
-      <div class="book-bulk-unlock-meta">
-        <div class="book-bulk-unlock-title">Unlock all <strong>${lockedChapterCount}</strong> locked chapter${lockedChapterCount === 1 ? '' : 's'}</div>
-        <div class="book-bulk-unlock-sub">Save ${bulkDiscount}% vs unlocking one by one</div>
-      </div>
-      <button class="btn btn-purple" id="btnBulkUnlockBook" data-locked-count="${lockedChapterCount}" data-coin="${bulkCoin}" data-star="${bulkStar}">
-        ${bulkCoin} coin${bulkCoin === 1 ? '' : 's'} or ${bulkStar} star${bulkStar === 1 ? '' : 's'}
-      </button>
-    </div>
-  ` : '';
-
-  content.innerHTML = `
-    <div class="book-detail">
-      <div class="book-detail-cover">${cover}</div>
-      <div class="book-detail-info">
-        <h1>${escHTML(book.title || 'Untitled')}</h1>
-        <button class="book-detail-author book-detail-author-link" data-author-id="${escHTML(book.profiles?.id || book.author_id || '')}" type="button" title="View author profile">
-          <div class="avatar">${authorAvatar ? `<img src="${escHTML(authorAvatar)}"/>` : initials(authorName)}</div>
-          <span>by <strong>${escHTML(authorName)}</strong></span>
-        </button>
-        <div class="book-detail-meta">
-          <span><strong>${(book.chapters_count || chapters.length).toLocaleString()}</strong> chapters</span>
-          <span><strong>${(book.word_count || 0).toLocaleString()}</strong> words</span>
-          <span><strong>${(book.views_count || 0).toLocaleString()}</strong> views</span>
-          <span><strong>${(book.likes_count || 0).toLocaleString()}</strong> likes</span>
-        </div>
-        <div class="book-detail-genre-row">
-          ${book.genre ? `<button class="book-chip active" type="button">${escHTML(book.genre.replace(/-/g, ' '))}</button>` : ''}
-          ${tagsHtml}
-        </div>
-        <div class="book-detail-actions">
-          <button class="btn btn-purple btn-sm" id="btnStartReading" ${chapters.length ? '' : 'disabled style="opacity:0.5;cursor:not-allowed"'}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            Start reading
-          </button>
-          <button class="btn btn-ghost btn-sm book-action-btn" id="btnLikeBook" data-active="0">
-            <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-            <span class="book-action-label">Like</span>
-            <span class="book-action-count" id="btnLikeBookCount">${(book.likes_count || 0).toLocaleString()}</span>
-          </button>
-          <button class="btn btn-ghost btn-sm book-action-btn" id="btnBookmarkBook" data-active="0">
-            <svg class="book-action-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-            <span class="book-action-label">Bookmark</span>
-          </button>
-          ${(currentProfile?.role === 'admin' || currentProfile?.role === 'moderator') ? `
-            <button class="btn btn-sm book-action-btn book-editors-pick-btn ${book.is_editors_pick ? 'is-picked' : ''}" id="btnEditorsPick" data-picked="${book.is_editors_pick ? '1' : '0'}" title="${book.is_editors_pick ? "Remove Editor's Pick" : "Mark as Editor's Pick"}">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="${book.is_editors_pick ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-              <span class="book-action-label">${book.is_editors_pick ? "Editor's Pick" : 'Pick'}</span>
-            </button>
-          ` : ''}
-        </div>
-        <div class="book-detail-description">${escHTML(book.description || 'No description provided.')}</div>
-        ${bulkUnlockCard}
-        <div class="chapter-list">
-          <div class="chapter-list-title">Chapters</div>
-          ${chaptersHtml}
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Sanity check: the count of `.chapter-row.is-locked` DOM nodes must
-  // equal `lockedChapterCount` (the number used by the bulk-unlock CTA).
-  // If the two ever disagree, the bulk button will charge for a different
-  // set of chapters than the user can see locked — exactly the kind of
-  // bug we just fixed (and want a guard against re-introducing).
-  //
-  // We log a console warning rather than throwing so a divergence in
-  // production surfaces in dev tools without breaking the user's flow.
-  // The `_walletConfigDefaults` and lock detection both live in this
-  // function, so any future logic change touching either will be caught
-  // here on the next render.
-  const renderedLockCount = content.querySelectorAll('.chapter-row.is-locked').length;
-  if (renderedLockCount !== lockedChapterCount) {
-    console.warn(
-      `[lock-count-mismatch] book ${book.id}: rendered ${renderedLockCount} lock icons but bulk CTA says ${lockedChapterCount}. ` +
-      `Lock detection has diverged between row render and stillLockedChapters filter — check isChapterLockedForReader callers.`
-    );
-  }
-
-  // Wire chapter rows
-  content.querySelectorAll('.chapter-row').forEach((row, i) => {
-    row.addEventListener('click', () => openChapterReader(i));
-  });
-
-  // Wire clickable author → opens their profile
-  content.querySelector('.book-detail-author-link')?.addEventListener('click', (e) => {
-    const authorId = e.currentTarget.dataset.authorId;
-    if (authorId) openProfile(authorId);
-  });
-
-  // Bulk-unlock button — opens a modal with coin/star choice + final price
-  document.getElementById('btnBulkUnlockBook')?.addEventListener('click', () => {
-    openBulkBookUnlockDialog({
-      bookId:        book.id,
-      bookTitle:     book.title || 'this book',
-      lockedCount:   parseInt(document.getElementById('btnBulkUnlockBook').dataset.lockedCount, 10) || lockedChapterCount,
-      coinCost:      parseInt(document.getElementById('btnBulkUnlockBook').dataset.coin, 10) || bulkCoin,
-      starCost:      parseInt(document.getElementById('btnBulkUnlockBook').dataset.star, 10) || bulkStar,
-      discountPct:   bulkDiscount,
-      onUnlocked:    () => openBookDetail(book.id),
-    });
-  });
-  // Start reading → first unread chapter (or chapter 1)
-  document.getElementById('btnStartReading')?.addEventListener('click', () => openChapterReader(0));
-
-  // Wire like + bookmark
-  const likeBtn = document.getElementById('btnLikeBook');
-  const bookmarkBtn = document.getElementById('btnBookmarkBook');
-  likeBtn?.addEventListener('click', () => toggleBookLike(book.id));
-  bookmarkBtn?.addEventListener('click', () => toggleBookBookmark(book.id));
-
-  // Editor's Pick toggle (mods/admins only — button is gated server-side too)
-  document.getElementById('btnEditorsPick')?.addEventListener('click', async (e) => {
-    const btn = e.currentTarget;
-    const currentlyPicked = btn.dataset.picked === '1';
-    const willPick = !currentlyPicked;
-    btn.disabled = true;
-    let note = null;
-    if (willPick) {
-      // Optional editorial note — short blurb that shows up in tooltips/lists
-      note = prompt('Optional — short editorial note (why is this an Editor\'s Pick?):', '') || null;
-    }
-    try {
-      const { data, error } = await supabase.rpc('set_editors_pick', {
-        p_book_id: book.id,
-        p_pick: willPick,
-        p_note: note,
-      });
-      if (error) throw error;
-      if (!data?.ok) throw new Error(data?.error || 'Failed to update Editor\'s Pick');
-      // Update UI inline
-      btn.dataset.picked = willPick ? '1' : '0';
-      btn.classList.toggle('is-picked', willPick);
-      btn.querySelector('.book-action-label').textContent = willPick ? "Editor's Pick" : 'Pick';
-      btn.querySelector('svg').setAttribute('fill', willPick ? 'currentColor' : 'none');
-      btn.title = willPick ? "Remove Editor's Pick" : "Mark as Editor's Pick";
-      // Mutate cached book so re-renders stay in sync
-      if (currentBookDetail?.book) {
-        currentBookDetail.book.is_editors_pick = willPick;
-        currentBookDetail.book.editors_pick_at = willPick ? new Date().toISOString() : null;
-        currentBookDetail.book.editors_pick_note = willPick ? note : null;
-      }
-      toast(willPick ? 'Marked as Editor\'s Pick ⭐' : 'Removed from Editor\'s Pick', 'success');
-    } catch (err) {
-      toast(err.message || String(err), 'error');
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
-  // Load initial state (whether the user has already liked/bookmarked)
-  loadBookActionState(book.id);
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Load initial like/bookmark state for the current book + render visual
-// ────────────────────────────────────────────────────────────────────────
-async function loadBookActionState(bookId) {
-  if (!currentUser) return;
-  try {
-    const [{ data: like }, { data: bm }] = await Promise.all([
-      supabase.from('book_likes').select('book_id').eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle(),
-      supabase.from('book_bookmarks').select('book_id').eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle(),
-    ]);
-    setBookActionActive('btnLikeBook',     !!like);
-    setBookActionActive('btnBookmarkBook', !!bm);
-  } catch (e) { /* non-fatal */ }
-}
-
-function setBookActionActive(buttonId, active) {
-  const btn = document.getElementById(buttonId);
-  if (!btn) return;
-  btn.dataset.active = active ? '1' : '0';
-  // Fill the SVG icon when active (heart filled, bookmark filled)
-  const icon = btn.querySelector('.book-action-icon');
-  if (icon) icon.setAttribute('fill', active ? 'currentColor' : 'none');
-  // Update label
-  const label = btn.querySelector('.book-action-label');
-  if (label) {
-    if (buttonId === 'btnLikeBook')      label.textContent = active ? 'Liked' : 'Like';
-    if (buttonId === 'btnBookmarkBook')  label.textContent = active ? 'Saved' : 'Bookmark';
-  }
-}
-
-async function toggleBookLike(bookId) {
-  if (!currentUser) { toast('Sign in to like books', 'error'); return; }
-  const btn  = document.getElementById('btnLikeBook');
-  const wasActive = btn?.dataset.active === '1';
-  const countEl   = document.getElementById('btnLikeBookCount');
-
-  // Optimistic UI — flip immediately
-  setBookActionActive('btnLikeBook', !wasActive);
-  if (countEl) {
-    const cur = parseInt(countEl.textContent.replace(/[^\d]/g, ''), 10) || 0;
-    const next = wasActive ? Math.max(0, cur - 1) : cur + 1;
-    countEl.textContent = next.toLocaleString();
-    if (currentBookDetail?.book) currentBookDetail.book.likes_count = next;
-  }
-
-  try {
-    if (wasActive) {
-      const { error } = await supabase.from('book_likes')
-        .delete()
-        .eq('user_id', currentUser.id)
-        .eq('book_id', bookId);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from('book_likes')
-        .insert({ user_id: currentUser.id, book_id: bookId });
-      // Ignore duplicate-key (already liked from another tab); other errors throw
-      if (error && !/duplicate|unique/i.test(error.message)) throw error;
-    }
-  } catch (e) {
-    // Revert optimistic UI on error
-    setBookActionActive('btnLikeBook', wasActive);
-    if (countEl) {
-      const cur = parseInt(countEl.textContent.replace(/[^\d]/g, ''), 10) || 0;
-      countEl.textContent = (wasActive ? cur + 1 : Math.max(0, cur - 1)).toLocaleString();
-    }
-    toast('Failed: ' + (e.message || e), 'error');
-  }
-}
-
-async function toggleBookBookmark(bookId) {
-  if (!currentUser) { toast('Sign in to bookmark books', 'error'); return; }
-  const btn = document.getElementById('btnBookmarkBook');
-  const wasActive = btn?.dataset.active === '1';
-
-  // Optimistic UI
-  setBookActionActive('btnBookmarkBook', !wasActive);
-
-  try {
-    if (wasActive) {
-      const { error } = await supabase.from('book_bookmarks')
-        .delete()
-        .eq('user_id', currentUser.id)
-        .eq('book_id', bookId);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from('book_bookmarks')
-        .insert({ user_id: currentUser.id, book_id: bookId });
-      if (error && !/duplicate|unique/i.test(error.message)) throw error;
-    }
-  } catch (e) {
-    setBookActionActive('btnBookmarkBook', wasActive);
-    toast('Failed: ' + (e.message || e), 'error');
-  }
-}
-
-// Back to book list
-document.getElementById('btnBackBooks')?.addEventListener('click', () => showBook());
-
-// ── Chapter reader ──
-async function openChapterReader(chapterIndex) {
-  if (!currentBookDetail || !currentBookDetail.chapters[chapterIndex]) return;
-  // Flush any in-progress chapter dwell BEFORE we mutate the
-  // module-scoped open-state below. Without this, navigating
-  // chapter-to-chapter would lose the previous chapter's close event.
-  flushReadClose();
-  currentChapterIndex = chapterIndex;
-  const chapter = currentBookDetail.chapters[chapterIndex];
-
-  hideAllMainPages();
-  chapterReaderPage.style.display = 'block';
-
-  // Daily-goal: "Read N chapters" tick. Dedupe by chapter id (strip
-  // the 'sb_' prefix if present) so re-opening the same chapter
-  // mid-session doesn't farm. Fire-and-forget — the RPC is best-
-  // effort and never gates the reader render. Mirrors mobile at
-  // app/(book)/book-reading.jsx:444.
-  try {
-    const ckey = String(chapter.id || '').replace(/^sb_/, '');
-    if (ckey) tickGoalUnique('read_chapters', ckey);
-  } catch {}
-
-  // Anti-fraud telemetry — log chapter open (dwell_ms=0, scroll_pct=0).
-  // The matching close event fires from the "previous chapter" / "next
-  // chapter" / back-out handlers a few hundred lines down with the
-  // actual dwell + scroll values. Two-event pattern lets Phase 4's
-  // detection job compute dwell distributions and flag bot-like reads
-  // (open → immediate close with no scroll).
-  const realChapterIdForLog = String(chapter.id || '').replace(/^sb_/, '');
-  if (realChapterIdForLog) {
-    _readChapterOpenTs = Date.now();
-    _readChapterOpenId = realChapterIdForLog;
-    _readChapterOpenBookId = currentBookDetail?.book?.id || null;
-    _readMaxScrollPct = 0;
-    logRead({
-      chapterId: realChapterIdForLog,
-      bookId:    _readChapterOpenBookId,
-      dwellMs:   0,
-      scrollPct: 0,
-    });
-  }
-
-  document.getElementById('readerBookTitle').textContent = currentBookDetail.book.title || 'Book';
-  document.getElementById('readerChapterTitle').textContent = chapter.title || `Chapter ${chapter.chapter_number}`;
-  document.getElementById('readerProgress').textContent = `Chapter ${chapter.chapter_number} of ${currentBookDetail.chapters.length}`;
-  document.getElementById('btnReaderPrev').disabled = chapterIndex <= 0;
-  document.getElementById('btnReaderNext').disabled = chapterIndex >= currentBookDetail.chapters.length - 1;
-
-  // Path-based deep-link-friendly chapter URL — keeps mobile Universal
-  // Links / App Links able to pick this URL up if shared.
-  history.pushState(null, '', `/books/${currentBookDetail.book.id}/chapter/${chapter.chapter_number}`);
-
-  const content = document.getElementById('readerContent');
-  content.innerHTML = '<div class="loading">Loading chapter...</div>';
-
-  // Fetch full chapter content + lock fields from the right source
-  let chapterContent = '';
-  let resolvedChapterId = chapter.id;
-  let chapterRow = null;
-  try {
-    const realChapterId = chapter.id.startsWith('sb_') ? chapter.id.slice(3) : chapter.id;
-    const { data, error } = await supabase
-      .from('chapters')
-      .select('id, chapter_number, title, content, is_locked, unlock_cost_coins, unlock_cost_stars')
-      .eq('id', realChapterId)
-      .single();
-    if (error || !data) throw new Error(error?.message || 'Chapter not found');
-    chapterContent = data.content || '';
-    resolvedChapterId = data.id;
-    chapterRow = data;
-  } catch (err) {
-    console.error('openChapterReader failed:', err);
-    const friendly = /timeout|canceling statement/i.test(err.message || '')
-      ? 'This chapter is taking too long to load. Tap to retry.'
-      : /not found/i.test(err.message || '')
-      ? 'This chapter isn\'t available — it may have been unpublished.'
-      : 'Couldn\'t load this chapter. Tap to retry.';
-    content.innerHTML = `<div class="loading" id="chapterRetry" style="cursor:pointer">${escHTML(friendly)}</div>`;
-    document.getElementById('chapterRetry')?.addEventListener('click', () => openChapterReader(chapterIndex));
-    return;
-  }
-
-  // PAYWALL: locked + not unlocked → render the lock CTA instead of content.
-  //
-  // Two-signal lock check, matching the row-rendering logic above and mobile's
-  // isAuthorChapterLocked / isChapterLocked helpers. A chapter is locked when:
-  //   • chapter.is_locked === true (per-chapter explicit override), OR
-  //   • book.lock_from_chapter is set AND chapter_number >= lock_from_chapter
-  //     (book-level paywall threshold cascade).
-  //
-  // The previous version only honored chapter.is_locked, so any chapter that
-  // was only locked via the book-level threshold (the common case for writers
-  // using the picker) silently rendered for free even though the TOC row
-  // showed a lock badge — a real revenue-leak bug.
-  const bookLockFrom = currentBookDetail?.book?.lock_from_chapter;
-  const isThresholdLocked = bookLockFrom != null && Number(chapterRow.chapter_number) >= Number(bookLockFrom);
-  const chapterIsLocked = !!chapterRow.is_locked || isThresholdLocked;
-  if (chapterIsLocked && !isUnlocked('chapter', resolvedChapterId)) {
-    const coinCost = resolveUnlockCost('chapter', 'coin', chapterRow);
-    const starCost = resolveUnlockCost('chapter', 'star', chapterRow);
-    content.style.fontSize = '';
-    content.innerHTML = `
-      <div class="reader-paywall">
-        <div class="reader-paywall-icon">🔒</div>
-        <h2>This chapter is locked</h2>
-        <p>Unlock once to read as many times as you like.</p>
-        <div class="reader-paywall-pricing">
-          <span><b>${coinCost}</b> coin${coinCost === 1 ? '' : 's'}</span>
-          <span class="reader-paywall-or">or</span>
-          <span><b>${starCost}</b> star${starCost === 1 ? '' : 's'}</span>
-        </div>
-        <button class="btn btn-purple" id="btnReaderUnlock">Unlock chapter</button>
-      </div>
-    `;
-    document.getElementById('btnReaderUnlock')?.addEventListener('click', () => {
-      openUnlockDialog({
-        targetType: 'chapter',
-        targetId:   resolvedChapterId,
-        row:        chapterRow,
-        title:      chapterRow.title || `Chapter ${chapterRow.chapter_number}`,
-        onUnlocked: () => openChapterReader(chapterIndex),  // re-open after unlock
-      });
-    });
-    return;
-  }
-
-  // Apply current font size and inject normalized content (HTML or plain text)
-  content.style.fontSize = `${readerFontSize}rem`;
-  content.innerHTML = normalizeChapterContent(chapterContent);
-  content.scrollTop = 0;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-
-  // Apply username watermark (re-run in case the user logged in/out since last read)
-  applyReaderWatermark();
-
-  saveReadingProgress(currentBookDetail.book.id, resolvedChapterId, chapter.chapter_number);
-}
-
-// Normalize chapter content: if HTML-ish, render as-is; if plain text, wrap in <p>
-function normalizeChapterContent(content) {
-  if (!content) return '<p><em>(No content)</em></p>';
-  // Detect common HTML tags to decide
-  if (/<\/?(p|div|br|h[1-6]|blockquote|ul|ol|li|strong|em|b|i|a|img|span)\b/i.test(content)) {
-    return content;
-  }
-  // Treat as plain text — split by blank lines into paragraphs, preserve single newlines as <br>
-  return content
-    .split(/\n\s*\n/)
-    .filter(p => p.trim())
-    .map(p => `<p>${escHTML(p).replace(/\n/g, '<br>')}</p>`)
-    .join('');
-}
-
-async function saveReadingProgress(bookId, chapterId, chapterNumber) {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-    const nowIso = new Date().toISOString();
-
-    // 1) book_reads — per-user reading progress (continue-reading rail).
-    //    Composite PK (user_id, book_id), one row per user per book ever.
-    await supabase.from('book_reads').upsert({
-      user_id: user.id,
-      book_id: bookId,
-      last_chapter_id: chapterId,
-      last_chapter_number: chapterNumber,
-      last_read_at: nowIso,
-    }, { onConflict: 'user_id,book_id' });
-
-    // 2) chapter_reads — per-(user, chapter) row that drives the
-    //    aggregate views counter. The bump_views_on_chapter_read
-    //    trigger fires here:
-    //      - On INSERT (first read of this chapter for this user) →
-    //        +1 to chapters.views_count and books.views_count.
-    //      - On UPDATE-after-24h cooldown → +1 again.
-    //    Mobile already does the same write (lib/book-reads-supabase.js
-    //    → readBookChapter); without this branch on web, chapter
-    //    reads from web readers were never feeding into the aggregate
-    //    counter and writers' view totals only reflected mobile
-    //    readers. Mirroring mobile's INSERT-then-UPDATE-on-23505
-    //    pattern keeps both surfaces uniform.
-    if (chapterId) {
-      try {
-        const { error: insertErr } = await supabase
-          .from('chapter_reads')
-          .insert({
-            chapter_id: chapterId,
-            user_id: user.id,
-            read_count: 1,
-            last_read_at: nowIso,
-          });
-        if (insertErr && insertErr.code === '23505') {
-          // Row already exists — bump read_count + last_read_at so the
-          // trigger's UPDATE branch can decide whether the cooldown
-          // has elapsed.
-          const { data: existing } = await supabase
-            .from('chapter_reads')
-            .select('read_count')
-            .eq('chapter_id', chapterId)
-            .eq('user_id', user.id)
-            .maybeSingle();
-          await supabase
-            .from('chapter_reads')
-            .update({
-              read_count: (existing?.read_count ?? 0) + 1,
-              last_read_at: nowIso,
-            })
-            .eq('chapter_id', chapterId)
-            .eq('user_id', user.id);
-        }
-      } catch (_) {
-        // Best-effort. A stats write must never block a reader from
-        // continuing through the chapter.
-      }
-    }
-  } catch (e) { /* ignore */ }
-}
-
-// ── Reader watermark (deterrent: leaked screenshots reveal the source) ──
-let _watermarkLabelCache = null;
-async function getReaderWatermarkLabel() {
-  if (_watermarkLabelCache) return _watermarkLabelCache;
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { _watermarkLabelCache = 'Guest'; return _watermarkLabelCache; }
-    // Try profile.username, then email local part, then user id prefix
-    const { data: profile } = await supabase
-      .from('profiles').select('username').eq('id', user.id).maybeSingle();
-    const username = profile?.username
-      || (user.email ? user.email.split('@')[0] : null)
-      || (user.id ? user.id.slice(0, 8) : 'User');
-    _watermarkLabelCache = `${username} · ${(user.id || '').slice(0, 6)}`;
-  } catch {
-    _watermarkLabelCache = 'Reader';
-  }
-  return _watermarkLabelCache;
-}
-
-async function applyReaderWatermark() {
-  const el = document.getElementById('readerContent');
-  if (!el) return;
-  const label = await getReaderWatermarkLabel();
-  const isLight = document.body.classList.contains('light');
-  const fillColor = isLight ? '%237c3aed' : '%23a78bfa'; // %23 = encoded "#"
-  // Encode for safe data URI use
-  const safeLabel = String(label).replace(/[<>&'"]/g, c =>
-    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&#39;', '"': '&quot;' }[c]));
-  const svg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200">' +
-      '<text x="160" y="100" text-anchor="middle"' +
-        ' transform="rotate(-25 160 100)"' +
-        ` fill="${isLight ? '#7c3aed' : '#a78bfa'}" fill-opacity="0.09"` +
-        ' font-family="system-ui, -apple-system, sans-serif"' +
-        ' font-size="13" font-weight="500" letter-spacing="0.04em">' +
-        safeLabel +
-      '</text>' +
-    '</svg>';
-  const dataUri = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
-  el.style.setProperty('--reader-watermark-bg', dataUri);
-}
-
-// Re-render watermark when theme toggles (so colour matches background).
-// May 2026: theme switcher moved from a single topbar button to a
-// segmented radio (Light/Dark) in the sidebar — listen on both so
-// the watermark stays in sync regardless of which option is picked.
-document.querySelectorAll('#sidebarThemeToggle .sidebar-theme-option').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    // Run after the body class actually flips
-    setTimeout(() => {
-      if (chapterReaderPage?.style.display === 'block') applyReaderWatermark();
-    }, 50);
-  });
-});
-
-// ── Anti-copy protection on the reader ──
-// Discourages casual copy-paste. Not bulletproof against DevTools/view-source,
-// but blocks selection, right-click, and Cmd/Ctrl+C / Cmd/Ctrl+A inside the reader.
-(function setupReaderAntiCopy() {
-  const el = document.getElementById('readerContent');
-  if (!el) return;
-
-  const isReaderVisible = () =>
-    chapterReaderPage && chapterReaderPage.style.display === 'block';
-
-  let antiCopyToastTimer = null;
-  const showAntiCopyToast = () => {
-    if (antiCopyToastTimer) return;          // throttle so we don't spam
-    toast('Copying is disabled to protect the author\'s work', 'error');
-    antiCopyToastTimer = setTimeout(() => { antiCopyToastTimer = null; }, 1500);
-  };
-
-  // Block selection-start (covers click-and-drag)
-  el.addEventListener('selectstart', (e) => {
-    e.preventDefault();
-    return false;
-  });
-
-  // Block native copy (Cmd/Ctrl+C, right-click → Copy)
-  el.addEventListener('copy', (e) => {
-    e.preventDefault();
-    e.clipboardData?.setData('text/plain', '');
-    showAntiCopyToast();
-    return false;
-  });
-
-  // Block cut + paste too, just in case the reader ever becomes editable somehow
-  el.addEventListener('cut', (e) => { e.preventDefault(); return false; });
-
-  // Block right-click context menu inside the reader
-  el.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showAntiCopyToast();
-    return false;
-  });
-
-  // Block drag (so users can't drag-out a text fragment)
-  el.addEventListener('dragstart', (e) => { e.preventDefault(); return false; });
-
-  // Block Cmd/Ctrl+A so a user can't quickly select-all then copy
-  document.addEventListener('keydown', (e) => {
-    if (!isReaderVisible()) return;
-    const isMod = e.metaKey || e.ctrlKey;
-    if (!isMod) return;
-    const k = e.key.toLowerCase();
-    if (k === 'a' || k === 'c' || k === 'x') {
-      // Only block if the focus is in/over the reader content, not in form inputs
-      const tag = (e.target?.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
-      e.preventDefault();
-      showAntiCopyToast();
-    }
-  });
-})();
-
-// Reader controls
-document.getElementById('btnReaderPrev')?.addEventListener('click', () => {
-  if (currentChapterIndex > 0) openChapterReader(currentChapterIndex - 1);
-});
-document.getElementById('btnReaderNext')?.addEventListener('click', () => {
-  if (currentBookDetail && currentChapterIndex < currentBookDetail.chapters.length - 1) {
-    openChapterReader(currentChapterIndex + 1);
-  }
-});
-document.getElementById('btnBackBookDetail')?.addEventListener('click', () => {
-  if (currentBookDetail) openBookDetail(currentBookDetail.book.id);
-});
-document.getElementById('btnReaderFontSmaller')?.addEventListener('click', () => {
-  readerFontSize = Math.max(0.85, readerFontSize - 0.05);
-  localStorage.setItem('selebox_reader_font', readerFontSize);
-  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
-});
-document.getElementById('btnReaderFontLarger')?.addEventListener('click', () => {
-  readerFontSize = Math.min(1.6, readerFontSize + 0.05);
-  localStorage.setItem('selebox_reader_font', readerFontSize);
-  document.getElementById('readerContent').style.fontSize = `${readerFontSize}rem`;
-});
+// (Back-to-books, theme-toggle watermark sync, reader anti-copy IIFE, and
+// the five reader nav buttons all migrated to wireBookReader() in
+// js/books.js as part of Stage 8B. App.js calls it after wireBooksPage()
+// near the initBooks({…}) block.)
 
 // ── Author (Manuscript Studio) page ──
 function showAuthor(forceReload = false) {
@@ -12094,13 +6721,20 @@ async function loadVideoBookmarks() {
 
   const items = (data || []).filter(r => r.videos);
   if (!items.length) {
+    // Inline onclick can't see module-scoped imports (`showVideos`,
+    // `setSidebarActive`) since the migration to ES modules — Codex P3.
+    // Wire the CTA via a real listener after innerHTML lands.
     wrap.innerHTML = `
       <div class="bookmarks-empty">
         <div class="bookmarks-empty-icon">🎬</div>
         <h3>No saved videos yet</h3>
         <p>Tap the <strong>Bookmark</strong> button on any video to save it here.</p>
-        <button class="btn btn-purple btn-sm" onclick="setSidebarActive('btnVideos');showVideos();">Browse videos</button>
+        <button class="btn btn-purple btn-sm" id="btnBookmarksBrowseVideos">Browse videos</button>
       </div>`;
+    document.getElementById('btnBookmarksBrowseVideos')?.addEventListener('click', () => {
+      setSidebarActive('btnVideos');
+      showVideos();
+    });
     return;
   }
 
@@ -12152,13 +6786,20 @@ async function loadBookBookmarks() {
 
   const items = (data || []).filter(r => r.books);
   if (!items.length) {
+    // Inline onclick can't see module-scoped imports (`showBook`,
+    // `setSidebarActive`) since the migration to ES modules — Codex P3.
+    // Wire the CTA via a real listener after innerHTML lands.
     wrap.innerHTML = `
       <div class="bookmarks-empty">
         <div class="bookmarks-empty-icon">📚</div>
         <h3>No saved books yet</h3>
         <p>Tap the <strong>Bookmark</strong> button on any book to save it for later.</p>
-        <button class="btn btn-purple btn-sm" onclick="setSidebarActive('btnBook');showBook();">Browse books</button>
+        <button class="btn btn-purple btn-sm" id="btnBookmarksBrowseBooks">Browse books</button>
       </div>`;
+    document.getElementById('btnBookmarksBrowseBooks')?.addEventListener('click', () => {
+      setSidebarActive('btnBook');
+      showBook();
+    });
     return;
   }
 
@@ -12657,1726 +7298,44 @@ function ensureLockPromptHandler() {
 // PHASE 7 — Author Earnings, KYC, Withdrawals
 // ════════════════════════════════════════════════════════════════════════════
 
-let _authorBalance = null;
-let _authorKyc     = null;
-// Earnings page state (May 2026 mobile-parity refresh)
-// ───────────────────────────────────────────────────────────────
-// `_allEarningsCache` and `_allWithdrawalsCache` retain the full
-// fetched datasets so the month picker can re-filter without going
-// back to the network. `_selectedMonthYear` is the picker's current
-// value as a "YYYY-MM" string; null means "current month".
-let _allEarningsCache    = [];
-let _allWithdrawalsCache = [];
-let _selectedMonthYear   = null;
-
-async function loadAuthorEarnings() {
-  if (!currentUser) return;
-  // Note: the legacy #authorEarningsSection lives in the Author dashboard
-  // and was removed. Earnings now lives in the dedicated #earningsPage.
-
-  // Fire all four reads in parallel — pulls all earnings rows for the
-  // breakdown calculation (small per-author dataset, fine to fetch in full).
-  // Withdrawals limit bumped 20 → 200 to match mobile so the lifetime
-  // total includes ALL paid-out / in-flight money (counting only the
-  // latest 20 would under-report lifetime gross on heavy creators).
-  const [balanceRes, earningsRes, withdrawalsRes, kycRes] = await Promise.all([
-    supabase.rpc('author_balance_for', { p_author_id: currentUser.id }),
-    supabase.from('author_earnings')
-      // adjusted_net_php_minor + adjusted_net_coins added for the
-      // earnings moderation state machine (Phase 1 — May 2026). When
-      // status='adjusted' the adjusted_* fields hold the effective
-      // amount; original net_* stays for audit.
-      .select('id, source_type, source_id, gross_coins, share_pct, net_coins, net_php_minor, adjusted_net_coins, adjusted_net_php_minor, currency_used, status, available_at, created_at')
-      .eq('author_id', currentUser.id)
-      .order('created_at', { ascending: false })
-      .limit(500),
-    supabase.from('author_withdrawals')
-      .select('id, amount_coins, amount_php_minor, status, payout_method, requested_at, approved_at, paid_at, rejection_reason')
-      .eq('author_id', currentUser.id)
-      .order('requested_at', { ascending: false })
-      .limit(200),
-    supabase.from('author_kyc')
-      .select('status, rejection_reason, submitted_at, reviewed_at')
-      .eq('user_id', currentUser.id)
-      .maybeSingle(),
-  ]);
-
-  _authorBalance        = balanceRes.data || { available_coins: 0, pending_coins: 0, available_php_minor: 0, pending_php_minor: 0 };
-  _authorKyc            = kycRes.data || null;
-  _allEarningsCache     = earningsRes.data || [];
-  _allWithdrawalsCache  = withdrawalsRes.data || [];
-
-  // Initialize the month picker to the current month on first paint
-  // (subsequent renders preserve whatever the user picked).
-  if (_selectedMonthYear === null) _selectedMonthYear = _currentMonthYearKey();
-
-  _populateMonthPicker();
-  renderAuthorEarningsBalance();
-  renderEarningsTotals();      // new — Total + This Month tiles
-  _renderMonthScopedBreakdown(); // breakdown now respects the picker
-
-  // Recent earnings is paginated to keep the DOM small (creators with
-  // thousands of rows + per-row title lookups would otherwise lag).
-  // Render the current page; the helper itself does the title resolve
-  // for the visible window.
-  _renderRecentEarningsPage();
-
-  _renderWithdrawalsPage();
-  renderAuthorKycBanner();
-  syncAuthorPayoutButton();
-}
-
-// "YYYY-MM" for the current month — the canonical default the picker
-// starts at, matching mobile's behavior.
-function _currentMonthYearKey(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  return `${y}-${m}`;
-}
-
-// Filter a list of earnings rows to a single "YYYY-MM" bucket using
-// `available_at` (mirrors mobile — see lib/earnings-supabase.js line
-// 119-121 comment block on why available_at not created_at).
-function _filterEarningsByMonthYear(rows, monthYear) {
-  if (!monthYear) return rows;
-  const [yStr, mStr] = monthYear.split('-');
-  const year = Number(yStr);
-  const monthIndex = Number(mStr) - 1;
-  if (!Number.isFinite(year) || !Number.isInteger(monthIndex)) return rows;
-  const start = new Date(year, monthIndex, 1, 0, 0, 0).getTime();
-  const end   = new Date(year, monthIndex + 1, 0, 23, 59, 59).getTime();
-  return rows.filter((r) => {
-    const t = new Date(r.available_at || r.created_at || 0).getTime();
-    return t >= start && t <= end;
-  });
-}
-
-// Build the month picker options from the earliest earning forward
-// to the current month. Newest first so the picker opens to the
-// current month by default. Re-populates idempotently on every
-// loadAuthorEarnings since the underlying data may grow.
-function _populateMonthPicker() {
-  const sel = document.getElementById('earningsMonthPicker');
-  if (!sel) return;
-
-  // Find the earliest available_at across all cached earnings. Falls
-  // back to "August 2025" (the platform's first month with author
-  // earnings, matching mobile's hardcoded floor).
-  let earliest = new Date(2025, 7, 1); // August = month index 7
-  for (const r of _allEarningsCache) {
-    const t = new Date(r.available_at || r.created_at || 0);
-    if (!isNaN(t.getTime()) && t < earliest) earliest = t;
-  }
-
-  const now = new Date();
-  const cur = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const opts = [];
-  // Walk from current month backwards to the earliest available.
-  let cursor = new Date(cur.getFullYear(), cur.getMonth(), 1);
-  while (cursor >= new Date(earliest.getFullYear(), earliest.getMonth(), 1)) {
-    const y = cursor.getFullYear();
-    const m = cursor.getMonth();
-    const key = `${y}-${String(m + 1).padStart(2, '0')}`;
-    const label = `${monthNames[m]} ${y}`;
-    opts.push(`<option value="${key}"${key === _selectedMonthYear ? ' selected' : ''}>${label}</option>`);
-    cursor = new Date(y, m - 1, 1);
-  }
-  sel.innerHTML = opts.join('');
-}
-
-// Re-render the month-scoped pieces: This Month tile + breakdown.
-// Lifetime total + balance cards are NOT month-sensitive.
-function _renderMonthScopedBreakdown() {
-  // Finalized-only rule (Phase 1.3 — May 14 earnings moderation):
-  // Only verified or adjusted rows count toward Monthly Earnings +
-  // breakdown. Pending (under review) and rejected are excluded.
-  // Adjusted rows count at adjusted_net_php_minor.
-  //
-  // Phase 1.3 switched the gate from `available_at <= now()` to
-  // `status IN ('verified','adjusted')`. The cron auto-promotes
-  // pending → verified after the 7-day hold, so the two are
-  // equivalent for normal flow. The status filter additionally
-  // excludes admin-rejected rows even when their available_at has
-  // passed.
-  //
-  // Legacy 'available' status is treated as verified (alias kept on
-  // the CHECK constraint to avoid breaking older live RPCs).
-  const monthFiltered = _filterEarningsByMonthYear(_allEarningsCache, _selectedMonthYear);
-  const finalized = monthFiltered.filter((r) =>
-    r.status === 'verified' || r.status === 'available' || r.status === 'adjusted'
-  );
-  // Project rows to use adjusted amounts when status='adjusted' so
-  // the breakdown sums the effective (post-adjustment) value, not
-  // the original. renderEarningsBreakdown reads `net_php_minor` and
-  // `net_coins` directly, so we substitute those fields per-row.
-  const projected = finalized.map((r) => {
-    if (r.status !== 'adjusted') return r;
-    return {
-      ...r,
-      net_php_minor: Number(r.adjusted_net_php_minor) >= 0 ? Number(r.adjusted_net_php_minor) : r.net_php_minor,
-      net_coins:     Number(r.adjusted_net_coins)     >= 0 ? Number(r.adjusted_net_coins)     : r.net_coins,
-    };
-  });
-  renderEarningsBreakdown(projected);
-  // Also update the "This Month" tile total.
-  const monthMinor = projected.reduce((sum, r) => sum + (r.net_php_minor || 0), 0);
-  const monthEl = document.getElementById('earningsMonthPhp');
-  if (monthEl) monthEl.textContent = formatPhpFromMinor(monthMinor);
-  // Label updates to match the selected month for clarity.
-  const labelEl = document.getElementById('earningsMonthLabel');
-  if (labelEl) {
-    labelEl.textContent = _selectedMonthYear === _currentMonthYearKey() ? 'This month' : 'Selected month';
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Shared title resolver for any list of `author_earnings` rows. Used
-// by BOTH the drill-down transaction view AND the main "Recent
-// earnings" list. Resolves chapter / book_bulk / video / post titles
-// in parallel and returns a Map<"<source_type>:<source_id>", title>.
+// ════════════════════════════════════════════════════════════════════════
+// Earnings read/render layer MOVED to js/earnings.js (Stage 11A).
+// ~1,000 lines covering loadAuthorEarnings + breakdown modal + all
+// totals/balance/recent-list/withdrawal-list rendering.
 //
-// Posts get a short content excerpt since they have no `title`
-// column. Returns "Untitled <thing>" as a defensive fallback.
+// Bridges still here in app.js (queued for later stages):
+//   • Stage 11B (#250) — KYC + Payments Info form subsystem
+//   • Stage 11C (#251) — Withdrawal request flow + Pioneer helpers
 //
-// Partition-by-id-format: rows backfilled from Appwrite have hex
-// `source_id`s that fail Postgres's UUID cast, so we split each id
-// list into UUIDs (queried by `id`) and legacy hex (queried by
-// `legacy_appwrite_id`). The combined `.or()` filter that mobile
-// tried first silently returned zero rows for the legacy partition;
-// two separate queries per kind sidestep the cast error entirely.
-const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-async function _resolveEarningsTitles(rows) {
-  const titleByKey = new Map();
-  if (!rows || !rows.length) return titleByKey;
+// formatPhpFromMinor is re-imported at the top of this file so the
+// withdrawal-flow handlers (still in app.js) and the _cfg passthrough
+// to other modules keep working.
+// ════════════════════════════════════════════════════════════════════════
 
-  const partition = (ids) => {
-    const uuids = [], legacy = [];
-    for (const id of ids) { if (_UUID_RE.test(id)) uuids.push(id); else legacy.push(id); }
-    return { uuids, legacy };
-  };
-  const setTitle = (key, label) => { if (label) titleByKey.set(key, label); };
-
-  const chapterIds  = [...new Set(rows.filter(r => r.source_type === 'chapter').map(r => r.source_id))];
-  const bookBulkIds = [...new Set(rows.filter(r => r.source_type === 'book_bulk').map(r => r.source_id))];
-  const videoIds    = [...new Set(rows.filter(r => r.source_type === 'video').map(r => r.source_id))];
-  const postIds     = [...new Set(rows.filter(r => r.source_type === 'post').map(r => r.source_id))];
-
-  const tasks = [];
-
-  if (chapterIds.length) {
-    tasks.push((async () => {
-      const { uuids, legacy } = partition(chapterIds);
-      const handle = (rs) => (rs || []).forEach((row) => {
-        const bookTitle    = row.books?.title || '';
-        const chapterTitle = row.title || '';
-        const label = bookTitle && chapterTitle
-          ? `${bookTitle} — ${chapterTitle}`
-          : chapterTitle || bookTitle || 'Untitled chapter';
-        setTitle(`chapter:${row.id}`, label);
-        if (row.legacy_appwrite_id) setTitle(`chapter:${row.legacy_appwrite_id}`, label);
-      });
-      const q = [];
-      if (uuids.length)  q.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('id', uuids).then(({ data }) => handle(data)));
-      if (legacy.length) q.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
-      await Promise.all(q);
-    })());
-  }
-  if (bookBulkIds.length) {
-    tasks.push((async () => {
-      const { uuids, legacy } = partition(bookBulkIds);
-      const handle = (rs) => (rs || []).forEach((row) => {
-        const label = row.title ? `${row.title} (full book)` : 'Untitled book (full)';
-        setTitle(`book_bulk:${row.id}`, label);
-        if (row.legacy_appwrite_id) setTitle(`book_bulk:${row.legacy_appwrite_id}`, label);
-      });
-      const q = [];
-      if (uuids.length)  q.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
-      if (legacy.length) q.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
-      await Promise.all(q);
-    })());
-  }
-  if (videoIds.length) {
-    tasks.push((async () => {
-      const { uuids, legacy } = partition(videoIds);
-      const handle = (rs) => (rs || []).forEach((row) => {
-        const label = row.title || 'Untitled video';
-        setTitle(`video:${row.id}`, label);
-        if (row.legacy_appwrite_id) setTitle(`video:${row.legacy_appwrite_id}`, label);
-      });
-      const q = [];
-      if (uuids.length)  q.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
-      if (legacy.length) q.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
-      await Promise.all(q);
-    })());
-  }
-  if (postIds.length) {
-    // Posts have no `title` column — use a short excerpt from the
-    // first non-empty line of `content` (or `caption` for legacy
-    // rows). Mobile doesn't resolve post titles at all (shows
-    // "Unknown item"); this small upgrade gives web a slightly
-    // better empty-fallback without diverging from mobile data.
-    tasks.push((async () => {
-      const { uuids, legacy } = partition(postIds);
-      const handle = (rs) => (rs || []).forEach((row) => {
-        const raw = (row.content || row.caption || '').trim();
-        const firstLine = raw.split(/\n/)[0] || '';
-        const label = firstLine
-          ? (firstLine.length > 60 ? firstLine.slice(0, 60) + '…' : firstLine)
-          : 'Post';
-        setTitle(`post:${row.id}`, label);
-        if (row.legacy_appwrite_id) setTitle(`post:${row.legacy_appwrite_id}`, label);
-      });
-      const q = [];
-      if (uuids.length)  q.push(supabase.from('posts').select('id, content, caption, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
-      if (legacy.length) q.push(supabase.from('posts').select('id, content, caption, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
-      await Promise.all(q);
-    })());
-  }
-
-  await Promise.all(tasks);
-  return titleByKey;
-}
-
-// Cache for the Recent earnings list. Populated by loadAuthorEarnings
-// for the visible window so renderAuthorEarningsList can render
-// titles synchronously without flicker.
-let _earningsRecentTitles = new Map();
-
-// Pagination state for the Recent earnings list. Default 10 per page
-// — keeps the DOM cheap and the title resolver fast. User can bump
-// to 20/50/100 via the picker; choice persists in localStorage.
-const EARNINGS_RECENT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
-let _earningsRecentPageIdx = 1;
-let _earningsRecentPageSize = (() => {
-  const stored = parseInt(localStorage.getItem('selebox_earnings_recent_page_size') || '10', 10);
-  return EARNINGS_RECENT_PAGE_SIZE_OPTIONS.includes(stored) ? stored : 10;
-})();
-
-// Same pagination story for the Withdrawal history list — separate
-// state so the two pickers don't interfere with each other.
-const WITHDRAWALS_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
-let _withdrawalsPageIdx = 1;
-let _withdrawalsPageSize = (() => {
-  const stored = parseInt(localStorage.getItem('selebox_withdrawals_page_size') || '10', 10);
-  return WITHDRAWALS_PAGE_SIZE_OPTIONS.includes(stored) ? stored : 10;
-})();
-
-// ─────────────────────────────────────────────────────────────────────
-// Pass C — Earnings breakdown drill-down (May 2026 mobile parity).
+// ════════════════════════════════════════════════════════════════════════
+// KYC + Payments Info form subsystem MOVED to js/earnings.js (Stage 11B).
+// ~437 lines, 10 functions: renderAuthorKycBanner, syncAuthorPayoutButton,
+// uploadKycImage, wireKycUpload, fillPaymentsInfoForm, applyPaymentsInfo-
+// LockState, openPaymentInfoChangeModal, closePaymentInfoChangeModal,
+// createPaymentInfoChangeModal, submitPaymentInfoChange.
 //
-// Click a per-source tile (Posts / Videos / Books) on the Earnings
-// page → opens a focused view showing a paginated transaction log
-// for that category plus a summary card with coins / stars / unlock
-// totals. Mirrors mobile's app/(payments)/earnings-breakdown.jsx +
-// lib/earnings-supabase.js {getAuthorEarningsSummary,
-// getAuthorEarningsTransactions}.
+// Stage 11A bridges (_cfg.renderAuthorKycBanner / syncAuthorPayoutButton /
+// fillPaymentsInfoForm) are now intra-module direct calls. The 3 entries
+// were dropped from app.js's initEarnings({...}) block too.
 //
-// State is local to this section; no module-globals leak beyond.
-// ─────────────────────────────────────────────────────────────────────
-
-const _BREAKDOWN_PAGE_SIZE = 15;
-let _breakdownState = {
-  category: null,   // 'post' | 'video' | 'book'
-  label: '',        // header copy ("From Videos", etc.)
-  monthYear: null,  // honors the Earnings page's month picker
-  items: [],
-  offset: 0,
-  hasMore: false,
-  loading: false,
-};
-
-// source_type fan-out — books are stored as TWO row variants
-// (chapter unlock vs full-book bulk), mirroring mobile's mapping.
-function _breakdownSourceTypes(category) {
-  if (category === 'book')  return ['chapter', 'book_bulk'];
-  if (category === 'video') return ['video'];
-  if (category === 'post')  return ['post'];
-  return [];
-}
-
-// Summary fetch — sums net_php_minor + gross_coins (split by
-// currency) + row count across ALL rows matching the filter.
-// Independent of pagination; the summary stays stable as the user
-// scrolls. Limit cap = 20,000, same as mobile.
-async function _fetchEarningsBreakdownSummary({ category, monthYear }) {
-  const empty = { total_pesos: 0, total_coins: 0, total_stars: 0, total_unlocks: 0 };
-  const sourceTypes = _breakdownSourceTypes(category);
-  if (!currentUser || sourceTypes.length === 0) return empty;
-
-  let query = supabase
-    .from('author_earnings')
-    .select('net_php_minor, gross_coins, currency_used')
-    .eq('author_id', currentUser.id)
-    .in('source_type', sourceTypes)
-    .limit(20000);
-
-  if (monthYear) {
-    const range = _parseMonthRange(monthYear);
-    if (range) {
-      query = query
-        .gte('available_at', range.start.toISOString())
-        .lte('available_at', range.end.toISOString());
-    }
-  }
-
-  const { data, error } = await query;
-  if (error) {
-    console.warn('[earnings-breakdown] summary fetch failed:', error.message);
-    return empty;
-  }
-
-  let pesosMinor = 0, coins = 0, stars = 0, unlocks = 0;
-  for (const r of data || []) {
-    pesosMinor += r.net_php_minor || 0;
-    unlocks += 1;
-    const amount = r.gross_coins || 0;
-    if (r.currency_used === 'star') stars += amount;
-    else coins += amount;
-  }
-  return {
-    total_pesos: pesosMinor / 100,
-    total_coins: coins,
-    total_stars: stars,
-    total_unlocks: unlocks,
-  };
-}
-
-// "YYYY-MM" → { start, end } Date pair. Mirrors mobile's
-// parseMonthYear in lib/earnings-supabase.js.
-function _parseMonthRange(monthYear) {
-  if (!monthYear) return null;
-  const [yStr, mStr] = monthYear.split('-');
-  const year = Number(yStr);
-  const monthIndex = Number(mStr) - 1;
-  if (!Number.isFinite(year) || !Number.isInteger(monthIndex)) return null;
-  return {
-    start: new Date(year, monthIndex, 1, 0, 0, 0),
-    end:   new Date(year, monthIndex + 1, 0, 23, 59, 59),
-  };
-}
-
-// Paginated transaction fetch — limit+1 rows so we can detect
-// hasMore without a separate count query. Titles are resolved
-// per-page (separate small queries against chapters / books /
-// videos) so we never load thousands of titles up front.
-async function _fetchEarningsBreakdownTransactions({ category, monthYear, limit = _BREAKDOWN_PAGE_SIZE, offset = 0 }) {
-  const empty = { items: [], hasMore: false };
-  const sourceTypes = _breakdownSourceTypes(category);
-  if (!currentUser || sourceTypes.length === 0) return empty;
-
-  let query = supabase
-    .from('author_earnings')
-    .select('source_id, source_type, gross_coins, currency_used, net_php_minor, created_at, available_at')
-    .eq('author_id', currentUser.id)
-    .in('source_type', sourceTypes)
-    .order('available_at', { ascending: false, nullsFirst: false })
-    .order('created_at', { ascending: false })
-    .range(offset, offset + limit); // inclusive — +1 row probes hasMore
-
-  if (monthYear) {
-    const range = _parseMonthRange(monthYear);
-    if (range) {
-      query = query
-        .gte('available_at', range.start.toISOString())
-        .lte('available_at', range.end.toISOString());
-    }
-  }
-
-  const { data: rows, error } = await query;
-  if (error) {
-    console.warn('[earnings-breakdown] transactions fetch failed:', error.message);
-    return empty;
-  }
-
-  const all = rows || [];
-  const hasMore = all.length > limit;
-  const pageRows = hasMore ? all.slice(0, limit) : all;
-
-  // Resolve titles for this page only. Same logic as mobile —
-  // partition ids into UUIDs vs legacy Appwrite hex strings; legacy
-  // hex would fail the `id` column's uuid cast, so we query by
-  // `legacy_appwrite_id` for those.
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const partition = (ids) => {
-    const uuids = [], legacy = [];
-    for (const id of ids) { if (UUID_RE.test(id)) uuids.push(id); else legacy.push(id); }
-    return { uuids, legacy };
-  };
-  const titleByKey = new Map();
-  const setTitle = (key, label) => { if (label) titleByKey.set(key, label); };
-
-  const chapterIds = pageRows.filter(r => r.source_type === 'chapter').map(r => r.source_id);
-  const bookBulkIds = pageRows.filter(r => r.source_type === 'book_bulk').map(r => r.source_id);
-  const videoIds   = pageRows.filter(r => r.source_type === 'video').map(r => r.source_id);
-
-  const tasks = [];
-
-  if (chapterIds.length) {
-    tasks.push((async () => {
-      const { uuids, legacy } = partition(chapterIds);
-      const handle = (rows) => (rows || []).forEach((row) => {
-        const bookTitle = row.books?.title || '';
-        const chapterTitle = row.title || '';
-        const label = bookTitle && chapterTitle ? `${bookTitle} — ${chapterTitle}`
-          : chapterTitle ? chapterTitle
-          : bookTitle ? bookTitle
-          : 'Untitled chapter';
-        setTitle(`chapter:${row.id}`, label);
-        if (row.legacy_appwrite_id) setTitle(`chapter:${row.legacy_appwrite_id}`, label);
-      });
-      const subqueries = [];
-      if (uuids.length)  subqueries.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('id', uuids).then(({ data }) => handle(data)));
-      if (legacy.length) subqueries.push(supabase.from('chapters').select('id, title, legacy_appwrite_id, books(id, title)').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
-      await Promise.all(subqueries);
-    })());
-  }
-  if (bookBulkIds.length) {
-    tasks.push((async () => {
-      const { uuids, legacy } = partition(bookBulkIds);
-      const handle = (rows) => (rows || []).forEach((row) => {
-        const label = row.title ? `${row.title} (full book)` : 'Untitled book (full)';
-        setTitle(`book_bulk:${row.id}`, label);
-        if (row.legacy_appwrite_id) setTitle(`book_bulk:${row.legacy_appwrite_id}`, label);
-      });
-      const subqueries = [];
-      if (uuids.length)  subqueries.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
-      if (legacy.length) subqueries.push(supabase.from('books').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
-      await Promise.all(subqueries);
-    })());
-  }
-  if (videoIds.length) {
-    tasks.push((async () => {
-      const { uuids, legacy } = partition(videoIds);
-      const handle = (rows) => (rows || []).forEach((row) => {
-        const label = row.title || 'Untitled video';
-        setTitle(`video:${row.id}`, label);
-        if (row.legacy_appwrite_id) setTitle(`video:${row.legacy_appwrite_id}`, label);
-      });
-      const subqueries = [];
-      if (uuids.length)  subqueries.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('id', uuids).then(({ data }) => handle(data)));
-      if (legacy.length) subqueries.push(supabase.from('videos').select('id, title, legacy_appwrite_id').in('legacy_appwrite_id', legacy).then(({ data }) => handle(data)));
-      await Promise.all(subqueries);
-    })());
-  }
-
-  await Promise.all(tasks);
-
-  const items = pageRows.map((r) => ({
-    title: titleByKey.get(`${r.source_type}:${r.source_id}`) || 'Unknown item',
-    amount: r.gross_coins || 0,
-    currency: r.currency_used === 'star' ? 'star' : 'coin',
-    pesos: (r.net_php_minor || 0) / 100,
-    // created_at = real transaction time. DO NOT switch to
-    // available_at — that's the vesting date, which is in the
-    // FUTURE for rows still inside the hold window (would display
-    // "May 21" for an unlock that actually happened on May 7).
-    // Mobile hit this exact bug; comment block at lib/earnings-
-    // supabase.js:601-616 documents the trap.
-    created_at: r.created_at || r.available_at,
-    source_id: r.source_id,
-    source_type: r.source_type,
-  }));
-
-  return { items, hasMore };
-}
-
-// "May 5, 2026 · 3:42 PM"
-function _formatBreakdownTimestamp(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  return `${date} · ${time}`;
-}
-
-// Open the drill-down view for `category`. Loads summary + first
-// page in parallel. Hides the main earnings tab content + tabs while
-// open so the user gets a focused, full-page view.
-async function openEarningsBreakdown(category, label) {
-  if (!currentUser) return;
-  const view = document.getElementById('earningsBreakdownView');
-  if (!view) return;
-
-  // Honor the current Earnings month picker — if "this month" is
-  // selected we filter; if the user is on the current month and
-  // nothing was filtered, monthYear stays as-is. Use the same
-  // _selectedMonthYear shared with the parent page.
-  _breakdownState = {
-    category,
-    label: label || 'Earnings',
-    monthYear: _selectedMonthYear || null,
-    items: [],
-    offset: 0,
-    hasMore: false,
-    loading: true,
-  };
-
-  // Hide tabs + tab content; show drill-down view.
-  document.querySelectorAll('#earningsPage .earnings-tabs, #earningsPage .earnings-tab-content').forEach(el => el.style.display = 'none');
-  view.style.display = 'block';
-
-  // Header — label + accent-colored icon for the chosen category
-  document.getElementById('earningsBreakdownLabel').textContent = label;
-  const iconWrap = document.getElementById('earningsBreakdownIcon');
-  if (iconWrap) {
-    iconWrap.dataset.category = category;
-    iconWrap.innerHTML = _breakdownCategoryIcon(category);
-  }
-
-  // Loading skeleton in list + summary
-  const list = document.getElementById('earningsBreakdownList');
-  if (list) list.innerHTML = '<div class="earnings-breakdown-loading">Loading transactions…</div>';
-  _renderEarningsBreakdownSummary({ total_pesos: 0, total_coins: 0, total_stars: 0, total_unlocks: 0 });
-
-  // Parallel fetch
-  const [sum, page] = await Promise.all([
-    _fetchEarningsBreakdownSummary({ category, monthYear: _breakdownState.monthYear }),
-    _fetchEarningsBreakdownTransactions({ category, monthYear: _breakdownState.monthYear, limit: _BREAKDOWN_PAGE_SIZE, offset: 0 }),
-  ]);
-
-  _renderEarningsBreakdownSummary(sum);
-  _breakdownState.items   = page.items;
-  _breakdownState.offset  = page.items.length;
-  _breakdownState.hasMore = page.hasMore;
-  _breakdownState.loading = false;
-  _renderEarningsBreakdownList();
-}
-
-function closeEarningsBreakdown() {
-  const view = document.getElementById('earningsBreakdownView');
-  if (view) view.style.display = 'none';
-  document.querySelectorAll('#earningsPage .earnings-tabs').forEach(el => el.style.display = '');
-  // Restore whichever tab was active when we opened. Default = earnings.
-  document.querySelectorAll('#earningsPage .earnings-tab-content').forEach(el => {
-    el.style.display = el.dataset.etabContent === 'earnings' ? 'block' : 'none';
-  });
-  // Make sure the Earnings tab is visually selected.
-  document.querySelectorAll('#earningsPage .earnings-tab').forEach(t => t.classList.toggle('active', t.dataset.etab === 'earnings'));
-}
-
-async function _loadMoreEarningsBreakdown() {
-  const st = _breakdownState;
-  if (!st.hasMore || st.loading) return;
-  st.loading = true;
-  const btn = document.getElementById('btnEarningsBreakdownMore');
-  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
-  const page = await _fetchEarningsBreakdownTransactions({
-    category: st.category,
-    monthYear: st.monthYear,
-    limit: _BREAKDOWN_PAGE_SIZE,
-    offset: st.offset,
-  });
-  st.items = [...st.items, ...page.items];
-  st.offset = st.items.length;
-  st.hasMore = page.hasMore;
-  st.loading = false;
-  if (btn) { btn.disabled = false; btn.textContent = 'Load more'; }
-  _renderEarningsBreakdownList();
-}
-
-function _renderEarningsBreakdownSummary(sum) {
-  const labelEl   = document.getElementById('earningsBreakdownSummaryLabel');
-  const amountEl  = document.getElementById('earningsBreakdownSummaryAmount');
-  const coinsEl   = document.getElementById('earningsBreakdownCoins');
-  const starsEl   = document.getElementById('earningsBreakdownStars');
-  const unlocksEl = document.getElementById('earningsBreakdownUnlocks');
-  const unlocksLb = document.getElementById('earningsBreakdownUnlocksLabel');
-  if (labelEl) {
-    labelEl.textContent = _breakdownState.monthYear
-      ? `Earnings · ${_humanizeMonthYear(_breakdownState.monthYear)}`
-      : 'Lifetime earnings';
-  }
-  if (amountEl)  amountEl.textContent = '₱' + (sum.total_pesos || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  if (coinsEl)   coinsEl.textContent   = (sum.total_coins || 0).toLocaleString();
-  if (starsEl)   starsEl.textContent   = (sum.total_stars || 0).toLocaleString();
-  if (unlocksEl) unlocksEl.textContent = (sum.total_unlocks || 0).toLocaleString();
-  if (unlocksLb) unlocksLb.textContent = (sum.total_unlocks === 1) ? 'unlock' : 'unlocks';
-}
-
-function _renderEarningsBreakdownList() {
-  const list = document.getElementById('earningsBreakdownList');
-  const pager = document.getElementById('earningsBreakdownPager');
-  if (!list) return;
-  if (_breakdownState.items.length === 0) {
-    list.innerHTML = `
-      <div class="earnings-breakdown-empty">
-        <div class="earnings-breakdown-empty-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>
-        </div>
-        <div class="earnings-breakdown-empty-title">No earnings yet for this category</div>
-        <div class="earnings-breakdown-empty-sub">When readers unlock your ${_breakdownLabelLowerNoun(_breakdownState.category)}, entries will show here.</div>
-      </div>
-    `;
-    if (pager) pager.style.display = 'none';
-    return;
-  }
-  list.innerHTML = _breakdownState.items.map((it) => `
-    <div class="earnings-breakdown-row">
-      <div class="earnings-breakdown-row-text">
-        <div class="earnings-breakdown-row-title" title="${escHTML(it.title)}">${escHTML(it.title)}</div>
-        <div class="earnings-breakdown-row-date">${escHTML(_formatBreakdownTimestamp(it.created_at))}</div>
-      </div>
-      <div class="earnings-breakdown-row-amount">
-        <span class="earnings-breakdown-row-num">+${(it.amount || 0).toLocaleString()}</span>
-        ${it.currency === 'star'
-          ? `<svg viewBox="0 0 24 24" width="13" height="13" fill="#a855f7"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z"/></svg><span class="earnings-breakdown-row-suffix">${it.amount === 1 ? 'star' : 'stars'}</span>`
-          : `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#b45309" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/></svg><span class="earnings-breakdown-row-suffix">${it.amount === 1 ? 'coin' : 'coins'}</span>`
-        }
-      </div>
-    </div>
-  `).join('');
-  if (pager) pager.style.display = _breakdownState.hasMore ? '' : 'none';
-}
-
-function _breakdownLabelLowerNoun(category) {
-  if (category === 'post')  return 'posts';
-  if (category === 'video') return 'videos';
-  if (category === 'book')  return 'books';
-  return 'content';
-}
-
-function _breakdownCategoryIcon(category) {
-  // Returns an inline SVG matching the per-source tile glyph, sized
-  // 18px to slot inside the breakdown header.
-  if (category === 'post')  return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-  if (category === 'video') return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>';
-  if (category === 'book')  return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4.5A2.5 2.5 0 0 1 4.5 2H12v18H4.5A2.5 2.5 0 0 1 2 17.5v-13z"/><path d="M22 4.5A2.5 2.5 0 0 0 19.5 2H12v18h7.5a2.5 2.5 0 0 0 2.5-2.5v-13z"/></svg>';
-  return '';
-}
-
-function _humanizeMonthYear(monthYear) {
-  if (!monthYear) return '';
-  const [y, m] = monthYear.split('-');
-  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  return `${monthNames[Number(m) - 1] || ''} ${y}`;
-}
-
-// Lifetime total = available + under-review + every withdrawal still
-// in flight or completed (pending/approved/paid). Excludes
-// rejected/failed — those didn't take money out. Mirrors mobile math
-// at lib/earnings-supabase.js:687-758. Critical: count `pending`
-// withdrawals so the lifetime total doesn't artificially drop when an
-// author requests a payout (Charles flagged this exact bug in mobile).
-function renderEarningsTotals() {
-  // Charles 2026-05-15 spec — Total Earnings = finalized lifetime
-  // earnings only. Under-review (pending_php_minor) earnings are
-  // NOT yet earnings; they may be reversed in the 7-day hold
-  // window. Pending is surfaced in the dedicated tile on this same
-  // page so creators can see the pipeline without it inflating the
-  // lifetime headline.
-  //
-  // Withdrawals (pending / approved / paid) still count because they
-  // moved already-finalized money out of `available` into the
-  // withdrawal pipeline — excluding them would make Total Earnings
-  // mysteriously drop the moment a creator requested a payout.
-  // Rejected / failed withdrawals are excluded (the money is back
-  // in `available` and already counted there).
-  const b = _authorBalance || {};
-  const balanceMinor = b.available_php_minor || 0;
-  const paidOutMinor = (_allWithdrawalsCache || [])
-    .filter((w) => w.status === 'pending' || w.status === 'approved' || w.status === 'paid')
-    .reduce((sum, w) => sum + (w.amount_php_minor || 0), 0);
-  const lifetimeMinor = balanceMinor + paidOutMinor;
-  const el = document.getElementById('earningsTotalLifetimePhp');
-  if (el) el.textContent = formatPhpFromMinor(lifetimeMinor);
-}
-
-// Breakdown by source_type — Posts / Videos / Books (Books = chapter + book_bulk)
-function renderEarningsBreakdown(rows) {
-  const totals = { posts: 0, videos: 0, books: 0 };
-  const phpTotals = { posts: 0, videos: 0, books: 0 };
-  for (const r of rows) {
-    if (r.source_type === 'video')                                        { totals.videos += r.net_coins; phpTotals.videos += r.net_php_minor; }
-    else if (r.source_type === 'chapter' || r.source_type === 'book_bulk'){ totals.books  += r.net_coins; phpTotals.books  += r.net_php_minor; }
-    else if (r.source_type === 'post')                                    { totals.posts  += r.net_coins; phpTotals.posts  += r.net_php_minor; }
-  }
-  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  set('breakdownPostsCoins',  totals.posts.toLocaleString());
-  set('breakdownVideosCoins', totals.videos.toLocaleString());
-  set('breakdownBooksCoins',  totals.books.toLocaleString());
-  set('breakdownPostsPhp',    formatPhpFromMinor(phpTotals.posts));
-  set('breakdownVideosPhp',   formatPhpFromMinor(phpTotals.videos));
-  set('breakdownBooksPhp',    formatPhpFromMinor(phpTotals.books));
-}
-
-function renderAuthorEarningsBalance() {
-  const b = _authorBalance || {};
-  // ── Rate-locked at earning time ─────────────────────────────────────
-  // available_php_minor and pending_php_minor are summed from author_earnings
-  // rows, each of which snapshotted its coin_to_php_minor at the moment the
-  // reader paid. So when admin changes the rate from ₱0.20 → ₱0.25, only
-  // FUTURE earnings use the new rate. Existing balances are immune.
-  const availMinor = b.available_php_minor || 0;
-  const pendMinor  = b.pending_php_minor   || 0;
-
-  document.getElementById('earningsAvailablePhp').textContent = formatPhpFromMinor(availMinor);
-  document.getElementById('earningsPendingPhp').textContent   = formatPhpFromMinor(pendMinor);
-
-  // Hold copy — driven by app_config.author_earnings_hold_days so web
-  // and mobile stay aligned whenever the SQL knob changes (was 14d,
-  // dropped to 7d May 2026). The previous hardcoded "1–3 days" went
-  // stale the moment the SQL was flipped; now the only update needed
-  // is the SQL row + page reload.
-  const holdDays = Number(_walletConfigDefaults.author_earnings_hold_days) || 7;
-  const foot = document.getElementById('earningsHoldFootnote');
-  if (foot) {
-    // Phase 5.3 — surface the review possibility alongside the hold
-    // window so creators understand a small fraction of earnings may
-    // be reduced or rejected after admin review. Paired with the
-    // notification trigger from 5.1: any actual rejection/adjustment
-    // produces an in-app notification with the reason, so creators
-    // never have to guess why their balance moved (or didn't).
-    foot.textContent = holdDays === 1
-      ? "Verified earnings become available 1 day after they're earned. We may review unusual activity for accuracy."
-      : `Verified earnings become available ${holdDays} days after they're earned. We may review unusual activity for accuracy.`;
-  }
-
-  // Minimum payout hint — show admin-configured floor, or ₱100 by default
-  const minPayoutMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
-  const minHint = document.getElementById('earningsMinPayoutHint');
-  if (minHint) minHint.textContent = `Minimum payout: ${formatPhpFromMinor(minPayoutMinor)}`;
-
-  // Cache for the payout-button gate
-  _authorBalance._computed_available_minor = availMinor;
-  _authorBalance._computed_pending_minor   = pendMinor;
-
-  // Latest-withdrawal status callout — mirrors mobile's colored-dot
-  // "pending - ₱X.XX" / "approved - ₱X.XX" / "paid - ₱X.XX" badge
-  // under the Available amount. Only renders when the latest
-  // withdrawal is in-flight or recently completed; otherwise hidden.
-  const wEl   = document.getElementById('earningsWithdrawalStatus');
-  const wText = wEl?.querySelector('.author-earnings-withdrawal-text');
-  const wDot  = wEl?.querySelector('.author-earnings-withdrawal-dot');
-  const latest = (_allWithdrawalsCache || [])[0]; // newest-first per query order
-  if (wEl && wText && wDot && latest && ['pending', 'approved', 'paid'].includes(latest.status)) {
-    const amt = formatPhpFromMinor(latest.amount_php_minor || 0);
-    wText.textContent = `${latest.status} · ${amt}`;
-    // Reset previous state classes, then apply the current one. Each
-    // state maps to a distinct color in CSS.
-    wEl.classList.remove('is-pending', 'is-approved', 'is-paid');
-    wEl.classList.add(`is-${latest.status}`);
-    wEl.style.display = '';
-  } else if (wEl) {
-    wEl.style.display = 'none';
-  }
-}
-
-function formatPhpFromMinor(m) {
-  return '₱' + (m / 100).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-// Slice + render the current Recent-earnings page. Computes the
-// page window from _earningsRecentPageIdx + _earningsRecentPageSize,
-// renders rows immediately with placeholder labels, then resolves
-// titles for the slice in the background and re-renders. Also
-// renders/updates the pagination bar below the list.
-function _renderRecentEarningsPage() {
-  const all = _allEarningsCache || [];
-  const total = all.length;
-  const pageSize = _earningsRecentPageSize;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  if (_earningsRecentPageIdx > totalPages) _earningsRecentPageIdx = totalPages;
-  if (_earningsRecentPageIdx < 1) _earningsRecentPageIdx = 1;
-  const start = (_earningsRecentPageIdx - 1) * pageSize;
-  const end   = Math.min(start + pageSize, total);
-  const slice = all.slice(start, end);
-
-  // First paint: placeholder labels (source_type fallback).
-  renderAuthorEarningsList(slice);
-
-  // Title resolve in background, then second paint with real labels.
-  // We MERGE into _earningsRecentTitles instead of replacing so
-  // titles already resolved for previous pages don't get wiped.
-  _resolveEarningsTitles(slice).then((titles) => {
-    titles.forEach((v, k) => _earningsRecentTitles.set(k, v));
-    renderAuthorEarningsList(slice);
-  }).catch(() => { /* swallow — page keeps placeholder labels */ });
-
-  _renderRecentEarningsPager({ total, totalPages, start, end });
-}
-
-// Pagination controls below the Recent earnings list — same shape as
-// the Creator Studio pager (per-page pill picker + Prev/Next + range
-// label). Targets a sibling container; creates it lazily on first call.
-function _renderRecentEarningsPager({ total, totalPages, start, end }) {
-  const listEl = document.getElementById('authorEarningsList');
-  if (!listEl) return;
-  let pager = document.getElementById('authorEarningsPager');
-  if (!pager) {
-    pager = document.createElement('div');
-    pager.id = 'authorEarningsPager';
-    pager.className = 'studio-pagination'; // reuse Studio pager styling
-    listEl.parentNode.insertBefore(pager, listEl.nextSibling);
-  }
-  if (total === 0) {
-    pager.style.display = 'none';
-    return;
-  }
-  pager.style.display = '';
-  pager.innerHTML = `
-    <div class="studio-pagination-pagesize">
-      <span class="studio-pagination-label">Rows per page</span>
-      <div class="studio-pagesize-group" role="radiogroup" aria-label="Rows per page">
-        ${EARNINGS_RECENT_PAGE_SIZE_OPTIONS.map(n => `
-          <button type="button" class="studio-pagesize-option ${n === _earningsRecentPageSize ? 'is-selected' : ''}" data-earnings-pagesize="${n}" role="radio" aria-checked="${n === _earningsRecentPageSize ? 'true' : 'false'}">${n}</button>
-        `).join('')}
-      </div>
-    </div>
-    <div class="studio-pagination-nav">
-      <span class="studio-pagination-info">${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} · Page ${_earningsRecentPageIdx} of ${totalPages}</span>
-      <button type="button" class="studio-pagination-btn" data-earnings-page-action="prev" ${_earningsRecentPageIdx <= 1 ? 'disabled' : ''} title="Previous page">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-      </button>
-      <button type="button" class="studio-pagination-btn" data-earnings-page-action="next" ${_earningsRecentPageIdx >= totalPages ? 'disabled' : ''} title="Next page">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-      </button>
-    </div>
-  `;
-  pager.querySelectorAll('[data-earnings-pagesize]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const next = parseInt(btn.dataset.earningsPagesize, 10);
-      if (!EARNINGS_RECENT_PAGE_SIZE_OPTIONS.includes(next) || next === _earningsRecentPageSize) return;
-      _earningsRecentPageSize = next;
-      _earningsRecentPageIdx = 1;
-      localStorage.setItem('selebox_earnings_recent_page_size', String(next));
-      _renderRecentEarningsPage();
-    });
-  });
-  pager.querySelectorAll('[data-earnings-page-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const dir = btn.dataset.earningsPageAction;
-      if (dir === 'prev') _earningsRecentPageIdx = Math.max(1, _earningsRecentPageIdx - 1);
-      else if (dir === 'next') _earningsRecentPageIdx = _earningsRecentPageIdx + 1;
-      _renderRecentEarningsPage();
-      const list = document.getElementById('authorEarningsList');
-      if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  });
-}
-
-function renderAuthorEarningsList(rows) {
-  const el = document.getElementById('authorEarningsList');
-  if (!el) return;
-  if (!rows.length) {
-    // Copy aligned with mobile + post-May-2026 stars overhaul: both
-    // currencies now earn for authors, so the message no longer
-    // singles out coins.
-    el.innerHTML = '<div class="page-empty-soft">No earnings yet. When readers unlock your work, you\'ll see entries here.</div>';
-    return;
-  }
-  // currency_used was added with the May 2026 stars-earn-for-authors
-  // overhaul. Older rows pre-migration default to 'coin' (the column has
-  // a server-side default), so the fallback below is just defensive
-  // against a row that somehow comes back with currency_used=null.
-  //
-  // The "type" line now shows the resolved item title (chapter /
-  // book / video / post excerpt) instead of the bare source_type.
-  // Source kind moves to a small label inside the sub-line so the
-  // user still knows what kind of content earned the row, without
-  // duplicating "Video" as the dominant label on every line.
-  const sourceKindLabel = (st) => {
-    if (st === 'chapter')   return 'Chapter';
-    if (st === 'book_bulk') return 'Book';
-    if (st === 'video')     return 'Video';
-    if (st === 'post')      return 'Post';
-    return st.replace('_', ' ');
-  };
-  el.innerHTML = rows.map(r => {
-    const cur   = (r.currency_used || 'coin').toLowerCase();
-    const label = cur === 'star' ? 'star' : 'coin';
-    const resolvedTitle = _earningsRecentTitles.get(`${r.source_type}:${r.source_id}`)
-      || sourceKindLabel(r.source_type); // first-paint fallback before titles resolve
-    return `
-    <div class="earnings-row">
-      <div class="earnings-row-meta">
-        <div class="earnings-row-type" title="${escHTML(resolvedTitle)}">${escHTML(resolvedTitle)}</div>
-        <div class="earnings-row-sub">${escHTML(sourceKindLabel(r.source_type))} · ${timeAgo(r.created_at)} · ${r.share_pct}% share of ${r.gross_coins} ${label}${r.gross_coins === 1 ? '' : 's'}</div>
-      </div>
-      <div class="earnings-row-amount">+${r.net_coins} <small>${label}${r.net_coins === 1 ? '' : 's'}</small></div>
-      <div class="earnings-row-php">${formatPhpFromMinor(r.net_php_minor)}</div>
-      <div class="earnings-row-status earnings-row-status-${r.status}">${earningsStatusLabel(r)}</div>
-    </div>`;
-  }).join('');
-}
-
-function earningsStatusLabel(r) {
-  if (r.status === 'pending') {
-    const ms = new Date(r.available_at) - Date.now();
-    if (ms <= 0) return 'Available';
-    const days = Math.ceil(ms / 86400000);
-    return `Pending · ${days}d`;
-  }
-  if (r.status === 'available') return 'Available';
-  if (r.status === 'withdrawn') return 'Withdrawn';
-  if (r.status === 'reversed')  return 'Reversed';
-  return r.status;
-}
-
-// Slice + render the current Withdrawal history page. Mirrors the
-// Recent-earnings paginator: caps DOM cost, persists user's pick.
-function _renderWithdrawalsPage() {
-  const all = _allWithdrawalsCache || [];
-  const total = all.length;
-  const pageSize = _withdrawalsPageSize;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  if (_withdrawalsPageIdx > totalPages) _withdrawalsPageIdx = totalPages;
-  if (_withdrawalsPageIdx < 1) _withdrawalsPageIdx = 1;
-  const start = (_withdrawalsPageIdx - 1) * pageSize;
-  const end   = Math.min(start + pageSize, total);
-  const slice = all.slice(start, end);
-
-  renderAuthorWithdrawalsList(slice);
-  _renderWithdrawalsPager({ total, totalPages, start, end });
-}
-
-function _renderWithdrawalsPager({ total, totalPages, start, end }) {
-  const listEl = document.getElementById('authorWithdrawalsList');
-  if (!listEl) return;
-  let pager = document.getElementById('authorWithdrawalsPager');
-  if (!pager) {
-    pager = document.createElement('div');
-    pager.id = 'authorWithdrawalsPager';
-    pager.className = 'studio-pagination';
-    listEl.parentNode.insertBefore(pager, listEl.nextSibling);
-  }
-  if (total === 0) {
-    pager.style.display = 'none';
-    return;
-  }
-  pager.style.display = '';
-  pager.innerHTML = `
-    <div class="studio-pagination-pagesize">
-      <span class="studio-pagination-label">Rows per page</span>
-      <div class="studio-pagesize-group" role="radiogroup" aria-label="Rows per page">
-        ${WITHDRAWALS_PAGE_SIZE_OPTIONS.map(n => `
-          <button type="button" class="studio-pagesize-option ${n === _withdrawalsPageSize ? 'is-selected' : ''}" data-withdrawals-pagesize="${n}" role="radio" aria-checked="${n === _withdrawalsPageSize ? 'true' : 'false'}">${n}</button>
-        `).join('')}
-      </div>
-    </div>
-    <div class="studio-pagination-nav">
-      <span class="studio-pagination-info">${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} · Page ${_withdrawalsPageIdx} of ${totalPages}</span>
-      <button type="button" class="studio-pagination-btn" data-withdrawals-page-action="prev" ${_withdrawalsPageIdx <= 1 ? 'disabled' : ''} title="Previous page">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-      </button>
-      <button type="button" class="studio-pagination-btn" data-withdrawals-page-action="next" ${_withdrawalsPageIdx >= totalPages ? 'disabled' : ''} title="Next page">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-      </button>
-    </div>
-  `;
-  pager.querySelectorAll('[data-withdrawals-pagesize]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const next = parseInt(btn.dataset.withdrawalsPagesize, 10);
-      if (!WITHDRAWALS_PAGE_SIZE_OPTIONS.includes(next) || next === _withdrawalsPageSize) return;
-      _withdrawalsPageSize = next;
-      _withdrawalsPageIdx = 1;
-      localStorage.setItem('selebox_withdrawals_page_size', String(next));
-      _renderWithdrawalsPage();
-    });
-  });
-  pager.querySelectorAll('[data-withdrawals-page-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const dir = btn.dataset.withdrawalsPageAction;
-      if (dir === 'prev') _withdrawalsPageIdx = Math.max(1, _withdrawalsPageIdx - 1);
-      else if (dir === 'next') _withdrawalsPageIdx = _withdrawalsPageIdx + 1;
-      _renderWithdrawalsPage();
-      const list = document.getElementById('authorWithdrawalsList');
-      if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  });
-}
-
-function renderAuthorWithdrawalsList(rows) {
-  const el = document.getElementById('authorWithdrawalsList');
-  if (!el) return;
-  if (!rows.length) {
-    el.innerHTML = '<div class="page-empty-soft">No withdrawals yet.</div>';
-    return;
-  }
-  el.innerHTML = rows.map(r => `
-    <div class="earnings-row earnings-row-withdrawal">
-      <div class="earnings-row-meta">
-        <div class="earnings-row-type">Payout · ${escHTML(r.payout_method)}</div>
-        <div class="earnings-row-sub">Requested ${timeAgo(r.requested_at)}${r.paid_at ? ' · Paid ' + timeAgo(r.paid_at) : ''}${r.rejection_reason ? ' · Reason: ' + escHTML(r.rejection_reason) : ''}</div>
-      </div>
-      <div class="earnings-row-amount">${r.amount_coins.toLocaleString()} <small>coins</small></div>
-      <div class="earnings-row-php">${formatPhpFromMinor(r.amount_php_minor)}</div>
-      <div class="earnings-row-status earnings-row-status-w-${r.status}">${escHTML(r.status)}</div>
-    </div>
-  `).join('');
-}
-
-function renderAuthorKycBanner() {
-  const banner  = document.getElementById('authorKycBanner');
-  const titleEl = document.getElementById('authorKycTitle');
-  const subEl   = document.getElementById('authorKycSub');
-  // btnSubmitKyc was removed from HTML when Payments Info became inline —
-  // kept a defensive null check so rendering doesn't crash if the element
-  // is ever missing again. The "Submit Payments Info" CTA now lives in the
-  // Payments Info tab button itself.
-  const btn     = document.getElementById('btnSubmitKyc');
-  const setBtn = (txt, show) => { if (!btn) return; if (txt != null) btn.textContent = txt; btn.style.display = show ? '' : 'none'; };
-  const setText = (el, txt) => { if (el) el.textContent = txt; };
-
-  if (!banner) return;
-
-  const k = _authorKyc;
-  if (!k) {
-    setText(titleEl, 'Complete Payments Info to enable payouts');
-    setText(subEl, 'We need to verify your identity before sending you money. One-time step required by Philippine law.');
-    setBtn('Submit Payments Info', true);
-    banner.style.display = '';
-    banner.className = 'author-kyc-banner is-required';
-    return;
-  }
-  if (k.status === 'pending') {
-    setText(titleEl, 'Payments Info under review');
-    setText(subEl, 'Submitted ' + timeAgo(k.submitted_at) + '. Usually approved within 1-2 business days.');
-    setBtn(null, false);
-    banner.className = 'author-kyc-banner is-pending';
-    banner.style.display = '';
-    return;
-  }
-  if (k.status === 'approved') {
-    setText(titleEl, 'Payments Info approved ✓');
-    setText(subEl, 'You\'re cleared for payouts. You can request a withdrawal whenever your available balance hits the minimum.');
-    setBtn(null, false);
-    banner.className = 'author-kyc-banner is-approved';
-    banner.style.display = '';
-    return;
-  }
-  if (k.status === 'rejected') {
-    setText(titleEl, 'Payments Info rejected');
-    setText(subEl, 'Reason: ' + (k.rejection_reason || 'unspecified') + '. Open Payments Info to update your details.');
-    setBtn('Update Payments Info', true);
-    banner.className = 'author-kyc-banner is-rejected';
-    banner.style.display = '';
-    return;
-  }
-}
-
-function syncAuthorPayoutButton() {
-  const btn = document.getElementById('btnRequestPayout');
-  if (!btn) return;
-  // Always keep the button ENABLED — when the user can't withdraw, the click
-  // handler shows a friendly popup explaining why (need to fill Payments Info,
-  // or below ₱100 minimum). A silently-disabled button just confuses people.
-  btn.disabled = false;
-
-  const minPhpMinor   = _walletConfigDefaults.min_payout_php_minor || 10000;
-  const availPhpMinor = _authorBalance?._computed_available_minor ?? (_authorBalance?.available_php_minor || 0);
-  const kycOk = !_walletConfigDefaults.author_payout_kyc_required ||
-                _authorKyc?.status === 'approved';
-  // Tooltip is just a hint — actual blocking happens in the click handler
-  if (!_authorKyc?.payment_method)  btn.title = 'Fill in your Payments Info first';
-  else if (availPhpMinor < minPhpMinor) btn.title = `Need at least ${formatPhpFromMinor(minPhpMinor)} available`;
-  else if (!kycOk)                 btn.title = 'KYC must be approved first';
-  else                             btn.title = '';
-}
-
-// ── Payments Info form (inline, replaces the old modal) ─────────────────
+// Stage 11C — withdrawal request flow — still below.
+// ════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════
+// Withdrawal request flow MOVED to js/earnings.js (Stage 11C).
+// ~232 lines, 4 fns + 3 listeners + PAYMENT_METHOD_LABELS constant:
+// btnRequestPayout click handler, _closeMinPayoutModal,
+// _isPioneerExempt, _pioneerDaysRemaining, _renderWithdrawalFeePreview,
+// withdrawalAmount input/change listeners, withdrawalSubmit handler.
 //
-// Click on the "Submit info" banner in the Earnings tab → switch to the
-// Payments Info tab where the full form lives.
-document.getElementById('btnSubmitKyc')?.addEventListener('click', () => {
-  switchEarningsTab('payments');
-});
-
-// File picker → upload to private kyc-uploads bucket → preview thumbnail
-async function uploadKycImage(file, kind /* 'qr' | 'id' | 'sig' */) {
-  if (!file || !currentUser) return null;
-  if (file.size > 5 * 1024 * 1024) { toast('File too large (max 5 MB)', 'error'); return null; }
-  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
-  const path = `${currentUser.id}/${kind}-${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
-  const { error } = await supabase.storage.from('kyc-uploads').upload(path, file, { upsert: false });
-  if (error) { toast('Upload failed: ' + error.message, 'error'); return null; }
-  return path;  // private bucket — store the path, not a public URL
-}
-
-// Wire each upload box: clicking it opens the file picker; on file pick,
-// upload + show preview.
-function wireKycUpload(boxId, fileId, textId, previewId, kind, urlSetter) {
-  const box     = document.getElementById(boxId);
-  const fileInp = document.getElementById(fileId);
-  const textEl  = document.getElementById(textId);
-  const prevEl  = document.getElementById(previewId);
-  if (!box || !fileInp) return;
-  // The label wraps the input so click is automatic.
-  fileInp.addEventListener('change', async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    box.classList.add('is-uploading');
-    if (textEl) textEl.textContent = 'Uploading…';
-    const path = await uploadKycImage(file, kind);
-    box.classList.remove('is-uploading');
-    if (!path) {
-      if (textEl) textEl.textContent = `Tap to upload ${kind === 'qr' ? 'qr code' : kind === 'id' ? 'valid id' : 'signature'}`;
-      return;
-    }
-    urlSetter(path);
-    if (file.type.startsWith('image/')) {
-      // Local preview (from the file blob — server URL is private)
-      const reader = new FileReader();
-      reader.onload = () => { if (prevEl) { prevEl.src = reader.result; prevEl.style.display = ''; } };
-      reader.readAsDataURL(file);
-    }
-    if (textEl) textEl.textContent = 'Replace';
-  });
-}
-
-// State for the in-flight form (paths only; uploaded immediately on file pick)
-const _piUploads = { qr: null, id: null, sig: null };
-
-// Pre-fill the form when the Payments Info tab loads (idempotent — safe to
-// call any time _authorKyc is fresh).
-async function fillPaymentsInfoForm() {
-  const k = _authorKyc;
-  document.getElementById('piFullName').value = k?.full_name || '';
-  document.getElementById('piPhone').value    = k?.phone || '';
-  document.getElementById('piEmail').value    = k?.email || currentUser?.email || '';
-  document.getElementById('piDob').value      = k?.date_of_birth ? String(k.date_of_birth).slice(0, 10) : '';
-  document.getElementById('piAddress').value  = k?.address || '';
-  // Method
-  document.querySelectorAll('input[name="piMethod"]').forEach(r => {
-    r.checked = (k?.payment_method === r.value);
-  });
-  // Existing uploads — show "Uploaded ✓" but no preview (file is private)
-  const hint = (id, has, kindLabel) => {
-    const t = document.getElementById(id);
-    if (t) t.textContent = has ? `Uploaded — tap to replace ${kindLabel}` : `Tap to upload ${kindLabel}`;
-  };
-  hint('piQrText',  !!k?.payment_qr_url,  'qr code');
-  hint('piIdText',  !!k?.id_document_url, 'valid id');
-  hint('piSigText', !!k?.signature_url,   'signature');
-  // Reset uploads buffer so a fresh edit starts clean
-  _piUploads.qr  = null;
-  _piUploads.id  = null;
-  _piUploads.sig = null;
-
-  // ── Lock-after-first-save logic ──
-  // If the user has already saved their info (record exists), the form goes
-  // read-only and they have to use the "Request changes" flow which routes
-  // through admin review. Prevents impulse edits / fraud.
-  const hasRecord = !!(k && k.full_name);
-
-  // Check for any pending change request to surface the "awaiting review" banner
-  let pendingRequest = null;
-  if (hasRecord) {
-    try {
-      const { data } = await supabase
-        .from('payment_info_change_requests')
-        .select('id, requested_at, status')
-        .eq('user_id', currentUser.id)
-        .eq('status', 'pending')
-        .order('requested_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (data) pendingRequest = data;
-    } catch {}
-  }
-
-  applyPaymentsInfoLockState(hasRecord, pendingRequest);
-}
-
-// Toggle the form between editable (first-time) and read-only (post-save).
-// In read-only mode, all inputs/uploads are disabled and the save button is
-// replaced with "Request changes" — which opens a modal that submits a request
-// for admin approval (see payment_info_change_requests table).
-function applyPaymentsInfoLockState(hasRecord, pendingRequest) {
-  const inputs = [
-    document.getElementById('piFullName'),
-    document.getElementById('piPhone'),
-    document.getElementById('piEmail'),
-    document.getElementById('piDob'),
-    document.getElementById('piAddress'),
-  ];
-  const radios = document.querySelectorAll('input[name="piMethod"]');
-  const uploadBoxes = document.querySelectorAll('.pi-upload, #piQrUploadBox, #piIdUploadBox, #piSigUploadBox');
-
-  inputs.forEach(el => { if (el) el.readOnly = hasRecord; });
-  radios.forEach(r => { r.disabled = hasRecord; });
-  uploadBoxes.forEach(box => {
-    if (hasRecord) box.classList.add('pi-locked');
-    else           box.classList.remove('pi-locked');
-  });
-
-  // Swap action buttons
-  const saveBtn      = document.getElementById('piSaveBtn');
-  const requestBtn   = document.getElementById('piRequestChangeBtn');
-  const pendingBanner = document.getElementById('piPendingBanner');
-
-  if (saveBtn) saveBtn.style.display = hasRecord ? 'none' : '';
-
-  // Lazily inject the "Request changes" button + pending banner if missing
-  if (hasRecord && !requestBtn) {
-    const saveContainer = saveBtn?.parentElement;
-    if (saveContainer) {
-      const btn = document.createElement('button');
-      btn.id = 'piRequestChangeBtn';
-      btn.className = 'pi-save-btn';
-      btn.style.background = 'linear-gradient(135deg, #7c3aed, #a78bfa)';
-      btn.innerHTML = '<span>Request changes</span>';
-      btn.onclick = openPaymentInfoChangeModal;
-      saveContainer.appendChild(btn);
-    }
-  } else if (!hasRecord && requestBtn) {
-    requestBtn.remove();
-  }
-
-  // Pending banner
-  let banner = document.getElementById('piPendingBanner');
-  if (pendingRequest) {
-    if (!banner) {
-      banner = document.createElement('div');
-      banner.id = 'piPendingBanner';
-      banner.className = 'pi-pending-banner';
-      const formContainer = document.querySelector('.pi-card')?.parentElement;
-      if (formContainer) formContainer.insertBefore(banner, formContainer.firstChild);
-    }
-    const requestedAt = new Date(pendingRequest.requested_at).toLocaleDateString();
-    banner.innerHTML = `<span>⏳</span><span>Change request pending admin review (submitted ${requestedAt}). You'll be notified when it's reviewed.</span>`;
-  } else if (banner) {
-    banner.remove();
-  }
-}
-
-async function openPaymentInfoChangeModal() {
-  const k = _authorKyc || {};
-  const modal = document.getElementById('piChangeModal') || createPaymentInfoChangeModal();
-  // Pre-fill with current values so the user only edits what's changing
-  modal.querySelector('#piChangeFullName').value = k.full_name || '';
-  modal.querySelector('#piChangePhone').value    = k.phone || '';
-  modal.querySelector('#piChangeEmail').value    = k.email || '';
-  modal.querySelector('#piChangeAddress').value  = k.address || '';
-  modal.querySelector('#piChangeMethod').value   = k.payment_method || '';
-  modal.querySelector('#piChangeReason').value   = '';
-  modal.classList.add('open');
-  document.body.style.overflow = 'hidden';
-}
-
-function closePaymentInfoChangeModal() {
-  document.getElementById('piChangeModal')?.classList.remove('open');
-  document.body.style.overflow = '';
-}
-
-function createPaymentInfoChangeModal() {
-  const m = document.createElement('div');
-  m.id = 'piChangeModal';
-  m.className = 'modal-overlay';
-  m.innerHTML = `
-    <div class="modal-box" style="max-width:520px">
-      <div class="modal-header">
-        <div class="modal-title">Request changes to Payments Info</div>
-        <button class="modal-close-btn" id="piChangeClose">×</button>
-      </div>
-      <p style="font-size:0.86rem; color:var(--text2); margin-bottom:1rem; line-height:1.5">
-        Edit only the fields you want to change. An admin will review your request — you'll get a notification when approved or rejected.
-      </p>
-      <label class="form-label">Full name</label>
-      <input class="form-input" id="piChangeFullName" maxlength="100"/>
-      <label class="form-label">Phone</label>
-      <input class="form-input" id="piChangePhone" maxlength="30"/>
-      <label class="form-label">Email</label>
-      <input class="form-input" id="piChangeEmail" maxlength="120"/>
-      <label class="form-label">Address</label>
-      <input class="form-input" id="piChangeAddress" maxlength="200"/>
-      <label class="form-label">Payment method</label>
-      <select class="form-input" id="piChangeMethod">
-        <option value="">— Select —</option>
-        <option value="gcash">GCash</option>
-        <option value="maya">Maya</option>
-        <option value="bank">Bank transfer</option>
-        <option value="gotyme">GoTyme</option>
-      </select>
-      <label class="form-label">Why are you making this change? (required)</label>
-      <textarea class="form-input" id="piChangeReason" rows="3" maxlength="500" placeholder="e.g. I switched to a new bank, my address changed…"></textarea>
-      <div class="modal-footer">
-        <button class="btn btn-ghost btn-sm" id="piChangeCancel">Cancel</button>
-        <button class="btn btn-purple btn-sm" id="piChangeSubmit">Submit request</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(m);
-  m.querySelector('#piChangeClose').onclick = closePaymentInfoChangeModal;
-  m.querySelector('#piChangeCancel').onclick = closePaymentInfoChangeModal;
-  m.addEventListener('click', (e) => { if (e.target === m) closePaymentInfoChangeModal(); });
-  m.querySelector('#piChangeSubmit').onclick = submitPaymentInfoChange;
-  return m;
-}
-
-async function submitPaymentInfoChange() {
-  const reason = document.getElementById('piChangeReason').value.trim();
-  if (!reason) { toast('Please explain why you need this change', 'error'); return; }
-
-  const k = _authorKyc || {};
-  // Only include fields that actually changed — keeps the diff focused
-  const changed = {};
-  const fields = [
-    ['piChangeFullName', 'full_name',      k.full_name],
-    ['piChangePhone',    'phone',          k.phone],
-    ['piChangeEmail',    'email',          k.email],
-    ['piChangeAddress',  'address',        k.address],
-    ['piChangeMethod',   'payment_method', k.payment_method],
-  ];
-  for (const [id, key, current] of fields) {
-    const v = document.getElementById(id).value.trim();
-    if (v && v !== (current || '')) changed[key] = v;
-  }
-  if (Object.keys(changed).length === 0) {
-    toast('No fields changed — edit at least one before submitting', 'error');
-    return;
-  }
-
-  const btn = document.getElementById('piChangeSubmit');
-  btn.disabled = true; btn.textContent = 'Submitting…';
-
-  const { data, error } = await supabase.rpc('request_payment_info_change', {
-    p_requested_data: changed,
-    p_reason: reason,
-  });
-
-  btn.disabled = false; btn.textContent = 'Submit request';
-
-  if (error) { toast(error.message, 'error'); return; }
-  if (!data?.ok) {
-    const msg = data?.error === 'pending_request_exists'
-      ? 'You already have a pending change request — wait for admin review first.'
-      : (data?.error || 'Failed to submit request');
-    toast(msg, 'error');
-    return;
-  }
-
-  toast('Change request submitted — admin will review it shortly', 'success');
-  closePaymentInfoChangeModal();
-  // Re-render the locked form so the pending banner appears
-  fillPaymentsInfoForm();
-}
-
-// Wire each upload control once at module load
-wireKycUpload('piQrUploadBox',  'piQrFile',  'piQrText',  'piQrPreview',  'qr',  (p) => { _piUploads.qr  = p; });
-wireKycUpload('piIdUploadBox',  'piIdFile',  'piIdText',  'piIdPreview',  'id',  (p) => { _piUploads.id  = p; });
-wireKycUpload('piSigUploadBox', 'piSigFile', 'piSigText', 'piSigPreview', 'sig', (p) => { _piUploads.sig = p; });
-
-// Method-pill visual selection
-document.querySelectorAll('input[name="piMethod"]').forEach(r => {
-  r.addEventListener('change', () => {
-    document.querySelectorAll('.pi-method-pill').forEach(p => p.classList.toggle('is-checked', p.querySelector('input').checked));
-  });
-});
-
-// Save button — validates + submits + reloads earnings
-document.getElementById('piSaveBtn')?.addEventListener('click', async () => {
-  const fullName = document.getElementById('piFullName').value.trim();
-  const phone    = document.getElementById('piPhone').value.trim();
-  const email    = document.getElementById('piEmail').value.trim();
-  const dob      = document.getElementById('piDob').value;
-  const address  = document.getElementById('piAddress').value.trim();
-  const method   = document.querySelector('input[name="piMethod"]:checked')?.value;
-
-  if (!fullName) { toast('Full name is required', 'error'); return; }
-  if (!phone)    { toast('Phone number is required', 'error'); return; }
-  if (!email)    { toast('Email is required', 'error'); return; }
-  if (!dob)      { toast('Date of birth is required', 'error'); return; }
-  if (!address)  { toast('Address is required', 'error'); return; }
-  if (!method)   { toast('Pick a payment method', 'error'); return; }
-
-  // QR / ID / Signature — required on first submit, optional on re-edit
-  // (we keep the existing upload paths if the user didn't pick new files).
-  const qr  = _piUploads.qr  || _authorKyc?.payment_qr_url  || null;
-  const id  = _piUploads.id  || _authorKyc?.id_document_url || null;
-  const sig = _piUploads.sig || _authorKyc?.signature_url   || null;
-  if (!qr)  { toast('Upload your payment QR code', 'error'); return; }
-  if (!id)  { toast('Upload a valid government ID', 'error'); return; }
-  if (!sig) { toast('Upload your signature', 'error'); return; }
-
-  const btn = document.getElementById('piSaveBtn');
-  btn.disabled = true; btn.querySelector('span').textContent = 'Saving…';
-
-  const { data, error } = await supabase.rpc('submit_author_kyc', {
-    p_full_name:        fullName,
-    p_date_of_birth:    dob,
-    p_id_type:          null,           // legacy — not collected by this form
-    p_id_number:        null,           // legacy — not collected by this form
-    p_id_document_url:  id,
-    p_selfie_url:       null,           // legacy
-    p_phone:            phone,
-    p_email:            email,
-    p_address:          address,
-    p_payment_method:   method,
-    p_payment_qr_url:   qr,
-    p_signature_url:    sig,
-  });
-
-  btn.disabled = false; btn.querySelector('span').textContent = 'Save Information';
-
-  if (error) { toast(error.message, 'error'); return; }
-  if (data?.ok === false) { toast(data.error || 'Failed', 'error'); return; }
-
-  toast('Submitted — we\'ll review within 1–2 business days.', 'success');
-  await loadAuthorEarnings();
-  fillPaymentsInfoForm();
-});
-document.getElementById('kycClose')?.addEventListener('click', () => { document.getElementById('kycModal').style.display = 'none'; });
-document.getElementById('kycCancel')?.addEventListener('click', () => { document.getElementById('kycModal').style.display = 'none'; });
-document.getElementById('kycSubmit')?.addEventListener('click', async () => {
-  const fullName = document.getElementById('kycFullName').value.trim();
-  const dob      = document.getElementById('kycDob').value;
-  const idType   = document.getElementById('kycIdType').value;
-  const idNumber = document.getElementById('kycIdNumber').value.trim();
-  if (!fullName) { toast('Full name is required', 'error'); return; }
-  if (!idNumber) { toast('ID number is required', 'error'); return; }
-  const btn = document.getElementById('kycSubmit');
-  btn.disabled = true; btn.textContent = 'Submitting…';
-  const { data, error } = await supabase.rpc('submit_author_kyc', {
-    p_full_name:       fullName,
-    p_date_of_birth:   dob || null,
-    p_id_type:         idType,
-    p_id_number:       idNumber,
-    p_id_document_url: null,
-    p_selfie_url:      null,
-  });
-  btn.disabled = false; btn.textContent = 'Submit for review';
-  if (error)        { toast(error.message, 'error'); return; }
-  if (data?.ok === false) { toast(data.error || 'Failed', 'error'); return; }
-  document.getElementById('kycModal').style.display = 'none';
-  toast('KYC submitted — we\'ll review within 1-2 business days.', 'success');
-  await loadAuthorEarnings();
-});
-
-// ── Withdrawal modal wiring (strict — server pulls saved Payments Info) ─
-const PAYMENT_METHOD_LABELS = { gcash: 'GCash', maya: 'Maya', bank: 'Bank transfer', gotyme: 'GoTyme' };
-
-document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
-  // Always re-derive these from cache so admin rate changes are reflected
-  const minPhpMinor   = _walletConfigDefaults.min_payout_php_minor || 10000;
-  const availPhpMinor = _authorBalance?._computed_available_minor ??
-                        (_authorBalance?.available_php_minor || 0);
-
-  const minModal = document.getElementById('minPayoutModal');
-
-  // ── PRIORITY 1: No Payments Info saved → walk them to it ──
-  // Even if they have ₱0 they should know payment info is required.
-  if (!_authorKyc?.payment_method) {
-    document.getElementById('minPayoutMsg').innerHTML =
-      "You haven't saved your Payments Info yet — we need that before sending money. It only takes a minute.";
-    const okBtn = document.getElementById('minPayoutOk');
-    okBtn.textContent = 'Open Payments Info';
-    okBtn.dataset.action = 'go-to-payments-info';
-    const progress = minModal.querySelector('.min-payout-progress');
-    if (progress) progress.style.display = 'none';
-    const title = minModal.querySelector('.modal-title');
-    if (title) title.textContent = 'Add Payments Info first';
-    // Show with both inline display + .open class to be safe across themes
-    minModal.style.display = 'flex';
-    minModal.classList.add('open');
-    return;
-  }
-
-  // ── PRIORITY 2: Below minimum → friendly explainer popup ──
-  if (availPhpMinor < minPhpMinor) {
-    const haveStr = formatPhpFromMinor(availPhpMinor);
-    const minStr  = formatPhpFromMinor(minPhpMinor);
-    const needStr = formatPhpFromMinor(Math.max(0, minPhpMinor - availPhpMinor));
-    document.getElementById('minPayoutMsg').innerHTML =
-      `You need at least <strong>${minStr}</strong> available to request a payout. Keep earning and you'll unlock withdrawals soon.`;
-    document.getElementById('minPayoutHave').textContent = haveStr;
-    document.getElementById('minPayoutMin').textContent  = minStr;
-    document.getElementById('minPayoutNeed').textContent = needStr;
-    const okBtn = document.getElementById('minPayoutOk');
-    okBtn.textContent = 'Got it';
-    okBtn.dataset.action = 'close';
-    const progress = minModal.querySelector('.min-payout-progress');
-    if (progress) progress.style.display = '';
-    const title = minModal.querySelector('.modal-title');
-    if (title) title.textContent = 'Not enough to withdraw yet';
-    minModal.style.display = 'flex';
-    minModal.classList.add('open');
-    return;
-  }
-
-  // ── Open the simple modal ──
-  const m = document.getElementById('withdrawalModal');
-  if (!m) return;
-
-  const amountInput = document.getElementById('withdrawalAmount');
-  amountInput.min  = (minPhpMinor / 100).toFixed(2);
-  amountInput.max  = (availPhpMinor / 100).toFixed(2);
-  amountInput.value = (availPhpMinor / 100).toFixed(2);   // default to full balance
-  amountInput.step = '0.01';
-  document.getElementById('withdrawalAmountHint').textContent =
-    `Minimum ${formatPhpFromMinor(minPhpMinor)}. Max available: ${formatPhpFromMinor(availPhpMinor)}.`;
-
-  // Read-only saved account display
-  const methodLabel = PAYMENT_METHOD_LABELS[_authorKyc.payment_method] || _authorKyc.payment_method;
-  document.getElementById('withdrawalAccountMethod').textContent = methodLabel;
-  document.getElementById('withdrawalAccountName').textContent   = _authorKyc.full_name || '(no name on file)';
-
-  // Programmatic value sets don't fire `input`, so seed the fee preview +
-  // Pioneer banner manually on modal open. After this, the listeners
-  // wired further down handle live updates as the user edits.
-  if (typeof _renderWithdrawalFeePreview === 'function') _renderWithdrawalFeePreview();
-
-  m.style.display = 'flex';
-});
-
-// Min-payout popup helpers — close fully (both inline display + .open class)
-function _closeMinPayoutModal() {
-  const m = document.getElementById('minPayoutModal');
-  if (!m) return;
-  m.style.display = 'none';
-  m.classList.remove('open');
-}
-document.getElementById('minPayoutClose')?.addEventListener('click', _closeMinPayoutModal);
-document.getElementById('minPayoutOk')?.addEventListener('click', (e) => {
-  const action = e.currentTarget.dataset.action;
-  _closeMinPayoutModal();
-  if (action === 'go-to-payments-info') {
-    if (typeof switchEarningsTab === 'function') switchEarningsTab('payments');
-  }
-});
-document.getElementById('minPayoutModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'minPayoutModal') _closeMinPayoutModal();
-});
-
-document.getElementById('withdrawalClose')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
-document.getElementById('withdrawalCancel')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
-
-// ── Pioneer-exemption + fee-preview helpers ──────────────────────────
-// Mirror of mobile lib/utils/calculateWithdrawal.js. Kept in sync so the
-// preview a Pioneer sees in the web modal matches what mobile would show
-// AND what the server's request_author_withdrawal RPC will charge.
-//
-// Reads PLATFORM_COST and TRANSFER_FEE from _walletConfigDefaults
-// (loaded from app_config). Both are stored as fractions (0.2, 0.02).
-// pioneer_exemption_days defaults to 365 if the config key isn't set.
-
-function _isPioneerExempt(profile, exemptionDays) {
-  if (!profile) return false;
-  if (profile.role !== 'pioneer') return false;
-  if (!profile.pioneer_at) return false;
-  const grantedAt = new Date(profile.pioneer_at).getTime();
-  if (!Number.isFinite(grantedAt)) return false;
-  const days = exemptionDays || 365;
-  const expiresAt = grantedAt + days * 24 * 60 * 60 * 1000;
-  return Date.now() <= expiresAt;
-}
-
-function _pioneerDaysRemaining(profile, exemptionDays) {
-  if (!profile?.pioneer_at || profile.role !== 'pioneer') return 0;
-  const grantedAt = new Date(profile.pioneer_at).getTime();
-  if (!Number.isFinite(grantedAt)) return 0;
-  const days = exemptionDays || 365;
-  const expiresAt = grantedAt + days * 24 * 60 * 60 * 1000;
-  const ms = expiresAt - Date.now();
-  return ms <= 0 ? 0 : Math.floor(ms / (24 * 60 * 60 * 1000));
-}
-
-// Render the fee preview rows live as the user types in the amount input.
-// Wired via input listener at the bottom of this block.
-function _renderWithdrawalFeePreview() {
-  const amountPhp   = parseFloat(document.getElementById('withdrawalAmount')?.value || '0') || 0;
-  const exemptDays  = _walletConfigDefaults.pioneer_exemption_days || 365;
-  const exempt      = _isPioneerExempt(currentProfile, exemptDays);
-  const daysLeft    = _pioneerDaysRemaining(currentProfile, exemptDays);
-
-  // Pioneer banner visibility + days-left copy
-  const banner = document.getElementById('withdrawalPioneerBanner');
-  const daysEl = document.getElementById('withdrawalPioneerDays');
-  if (banner) banner.style.display = exempt ? 'flex' : 'none';
-  if (daysEl) {
-    daysEl.textContent = daysLeft > 0
-      ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} of free withdrawals remaining`
-      : 'Exemption window ending soon';
-  }
-
-  const platformFraction = Number(_walletConfigDefaults.PLATFORM_COST ?? 0.2) || 0;
-  const transferFraction = Number(_walletConfigDefaults.TRANSFER_FEE  ?? 0.02) || 0;
-  const platformPct = (platformFraction <= 1 ? platformFraction : platformFraction / 100);
-  const transferPct = (transferFraction <= 1 ? transferFraction : transferFraction / 100);
-
-  const platformCost = exempt ? 0 : amountPhp * platformPct;
-  const transferFee  = exempt ? 0 : amountPhp * transferPct;
-  const net          = Math.max(0, amountPhp - platformCost - transferFee);
-
-  const fmt = (n) => '₱' + n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
-  const setClass = (id, cls, on) => { const el = document.getElementById(id); if (el) el.classList.toggle(cls, on); };
-
-  setText('withdrawalFeeGross',    fmt(amountPhp));
-  setText('withdrawalFeePlatform', exempt ? 'Waived' : fmt(platformCost));
-  setText('withdrawalFeeTransfer', exempt ? 'Waived' : fmt(transferFee));
-  setText('withdrawalFeeNet',      fmt(net));
-  setClass('withdrawalFeePlatform', 'is-waived', exempt);
-  setClass('withdrawalFeeTransfer', 'is-waived', exempt);
-
-  // Update label percentages so they reflect the current config rates.
-  const pctTxt = (frac) => {
-    const p = (frac <= 1 ? frac * 100 : frac);
-    return `${(Math.round(p * 10) / 10)}%`;
-  };
-  setText('withdrawalFeePlatformLabel', `Platform cost (${pctTxt(platformFraction)})`);
-  setText('withdrawalFeeTransferLabel', `Transfer fee (${pctTxt(transferFraction)})`);
-}
-
-// Re-run the preview every keystroke; also once when the modal opens
-// (the existing modal-open code sets the input value, which doesn't fire
-// `input`, so we hook the open click separately further down).
-document.getElementById('withdrawalAmount')?.addEventListener('input', _renderWithdrawalFeePreview);
-document.getElementById('withdrawalAmount')?.addEventListener('change', _renderWithdrawalFeePreview);
-
-document.getElementById('withdrawalSubmit')?.addEventListener('click', async () => {
-  const amountPhp   = parseFloat(document.getElementById('withdrawalAmount').value);
-  const minPhpMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
-
-  if (!Number.isFinite(amountPhp) || amountPhp <= 0) { toast('Enter a valid amount', 'error'); return; }
-  const amountMinor = Math.round(amountPhp * 100);
-  if (amountMinor < minPhpMinor) {
-    toast(`Need at least ${formatPhpFromMinor(minPhpMinor)}`, 'error');
-    return;
-  }
-
-  const btn = document.getElementById('withdrawalSubmit');
-  btn.disabled = true; btn.textContent = 'Submitting…';
-
-  // Switched (May 2026 earnings overhaul) from request_author_withdrawal_php
-  // to the unified request_author_withdrawal — the new RPC computes
-  // Pioneer-aware fees server-side and earmarks across both coin and
-  // star earnings FIFO. Payout method + account details still come from
-  // author_kyc (the saved Payments Info row); we forward them through
-  // p_payout_method + p_payout_details so the new RPC's signature is
-  // satisfied without losing the strict-saved-account guarantee.
-  const payoutMethod  = _authorKyc?.payment_method || '';
-  const payoutDetails = {
-    full_name:      _authorKyc?.full_name      || null,
-    account_number: _authorKyc?.account_number || null,
-    account_name:   _authorKyc?.account_name   || null,
-  };
-  const { data, error } = await supabase.rpc('request_author_withdrawal', {
-    p_amount_php_minor: amountMinor,
-    p_payout_method:    payoutMethod,
-    p_payout_details:   payoutDetails,
-  });
-
-  btn.disabled = false; btn.textContent = 'Submit request';
-  if (error) { toast(error.message, 'error'); return; }
-  if (data?.ok === false) {
-    const msg = data.error === 'kyc_not_approved'         ? 'KYC must be approved first.' :
-                data.error === 'kyc_not_submitted'        ? 'Submit Payments Info first.' :
-                data.error === 'no_payment_method_saved'  ? 'Save a payment method in Payments Info first.' :
-                data.error === 'below_minimum'            ? `Need at least ${formatPhpFromMinor(data.minimum_php_minor || minPhpMinor)}.` :
-                data.error === 'insufficient_available'   ? `Only ${formatPhpFromMinor(data.available_php_minor || 0)} available.` :
-                data.error === 'withdrawal_in_progress'   ? 'You already have a pending or approved request.' :
-                data.error === 'no_eligible_earnings'     ? 'No eligible earnings yet — your balance might still be in the hold period.' :
-                data.error || 'Failed';
-    toast(msg, 'error');
-    return;
-  }
-  document.getElementById('withdrawalModal').style.display = 'none';
-  toast('Withdrawal request submitted. Admin review usually within 1-3 business days.', 'success');
-  await loadAuthorEarnings();
-});
-
+// With 11C landed, ALL Earnings page logic lives in earnings.js. The
+// only earnings touchpoint in app.js is the initEarnings({...}) call
+// (which wires the 5 cross-feature _cfg handles) and the import line.
+// ════════════════════════════════════════════════════════════════════════
 // ── New book modal ──
 const newBookModal = document.getElementById('newBookModal');
 function openNewBookModal() {
@@ -14819,19 +7778,20 @@ document.getElementById('bookCoverFile')?.addEventListener('change', async (e) =
   if (!file.type.startsWith('image/')) { toast('Pick an image file', 'error'); return; }
   if (file.size > 5 * 1024 * 1024) { toast('Cover must be under 5MB', 'error'); return; }
 
-  // Open the crop modal with NO forced aspect ratio. The previous
-  // hardcoded 2:3 silently chopped the sides off every uploaded
-  // cover — creators upload at 9:16 (vertical-video aspect), the
-  // 2:3 crop box locks narrower, and pixels outside that frame are
-  // permanently discarded before reaching Supabase Storage. That's
-  // why almost every cover on Selebox had its title clipped at the
-  // edges. With aspectRatio: NaN, Cropper.js lets the creator
-  // resize the crop box freely — by default it covers 100% of the
-  // image (autoCropArea: 1), so most uploads will just save the
-  // entire original at full aspect.
+  // Lock to 2:3 — the canonical book-cover ratio. Mobile uses it for
+  // every render path, and every web display surface (For You,
+  // Discover, Ranking, detail page, home shelves) frames covers at
+  // 2:3 via aspect-ratio CSS. The previous NaN (free crop) was added
+  // to fix one symptom (titles clipped on 9:16 uploads) but caused a
+  // bigger one (covers landed at random aspect ratios → display layer
+  // had to letterbox-or-zoom-crop them forever). Better fix: tell the
+  // author to crop their 9:16 source to 2:3 here, once, instead of
+  // chasing the consequences across every shelf and detail page.
+  // Cropper.js shows a draggable 2:3 box over the source so creators
+  // can pick the best 2:3 window of their original at upload time.
   openCropModal(file, {
-    aspectRatio: NaN,
-    title: 'Crop book cover',
+    aspectRatio: 2 / 3,
+    title: 'Crop book cover (2:3)',
     onSave: async (croppedFile) => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { toast('Sign in first', 'error'); return; }
@@ -15902,1178 +8862,26 @@ window.addEventListener('beforeunload', (e) => {
 // CREATOR STUDIO
 // ════════════════════════════════════════
 
-let studioVideosCache = [];
-let studioSearchQuery = '';
-// Lifetime video revenue (PHP minor units = centavos). Populated by
-// loadStudio() summing author_earnings.net_php_minor for the current
-// user's video earnings. Shown in the 4th stat card.
-let studioRevenuePhpMinor = 0;
-// Per-video earnings map: Map<videoId, php_minor>. Same source as
-// studioRevenuePhpMinor (just bucketed by source_id instead of summed
-// globally). Populated by loadStudio. Read by the Earnings column.
-const studioEarningsByVideoId = new Map();
-// Pagination state. Persisted page-size choice means the user's
-// preference (25/50/100) survives reloads; current page resets on
-// every filter change so we never end up "stuck" on page 7 of a
-// 3-page filtered list.
-let studioPageIdx = 1;
-const STUDIO_PAGE_SIZE_OPTIONS = [25, 50, 100];
-let studioPageSize = (() => {
-  const stored = parseInt(localStorage.getItem('selebox_studio_page_size') || '25', 10);
-  return STUDIO_PAGE_SIZE_OPTIONS.includes(stored) ? stored : 25;
-})();
-
-// Visibility filter — 'all' or one of the buckets returned by
-// _studioDeriveVisibility (published, scheduled, processing, private,
-// failed). The chip row above the search drives this. We never
-// persist it: a creator usually wants to see "all" by default on
-// re-entry to Studio.
-let studioVisibilityFilter = 'all';
-
-// Sort state. Default mirrors the pre-pagination behavior (newest
-// first). Sortable keys: 'created_at', 'views', 'likes', 'title'.
-// dir is 'asc' | 'desc'.
-let studioSort = { key: 'created_at', dir: 'desc' };
-
-// Bulk-selection state — set of row ids the user has checked. Empty
-// = no bulk bar shown. Cleared on every renderStudio() invocation
-// that follows a non-selection action (search/filter/sort/page
-// change) since stale ids referring to off-screen rows are confusing
-// to the user.
-let studioSelectedIds = new Set();
-
-// Single source of truth for the visibility bucket a row falls into.
-// Used by both the chip-row counts and the per-row visibility pill
-// so the two never disagree (e.g. chip says 1 Scheduled but the pill
-// reads Processing — that's exactly the kind of drift this helper
-// prevents).
-function _studioDeriveVisibility(v) {
-  const isReadyAndScheduled = v.status === 'ready'
-    && !!v.scheduled_publish_at
-    && new Date(v.scheduled_publish_at).getTime() > Date.now();
-  if (isReadyAndScheduled) return 'scheduled';
-  if (v.status === 'ready' || v.status === 'published') return 'published';
-  if (v.status === 'uploading' || v.status === 'processing') return 'processing';
-  if (v.status === 'unpublished') return 'private';
-  if (v.status === 'failed' || v.status === 'error') return 'failed';
-  return 'unknown';
-}
-
-// Numeric/string accessor for the sortable columns. Keeps the
-// comparator in renderStudio one-liner clean.
-function _studioGetSortValue(v, key) {
-  if (key === 'views')    return (v.views_count ?? v.views ?? 0);
-  if (key === 'likes')    return (v.likes_count ?? v.likes ?? 0);
-  if (key === 'comments') return (v.comments_count ?? 0);
-  if (key === 'earnings') return studioEarningsByVideoId.get(v.id) || 0;
-  if (key === 'created_at') return new Date(v.created_at || 0).getTime();
-  if (key === 'title')    return (v.title || '').toLowerCase();
-  return 0;
-}
-let studioEditingVideoId = null;
-
-// Lightweight client-side substitute for the scheduled-publish cron.
-// Fires `publish_due_scheduled_videos()` at most once per 5 min whenever
-// the user opens Studio — covers the case where no real cron is wired yet.
-let _lastSchedulePublishCheck = 0;
-function maybeFlushDueScheduledVideos() {
-  const now = Date.now();
-  if (now - _lastSchedulePublishCheck < 5 * 60 * 1000) return; // 5 min throttle
-  _lastSchedulePublishCheck = now;
-  // Fire-and-forget — never block UI on this.
-  supabase.rpc('publish_due_scheduled_videos').then(({ error }) => {
-    if (error) console.warn('publish_due_scheduled_videos:', error.message);
-  }).catch(() => {});
-}
-
-async function loadStudio() {
-  const content = document.getElementById('studioContent');
-  content.innerHTML = '<div class="empty"><h3>Loading your videos...</h3></div>';
-
-  if (!currentUser) {
-    content.innerHTML = '<div class="empty"><h3>Please sign in</h3></div>';
-    return;
-  }
-
-  // Background sweep: surface any scheduled videos whose publish time has passed.
-  maybeFlushDueScheduledVideos();
-
-  // Fetch videos + per-video earnings rows in parallel. We use the
-  // earnings rows for TWO things:
-  //   1. Header "Revenue" stat card = sum of net_php_minor.
-  //   2. Per-row "Earnings" column = group rows by source_id then
-  //      sum, populating a Map<videoId, php_minor>.
-  // Net (not gross) so both surfaces reflect money the creator
-  // actually keeps after the platform share.
-  const earningsP = supabase
-    .from('author_earnings')
-    .select('source_id, net_php_minor')
-    .eq('author_id', currentUser.id)
-    .eq('source_type', 'video');
-
-  const { data: videos, error } = await supabase
-    .from('videos')
-    // Engagement counters — read BOTH the canonical trigger-maintained
-    // counters (views_count / likes_count / comments_count, kept fresh
-    // by migration_videos_engagement_counts.sql, also what mobile's
-    // CreatorVideoCard reads via the videoStats adapter) AND the bare
-    // legacy columns (views, likes) for older rows that never got the
-    // trigger backfill. The render code below prefers _count over the
-    // bare column. Without this, Studio shows real views in the
-    // legacy `views` column but always-zero likes — because the
-    // `likes` bare column isn't maintained anywhere.
-    .select('id, title, description, thumbnail_url, video_url, views, likes, views_count, likes_count, comments_count, duration, status, created_at, tags, category, bunny_video_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, scheduled_publish_at, is_hidden')
-    .eq('uploader_id', currentUser.id)
-    .order('created_at', { ascending: false });
-  
-  if (error) {
-    content.innerHTML = `<div class="empty"><h3>Error loading videos</h3><p>${escHTML(error.message)}</p></div>`;
-    return;
-  }
-  
-  studioVideosCache = videos || [];
-
-  // Tally lifetime video revenue + build per-video earnings map.
-  // Failure here isn't fatal — we just fall back to empty so the
-  // rest of the Studio still renders cleanly.
-  studioEarningsByVideoId.clear();
-  studioRevenuePhpMinor = 0;
-  try {
-    const { data: earnRows } = await earningsP;
-    for (const r of earnRows || []) {
-      const cents = r.net_php_minor || 0;
-      studioRevenuePhpMinor += cents;
-      if (r.source_id) {
-        studioEarningsByVideoId.set(
-          r.source_id,
-          (studioEarningsByVideoId.get(r.source_id) || 0) + cents,
-        );
-      }
-    }
-  } catch {
-    // Map already cleared, total already 0 — nothing to do.
-  }
-
-  renderStudio();
-}
-
-function renderStudio() {
-  const content = document.getElementById('studioContent');
-  const videos = studioVideosCache;
-  
-  if (!videos.length) {
-    content.innerHTML = `
-      <div class="studio-empty">
-        <div class="studio-empty-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <polygon points="23 7 16 12 23 17 23 7"/>
-            <rect x="1" y="5" width="15" height="14" rx="2"/>
-          </svg>
-        </div>
-        <h3>No videos yet</h3>
-        <p>Upload your first video to get started</p>
-        <button class="vu-btn vu-btn-primary" onclick="document.getElementById('btnStudioUpload').click()" style="margin-top:1rem">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          Upload your first video
-        </button>
-      </div>
-    `;
-    return;
-  }
-  
-  const totalVideos = videos.length;
-  // Prefer the trigger-maintained _count columns; fall back to the
-  // bare legacy columns for older rows that pre-date the trigger
-  // backfill. This mirrors how mobile's mapRowToVideo reads engagement.
-  const totalViews = videos.reduce((sum, v) => sum + (v.views_count ?? v.views ?? 0), 0);
-  const totalLikes = videos.reduce((sum, v) => sum + (v.likes_count ?? v.likes ?? 0), 0);
-  // "Published" includes both the web-era 'ready' status and the
-  // mobile-era 'published' status — same parity the visibility pill
-  // applies below. Without including 'published' the header card
-  // undercounts on profiles that have any mobile-uploaded rows.
-  const publishedCount = videos.filter(v => {
-    const isReadyAndScheduled = v.status === 'ready' && v.scheduled_publish_at && new Date(v.scheduled_publish_at).getTime() > Date.now();
-    return (v.status === 'ready' || v.status === 'published') && !isReadyAndScheduled;
-  }).length;
-  
-  // ── 1. Visibility chip counts (always computed on the full cache so
-  // counts are stable as the user filters / searches). ──────────────
-  const visibilityCounts = { all: videos.length, published: 0, scheduled: 0, processing: 0, private: 0, failed: 0 };
-  for (const v of videos) {
-    const bucket = _studioDeriveVisibility(v);
-    if (visibilityCounts[bucket] != null) visibilityCounts[bucket]++;
-  }
-
-  // ── 2. Apply visibility chip filter ──────────────────────────────
-  const afterChip = studioVisibilityFilter === 'all'
-    ? videos
-    : videos.filter(v => _studioDeriveVisibility(v) === studioVisibilityFilter);
-
-  // ── 3. Apply text search ─────────────────────────────────────────
-  const q = studioSearchQuery.trim().toLowerCase();
-  const afterSearch = q
-    ? afterChip.filter(v =>
-        (v.title || '').toLowerCase().includes(q) ||
-        (v.description || '').toLowerCase().includes(q) ||
-        (v.tags || []).some(t => t.toLowerCase().includes(q))
-      )
-    : afterChip;
-
-  // ── 4. Apply sort ────────────────────────────────────────────────
-  // Don't sort in-place — the cache is the source of truth and shared
-  // with the edit modal. Spread first.
-  const sorted = [...afterSearch].sort((a, b) => {
-    const av = _studioGetSortValue(a, studioSort.key);
-    const bv = _studioGetSortValue(b, studioSort.key);
-    if (av < bv) return studioSort.dir === 'asc' ? -1 : 1;
-    if (av > bv) return studioSort.dir === 'asc' ? 1 : -1;
-    return 0;
-  });
-  const filtered = sorted; // alias for downstream references
-
-  // ── 5. Pagination. Clamp defensively. ────────────────────────────
-  const totalPages   = Math.max(1, Math.ceil(filtered.length / studioPageSize));
-  if (studioPageIdx > totalPages) studioPageIdx = totalPages;
-  if (studioPageIdx < 1)          studioPageIdx = 1;
-  const pageStart    = (studioPageIdx - 1) * studioPageSize;
-  const pageEnd      = Math.min(pageStart + studioPageSize, filtered.length);
-  const pageSlice    = filtered.slice(pageStart, pageEnd);
-  // Human-readable "1–25 of 412" label for the toolbar.
-  const rangeLabel   = filtered.length === 0
-    ? '0 videos'
-    : `${(pageStart + 1).toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`;
-
-  // ── 6. Bulk-selection helpers ────────────────────────────────────
-  // Prune ids that no longer exist in the current visible slice so
-  // the "Delete N" copy never lies. The set itself is preserved so a
-  // user who filters down to processing, selects 3, then clears the
-  // chip filter still has those 3 selected on the broader view.
-  const visiblePageIds = new Set(pageSlice.map(v => v.id));
-  const selectedOnPage = pageSlice.filter(v => studioSelectedIds.has(v.id));
-  const allOnPageSelected = pageSlice.length > 0 && selectedOnPage.length === pageSlice.length;
-  const someOnPageSelected = selectedOnPage.length > 0 && !allOnPageSelected;
-  
-  content.innerHTML = `
-    <div class="studio-stats">
-      <div class="studio-stat">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#a855f7,#6366f1)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-        </div>
-        <div>
-          <div class="studio-stat-value">${totalVideos.toLocaleString()}</div>
-          <div class="studio-stat-label">Total videos</div>
-        </div>
-      </div>
-      <div class="studio-stat">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#3b82f6,#06b6d4)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-        </div>
-        <div>
-          <div class="studio-stat-value">${totalViews.toLocaleString()}</div>
-          <div class="studio-stat-label">Total views</div>
-        </div>
-      </div>
-      <div class="studio-stat">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#ec4899,#f43f5e)">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" stroke="white" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-        </div>
-        <div>
-          <div class="studio-stat-value">${totalLikes.toLocaleString()}</div>
-          <div class="studio-stat-label">Total likes</div>
-        </div>
-      </div>
-      <button type="button" class="studio-stat studio-stat-clickable" id="studioStatRevenueBtn" title="View detailed earnings & withdraw">
-        <div class="studio-stat-icon" style="background:linear-gradient(135deg,#22c55e,#10b981)">
-          <!-- Peso glyph in a soft circle — same money cue as the
-               monetize toggle, in green to keep the "earnings" semantic. -->
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M8 5h5.5a3.5 3.5 0 0 1 0 7H8"/>
-            <line x1="6" y1="9" x2="14" y2="9"/>
-            <line x1="6" y1="13" x2="11" y2="13"/>
-            <line x1="8" y1="3" x2="8" y2="19"/>
-          </svg>
-        </div>
-        <div class="studio-stat-text">
-          <div class="studio-stat-value">${formatPhpFromMinor(studioRevenuePhpMinor || 0)}</div>
-          <div class="studio-stat-label">
-            Revenue
-            <span class="studio-stat-cta" aria-hidden="true">View earnings →</span>
-          </div>
-        </div>
-      </button>
-    </div>
-
-    <div class="studio-filter-chips" role="tablist" aria-label="Filter and sort">
-      ${[
-        ['all',        'All'],
-        ['published',  'Published'],
-        ['scheduled',  'Scheduled'],
-        ['processing', 'Processing'],
-        ['private',    'Private'],
-        ['failed',     'Failed'],
-      ].map(([key, label]) => `
-        <button type="button" class="studio-filter-chip studio-filter-chip-${key} ${studioVisibilityFilter === key ? 'is-selected' : ''}" data-filter="${key}" role="tab" aria-selected="${studioVisibilityFilter === key ? 'true' : 'false'}">
-          ${label}<span class="studio-filter-chip-count">${(visibilityCounts[key] || 0).toLocaleString()}</span>
-        </button>
-      `).join('')}
-    </div>
-
-    <div class="studio-toolbar">
-      <div class="studio-search">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="studioSearchInput" placeholder="Search your videos..." value="${escHTML(studioSearchQuery)}"/>
-      </div>
-      <div class="studio-toolbar-info">${rangeLabel}${filtered.length !== totalVideos ? ` (filtered from ${totalVideos.toLocaleString()})` : ''}</div>
-    </div>
-
-    ${studioSelectedIds.size > 0 ? `
-      <div class="studio-bulk-bar" role="region" aria-label="Bulk actions">
-        <div class="studio-bulk-count">
-          <strong>${studioSelectedIds.size.toLocaleString()}</strong> selected
-        </div>
-        <div class="studio-bulk-actions">
-          <button type="button" class="studio-bulk-btn studio-bulk-btn-monetize" data-bulk-action="monetize-off" title="Disable monetization on selected">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><circle cx="12" cy="12" r="9"/></svg>
-            Disable monetization
-          </button>
-          <button type="button" class="studio-bulk-btn studio-bulk-btn-delete" data-bulk-action="delete" title="Delete selected">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-            Delete
-          </button>
-          <button type="button" class="studio-bulk-btn studio-bulk-btn-clear" data-bulk-action="clear" title="Clear selection">
-            Clear
-          </button>
-        </div>
-      </div>
-    ` : ''}
-
-    <div class="studio-table-wrap">
-      ${filtered.length === 0 ? `
-        <div class="studio-empty" style="padding:3rem 1rem">
-          <h3>${studioVisibilityFilter === 'all' && !q ? 'No videos' : 'No matches'}</h3>
-          <p>${studioVisibilityFilter === 'all' && !q ? '' : 'Try a different filter or search term'}</p>
-        </div>
-      ` : `
-        <table class="studio-table">
-          <thead>
-            <tr>
-              <th class="studio-col-select">
-                <input type="checkbox" class="studio-checkbox" id="studioSelectAll" ${allOnPageSelected ? 'checked' : ''} ${someOnPageSelected ? 'data-indeterminate="true"' : ''} aria-label="Select all on this page"/>
-              </th>
-              <th class="studio-col-num">#</th>
-              <th class="studio-col-video studio-sortable ${studioSort.key === 'title' ? 'is-sorted' : ''}" data-sort-key="title">
-                Video${studioSort.key === 'title' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
-              </th>
-              <th class="studio-col-status">Visibility</th>
-              <th class="studio-col-date studio-sortable ${studioSort.key === 'created_at' ? 'is-sorted' : ''}" data-sort-key="created_at">
-                Date${studioSort.key === 'created_at' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
-              </th>
-              <th class="studio-col-views studio-sortable ${studioSort.key === 'views' ? 'is-sorted' : ''}" data-sort-key="views">
-                Views${studioSort.key === 'views' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
-              </th>
-              <th class="studio-col-likes studio-sortable ${studioSort.key === 'likes' ? 'is-sorted' : ''}" data-sort-key="likes">
-                Likes${studioSort.key === 'likes' ? `<span class="studio-sort-icon ${studioSort.dir}">${studioSort.dir === 'asc' ? '↑' : '↓'}</span>` : '<span class="studio-sort-icon dim">↕</span>'}
-              </th>
-              <th class="studio-col-comments">Comments</th>
-              <th class="studio-col-actions">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${pageSlice.map((v, i) => renderStudioRow(v, pageStart + i + 1, studioSelectedIds.has(v.id))).join('')}
-          </tbody>
-        </table>
-      `}
-    </div>
-    ${filtered.length > 0 ? `
-      <div class="studio-pagination">
-        <div class="studio-pagination-pagesize">
-          <span class="studio-pagination-label">Rows per page</span>
-          <div class="studio-pagesize-group" role="radiogroup" aria-label="Rows per page">
-            ${STUDIO_PAGE_SIZE_OPTIONS.map(n => `
-              <button type="button" class="studio-pagesize-option ${n === studioPageSize ? 'is-selected' : ''}" data-pagesize="${n}" role="radio" aria-checked="${n === studioPageSize ? 'true' : 'false'}">${n}</button>
-            `).join('')}
-          </div>
-        </div>
-        <div class="studio-pagination-nav">
-          <span class="studio-pagination-info">Page ${studioPageIdx} of ${totalPages}</span>
-          <button type="button" class="studio-pagination-btn" data-page-action="prev" ${studioPageIdx <= 1 ? 'disabled' : ''} title="Previous page">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-          </button>
-          <button type="button" class="studio-pagination-btn" data-page-action="next" ${studioPageIdx >= totalPages ? 'disabled' : ''} title="Next page">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-          </button>
-        </div>
-      </div>
-    ` : ''}
-  `;
-
-  // Wire up search input
-  const searchInput = document.getElementById('studioSearchInput');
-  if (searchInput) {
-    searchInput.addEventListener('input', (e) => {
-      studioSearchQuery = e.target.value;
-      // Filter changed → reset to page 1 so we don't end up stuck on
-      // page 7 of a 2-page filtered result set.
-      studioPageIdx = 1;
-      renderStudio();
-      // Re-focus the input after re-render
-      const newInput = document.getElementById('studioSearchInput');
-      if (newInput) {
-        newInput.focus();
-        newInput.setSelectionRange(studioSearchQuery.length, studioSearchQuery.length);
-      }
-    });
-  }
-
-  // Wire up pagination controls
-  content.querySelectorAll('[data-pagesize]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const next = parseInt(btn.dataset.pagesize, 10);
-      if (!STUDIO_PAGE_SIZE_OPTIONS.includes(next) || next === studioPageSize) return;
-      studioPageSize = next;
-      studioPageIdx = 1; // resize collapses page indices — start from the top
-      localStorage.setItem('selebox_studio_page_size', String(next));
-      renderStudio();
-    });
-  });
-  content.querySelectorAll('[data-page-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const dir = btn.dataset.pageAction;
-      if (dir === 'prev') studioPageIdx = Math.max(1, studioPageIdx - 1);
-      else if (dir === 'next') studioPageIdx = studioPageIdx + 1; // clamp happens inside renderStudio
-      renderStudio();
-      // Scroll the table back to the top so the new page starts at row 1.
-      const wrap = document.querySelector('#studioPage .studio-table-wrap');
-      if (wrap) wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  });
-
-  // Wire the Revenue stat card → opens the dedicated Earnings page.
-  // Uses the same showEarnings() entry point as the sidebar's
-  // Earnings button so the route, breadcrumbs, and sidebar active
-  // state stay consistent.
-  const revenueBtn = document.getElementById('studioStatRevenueBtn');
-  if (revenueBtn) {
-    revenueBtn.addEventListener('click', () => showEarnings());
-  }
-
-  // Wire visibility filter chips
-  content.querySelectorAll('[data-filter]').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const next = chip.dataset.filter;
-      if (next === studioVisibilityFilter) return;
-      studioVisibilityFilter = next;
-      studioPageIdx = 1;            // filter narrowed → start from page 1
-      renderStudio();
-    });
-  });
-
-
-  // Wire sortable header clicks. Same-key click → flip direction;
-  // different-key click → switch key and start descending (default for
-  // the visual sort metaphor "most first" — most views, newest date, etc).
-  content.querySelectorAll('[data-sort-key]').forEach(th => {
-    th.addEventListener('click', () => {
-      const key = th.dataset.sortKey;
-      if (studioSort.key === key) {
-        studioSort.dir = studioSort.dir === 'asc' ? 'desc' : 'asc';
-      } else {
-        studioSort.key = key;
-        studioSort.dir = key === 'title' ? 'asc' : 'desc'; // titles read better A→Z, metrics most-first
-      }
-      studioPageIdx = 1;
-      renderStudio();
-    });
-  });
-
-  // Wire the page header checkbox: toggle all visible rows.
-  const selectAll = document.getElementById('studioSelectAll');
-  if (selectAll) {
-    // The DOM doesn't accept an indeterminate attribute at parse time;
-    // hydrate it imperatively from the data attribute the renderer set.
-    if (selectAll.dataset.indeterminate === 'true') selectAll.indeterminate = true;
-    selectAll.addEventListener('change', () => {
-      if (selectAll.checked) {
-        // Add every visible-page id to the selection set.
-        pageSlice.forEach(v => studioSelectedIds.add(v.id));
-      } else {
-        // Drop just the visible-page ids; selections on other pages
-        // (in case the user paged then came back) are preserved.
-        pageSlice.forEach(v => studioSelectedIds.delete(v.id));
-      }
-      renderStudio();
-    });
-  }
-
-  // Wire per-row checkboxes.
-  content.querySelectorAll('.studio-row-checkbox').forEach(cb => {
-    cb.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const id = cb.dataset.id;
-      if (cb.checked) studioSelectedIds.add(id);
-      else            studioSelectedIds.delete(id);
-      renderStudio();
-    });
-  });
-
-  // Wire bulk action bar.
-  content.querySelectorAll('[data-bulk-action]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const action = btn.dataset.bulkAction;
-      const ids = Array.from(studioSelectedIds);
-      if (action === 'clear') {
-        studioSelectedIds.clear();
-        renderStudio();
-        return;
-      }
-      if (!ids.length) return;
-
-      if (action === 'delete') {
-        if (!confirm(`Delete ${ids.length} video${ids.length === 1 ? '' : 's'} forever? This can't be undone.`)) return;
-        btn.disabled = true;
-        const { error } = await supabase.from('videos').delete().in('id', ids);
-        btn.disabled = false;
-        if (error) { toast(error.message, 'error'); return; }
-        // Prune local cache + clear selection so the UI converges
-        // without an extra round-trip.
-        studioVideosCache = studioVideosCache.filter(v => !ids.includes(v.id));
-        studioSelectedIds.clear();
-        toast(`Deleted ${ids.length} video${ids.length === 1 ? '' : 's'}`, 'success');
-        renderStudio();
-        return;
-      }
-
-      if (action === 'monetize-off') {
-        btn.disabled = true;
-        const { error } = await supabase.from('videos').update({ is_monetized: false }).in('id', ids);
-        btn.disabled = false;
-        if (error) { toast(error.message, 'error'); return; }
-        // Patch the in-memory cache so the next render reflects the change.
-        for (const v of studioVideosCache) if (ids.includes(v.id)) v.is_monetized = false;
-        toast(`Monetization disabled on ${ids.length} video${ids.length === 1 ? '' : 's'}`, 'success');
-        renderStudio();
-        return;
-      }
-    });
-  });
-
-  // Wire up monetize/edit/delete buttons via delegation
-  content.querySelectorAll('[data-studio-action]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const action = btn.dataset.studioAction;
-      const id = btn.dataset.id;
-      if (action === 'edit')          openStudioEditModal(id);
-      else if (action === 'delete')   deleteStudioVideo(id);
-      else if (action === 'monetize') toggleStudioMonetize(id, btn);
-      else if (action === 'share')    openStudioShareModal(id);
-    });
-  });
-}
-
-// Inline monetize toggle from the studio list — no need to open the edit modal.
-// Same gate as the modal: video duration must be ≥ 3 min (else show why).
-async function toggleStudioMonetize(videoId, btn) {
-  const v = studioVideosCache.find(x => x.id === videoId);
-  if (!v) return;
-  const minSec = _walletConfigDefaults.video_initial_unlock_seconds || 180;
-
-  // Already monetized → just turn it off (no gate needed)
-  if (v.is_monetized) {
-    btn.disabled = true;
-    const { error } = await supabase.from('videos').update({ is_monetized: false }).eq('id', videoId);
-    btn.disabled = false;
-    if (error) { toast(error.message, 'error'); return; }
-    v.is_monetized = false;
-    btn.classList.remove('is-on');
-    btn.title = 'Toggle monetization';
-    toast('Monetization disabled', 'success');
-    return;
-  }
-
-  // Turning on → check duration.
-  //
-  // If 0 (legacy/migrated rows that never had duration persisted), we
-  // used to bounce the user into the Edit modal so it could auto-probe
-  // the file. That's a friction tax for a one-tap action. Instead we
-  // do the same client-side probe inline here, persist the discovered
-  // duration back to the DB, then re-evaluate the gate and flip the
-  // toggle without any modal in between. Mirrors the helper at
-  // openStudioEditModal's auto-probe block.
-  if (!v.duration || v.duration === 0) {
-    if (!(v.video_url || v.videoUrl)) {
-      toast('Missing video URL — cannot read duration.', 'error');
-      return;
-    }
-    btn.disabled = true;
-    const prevHTML = btn.querySelector('.studio-btn-peso')?.textContent;
-    const peso = btn.querySelector('.studio-btn-peso');
-    if (peso) peso.textContent = '…'; // small visual cue while we probe
-    try {
-      const real = await new Promise((resolve) => {
-        const probe = document.createElement('video');
-        probe.preload = 'metadata';
-        probe.muted = true;
-        probe.crossOrigin = 'anonymous';
-        probe.style.display = 'none';
-        probe.src = v.video_url || v.videoUrl;
-        const done = (val) => { probe.remove(); resolve(val); };
-        probe.onloadedmetadata = () => done(Math.round(probe.duration || 0));
-        probe.onerror = () => done(0);
-        document.body.appendChild(probe);
-      });
-      if (peso && prevHTML !== undefined) peso.textContent = prevHTML;
-      btn.disabled = false;
-      if (real > 0) {
-        v.duration = real;
-        // Persist so we never need to probe again for this row.
-        try { await supabase.from('videos').update({ duration: real }).eq('id', videoId); } catch {}
-      } else {
-        toast('Could not read video duration. Try again in a moment.', 'error');
-        return;
-      }
-    } catch {
-      if (peso && prevHTML !== undefined) peso.textContent = prevHTML;
-      btn.disabled = false;
-      toast('Could not read video duration.', 'error');
-      return;
-    }
-  }
-  if (v.duration < minSec) {
-    const mins = Math.floor(v.duration / 60);
-    const secs = Math.floor(v.duration % 60);
-    toast(`Video must be at least ${minSec/60} min to monetize. This one is ${mins}m ${secs}s.`, 'error');
-    return;
-  }
-
-  // Eligible — flip it on
-  btn.disabled = true;
-  const { error } = await supabase.from('videos').update({ is_monetized: true }).eq('id', videoId);
-  btn.disabled = false;
-  if (error) { toast(error.message, 'error'); return; }
-  v.is_monetized = true;
-  btn.classList.add('is-on');
-  btn.title = 'Monetized — click to disable';
-  toast('Monetization enabled 💰', 'success');
-}
-
-function renderStudioRow(v, rowNumber, isSelected = false) {
-  const thumb = v.thumbnail_url 
-    ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>` 
-    : '<div class="studio-thumb-placeholder"></div>';
-  const date = new Date(v.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-  const desc = v.description 
-    ? `<div class="studio-row-desc">${escHTML(v.description.slice(0, 100))}${v.description.length > 100 ? '…' : ''}</div>` 
-    : '<div class="studio-row-desc" style="color:#aaa;font-style:italic">No description</div>';
-  // Visibility pill — derives from the shared _studioDeriveVisibility
-  // helper so the chip-row counts and the per-row pill can never
-  // disagree. Mirrors mobile's CreatorVideoCard mapping.
-  const _bucket = _studioDeriveVisibility(v);
-  const _badgeMap = {
-    published:  { cls: 'studio-badge-published',  dot: 'studio-dot-green',  label: 'Published' },
-    scheduled:  { cls: 'studio-badge-scheduled',  dot: 'studio-dot-purple', label: 'Scheduled' },
-    processing: { cls: 'studio-badge-processing', dot: 'studio-dot-yellow', label: v.status === 'uploading' ? 'Uploading' : 'Processing' },
-    private:    { cls: 'studio-badge-private',    dot: 'studio-dot-red',    label: 'Private' },
-    failed:     { cls: 'studio-badge-failed',     dot: 'studio-dot-red',    label: v.status === 'failed' ? 'Failed' : 'Error' },
-    unknown:    { cls: 'studio-badge-processing', dot: 'studio-dot-yellow', label: v.status || 'Unknown' },
-  };
-  const _b = _badgeMap[_bucket] || _badgeMap.unknown;
-  const statusBadge = `<span class="studio-badge ${_b.cls}"><span class="studio-dot ${_b.dot}"></span>${_b.label}</span>`;
-  const duration = v.duration ? formatDuration(v.duration) : '';
-  
-  return `
-    <tr data-video-id="${v.id}" class="${isSelected ? 'is-selected' : ''}">
-      <td class="studio-col-select-cell">
-        <input type="checkbox" class="studio-checkbox studio-row-checkbox" data-id="${v.id}" ${isSelected ? 'checked' : ''} aria-label="Select video"/>
-      </td>
-      <td class="studio-col-num-cell">${rowNumber != null ? rowNumber.toLocaleString() : ''}</td>
-      <td>
-        <div class="studio-row-video">
-          <div class="studio-thumb">
-            ${thumb}
-            ${duration ? `<span class="studio-thumb-duration">${duration}</span>` : ''}
-          </div>
-          <div class="studio-row-text">
-            <div class="studio-row-title">${escHTML(v.title || 'Untitled')}</div>
-            ${desc}
-          </div>
-        </div>
-      </td>
-      <td class="studio-col-status">${statusBadge}</td>
-      <td class="studio-col-date"><span class="studio-cell-muted">${date}</span></td>
-      <td class="studio-col-views">${((v.views_count ?? v.views) || 0).toLocaleString()}</td>
-      <td class="studio-col-likes">${((v.likes_count ?? v.likes) || 0).toLocaleString()}</td>
-      <td class="studio-col-comments">${(v.comments_count || 0).toLocaleString()}</td>
-      <td class="studio-col-actions">
-        <div class="studio-actions">
-          <button class="studio-btn studio-btn-monetize ${v.is_monetized ? 'is-on' : ''}" data-studio-action="monetize" data-id="${v.id}" title="${v.is_monetized ? 'Monetized — click to disable' : 'Toggle monetization'}">
-            <span class="studio-btn-peso" aria-hidden="true">₱</span>
-          </button>
-          <button class="studio-btn" data-studio-action="edit" data-id="${v.id}" title="Edit details">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-          </button>
-          <!-- Share to feed — drafts a post (with or without schedule)
-               that embeds this video. Useful for announcing scheduled
-               videos: pick the same publish time for the post and the
-               video, both go live together. See openStudioShareModal(). -->
-          <button class="studio-btn" data-studio-action="share" data-id="${v.id}" title="Share to feed / schedule a post">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-          </button>
-          <button class="studio-btn studio-btn-danger" data-studio-action="delete" data-id="${v.id}" title="Delete forever">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-          </button>
-        </div>
-      </td>
-    </tr>
-  `;
-}
-
-// Custom thumbnail state for the studio edit modal (May 2026). When
-// the author picks a new image we upload it immediately so by the time
-// they hit Save, the only DB write needed is the videos row update.
-// `null` means "no pending change" — the existing thumbnail_url stays.
-let studioEditPendingThumbnailUrl = null;
-let _studioEditThumbUploadToken = 0;
-
-function _renderStudioEditThumb(currentUrl) {
-  const tile    = document.getElementById('studioEditThumbTile');
-  const picker  = document.getElementById('studioEditThumbPicker');
-  const img     = document.getElementById('studioEditThumb');
-  const empty   = document.getElementById('studioEditThumbEmpty');
-  const overlay = document.getElementById('studioEditThumbOverlay');
-  const title   = document.getElementById('studioEditThumbMetaTitle');
-  const sub     = document.getElementById('studioEditThumbMetaSub');
-  const replace = document.getElementById('studioEditThumbReplace');
-  if (!tile || !img || !empty) return;
-  const url = studioEditPendingThumbnailUrl || currentUrl || null;
-  if (url) {
-    img.src = url;
-    img.style.display = '';
-    empty.style.display = 'none';
-    if (overlay) overlay.style.display = '';
-    if (title) title.textContent = studioEditPendingThumbnailUrl ? 'New thumbnail (unsaved)' : 'Current thumbnail';
-    if (sub)   sub.textContent   = 'Click the tile to upload a new cover. JPG/PNG/WebP, up to 5 MB.';
-    if (replace) replace.textContent = studioEditPendingThumbnailUrl ? 'Replace image' : 'Change image';
-  } else {
-    img.src = '';
-    img.style.display = 'none';
-    empty.style.display = '';
-    if (overlay) overlay.style.display = 'none';
-    if (title) title.textContent = 'No thumbnail set';
-    if (sub)   sub.textContent   = 'Add a cover so your video stands out on the home feed.';
-    if (replace) replace.textContent = 'Choose image';
-  }
-  if (picker) picker.classList.remove('is-uploading');
-}
-
-async function _studioEditHandleThumbPick(file) {
-  if (!file) return;
-  const myToken = ++_studioEditThumbUploadToken;
-  const picker = document.getElementById('studioEditThumbPicker');
-  const sub    = document.getElementById('studioEditThumbMetaSub');
-  picker?.classList.add('is-uploading');
-  if (sub) sub.textContent = 'Uploading thumbnail…';
-  try {
-    const url = await _vuUploadThumbnailFile(file);
-    if (myToken !== _studioEditThumbUploadToken) return;
-    if (url) {
-      studioEditPendingThumbnailUrl = url;
-      toast('Thumbnail uploaded — click Save to apply', 'success');
-    }
-  } finally {
-    if (myToken === _studioEditThumbUploadToken) {
-      const v = studioVideosCache.find(x => x.id === studioEditingVideoId);
-      _renderStudioEditThumb(v?.thumbnail_url || null);
-    }
-  }
-}
-
-document.getElementById('studioEditThumbFile')?.addEventListener('change', (e) => {
-  const file = e.target.files?.[0];
-  e.target.value = '';
-  _studioEditHandleThumbPick(file);
-});
-document.getElementById('studioEditThumbReplace')?.addEventListener('click', () => {
-  document.getElementById('studioEditThumbFile')?.click();
-});
-
-function openStudioEditModal(videoId) {
-  const v = studioVideosCache.find(x => x.id === videoId);
-  if (!v) return;
-
-  studioEditingVideoId = videoId;
-  // Clear any leftover pending thumbnail from a previous edit session.
-  studioEditPendingThumbnailUrl = null;
-  _studioEditThumbUploadToken++;
-
-  document.getElementById('studioEditTitle').value = v.title || '';
-  document.getElementById('studioEditDescription').value = v.description || '';
-  document.getElementById('studioEditTags').value = (v.tags || []).join(', ');
-  // Category dropdown removed — see videoUploadCategory comment above.
-
-  // Render the thumbnail tile in its starting state. The new
-  // .vu-thumb-picker component (defined alongside the upload-wizard
-  // picker) replaces the static .vu-preview-box that used to sit here.
-  _renderStudioEditThumb(v.thumbnail_url || null);
-
-  document.getElementById('studioEditTitleCount').textContent = `${(v.title || '').length} / 100`;
-  document.getElementById('studioEditDescCount').textContent = `${(v.description || '').length} / 2000`;
-
-  // Monetization toggle (Phase 6: time-based, not gated-from-start).
-  // Gate: monetize requires duration >= 3 min, since the first paid threshold
-  // is the 3:00 mark — a 2-min video could never trigger an unlock.
-  const monCb     = document.getElementById('studioEditMonetized');
-  const monLabel  = monCb?.closest('.lock-toggle');
-  const minSec    = _walletConfigDefaults.video_initial_unlock_seconds || 180;
-
-  // Helper: render the gate state given a duration in seconds.
-  const applyGate = (duration) => {
-    const eligible = (duration || 0) >= minSec;
-    if (!monCb) return;
-    monCb.checked  = !!v.is_monetized && eligible;
-    monCb.disabled = !eligible;
-    if (monLabel) monLabel.classList.toggle('is-disabled', !eligible);
-    const subEl = monLabel?.querySelector('.lock-toggle-sub');
-    if (!subEl) return;
-    if (duration == null) {
-      subEl.textContent = 'Reading video duration…';
-    } else if (eligible) {
-      subEl.innerHTML = 'Free for the first 3 minutes. After that, viewers pay <strong>1 coin</strong> for permanent access, or <strong>1 star every 10 minutes</strong> they keep watching.';
-    } else {
-      subEl.textContent = `Video must be at least ${Math.floor(minSec/60)} minute${minSec/60 === 1 ? '' : 's'} long to monetize. This one is ${Math.floor((duration||0)/60)}m ${Math.floor((duration||0)%60)}s.`;
-    }
-  };
-
-  // Initial render with whatever the DB has (may be 0 for legacy/migrated videos)
-  applyGate(v.duration || 0);
-
-  // Backfill from the actual video file if duration is missing or zero.
-  // Reads metadata client-side, then UPDATEs the videos row so the gate works
-  // immediately and stays correct on future opens.
-  if (!v.duration && (v.video_url || v.videoUrl)) {
-    const probe = document.createElement('video');
-    probe.preload = 'metadata';
-    probe.muted   = true;
-    probe.crossOrigin = 'anonymous';
-    probe.style.display = 'none';
-    probe.src = v.video_url || v.videoUrl;
-    const cleanup = () => probe.remove();
-    probe.onloadedmetadata = async () => {
-      const real = Math.round(probe.duration || 0);
-      if (real > 0) {
-        v.duration = real;       // patch in-memory cache so save sees the right value
-        applyGate(real);
-        // Persist back to DB so we don't probe again on next open
-        try {
-          await supabase.from('videos').update({ duration: real }).eq('id', studioEditingVideoId);
-        } catch {}
-      }
-      cleanup();
-    };
-    probe.onerror = () => { applyGate(0); cleanup(); };
-    document.body.appendChild(probe);
-  }
-
-  document.getElementById('studioEditModal').style.display = 'flex';
-}
-
-function closeStudioEditModal() {
-  document.getElementById('studioEditModal').style.display = 'none';
-  studioEditingVideoId = null;
-  // Drop any unsaved thumbnail upload — the file already lives in
-  // Supabase Storage but isn't pointed at by any row, so it'll be
-  // garbage-collected by the bucket-cleanup job.
-  studioEditPendingThumbnailUrl = null;
-  _studioEditThumbUploadToken++;
-}
-
-async function saveStudioEdit() {
-  if (!studioEditingVideoId) return;
-
-  const saveBtn = document.getElementById('studioEditSave');
-  const originalLabel = saveBtn.textContent;
-
-  const setSaving = (saving) => {
-    if (saving) {
-      saveBtn.classList.add('is-saving');
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving';
-    } else {
-      saveBtn.classList.remove('is-saving');
-      saveBtn.disabled = false;
-      saveBtn.textContent = originalLabel;
-    }
-  };
-
-  const title = document.getElementById('studioEditTitle').value.trim();
-  const description = document.getElementById('studioEditDescription').value.trim();
-  const tagsRaw = document.getElementById('studioEditTags').value;
-  // Category dropdown removed — see videoUploadCategory comment.
-
-  if (!title) {
-    toast('Title is required', 'error');
-    return;
-  }
-
-  setSaving(true);
-
-  const tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t);
-
-  // Monetization toggle (Phase 6 replaces is_locked for new videos)
-  const isMonetized = document.getElementById('studioEditMonetized')?.checked || false;
-
-  // Only write thumbnail_url when the author actually picked a new
-  // image. Including it unconditionally would overwrite the current
-  // value with the same string — harmless but pointless DB write — and
-  // would conflict with any in-flight bunny-video-ready webhook that's
-  // updating other columns on the same row.
-  const updatePayload = {
-    title, description, tags,
-    is_monetized: isMonetized,
-    updated_at: new Date().toISOString(),
-  };
-  if (studioEditPendingThumbnailUrl) {
-    updatePayload.thumbnail_url = studioEditPendingThumbnailUrl;
-  }
-
-  const { error } = await supabase
-    .from('videos')
-    .update(updatePayload)
-    .eq('id', studioEditingVideoId);
-
-  setSaving(false);
-
-  if (error) {
-    toast('Failed to save: ' + error.message, 'error');
-    return;
-  }
-
-  toast('Saved', 'success');
-  closeStudioEditModal();
-
-  // Invalidate caches and reload
-  allVideosCache = [];
-  loadStudio();
-}
-
 // ════════════════════════════════════════════════════════════════════════
-// Share-to-feed modal — opened from the Creator Studio actions column.
-// Lets the creator post a feed announcement with the video attached as
-// an embedded card. The post can be scheduled for the same time as the
-// video (Charles's typical workflow: schedule the video, then schedule
-// the announcement post to drop at the same moment).
+// Creator Studio moved to js/studio.js (Stage 4, 2026-05-15). The original
+// block lived here from line ~15624 to ~16795 and owned: ~30 studio* state
+// vars (cache, search, sort, filter, page, selection), loadStudio,
+// renderStudio, renderStudioRow, openStudioEditModal + saveStudioEdit,
+// _renderStudioEditThumb + _studioEditHandleThumbPick + thumbnail picker
+// listeners, openStudioShareModal (with its own internal listeners),
+// toggleStudioMonetize, deleteStudioVideo, maybeFlushDueScheduledVideos,
+// _studioDeriveVisibility, _studioGetSortValue, and the btnStudioUpload
+// click handler.
 //
-// Uses the existing submit_post RPC mobile uses, so the feed rendering
-// stays consistent across web + mobile. Attaching the video via
-// p_video_id makes the feed card show the video thumbnail + title
-// rather than a bare URL.
+// What stays here: showStudio() at ~line 9461 (sidebar nav entry). It now
+// imports loadStudio from ./studio.js. The btnStudio sidebar listener
+// stays unchanged; it calls showStudio() which in turn calls loadStudio().
+//
+// Drive-by fix bundled in: the share modal used to call a `esc()` helper
+// that didn't exist at module scope (local const inside a different fn),
+// so Share would have thrown ReferenceError under certain code paths.
+// Replaced with the imported escHTML during the move.
 // ════════════════════════════════════════════════════════════════════════
-function openStudioShareModal(videoId) {
-  const v = studioVideosCache.find(x => x.id === videoId);
-  if (!v) { toast('Video not found in cache', 'error'); return; }
-  if (!currentUser?.id) { toast('Please sign in first', 'error'); return; }
-
-  // Build the public URL using the same format the in-app share menu uses
-  // (see line ~17271): /#video/sb_<uuid>. Kept here only for display in
-  // the modal — the actual post attaches the video via p_video_id so
-  // the feed renders a rich embed, not a bare URL.
-  const shareUrl = `${window.location.origin}/#video/sb_${v.id}`;
-  const thumbUrl = v.thumbnail_url || '';
-  const title    = v.title || '(untitled video)';
-
-  // Default schedule input: 1 hour from now, rounded down to the
-  // minute. <input type="datetime-local"> wants 'YYYY-MM-DDTHH:mm' in
-  // LOCAL time (no timezone suffix); we convert back to UTC at submit.
-  const oneHourLater = new Date(Date.now() + 60 * 60 * 1000);
-  oneHourLater.setSeconds(0, 0);
-  const tzOffMs   = oneHourLater.getTimezoneOffset() * 60 * 1000;
-  const defaultLocal = new Date(oneHourLater.getTime() - tzOffMs).toISOString().slice(0, 16);
-
-  // Build modal DOM. Reuses .admin-modal-* classes from admin.css for
-  // visual parity with the rest of the polished admin shell.
-  const backdrop = document.createElement('div');
-  backdrop.className = 'admin-modal-backdrop';
-  backdrop.style.zIndex = '1100';                      // above other modals
-  backdrop.innerHTML = `
-    <div class="admin-modal" role="dialog" aria-modal="true" style="max-width:560px;padding:1.4rem 1.6rem 1.5rem;position:relative">
-      <button type="button" aria-label="Close" id="studioShareClose"
-              style="position:absolute;top:0.9rem;right:1rem;background:transparent;border:none;cursor:pointer;color:var(--admin-text-2);font-size:1.4rem;line-height:1;padding:0.25rem 0.5rem;border-radius:6px">×</button>
-      <h3 style="margin:0 0 0.4rem;font-size:1.1rem;font-weight:600;color:var(--admin-text)">Share to feed</h3>
-      <p class="admin-modal-sub" style="margin:0 0 1rem;color:var(--admin-text-2);font-size:0.875rem">Draft a post that links to this video. Publish now or schedule it.</p>
-
-      <!-- Video preview tile -->
-      <div style="display:flex;gap:0.85rem;align-items:flex-start;padding:0.85rem;border:1px solid var(--admin-border);border-radius:10px;background:var(--admin-card);margin-bottom:1rem">
-        ${thumbUrl
-          ? `<img src="${esc(thumbUrl)}" alt="" style="width:88px;height:88px;border-radius:8px;object-fit:cover;flex-shrink:0"/>`
-          : `<div style="width:88px;height:88px;border-radius:8px;background:var(--admin-surface-2,#222);flex-shrink:0"></div>`}
-        <div style="min-width:0;flex:1">
-          <div style="font-weight:600;color:var(--admin-text);margin-bottom:0.25rem;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${esc(title)}</div>
-          <div style="font-size:0.78rem;color:var(--admin-text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(shareUrl)}">${esc(shareUrl)}</div>
-        </div>
-      </div>
-
-      <!-- Caption -->
-      <label style="display:block;font-size:0.78rem;font-weight:500;color:var(--admin-text-2);margin-bottom:0.4rem">Caption (optional)</label>
-      <textarea id="studioShareCaption" class="admin-input" rows="3"
-                placeholder="What should the post say?"
-                maxlength="2000"
-                style="width:100%;resize:vertical;font-family:inherit"></textarea>
-
-      <!-- When to publish -->
-      <div style="margin-top:1rem">
-        <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;color:var(--admin-text);margin-bottom:0.5rem;cursor:pointer">
-          <input type="radio" name="studioSharePublishWhen" value="now" checked/>
-          Publish now
-        </label>
-        <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;color:var(--admin-text);cursor:pointer">
-          <input type="radio" name="studioSharePublishWhen" value="schedule"/>
-          Schedule for later
-        </label>
-        <div id="studioShareScheduleRow" style="display:none;margin-top:0.55rem;padding-left:1.5rem">
-          <input type="datetime-local" id="studioShareScheduleAt" class="admin-input"
-                 value="${defaultLocal}" min="${defaultLocal}"
-                 style="font-family:inherit"/>
-          <div style="font-size:0.72rem;color:var(--admin-text-2);margin-top:0.3rem">Post will go live at the chosen time. Pair with your video's schedule for a coordinated drop.</div>
-        </div>
-      </div>
-
-      <div class="admin-modal-actions" style="display:flex;justify-content:flex-end;gap:0.5rem;margin-top:1.3rem;padding-top:1rem;border-top:1px solid var(--admin-border)">
-        <button type="button" class="admin-btn" id="studioShareCancel">Cancel</button>
-        <button type="button" class="admin-btn admin-btn-primary" id="studioShareSubmit">Share</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(backdrop);
-
-  const close = () => backdrop.remove();
-  backdrop.querySelector('#studioShareClose').addEventListener('click', close);
-  backdrop.querySelector('#studioShareCancel').addEventListener('click', close);
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-  // ESC handler scoped to this modal — remove on close.
-  const onEsc = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onEsc); } };
-  document.addEventListener('keydown', onEsc);
-
-  // Toggle the datetime row when the radio changes.
-  backdrop.querySelectorAll('input[name="studioSharePublishWhen"]').forEach(r => {
-    r.addEventListener('change', () => {
-      const isScheduled = backdrop.querySelector('input[name="studioSharePublishWhen"]:checked').value === 'schedule';
-      backdrop.querySelector('#studioShareScheduleRow').style.display = isScheduled ? '' : 'none';
-    });
-  });
-
-  // Submit handler.
-  backdrop.querySelector('#studioShareSubmit').addEventListener('click', async () => {
-    const submitBtn = backdrop.querySelector('#studioShareSubmit');
-    const caption   = backdrop.querySelector('#studioShareCaption').value.trim();
-    const when      = backdrop.querySelector('input[name="studioSharePublishWhen"]:checked').value;
-    const schedAt   = backdrop.querySelector('#studioShareScheduleAt').value;
-
-    let scheduledIso = null;
-    if (when === 'schedule') {
-      if (!schedAt) { toast('Pick a date/time to schedule', 'error'); return; }
-      // datetime-local input gives 'YYYY-MM-DDTHH:mm' in local time;
-      // new Date(...) interprets that as local, then toISOString() emits UTC.
-      const d = new Date(schedAt);
-      if (Number.isNaN(d.getTime())) { toast('Invalid date/time', 'error'); return; }
-      if (d.getTime() <= Date.now()) { toast('Schedule time must be in the future', 'error'); return; }
-      scheduledIso = d.toISOString();
-    }
-
-    submitBtn.disabled = true;
-    submitBtn.textContent = when === 'schedule' ? 'Scheduling…' : 'Posting…';
-
-    // Call the same RPC the mobile composer uses. p_video_id attaches
-    // the video so the feed renders a rich card (thumbnail + title)
-    // rather than a bare URL in the body. p_is_hidden + p_scheduled_publish_at
-    // implement the scheduled-publish flow — a pg_cron job flips
-    // is_hidden=false at scheduled_publish_at time.
-    try {
-      const { data, error } = await supabase.rpc('submit_post', {
-        p_actor_id:            currentUser.id,
-        p_body:                caption,
-        p_image_url:           null,
-        p_video_id:            v.id,
-        p_book_id:             null,
-        p_reposted_from:       null,
-        p_legacy_appwrite_id:  null,
-        p_is_hidden:           when === 'schedule',
-        p_scheduled_publish_at: scheduledIso,
-      });
-      if (error) { toast(`Share failed: ${error.message}`, 'error'); return; }
-      if (data?.error) { toast(`Share failed: ${data.error}`, 'error'); return; }
-      toast(when === 'schedule' ? 'Post scheduled' : 'Posted!', 'success');
-      close();
-    } catch (err) {
-      toast(`Share threw: ${err?.message || err}`, 'error');
-    } finally {
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Share';
-    }
-  });
-}
-
-async function deleteStudioVideo(videoId) {
-  const v = studioVideosCache.find(x => x.id === videoId);
-  if (!v) return;
-
-  const ok = await confirmDialog({
-    title: `Delete "${v.title || 'this video'}"?`,
-    body: 'This permanently removes the video from your feed and Bunny storage. This can\'t be undone.',
-    confirmLabel: 'Delete forever',
-  });
-  if (!ok) return;
-  
-  // Show loading state on the row
-  const row = document.querySelector(`tr[data-video-id="${videoId}"]`);
-  if (row) row.style.opacity = '0.4';
-  
-  try {
-    // 1. Call Edge Function to delete from Bunny + Supabase videos table
-    await callEdgeFunction('bunny-delete', { videoId });
-    
-    // 2. Also delete any post that links to this video
-    await supabase.from('posts').delete().eq('video_id', videoId);
-    
-    // 3. Update local cache
-    studioVideosCache = studioVideosCache.filter(x => x.id !== videoId);
-    
-    // 4. Invalidate other caches
-    allVideosCache = [];
-    
-    toast('Video deleted', 'success');
-    renderStudio();
-    
-    // 5. Refresh feed if it's open
-    if (feedEl.style.display !== 'none') {
-      loadFeed();
-    }
-  } catch (err) {
-    console.error('Delete failed:', err);
-    toast('Failed to delete: ' + err.message, 'error');
-    if (row) row.style.opacity = '1';
-  }
-}
-
-// Wire up edit modal events
-document.getElementById('studioEditClose')?.addEventListener('click', closeStudioEditModal);
-document.getElementById('studioEditCancel')?.addEventListener('click', closeStudioEditModal);
-document.getElementById('studioEditSave')?.addEventListener('click', saveStudioEdit);
-document.getElementById('studioEditModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'studioEditModal') closeStudioEditModal();
-});
-
-// Live char counters in edit modal
-document.getElementById('studioEditTitle')?.addEventListener('input', (e) => {
-  document.getElementById('studioEditTitleCount').textContent = `${e.target.value.length} / 100`;
-});
-document.getElementById('studioEditDescription')?.addEventListener('input', (e) => {
-  document.getElementById('studioEditDescCount').textContent = `${e.target.value.length} / 2000`;
-});
-
-// Studio upload button → trigger same upload modal as Videos page
-document.getElementById('btnStudioUpload')?.addEventListener('click', () => {
-  document.getElementById('btnUploadVideo')?.click();
-});
 
 function showVideoPlayer() {
   hideAllMainPages();
@@ -17124,688 +8932,8 @@ document.getElementById('btnBackVideos').addEventListener('click', () => {
   showVideos();
 });
 
-// Fetch new videos uploaded via web (from Supabase)
-async function fetchSupabaseVideos() {
-  try {
-    const { data, error } = await supabase
-      .from('videos')
-      .select(`
-        id,
-        bunny_video_id,
-        title,
-        description,
-        tags,
-        category,
-        video_url,
-        thumbnail_url,
-        views,
-        duration,
-        created_at,
-        uploader_id,
-        is_locked,
-        is_monetized,
-        unlock_cost_coins,
-        unlock_cost_stars,
-        profiles!videos_uploader_id_fkey (
-          id,
-          username,
-          avatar_url,
-          is_banned
-        )
-      `)
-      .eq('status', 'ready')
-      .eq('is_hidden', false)
-      .order('created_at', { ascending: false })
-      .limit(100);
 
-    if (error) {
-      console.error('Supabase videos fetch error:', error);
-      return [];
-    }
-
-    // Map to the shape used throughout the app (videoStats, $id, $createdAt, etc.).
-    // Filter out videos whose uploader is banned.
-    return (data || [])
-      .filter(v => !v.profiles?.is_banned)
-      .map(v => ({
-        $id: 'sb_' + v.id, // prefix so we can tell Supabase videos apart
-        _supabase: true,    // flag for special handling
-        _supabaseId: v.id,
-        title: v.title,
-        description: v.description || '',
-        tags: v.tags || [],
-        uploader: v.uploader_id,
-        thumbnail: v.thumbnail_url,
-        videoUrl: v.video_url,
-        uri: v.video_url,
-        videoStats: { views: v.views || 0, duration: v.duration || 0 },
-        // Monetization fields (Phase 6) — needed by setupVideoMonetGate to
-        // decide whether to set up the time-based unlock listener.
-        // Without these the gate silently no-ops, breaking auto-deduct.
-        is_locked:          !!v.is_locked,
-        is_monetized:       !!v.is_monetized,
-        duration:           v.duration || 0,
-        unlock_cost_coins:  v.unlock_cost_coins ?? null,
-        unlock_cost_stars:  v.unlock_cost_stars ?? null,
-        status: 'ready',
-        $createdAt: v.created_at,
-        // Pre-populated uploader info (saves an extra fetch)
-        _uploaderInfo: v.profiles ? {
-          $id: v.profiles.id,
-          username: v.profiles.username,
-          avatar: v.profiles.avatar_url,
-        } : null,
-      }));
-  } catch (err) {
-    console.error('Failed to fetch Supabase videos:', err);
-    return [];
-  }
-}
-
-async function loadVideos() {
-  const grid = document.getElementById('videoGrid');
-  grid.innerHTML = '<div class="loading">Loading videos...</div>';
-
-  // Populate cache from Supabase if empty (post-migration: Supabase is the only source)
-  if (!allVideosCache.length) {
-    const supabaseVideos = await fetchSupabaseVideos();
-    supabaseVideos.forEach(v => {
-      if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
-        allUploadersCache[v.uploader] = v._uploaderInfo;
-      }
-    });
-    allVideosCache = supabaseVideos;
-  }
-  window._cache = allVideosCache; // expose for debugging
-
-  if (!allVideosCache.length) {
-    grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3>No videos yet</h3></div>';
-    return;
-  }
-
-  renderTagPills();
-
-  // If no search/tag filter, show personalized feed
-  if (!activeSearchQuery && !activeTagFilter) {
-    const personalized = getPersonalizedFeed();
-    renderVideoResults(personalized);
-  } else {
-    runSearch();
-  }
-}
-
-function getPersonalizedFeed() {
-  const { tagWeights, watchedIds, recentUploaders } = getInterestProfile();
-  const hasHistory = Object.keys(tagWeights).length > 0;
-  const myId = currentUser?.id;
-
-  // Filter out already-watched (last 30 days), but always show user's own uploads
-  let pool = allVideosCache.filter(v => v.uploader === myId || !watchedIds.has(v.$id));
-
-  // Pin user's own recent uploads (last 7 days) at the top
-  const myRecent = pool.filter(v =>
-    v.uploader === myId &&
-    v.$createdAt &&
-    (Date.now() - new Date(v.$createdAt).getTime()) < 7 * 24 * 3600 * 1000
-  );
-  const myRecentIds = new Set(myRecent.map(v => v.$id));
-  const others = pool.filter(v => !myRecentIds.has(v.$id));
-
-  if (!hasHistory) {
-    // No watch history → my recent uploads first, then by recency
-    return [...myRecent, ...others];
-  }
-
-  // Score each remaining video
-  others.forEach(v => {
-    let score = 0;
-
-    // Tag matching (interest profile)
-    (v.tags || []).forEach(tag => {
-      if (tagWeights[tag]) score += tagWeights[tag] * 100;
-    });
-
-    // Same uploader bonus (creators you've watched before)
-    if (recentUploaders.includes(v.uploader)) score += 15;
-
-    // Engagement boost
-    const views = v.videoStats?.views || 0;
-    score += Math.log10(views + 1) * 2;
-
-    // Recency boost (newer videos slightly preferred)
-    const ageHours = (Date.now() - new Date(v.$createdAt).getTime()) / 3600000;
-    if (ageHours < 24) score += 8;
-    else if (ageHours < 168) score += 4;
-
-    // Random spice (30% chance to boost a random video)
-    if (Math.random() < 0.3) score += Math.random() * 20;
-
-    v._feedScore = score;
-  });
-
-  // Sort: 70% personalized + 30% trending mixed in
-  others.sort((a, b) => b._feedScore - a._feedScore);
-
-  // Take top 70 personalized
-  const personalized = others.slice(0, 70);
-  // Take 30 trending (high views, not in personalized)
-  const personalizedIds = new Set(personalized.map(v => v.$id));
-  const trending = others
-    .filter(v => !personalizedIds.has(v.$id))
-    .sort((a, b) => (b.videoStats?.views || 0) - (a.videoStats?.views || 0))
-    .slice(0, 30);
-
-  // Interleave them (every 3rd is trending)
-  const result = [];
-  const maxLen = Math.max(personalized.length, trending.length);
-  for (let i = 0; i < maxLen; i++) {
-    if (personalized[i]) result.push(personalized[i]);
-    if (i % 2 === 1 && trending[Math.floor(i/2)]) {
-      result.push(trending[Math.floor(i/2)]);
-    }
-  }
-
-  // Pin my recent uploads at the top
-  return [...myRecent, ...result];
-}
-
-// ── Video search ──
-let allVideosCache = [];
-let allUploadersCache = {};
-let activeSearchQuery = '';
-let activeTagFilter = null;
-
-function searchVideos(query, tagFilter) {
-  query = (query || '').trim();
-  if (!query && !tagFilter) return allVideosCache;
-
-  // Detect hashtag search (e.g. "#music")
-  const hashtagMatch = query.match(/^#(\w+)/);
-  const isHashtag = !!hashtagMatch;
-  // Normalize so "café" matches "cafe" and "Mañana" matches "manana"
-  const cleanQuery = normalizeForSearch(isHashtag ? hashtagMatch[1] : query);
-
-  return allVideosCache.filter(v => {
-    // Tag filter (when user clicks a tag pill)
-    if (tagFilter) {
-      const hasTag = (v.tags || []).some(t => normalizeForSearch(t) === normalizeForSearch(tagFilter));
-      if (!hasTag) return false;
-    }
-    if (!cleanQuery) return true;
-
-    // Hashtag mode: ONLY match tags
-    if (isHashtag) {
-      return (v.tags || []).some(t => normalizeForSearch(t).includes(cleanQuery));
-    }
-
-    // Normal search: match title, description, tags, category, uploader
-    const title    = normalizeForSearch(v.title);
-    const desc     = normalizeForSearch(v.description);
-    const tags     = normalizeForSearch((v.tags || []).join(' '));
-    const category = normalizeForSearch((v.category || '').replace(/-/g, ' '));
-    const uploader = allUploadersCache[v.uploader];
-    const uploaderName = normalizeForSearch(uploader?.username || v._uploaderInfo?.username || '');
-
-    return title.includes(cleanQuery)
-        || desc.includes(cleanQuery)
-        || tags.includes(cleanQuery)
-        || category.includes(cleanQuery)
-        || uploaderName.includes(cleanQuery);
-  });
-}
-
-// Adaptive tag chips — blends user's watch-history tags with platform-popular tags.
-// YouTube-style: chips reflect what YOU'VE been watching, with some discovery sprinkled in.
-function getTopTags(limit = 18) {
-  // Platform popularity (counts every tag occurrence across all videos)
-  const platformCounts = {};
-  allVideosCache.forEach(v => {
-    (v.tags || []).forEach(t => {
-      if (!t || typeof t !== 'string') return;
-      platformCounts[t] = (platformCounts[t] || 0) + 1;
-    });
-  });
-  const platformRanked = Object.entries(platformCounts)
-    .sort((a, b) => b[1] - a[1])
-    .map(([tag]) => tag);
-
-  // User's interest profile — tags weighted by their recent watch history
-  const { tagWeights } = (typeof getInterestProfile === 'function')
-    ? getInterestProfile()
-    : { tagWeights: {} };
-  const userRanked = Object.entries(tagWeights || {})
-    .filter(([t]) => t && platformCounts[t]) // only suggest tags that actually have content
-    .sort((a, b) => b[1] - a[1])
-    .map(([tag]) => tag);
-
-  const hasInterest = userRanked.length > 0;
-
-  if (!hasInterest) {
-    // Brand new user → 100% platform-popular
-    return platformRanked.slice(0, limit);
-  }
-
-  // Returning user → 70% from interest profile, 30% platform discovery
-  const userQuota = Math.ceil(limit * 0.7);
-  const out = new Set(userRanked.slice(0, userQuota));
-  for (const t of platformRanked) {
-    if (out.size >= limit) break;
-    out.add(t);
-  }
-  return [...out].slice(0, limit);
-}
-
-function renderTagPills() {
-  const wrap = document.getElementById('videoSearchTags');
-  const tags = getTopTags(18);
-
-  // First chip = "All" (clears active filter)
-  const allActive = !activeTagFilter ? 'active' : '';
-  let html = `<button class="search-tag-pill search-tag-pill-all ${allActive}" data-tag="">All</button>`;
-  // Then user-adapted + popular tag chips
-  html += tags.map(tag =>
-    `<button class="search-tag-pill ${tag === activeTagFilter ? 'active' : ''}" data-tag="${escHTML(tag)}">${escHTML(tag)}</button>`
-  ).join('');
-  wrap.innerHTML = html;
-
-  wrap.querySelectorAll('.search-tag-pill').forEach(pill => {
-    pill.onclick = () => {
-      const tag = pill.dataset.tag;
-      // "All" chip (empty data-tag) clears the filter; clicking the active tag toggles it off
-      activeTagFilter = (!tag || activeTagFilter === tag) ? null : tag;
-      renderTagPills();
-      if (!activeTagFilter && !activeSearchQuery) {
-        renderVideoResults(getPersonalizedFeed());
-      } else {
-        runSearch();
-      }
-    };
-  });
-}
-
-async function runSearch() {
-  const q = (activeSearchQuery || '').trim();
-
-  // Empty query — show personalized feed, or tag-filtered results.
-  // For tag filters we must hit the server (not the 100-video in-memory cache),
-  // otherwise older videos in that category never show. Without this fix,
-  // clicking "Comedy" only surfaced comedy videos that happened to be in the
-  // most recent 100 uploads.
-  if (!q) {
-    if (activeTagFilter) {
-      const grid = document.getElementById('videoGrid');
-      grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Loading…</div>';
-      const tagLower = activeTagFilter.toLowerCase();
-      try {
-        // Match category OR any tag that equals the filter — covers both
-        // schema patterns (category column + tags array).
-        const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
-        const [byCat, byTag] = await Promise.all([
-          supabase.from('videos').select(baseSelect)
-            .eq('status', 'ready').eq('is_hidden', false)
-            .ilike('category', tagLower)
-            .order('created_at', { ascending: false })
-            .limit(100),
-          supabase.from('videos').select(baseSelect)
-            .eq('status', 'ready').eq('is_hidden', false)
-            .contains('tags', [activeTagFilter])
-            .order('created_at', { ascending: false })
-            .limit(100),
-        ]);
-        // Merge + dedupe + drop banned uploaders
-        const seen = new Set();
-        const merged = [];
-        [...(byCat.data || []), ...(byTag.data || [])].forEach(v => {
-          if (seen.has(v.id) || v.profiles?.is_banned) return;
-          seen.add(v.id);
-          merged.push(v);
-        });
-        const formatted = merged.map(v => ({
-          $id: 'sb_' + v.id, _supabase: true, _supabaseId: v.id,
-          title: v.title, description: v.description || '',
-          tags: v.tags || [], uploader: v.uploader_id,
-          thumbnail: v.thumbnail_url, videoUrl: v.video_url, uri: v.video_url,
-          videoStats: { views: v.views || 0, duration: v.duration || 0 },
-          is_locked: !!v.is_locked, is_monetized: !!v.is_monetized,
-          duration: v.duration || 0,
-          unlock_cost_coins: v.unlock_cost_coins ?? null,
-          unlock_cost_stars: v.unlock_cost_stars ?? null,
-          status: 'ready', $createdAt: v.created_at,
-          _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
-        }));
-        // Hydrate cache so playVideo finds these
-        formatted.forEach(v => {
-          if (!allVideosCache.find(x => x.$id === v.$id)) allVideosCache.push(v);
-          if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
-            allUploadersCache[v.uploader] = v._uploaderInfo;
-          }
-        });
-        renderVideoResults(formatted);
-      } catch (err) {
-        console.warn('Tag filter server fetch failed, falling back to cache:', err);
-        renderVideoResults(searchVideos('', activeTagFilter));
-      }
-    } else {
-      renderVideoResults(getPersonalizedFeed?.() || allVideosCache);
-    }
-    return;
-  }
-
-  // Hashtag mode → cache filter is fine (tag is typed, exact field)
-  if (q.startsWith('#')) {
-    renderVideoResults(searchVideos(q, activeTagFilter));
-    return;
-  }
-
-  // Real search → query the DB so we find ALL matching videos site-wide,
-  // not just the 100 most-recent that live in allVideosCache. This also
-  // fixes "Unknown" creator names (the 100-cap cache may miss some uploaders).
-  const grid = document.getElementById('videoGrid');
-  grid.innerHTML = '<div class="loading" style="grid-column:1/-1">Searching…</div>';
-
-  // Sanitize FIRST (strip , ( ) " — these break .or() / quoting), then ilike-escape.
-  const safeQ = sanitizeSearchQuery(q);
-  // If sanitize stripped everything (e.g. user typed only `,,,` or `()`),
-  // fall back to the personalized feed instead of an unbounded `%%` query
-  // that would match every video on the platform.
-  if (!safeQ) {
-    renderVideoResults(getPersonalizedFeed?.() || allVideosCache);
-    return;
-  }
-  const term = `%${escapeIlike(safeQ)}%`;
-  const baseSelect = `id, bunny_video_id, title, description, tags, category, video_url, thumbnail_url, views, duration, created_at, uploader_id, is_locked, is_monetized, unlock_cost_coins, unlock_cost_stars, profiles!videos_uploader_id_fkey ( id, username, avatar_url, is_banned )`;
-  // Stale-query guard: a slow request mustn't clobber a newer query.
-  const savedQuery = activeSearchQuery;
-
-  try {
-    // Two parallel queries: title/description match, and creator-name match.
-    // Also collect matching CREATOR profiles to surface them as channel cards.
-    let matchingCreators = [];
-    const [byText, byUploader] = await Promise.all([
-      supabase.from('videos').select(baseSelect)
-        .eq('status', 'ready').eq('is_hidden', false)
-        .or(`title.ilike.${term},description.ilike.${term}`)
-        .order('created_at', { ascending: false })
-        .limit(60),
-      (async () => {
-        const { data: profs } = await supabase.from('profiles')
-          .select('id, username, avatar_url, bio, is_banned')
-          .ilike('username', term)
-          .eq('is_banned', false)
-          .limit(8);
-        if (!profs?.length) return { data: [] };
-        matchingCreators = profs;
-        const ids = profs.map(p => p.id);
-        return await supabase.from('videos').select(baseSelect)
-          .eq('status', 'ready').eq('is_hidden', false)
-          .in('uploader_id', ids)
-          .order('created_at', { ascending: false })
-          .limit(60);
-      })(),
-    ]);
-
-    // Stale-query guard — user kept typing while we awaited; abandon this run.
-    if (activeSearchQuery !== savedQuery) return;
-
-    // Merge + dedupe + drop banned uploaders
-    const seen = new Set();
-    const merged = [];
-    [...(byText.data || []), ...(byUploader.data || [])].forEach(v => {
-      if (seen.has(v.id) || v.profiles?.is_banned) return;
-      seen.add(v.id);
-      merged.push(v);
-    });
-
-    // Map to canonical shape
-    const formatted = merged.map(v => ({
-      $id: 'sb_' + v.id,
-      _supabase: true,
-      _supabaseId: v.id,
-      title: v.title,
-      description: v.description || '',
-      tags: v.tags || [],
-      uploader: v.uploader_id,
-      thumbnail: v.thumbnail_url,
-      videoUrl: v.video_url,
-      uri: v.video_url,
-      videoStats: { views: v.views || 0, duration: v.duration || 0 },
-      // Monetization fields needed by setupVideoMonetGate (auto-deduct at 3:00)
-      is_locked:          !!v.is_locked,
-      is_monetized:       !!v.is_monetized,
-      duration:           v.duration || 0,
-      unlock_cost_coins:  v.unlock_cost_coins ?? null,
-      unlock_cost_stars:  v.unlock_cost_stars ?? null,
-      status: 'ready',
-      $createdAt: v.created_at,
-      _uploaderInfo: v.profiles ? { $id: v.profiles.id, username: v.profiles.username, avatar: v.profiles.avatar_url } : null,
-    }));
-
-    // Hydrate caches so playVideo + repeat searches are instant
-    formatted.forEach(v => {
-      if (!allVideosCache.find(x => x.$id === v.$id)) allVideosCache.push(v);
-      if (v._uploaderInfo && !allUploadersCache[v.uploader]) {
-        allUploadersCache[v.uploader] = v._uploaderInfo;
-      }
-    });
-
-    // Apply optional tag filter client-side (rare path)
-    let out = formatted;
-    if (activeTagFilter) {
-      out = formatted.filter(v => (v.tags || []).some(t => t.toLowerCase() === activeTagFilter.toLowerCase()));
-    }
-
-    // Decorate matching creators with video count + total views drawn from
-    // the search results we already have in hand. Cheap, no extra round-trip.
-    const creatorStats = new Map();
-    for (const v of formatted) {
-      const s = creatorStats.get(v.uploader) || { videos: 0, views: 0 };
-      s.videos += 1;
-      s.views  += (v.videoStats?.views || 0);
-      creatorStats.set(v.uploader, s);
-    }
-    const creators = (matchingCreators || []).map(p => ({
-      id: p.id,
-      username: p.username,
-      avatar_url: p.avatar_url,
-      bio: p.bio || '',
-      videos_count: creatorStats.get(p.id)?.videos || 0,
-      views_count:  creatorStats.get(p.id)?.views  || 0,
-    }));
-
-    renderVideoResults(out, creators);
-  } catch (err) {
-    console.error('Search failed:', err);
-    // Fallback: cache filter (covers offline / RPC issues)
-    if (activeSearchQuery !== savedQuery) return; // stale-guard for fallback path too
-    renderVideoResults(searchVideos(q, activeTagFilter));
-  }
-}
-
-function renderVideoResults(videos, creators = []) {
-  const grid = document.getElementById('videoGrid');
-  // No videos AND no matching creators → empty state
-  if (!videos.length && !creators.length) {
-    grid.innerHTML = `
-      <div class="video-search-empty">
-        <h3>No videos found</h3>
-        <p>Try a different keyword or tag</p>
-      </div>
-    `;
-    return;
-  }
-
-  grid.innerHTML = '';
-
-  // ── Creator channel cards (YouTube-style, top of search results) ──
-  if (creators?.length) {
-    const header = document.createElement('div');
-    header.className = 'video-creators-header';
-    header.textContent = creators.length === 1 ? 'Creator' : 'Creators';
-    grid.appendChild(header);
-
-    const channelRow = document.createElement('div');
-    channelRow.className = 'video-creators-row';
-    creators.forEach(c => channelRow.appendChild(renderCreatorChannelCard(c)));
-    grid.appendChild(channelRow);
-
-    if (videos.length) {
-      const videosHeader = document.createElement('div');
-      videosHeader.className = 'video-creators-header';
-      videosHeader.textContent = 'Videos';
-      grid.appendChild(videosHeader);
-    }
-  }
-
-  videos.slice(0, 100).forEach((v, i) => {
-    const card = renderVideoCard(v, allUploadersCache[v.uploader]);
-    card.style.animationDelay = `${i * 0.03}s`;
-    grid.appendChild(card);
-  });
-}
-
-// Creator channel card (search result top row, YouTube-style)
-function renderCreatorChannelCard(creator) {
-  const card = document.createElement('button');
-  card.className = 'creator-channel-card';
-  card.type = 'button';
-  card.onclick = () => openProfile(creator.id);
-
-  const initial = (creator.username || '?').trim().charAt(0).toUpperCase();
-  const avatar = creator.avatar_url
-    ? `<img src="${escHTML(creator.avatar_url)}" alt=""/>`
-    : `<div class="creator-channel-avatar-placeholder">${initial}</div>`;
-
-  const videosLabel = creator.videos_count === 1 ? '1 video' : `${formatCompact(creator.videos_count)} videos`;
-  const viewsLabel  = creator.views_count > 0 ? ` · ${formatCompact(creator.views_count)} views` : '';
-
-  card.innerHTML = `
-    <div class="creator-channel-avatar">${avatar}</div>
-    <div class="creator-channel-info">
-      <div class="creator-channel-name">${escHTML(creator.username || 'Unknown')}</div>
-      <div class="creator-channel-meta">${videosLabel}${viewsLabel}</div>
-      ${creator.bio ? `<div class="creator-channel-bio">${escHTML(creator.bio.slice(0, 90))}${creator.bio.length > 90 ? '…' : ''}</div>` : ''}
-    </div>
-    <div class="creator-channel-cta">View channel →</div>
-  `;
-  return card;
-}
-
-function renderVideoCard(video, uploader) {
-  const div = document.createElement('div');
-  div.className = 'video-card';
-  div.onclick = () => playVideo(video.$id);
-
-  // Resolve uploader from arg → cache → embedded info, in that order
-  uploader = uploader
-    || allUploadersCache[video.uploader]
-    || video._uploaderInfo
-    || null;
-  const name = uploader?.username || 'Unknown';
-  const uploaderId = uploader?.$id || uploader?.id || video.uploader || null;
-  const avatarHTML = uploader?.avatar ? `<img src="${uploader.avatar}" alt="${escHTML(name)}"/>` : initials(name);
-
-  const thumbHTML = video.thumbnail ? `<img src="${video.thumbnail}" loading="lazy" onerror="this.style.display='none'"/>` : '';
-  const resumeTime = getResumeTime(video.$id);
-  const videoDuration = video.videoStats?.duration || 0;
-  const progressPct = (resumeTime && videoDuration) ? Math.min(100, (resumeTime / videoDuration) * 100) : 0;
-
-  // Make creator name + avatar clickable when we have an uploader id
-  const clickableClass = uploaderId ? ' video-card-creator-clickable' : '';
-
-  div.innerHTML = `
-    <div class="video-thumb">
-      ${thumbHTML}
-      <video class="preview" muted playsinline preload="none"></video>
-      <span class="video-thumb-duration" data-duration></span>
-      ${progressPct > 0 ? `<div class="video-thumb-progress"><div class="video-thumb-progress-fill" style="width:${progressPct}%"></div></div>` : ''}
-    </div>
-    <div class="video-card-info">
-      <div class="avatar${clickableClass}" data-uploader-id="${uploaderId || ''}" title="${uploaderId ? 'View profile' : ''}">${avatarHTML}</div>
-      <div class="video-card-text">
-        <div class="video-card-title">${escHTML(video.title || 'Untitled')}</div>
-        <div class="video-card-meta">
-          <span class="video-card-creator${clickableClass}" data-uploader-id="${uploaderId || ''}">${escHTML(name)}</span><br>
-          ${(video.videoStats?.views || 0).toLocaleString()} views • ${timeAgo(video.$createdAt)}
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Wire creator-name + avatar click → open profile (don't bubble to card)
-  if (uploaderId) {
-    div.querySelectorAll('[data-uploader-id="' + uploaderId + '"]').forEach(el => {
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (typeof openProfile === 'function') openProfile(uploaderId);
-      });
-    });
-  }
-
-  // Show duration if available, otherwise fetch from video metadata
-  const durationEl = div.querySelector('[data-duration]');
-  if (videoDuration) {
-    durationEl.textContent = formatDuration(videoDuration);
-  } else if (video.videoUrl) {
-    const tempVid = document.createElement('video');
-    tempVid.preload = 'metadata';
-    tempVid.muted = true;
-    if (video.videoUrl.endsWith('.m3u8') && window.Hls && Hls.isSupported() && !tempVid.canPlayType('application/vnd.apple.mpegurl')) {
-      const tempHls = new Hls();
-      tempHls.loadSource(video.videoUrl);
-      tempHls.attachMedia(tempVid);
-      tempHls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (tempVid.duration && !isNaN(tempVid.duration)) {
-          durationEl.textContent = formatDuration(tempVid.duration);
-        }
-        setTimeout(() => tempHls.destroy(), 500);
-      });
-    } else {
-      tempVid.src = video.videoUrl;
-      tempVid.addEventListener('loadedmetadata', () => {
-        durationEl.textContent = formatDuration(tempVid.duration);
-        tempVid.removeAttribute('src');
-      });
-    }
-  }
-
-  // Hover to play preview
-  const previewEl = div.querySelector('video.preview');
-  let hoverHls = null;
-  let hoverTimeout = null;
-
-  div.addEventListener('mouseenter', () => {
-    hoverTimeout = setTimeout(() => {
-      if (video.videoUrl && video.videoUrl.endsWith('.m3u8')) {
-        if (previewEl.canPlayType('application/vnd.apple.mpegurl')) {
-          previewEl.src = video.videoUrl;
-        } else if (window.Hls && Hls.isSupported()) {
-          hoverHls = new Hls();
-          hoverHls.loadSource(video.videoUrl);
-          hoverHls.attachMedia(previewEl);
-        }
-      } else {
-        previewEl.src = video.videoUrl;
-      }
-      previewEl.play().then(() => {
-        previewEl.classList.add('playing');
-      }).catch(() => {});
-    }, 600); // 600ms delay before preview starts (like YouTube)
-  });
-
-  div.addEventListener('mouseleave', () => {
-    clearTimeout(hoverTimeout);
-    previewEl.classList.remove('playing');
-    previewEl.pause();
-    previewEl.currentTime = 0;
-    if (hoverHls) { hoverHls.destroy(); hoverHls = null; }
-    previewEl.removeAttribute('src');
-    previewEl.load();
-  });
-
-  return div;
-}
-
-async function playVideo(videoId) {
+export async function playVideo(videoId) {
   try {
     let video = null;
     let uploader = null;
@@ -17813,11 +8941,11 @@ async function playVideo(videoId) {
     // All videos are now Supabase. Cache holds the most recent ~100 platform-wide,
     // but profiles can list older uploads — so a cache miss is normal and not an error.
     // Try the cache first, then fall back to a direct fetch by ID.
-    if (!allVideosCache.length) {
+    if (!getAllVideos().length) {
       const fresh = await fetchSupabaseVideos();
-      allVideosCache = fresh;
+      setAllVideos(fresh);
     }
-    let cached = allVideosCache.find(v => v.$id === videoId);
+    let cached = findVideoInCache(videoId);
     if (!cached) {
       // Cache miss — fetch this specific video by ID (works for older videos
       // outside the top-100 window, deep links, and shared URLs).
@@ -17859,7 +8987,7 @@ async function playVideo(videoId) {
         _uploaderInfo: data.profiles ? { $id: data.profiles.id, username: data.profiles.username, avatar: data.profiles.avatar_url } : null,
       };
       // Cache it so revisits are instant + Prev/Next nav has it.
-      allVideosCache.push(cached);
+      addToVideosCache(cached);
     }
     video = cached;
     uploader = cached._uploaderInfo || null;
@@ -18396,1186 +9524,6 @@ document.querySelectorAll('#sidebarThemeToggle .sidebar-theme-option').forEach((
   });
 });
 
-// ════════════════════════════════════════
-// NOTIFICATIONS
-// ════════════════════════════════════════
-const NOTIF_PAGE_SIZE = 25;
-let _notifications = [];
-let _notifUnreadCount = 0;
-let _notifChannel = null;
-let _notifPanelOpen = false;
-let _notifFilter = 'all';      // 'all' | 'you' | 'following'
-const _notifActorCache = {};   // user_id → { username, avatar_url }
-// Resource hydration cache — { "kind:id": { title, thumbnail } }.
-// 2-minute TTL via _notifResourceCacheAt so a refresh picks up
-// renamed videos / updated book covers without a full reload.
-// Mirrors mobile's lib/notifications-supabase.js:227-360.
-const _notifResourceCache = new Map();
-const _notifResourceCacheAt = new Map();
-const NOTIF_RESOURCE_TTL_MS = 2 * 60 * 1000;
-// Infinite-scroll cursor: oldest loaded created_at. Pagination is
-// cursor-based (`.lt('created_at', _notifCursor)`) — mirrors mobile's
-// `lastId`-style pager but keyed on timestamps since our query is
-// ordered by created_at desc.
-let _notifCursor = null;
-let _notifHasMore = false;
-let _notifLoadingMore = false;
-// Guard: only mark-as-read once per panel-open. Prevents redundant
-// UPDATEs if the user opens/closes/opens the panel quickly.
-let _notifMarkedReadThisOpen = false;
-
-// ─── Sound chime + tab-title flash (May 2026) ────────────────────────
-// Sound state persisted in localStorage so the user's preference
-// survives reloads. Tab-title flash uses Visibility API: only mutate
-// document.title when the tab is hidden — restore on focus.
-let _notifSoundMuted = localStorage.getItem('selebox_notif_muted') === '1';
-let _notifTitleFlashTimer = null;
-let _notifTitleOriginal   = null;
-let _notifTitleFlashCount = 0;
-
-// One-shot WebAudio beep — no asset file required. Tiny envelope so
-// it doesn't startle, mid-frequency so it carries on cheap speakers.
-let _notifAudioCtx = null;
-function _playNotifChime() {
-  if (_notifSoundMuted) return;
-  try {
-    if (!_notifAudioCtx) {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!Ctx) return;
-      _notifAudioCtx = new Ctx();
-    }
-    const ctx = _notifAudioCtx;
-    // Some browsers suspend the AudioContext until user interaction;
-    // try to resume but don't break if it stays suspended.
-    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
-    const now = ctx.currentTime;
-    // Two-tone chime: 880 Hz then 1175 Hz, ~70ms each.
-    const make = (freq, start, dur) => {
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      o.type = 'sine';
-      o.frequency.value = freq;
-      // Quick attack + decay envelope so it sounds like a chime, not a buzz.
-      g.gain.setValueAtTime(0, start);
-      g.gain.linearRampToValueAtTime(0.18, start + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
-      o.connect(g).connect(ctx.destination);
-      o.start(start);
-      o.stop(start + dur);
-    };
-    make(880,  now,         0.08);
-    make(1175, now + 0.075, 0.10);
-  } catch (e) {
-    // Don't crash the realtime handler on a sound hiccup.
-  }
-}
-
-// Tab title flasher — when the tab is hidden, swap the title to
-// "(N) Selebox" and oscillate the prefix between "(N)" and a bullet
-// so the OS tab title flashes the user's attention. Resets on
-// visibilitychange.
-function _startNotifTitleFlash() {
-  if (!document.hidden) return;
-  if (!_notifTitleOriginal) _notifTitleOriginal = document.title.replace(/^\(\d+\) /, '').replace(/^[•●] /, '');
-  _notifTitleFlashCount = _notifUnreadCount;
-  if (_notifTitleFlashTimer) clearInterval(_notifTitleFlashTimer);
-  let toggle = false;
-  _notifTitleFlashTimer = setInterval(() => {
-    toggle = !toggle;
-    document.title = toggle
-      ? `(${_notifTitleFlashCount}) ${_notifTitleOriginal}`
-      : `• ${_notifTitleOriginal}`;
-  }, 1100);
-}
-function _stopNotifTitleFlash() {
-  if (_notifTitleFlashTimer) { clearInterval(_notifTitleFlashTimer); _notifTitleFlashTimer = null; }
-  if (_notifTitleOriginal)   { document.title = _notifTitleOriginal; _notifTitleOriginal = null; }
-}
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) _stopNotifTitleFlash();
-});
-
-// Wire the sound-mute toggle (button lives in the notif panel header).
-// The icon swap (speaker-on / speaker-off) reflects current state.
-function _syncNotifSoundIcon() {
-  const btn = document.getElementById('notifSoundToggle');
-  if (!btn) return;
-  const on  = btn.querySelector('.notif-sound-on');
-  const off = btn.querySelector('.notif-sound-off');
-  if (on)  on.style.display  = _notifSoundMuted ? 'none' : '';
-  if (off) off.style.display = _notifSoundMuted ? ''     : 'none';
-  btn.setAttribute('aria-pressed', _notifSoundMuted ? 'true' : 'false');
-  btn.title = _notifSoundMuted ? 'Unmute notification sounds' : 'Mute notification sounds';
-}
-document.getElementById('notifSoundToggle')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  _notifSoundMuted = !_notifSoundMuted;
-  localStorage.setItem('selebox_notif_muted', _notifSoundMuted ? '1' : '0');
-  _syncNotifSoundIcon();
-});
-_syncNotifSoundIcon();
-
-// ─── Time bucketing (May 2026) ───────────────────────────────────────
-// Group the rendered list into Today / Yesterday / This week / Older
-// section headers. Cheap render-time logic on existing created_at —
-// no schema or query changes.
-function _notifTimeBucket(iso) {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return 'older';
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfYesterday = startOfToday - 86400000;
-  const startOfThisWeek  = startOfToday - 6 * 86400000; // last 7 calendar days including today
-  const t = d.getTime();
-  if (t >= startOfToday)     return 'today';
-  if (t >= startOfYesterday) return 'yesterday';
-  if (t >= startOfThisWeek)  return 'thisweek';
-  return 'older';
-}
-const _NOTIF_BUCKET_LABELS = {
-  today:     'Today',
-  yesterday: 'Yesterday',
-  thisweek:  'This week',
-  older:     'Older',
-};
-
-// Categorize a notification for the filter tabs.
-// Mirrors mobile's `categorizeNotification`
-// (app/(notification)/notification.jsx:21-34). Maps to web's
-// underscored type strings:
-//   "you"       — something happened TO you (your content or your
-//                  relationship): likes, comments, replies, mentions,
-//                  follow (somebody followed you), dm_message,
-//                  reposts of your stuff.
-//   "following" — somebody you follow CREATED something new
-//                  (follow_new_post/video/book, follow_repost).
-//   "all"       — fall-through; only visible in the All tab.
-function notifCategory(n) {
-  const t = (n?.type || '').toLowerCase();
-  if (!t) return 'all';
-  if (t === 'follow_new_post' || t === 'follow_new_video'
-      || t === 'follow_new_book' || t === 'follow_repost') {
-    return 'following';
-  }
-  if (t === 'follow' || t === 'dm_message') return 'you';
-  if (t.includes('comment') || t.includes('reply')
-      || t.startsWith('like_') || t.endsWith('_like')
-      || t.startsWith('mention_')
-      || t === 'post_repost' || t === 'repost_post') {
-    return 'you';
-  }
-  return 'all';
-}
-
-async function initNotifications() {
-  if (!currentUser) return;
-
-  await loadNotifications();
-
-  // Realtime — subscribe to new notifications for this user only
-  if (_notifChannel) {
-    try { supabase.removeChannel(_notifChannel); } catch {}
-    _notifChannel = null;
-  }
-  try {
-    _notifChannel = supabase
-      .channel(`notif:${currentUser.id}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'notifications',
-        filter: `recipient_id=eq.${currentUser.id}`,
-      }, async (payload) => {
-        const n = payload.new;
-        // Fetch the actor profile AND target resource (thumbnail +
-        // title) so the bell card paints with full context.
-        await Promise.all([
-          hydrateActorProfiles([n]),
-          hydrateNotifResources([n]),
-        ]);
-        _notifications.unshift(n);
-        if (_notifications.length > 100) _notifications.length = 100;
-        _notifUnreadCount += 1;
-        updateNotifBadge();
-        // Re-run grouping so the new row buckets with existing ones
-        // (e.g. follow:any bucket merges all "started following you"
-        // notifications). Without this, every realtime INSERT
-        // rendered as its own row, breaking the Facebook-style
-        // "Alice and 4 others started following you" UX. Grouping is
-        // idempotent — safe to re-run over an already-grouped set.
-        _notifications = groupNotifications(_notifications);
-        renderNotifications();
-        // New incoming notification → audible + visual cue. Chime
-        // muted via the per-user toggle; title flash only when tab
-        // is in the background (no point flashing the visible tab).
-        _playNotifChime();
-        if (document.hidden) _startNotifTitleFlash();
-        // No toast on incoming notifications — the bell badge + dropdown
-        // already surfaces them. Toast was too intrusive (especially for DMs
-        // where the unread badge on the Messages sidebar entry is enough).
-      })
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'notifications',
-        filter: `recipient_id=eq.${currentUser.id}`,
-      }, async (payload) => {
-        // Coalesced DM notifications: an existing unread row is being bumped
-        // (preview/timestamp updated). Replace the row in-place — DON'T re-increment
-        // the badge (it was already counted on first INSERT).
-        const n = payload.new;
-        await Promise.all([
-          hydrateActorProfiles([n]),
-          hydrateNotifResources([n]),
-        ]);
-        const idx = _notifications.findIndex(x => x.id === n.id);
-        if (idx >= 0) {
-          _notifications[idx] = n;
-        } else {
-          _notifications.unshift(n);
-        }
-        // Re-sort by created_at desc so the bumped row floats to the top
-        _notifications.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        // Re-group so the bumped row buckets correctly (same reasoning
-        // as the INSERT handler above). Idempotent.
-        _notifications = groupNotifications(_notifications);
-        renderNotifications();
-      })
-      .subscribe();
-  } catch (err) {
-    console.warn('Notifications realtime subscribe failed:', err);
-  }
-}
-
-async function loadNotifications() {
-  const list = document.getElementById('notificationsList');
-  if (list) list.innerHTML = _notifSkeletonHTML();
-
-  // Reset pagination state on every cold load.
-  _notifCursor = null;
-  _notifHasMore = false;
-  _notifMarkedReadThisOpen = false;
-
-  const { data, error } = await supabase
-    .from('notifications')
-    .select('*')
-    .eq('recipient_id', currentUser.id)
-    .order('created_at', { ascending: false })
-    .limit(NOTIF_PAGE_SIZE);
-
-  if (error) {
-    if (list) list.innerHTML = `<div class="notifications-empty">Couldn't load notifications</div>`;
-    console.warn('Notifications fetch error:', error);
-    return;
-  }
-  let raw = data || [];
-
-  // Suppress dm_message notifications whose conversation is Secret. The
-  // user discovers Secret messages by opening the Secret tab; they never
-  // appear in the bell. We collect all dm_message conversation IDs and
-  // bulk-fetch the is_secret flag in one query, then drop the matching
-  // notifications.
-  raw = await _filterSecretDmConversations(raw);
-
-  _notifications = raw;
-  // Advance cursor + hasMore from the fetched window.
-  if (_notifications.length) _notifCursor = _notifications[_notifications.length - 1].created_at;
-  _notifHasMore = raw.length === NOTIF_PAGE_SIZE;
-
-  // Resolve actor profiles + target resources (post/video/book/chapter
-  // titles + thumbnails) in parallel — both needed for first paint.
-  await Promise.all([
-    hydrateActorProfiles(_notifications),
-    hydrateNotifResources(_notifications),
-  ]);
-
-  // Compute unread count from RAW rows BEFORE grouping. Grouping
-  // collapses N rows into 1, so counting after grouping would
-  // under-report the badge (5 unread comments on the same post would
-  // show as "1" instead of "5"). Unread badge mirrors what the user
-  // would see if grouping were turned off — every individual unread
-  // notification counts.
-  _notifUnreadCount = _notifications.filter(n => !n.is_read).length;
-  updateNotifBadge();
-
-  // Facebook-style grouping (May 2026) — see groupNotifications below.
-  // Mobile (selebox-mobile-main) ships the same pass in
-  // lib/notifications-supabase.js. Keeping web + mobile parallel so the
-  // bell experience matches across platforms.
-  _notifications = groupNotifications(_notifications);
-  renderNotifications();
-}
-
-// Filter out dm_message notifications whose conversation is Secret.
-// Pulled into its own helper so loadMoreNotifications can reuse it.
-async function _filterSecretDmConversations(rows) {
-  const dmConvIds = Array.from(new Set(
-    rows
-      .filter(n => n.type === 'dm_message' && n.parent_target_type === 'conversation' && n.parent_target_id)
-      .map(n => n.parent_target_id),
-  ));
-  if (!dmConvIds.length) return rows;
-  const { data: convs } = await supabase
-    .from('conversations')
-    .select('id, is_secret')
-    .in('id', dmConvIds);
-  const secretSet = new Set((convs || []).filter(c => c.is_secret).map(c => c.id));
-  if (secretSet.size === 0) return rows;
-  return rows.filter(n => !(n.type === 'dm_message' && secretSet.has(n.parent_target_id)));
-}
-
-// Fetch the next page using `.lt('created_at', _notifCursor)`. Called
-// from the scroll-near-bottom handler installed by openNotifPanel.
-async function loadMoreNotifications() {
-  if (!currentUser || !_notifHasMore || _notifLoadingMore || !_notifCursor) return;
-  _notifLoadingMore = true;
-  // Render a tiny "loading more" footer immediately so the user gets
-  // visual feedback before the round-trip resolves.
-  _renderNotifLoadMoreFooter(true);
-
-  const { data, error } = await supabase
-    .from('notifications')
-    .select('*')
-    .eq('recipient_id', currentUser.id)
-    .lt('created_at', _notifCursor)
-    .order('created_at', { ascending: false })
-    .limit(NOTIF_PAGE_SIZE);
-
-  _notifLoadingMore = false;
-  if (error) {
-    console.warn('Notifications loadMore error:', error);
-    _renderNotifLoadMoreFooter(false);
-    return;
-  }
-  let raw = data || [];
-  raw = await _filterSecretDmConversations(raw);
-
-  if (raw.length === 0) {
-    _notifHasMore = false;
-    _renderNotifLoadMoreFooter(false);
-    return;
-  }
-
-  // Merge into the existing list. Re-build _notifications by taking
-  // the RAW (pre-grouping) source — we don't have that anymore, so
-  // re-run grouping over the appended set. Simpler than maintaining a
-  // separate raw cache.
-  // Track the raw rows we already have by id to avoid duplicates when
-  // a realtime INSERT hit and the row is now also in the loadMore page.
-  const seen = new Set(_notifications.map(n => n.id));
-  const fresh = raw.filter(n => !seen.has(n.id));
-
-  // Hydrate actors + resources for the new rows.
-  await Promise.all([
-    hydrateActorProfiles(fresh),
-    hydrateNotifResources(fresh),
-  ]);
-
-  // Append, advance cursor + hasMore.
-  _notifications = _notifications.concat(fresh);
-  if (raw.length) _notifCursor = raw[raw.length - 1].created_at;
-  _notifHasMore = raw.length === NOTIF_PAGE_SIZE;
-
-  // Re-group the merged set. Grouping is idempotent.
-  _notifications = groupNotifications(_notifications);
-
-  // Mobile parity (May 2026) — refresh the unread badge from the
-  // just-merged + grouped set. Mirrors mobile's notif fetch chain in
-  // selebox-mobile-main/lib/notifications-supabase.js, which calls
-  // updateNotifBadge() after every batch so the dot count stays
-  // accurate as load-more pages arrive.
-  _notifUnreadCount = _notifications.filter(n => !n.is_read).length;
-  updateNotifBadge();
-
-  renderNotifications();
-}
-
-// Skeleton rows shown during the initial load — same visual mass as
-// the real items so the panel doesn't jump when data arrives.
-function _notifSkeletonHTML() {
-  const skel = `
-    <div class="notification-item notification-skeleton">
-      <div class="notification-avatar skel-block"></div>
-      <div class="notification-body">
-        <div class="skel-line skel-line-1"></div>
-        <div class="skel-line skel-line-2"></div>
-      </div>
-      <div class="notification-thumb skel-block"></div>
-    </div>`;
-  return skel.repeat(5);
-}
-
-function _renderNotifLoadMoreFooter(isLoading) {
-  const list = document.getElementById('notificationsList');
-  if (!list) return;
-  let footer = list.querySelector('.notif-loadmore-footer');
-  if (!_notifHasMore && !isLoading) {
-    if (footer) footer.remove();
-    return;
-  }
-  if (!footer) {
-    footer = document.createElement('div');
-    footer.className = 'notif-loadmore-footer';
-    list.appendChild(footer);
-  }
-  footer.innerHTML = isLoading
-    ? '<div class="notif-loadmore-spinner">Loading more…</div>'
-    : '';
-}
-
-// Resource hydration — port of mobile's hydrateResources (see
-// lib/notifications-supabase.js:227-360). Batches one SELECT per
-// resource kind. Hits a 2-minute TTL cache so realtime INSERTs +
-// load-more pages don't redundantly re-query. Each cache entry has
-// { title, thumbnail }; renderNotifications reads from this map.
-async function hydrateNotifResources(rows) {
-  if (!rows || !rows.length) return;
-  const now = Date.now();
-
-  // Resolve the SURFACE id for each row. Comments target the comment
-  // row, but the actual openable resource lives in parent_target_*.
-  const buckets = { post: new Set(), video: new Set(), book: new Set(), chapter: new Set() };
-
-  const KIND_MAP = {
-    // surface mapping for direct target_type
-    post: 'post', video: 'video', book: 'book',
-    chapter: 'chapter', 'book-chapter': 'chapter',
-  };
-
-  for (const n of rows) {
-    // Comment-type rows: hydrate the parent surface (the post/video/
-    // chapter the comment was made on) so the bell card gets a
-    // thumbnail and clicks land on the openable resource.
-    let kind = n.target_type;
-    let id   = n.target_id;
-    if (kind === 'comment' && n.parent_target_type && n.parent_target_id) {
-      kind = n.parent_target_type;
-      id   = n.parent_target_id;
-    }
-    const surface = KIND_MAP[kind];
-    if (!surface || !id) continue;
-    const cacheKey = `${surface}:${id}`;
-    // Skip if cached AND not stale.
-    const ts = _notifResourceCacheAt.get(cacheKey);
-    if (ts && now - ts < NOTIF_RESOURCE_TTL_MS) continue;
-    buckets[surface].add(id);
-  }
-
-  const tasks = [];
-
-  if (buckets.post.size) {
-    tasks.push((async () => {
-      const ids = [...buckets.post];
-      const { data, error } = await supabase
-        .from('posts')
-        .select('id, body, image_url, video_id, videos(id, thumbnail_url)')
-        .in('id', ids);
-      if (error) { console.warn('[hydrateNotifResources:post]', error.message); return; }
-      for (const p of data || []) {
-        _notifResourceCache.set(`post:${p.id}`, {
-          title: p.body ? p.body.slice(0, 80) : null,
-          thumbnail: p.image_url || p.videos?.thumbnail_url || null,
-        });
-        _notifResourceCacheAt.set(`post:${p.id}`, now);
-      }
-    })());
-  }
-  if (buckets.video.size) {
-    tasks.push((async () => {
-      const { data, error } = await supabase
-        .from('videos')
-        .select('id, title, thumbnail_url')
-        .in('id', [...buckets.video]);
-      if (error) { console.warn('[hydrateNotifResources:video]', error.message); return; }
-      for (const v of data || []) {
-        _notifResourceCache.set(`video:${v.id}`, { title: v.title || null, thumbnail: v.thumbnail_url || null });
-        _notifResourceCacheAt.set(`video:${v.id}`, now);
-      }
-    })());
-  }
-  if (buckets.book.size) {
-    tasks.push((async () => {
-      const { data, error } = await supabase
-        .from('books')
-        .select('id, title, cover_url')
-        .in('id', [...buckets.book]);
-      if (error) { console.warn('[hydrateNotifResources:book]', error.message); return; }
-      for (const b of data || []) {
-        _notifResourceCache.set(`book:${b.id}`, { title: b.title || null, thumbnail: b.cover_url || null });
-        _notifResourceCacheAt.set(`book:${b.id}`, now);
-      }
-    })());
-  }
-  if (buckets.chapter.size) {
-    tasks.push((async () => {
-      const { data, error } = await supabase
-        .from('chapters')
-        .select('id, title, cover_url, book_id, books(id, cover_url)')
-        .in('id', [...buckets.chapter]);
-      if (error) { console.warn('[hydrateNotifResources:chapter]', error.message); return; }
-      for (const c of data || []) {
-        _notifResourceCache.set(`chapter:${c.id}`, {
-          title: c.title || null,
-          // Chapter cover may be null — fall back to the parent book's
-          // cover so the bell card still renders something.
-          thumbnail: c.cover_url || c.books?.cover_url || null,
-        });
-        _notifResourceCacheAt.set(`chapter:${c.id}`, now);
-      }
-    })());
-  }
-
-  await Promise.all(tasks);
-}
-
-// Helper for renderNotifications — looks up the cached resource for
-// a notification row (or null). Resolves comment-type rows via their
-// parent surface.
-function _notifResourceFor(n) {
-  let kind = n.target_type;
-  let id   = n.target_id;
-  if (kind === 'comment' && n.parent_target_type && n.parent_target_id) {
-    kind = n.parent_target_type;
-    id   = n.parent_target_id;
-  }
-  const KIND_TO_KEY = { post: 'post', video: 'video', book: 'book', chapter: 'chapter', 'book-chapter': 'chapter' };
-  const k = KIND_TO_KEY[kind];
-  if (!k || !id) return null;
-  return _notifResourceCache.get(`${k}:${id}`) || null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Facebook-style notification grouping
-// ─────────────────────────────────────────────────────────────────────────
-// Collapses same-type-same-target rows into one bell entry so the panel
-// stays clean when many users engage with the same post/video/book.
-//
-// Rules:
-//   - All-time window. We don't bucket by recency window — every row in
-//     the loaded page that shares (type, target) merges. (Pagination
-//     limits how far back we go, but anything in `raw` is fair game.)
-//   - Group: comments / replies on the same post / video / chapter,
-//     reactions on the same post / video / book / comment, and ALL
-//     follow events into one bucket (follows have target_id=NULL — the
-//     trigger can't tie them to a resource — so per the product call we
-//     collapse them globally per recipient).
-//   - Timestamp = most recent action. The newest entry's created_at
-//     becomes the head's timestamp, so the grouped row floats up the
-//     bell list as new actors join.
-//
-// Output shape:
-//   - head row with `actor_ids` set to the deduplicated list of actors
-//     across all buckets entries (the existing notificationLabel
-//     renderer already reads `actor_ids` and produces "X, Y and N
-//     others" — no renderer change needed).
-//   - `_grouped_source_ids` = every row's id in the bucket. Used by
-//     onNotificationClick to mark all underlying rows read in one
-//     UPDATE round-trip.
-//   - is_read = true only when EVERY underlying entry is read.
-//
-// Anything not bucketable (mention_comment, dm_message, follow_new_post,
-// follow_new_video, follow_new_book, follow_repost, default) passes
-// through unchanged so it keeps its existing behavior.
-function _notifGroupKey(n) {
-  const t = n?.type || '';
-
-  // Bare "X started following you" — single global bucket per recipient.
-  // No target to key on, but the user explicitly asked to merge them.
-  if (t === 'follow') return 'follow:any';
-
-  // Reactions / likes — one bucket per liked target.
-  if (t === 'like_post' || t === 'post_like') {
-    return n.target_id ? `like-post:${n.target_id}` : null;
-  }
-  if (t === 'like_video' || t === 'video_like') {
-    return n.target_id ? `like-video:${n.target_id}` : null;
-  }
-  if (t === 'like_book' || t === 'book_like') {
-    return n.target_id ? `like-book:${n.target_id}` : null;
-  }
-  if (t === 'like_comment' || t === 'post_comment_like' || t === 'video_comment_like') {
-    return n.target_id ? `like-comment:${n.target_id}` : null;
-  }
-
-  // Comments + replies — comments and replies on the same post merge
-  // into one bucket because the user-facing verb is the same ("X and Y
-  // commented on your post"). If we wanted to split them ("X commented"
-  // vs "Y replied to your comment"), we'd add a `:reply` suffix here.
-  if (t === 'comment_post' || t === 'post_comment' || t === 'reply_comment'
-      || t === 'post_comment_reply' || t === 'video_comment_reply') {
-    if (t === 'reply_comment' || t === 'post_comment_reply' || t === 'video_comment_reply') {
-      // reply_comment carries parent_target_id = the post/video the
-      // parent comment lives on. Group with comment_post / comment_video
-      // by that id when present.
-      return n.parent_target_id ? `comment-post:${n.parent_target_id}` : (n.target_id ? `reply:${n.target_id}` : null);
-    }
-    return n.target_id ? `comment-post:${n.target_id}` : null;
-  }
-  if (t === 'comment_video' || t === 'video_comment') {
-    return n.target_id ? `comment-video:${n.target_id}` : null;
-  }
-  if (t === 'comment_chapter' || t === 'chapter_comment'
-      || t === 'reply_chapter_comment' || t === 'chapter_comment_reply') {
-    return n.target_id ? `comment-chapter:${n.target_id}` : null;
-  }
-
-  return null; // not groupable — passes through
-}
-
-function groupNotifications(rows) {
-  if (!Array.isArray(rows) || !rows.length) return rows || [];
-
-  const buckets = new Map();
-  const passThrough = [];
-
-  for (const n of rows) {
-    const key = _notifGroupKey(n);
-    if (!key) { passThrough.push(n); continue; }
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push(n);
-  }
-
-  const grouped = [];
-  for (const entries of buckets.values()) {
-    if (entries.length === 1) {
-      grouped.push(entries[0]);
-      continue;
-    }
-    // Newest first — head's timestamp wins.
-    entries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const head = entries[0];
-
-    // Dedupe actors. Same person commenting twice on a post counts
-    // once — matches Facebook's behavior where one actor never appears
-    // twice in a grouped row's actor list.
-    const seen = new Set();
-    const actor_ids = [];
-    for (const e of entries) {
-      const id = e?.actor_id;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      actor_ids.push(id);
-    }
-
-    grouped.push({
-      ...head,
-      actor_ids,
-      _grouped_source_ids: entries.map(e => e?.id).filter(Boolean),
-      is_read: entries.every(e => !!e?.is_read),
-    });
-  }
-
-  // Re-sort everything by created_at desc to keep grouped rows in the
-  // right chronological position relative to ungrouped ones.
-  const all = [...grouped, ...passThrough];
-  all.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  return all;
-}
-
-async function hydrateActorProfiles(items) {
-  // Collect ALL actor ids (primary + coalesced others) so the
-  // "Alice and Bob reacted" label can resolve every name.
-  const allIds = new Set();
-  items.forEach(n => {
-    if (n.actor_id) allIds.add(n.actor_id);
-    if (Array.isArray(n.actor_ids)) {
-      n.actor_ids.forEach(id => { if (id) allIds.add(id); });
-    }
-  });
-  const ids = [...allIds].filter(id => !_notifActorCache[id]);
-  if (!ids.length) return;
-  const { data } = await supabase.from('profiles').select('id, username, avatar_url').in('id', ids);
-  (data || []).forEach(p => { _notifActorCache[p.id] = p; });
-}
-
-function updateNotifBadge() {
-  const badge = document.getElementById('notifBadge');
-  const bell  = document.getElementById('btnNotifications');
-  if (!badge || !bell) return;
-  if (_notifUnreadCount > 0) {
-    badge.style.display = 'flex';
-    badge.textContent = _notifUnreadCount > 99 ? '99+' : String(_notifUnreadCount);
-    bell.classList.add('has-unread');
-    // Re-trigger animation
-    bell.classList.remove('has-unread');
-    void bell.offsetWidth;
-    bell.classList.add('has-unread');
-  } else {
-    badge.style.display = 'none';
-    bell.classList.remove('has-unread');
-  }
-}
-
-function renderNotifications() {
-  const list = document.getElementById('notificationsList');
-  if (!list) return;
-
-  const visible = _notifFilter === 'all'
-    ? _notifications
-    : _notifications.filter(n => notifCategory(n) === _notifFilter);
-
-  if (!visible.length) {
-    const msg = _notifications.length === 0
-      ? `<p style="margin:0;font-size:0.85rem">You're all caught up.</p>
-         <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone reacts, comments, replies, or someone you follow posts, it'll show up here.</p>`
-      : (_notifFilter === 'you'
-          ? `<p style="margin:0;font-size:0.85rem">No activity on your content yet.</p>
-             <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">Reactions and comments on your posts/books will appear here.</p>`
-          : `<p style="margin:0;font-size:0.85rem">Nothing from people you follow yet.</p>
-             <p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text3)">When someone you follow posts, uploads, or publishes, you'll see it here.</p>`);
-    list.innerHTML = `<div class="notifications-empty">${msg}</div>`;
-    return;
-  }
-
-  // Build the rendered HTML by walking visible in order, inserting
-  // a section header whenever the time bucket changes. Visible is
-  // already sorted desc by created_at (Today → Older), so a single
-  // pass with a "lastBucket" tracker is enough.
-  let lastBucket = null;
-  list.innerHTML = visible.map(n => {
-    const bucket = _notifTimeBucket(n.created_at);
-    const headerHTML = bucket !== lastBucket
-      ? `<div class="notif-bucket-header">${_NOTIF_BUCKET_LABELS[bucket] || ''}</div>`
-      : '';
-    lastBucket = bucket;
-    const actor = _notifActorCache[n.actor_id] || {};
-    // Privacy treatment (lock avatar, "Someone sent you a private
-    // message", no preview) is reserved for SECRET-CHAT DMs only. The
-    // is_secret flag is written by the chat-bell trigger
-    // (migration_notifications_dm_secret_flag.sql) and backfilled for
-    // existing rows. Regular DMs render with the real sender, real
-    // avatar, and the normal "X sent you a message" label so the bell
-    // doesn't lie about who's chatting with you.
-    const isPrivateDm = n.type === 'dm_message' && n.metadata?.is_secret === true;
-    const avatar = isPrivateDm
-      ? '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
-      : (actor.avatar_url
-          ? `<img src="${escHTML(actor.avatar_url)}"/>`
-          : (actor.username ? initials(actor.username) : '?'));
-    const text = isPrivateDm
-      ? 'Someone sent you a private message'
-      : notificationLabel(n, actor.username);
-    // Resource thumbnail + title — pulled from _notifResourceCache,
-    // populated by hydrateNotifResources. Skipped for private DMs
-    // (their content is the whole point of being private) and for
-    // notifications without an openable surface (follow, mention with
-    // no parent, etc.). Mirrors mobile's NotificationCard right-side
-    // 48px thumbnail.
-    const resource = isPrivateDm ? null : _notifResourceFor(n);
-    const thumbHTML = resource && resource.thumbnail
-      ? `<div class="notification-thumb"><img src="${escHTML(resource.thumbnail)}" alt="" loading="lazy"/></div>`
-      : '';
-    // Snippets reveal context — also hidden for Secret DMs.
-    // Prefer the resolved resource title when it's richer than the
-    // metadata snippet; falls back to the metadata for legacy rows
-    // where hydration didn't find anything.
-    const snippet = isPrivateDm ? '' : (resource?.title || n.metadata?.snippet || n.metadata?.caption || '');
-    const snippetHTML = snippet
-      ? `<div class="notification-snippet">"${escHTML(snippet.slice(0, 120))}"</div>`
-      : '';
-    return `${headerHTML}
-      <div class="notification-item ${n.is_read ? '' : 'unread'}${isPrivateDm ? ' notification-private' : ''}" data-id="${n.id}">
-        <div class="notification-avatar">${avatar}</div>
-        <div class="notification-body">
-          <div class="notification-text">${text}</div>
-          ${snippetHTML}
-          <div class="notification-time">${timeAgo(n.created_at)}</div>
-        </div>
-        ${thumbHTML}
-        <span class="notification-dot"></span>
-      </div>`;
-  }).join('');
-
-  // Re-attach the load-more footer (if there's more to fetch) after
-  // the list rebuild, since innerHTML wiped it.
-  if (_notifHasMore) _renderNotifLoadMoreFooter(false);
-
-  list.querySelectorAll('.notification-item').forEach(item => {
-    item.addEventListener('click', () => onNotificationClick(item.dataset.id));
-  });
-}
-
-function notificationLabel(n, knownUsername) {
-  // Build the actor display: 1 = "Alice", 2 = "Alice and Bob",
-  // 3+ = "Alice and N others". Uses actor_ids when present (coalesced
-  // engagement notifications), otherwise falls back to the single actor_id.
-  const ids = (Array.isArray(n.actor_ids) && n.actor_ids.length)
-    ? n.actor_ids
-    : (n.actor_id ? [n.actor_id] : []);
-  const names = ids
-    .map(id => _notifActorCache[id]?.username)
-    .filter(Boolean);
-  const fallbackName = knownUsername || _notifActorCache[n.actor_id]?.username || 'Someone';
-  let actorTag;
-  if (names.length === 0) {
-    actorTag = `<strong>${escHTML(fallbackName)}</strong>`;
-  } else if (names.length === 1) {
-    actorTag = `<strong>${escHTML(names[0])}</strong>`;
-  } else if (names.length === 2) {
-    actorTag = `<strong>${escHTML(names[0])}</strong> and <strong>${escHTML(names[1])}</strong>`;
-  } else {
-    actorTag = `<strong>${escHTML(names[0])}</strong> and <strong>${names.length - 1} others</strong>`;
-  }
-  const titleHint = n.metadata?.title ? ` <em style="color:var(--text2)">"${escHTML(n.metadata.title)}"</em>` : '';
-  switch (n.type) {
-    // ── You: engagement on your stuff ──
-    case 'like_post':
-    case 'post_like':              // legacy noun_verb, pre-rename migration
-      return `${actorTag} reacted to your post`;
-    case 'like_video':
-    case 'video_like':             // legacy
-      return `${actorTag} reacted to your video`;
-    case 'like_comment':
-    case 'post_comment_like':      // legacy
-    case 'video_comment_like':     // legacy
-      return `${actorTag} reacted to your comment`;
-    case 'like_book':
-    case 'book_like':              // legacy
-      return `${actorTag} liked your book${titleHint}`;
-    case 'comment_post':
-    case 'post_comment':           // legacy
-      return `${actorTag} commented on your post`;
-    case 'comment_video':
-    case 'video_comment':          // legacy
-      return `${actorTag} commented on your video`;
-    case 'reply_comment':
-    case 'post_comment_reply':     // legacy
-    case 'video_comment_reply':    // legacy
-      return `${actorTag} replied to your comment`;
-    case 'comment_chapter':
-    case 'chapter_comment':        // legacy
-      return `${actorTag} commented on your chapter`;
-    case 'reply_chapter_comment':
-    case 'chapter_comment_reply':  // legacy
-      return `${actorTag} replied to your chapter comment`;
-    // Book-level comments (the conversation thread on the book itself,
-    // not a chapter). Mobile renders these distinctly via the
-    // `book-comment` / `book-comment-reply` keys; web previously fell
-    // through to the "did something on Selebox" default. Both
-    // verb_noun and legacy noun_verb shapes covered.
-    case 'comment_book':
-    case 'book_comment':
-      return `${actorTag} commented on your book${titleHint}`;
-    case 'reply_book_comment':
-    case 'book_comment_reply':
-      return `${actorTag} replied to your book comment`;
-    // Inline-comment notifications — annotations attached to a
-    // specific passage inside a chapter (highlighted-text comments).
-    // Mobile routes these to /book-reading with anchorKey to scroll
-    // to the passage; web doesn't have a chapter anchor yet, so the
-    // click handler routes to the book detail as an acceptable
-    // degradation. Three legacy variants covered for safety.
-    case 'book_chapter_inline_comment':
-    case 'book_chapter_inline_comment_reply':
-    case 'book_chapter_inline_comment_mention':
-      return `${actorTag} commented on a passage in your chapter`;
-    case 'repost_post':
-    case 'post_repost':            // legacy
-      return `${actorTag} reposted your post`;
-    // ── Follows ──
-    // The notify_on_follow trigger fires this on every new row in
-    // public.follows. Earlier we keyed off 'follow_new_post' /
-    // 'follow_new_video' / 'follow_new_book' for the more specialized
-    // "person you follow just published X" notifications, but the
-    // raw "X started following you" event gets the bare 'follow' type.
-    case 'follow':                 return `${actorTag} started following you`;
-
-    // ── Following: people you follow doing things ──
-    case 'follow_new_post':        return `${actorTag} posted something new`;
-    case 'follow_new_video':       return `${actorTag} uploaded a new video`;
-    case 'follow_new_book':        return `${actorTag} published a new book${titleHint}`;
-    case 'follow_repost':          return `${actorTag} shared a post`;
-
-    // ── Direct content publish events (Supabase triggers fire these
-    //    with type='video'/'book'/'chapter' when a scheduled post
-    //    goes live or a creator publishes directly. The video title
-    //    arrives in the `message` column from the trigger.) Different
-    //    from the follow_new_* fanout above which targets followers
-    //    specifically; these can also arrive on the bell.
-    case 'video': {
-      const titleSnip = n.message
-        ? ` <em style="color:var(--text2)">"${escHTML(String(n.message).slice(0, 80))}${String(n.message).length > 80 ? '…' : ''}"</em>`
-        : '';
-      return `${actorTag} uploaded a new video${titleSnip}`;
-    }
-    case 'book':
-    case 'chapter': {
-      const titleSnip = n.message
-        ? ` <em style="color:var(--text2)">"${escHTML(String(n.message).slice(0, 80))}${String(n.message).length > 80 ? '…' : ''}"</em>`
-        : '';
-      const verb = n.type === 'chapter' ? 'published a new chapter' : 'published a new book';
-      return `${actorTag} ${verb}${titleSnip}`;
-    }
-
-    // ── Mentions ──
-    case 'mention_comment':        return `${actorTag} mentioned you in a comment`;
-    case 'mention_chapter_comment':return `${actorTag} mentioned you in a chapter comment`;
-
-    // ── Direct messages ──
-    case 'dm_message': {
-      const preview = n.metadata?.preview ? ` <em style="color:var(--text2)">"${escHTML(String(n.metadata.preview).slice(0, 80))}"</em>` : '';
-      return `${actorTag} sent you a message${preview}`;
-    }
-
-    // ── System announcements (2026-05-15) ──
-    // Withdrawal status changes (approved / rejected / paid) are the
-    // first user of the announcement type. The
-    // _notify_withdrawal_status_change trigger writes the human-readable
-    // status line into notifications.message itself ("Your withdrawal
-    // request has been approved.", "Payment sent.", etc) so we render
-    // the message verbatim and skip the actor-name prefix that the
-    // other branches emit. The actor on these rows is the admin who
-    // performed the action, but creators see them as "Selebox" updates.
-    // If a future announcement type has no message text, fall through
-    // to the actor-prefix default rather than render an empty card.
-    case 'announcement':
-      if (n.target_type === 'withdrawal' && n.message) return escHTML(n.message);
-      if (n.message) return escHTML(n.message);
-      return `${actorTag} sent you an update`;
-
-    default:                       return `${actorTag} did something on Selebox`;
-  }
-}
-
-async function onNotificationClick(notifId) {
-  const n = _notifications.find(x => x.id === notifId);
-  if (!n) return;
-
-  // Mark as read locally + in DB (optimistic).
-  //
-  // Grouped rows expand into all their underlying source ids — without
-  // this the bell badge would tick down by 1 even when 5 individual
-  // unread rows were collapsed into the row that was tapped. We also
-  // need to count how many of those sources were ACTUALLY unread before
-  // adjusting the badge (some entries in a bucket may have been read
-  // independently before the user tapped the grouped representation).
-  if (!n.is_read) {
-    n.is_read = true;
-    const sourceIds = Array.isArray(n._grouped_source_ids) && n._grouped_source_ids.length
-      ? n._grouped_source_ids
-      : [notifId];
-    // Decrement the badge by the count of underlying unread rows.
-    // _notifUnreadCount was computed from the raw (pre-grouping) set,
-    // so we need the same granularity here.
-    _notifUnreadCount = Math.max(0, _notifUnreadCount - sourceIds.length);
-    updateNotifBadge();
-    renderNotifications();
-    supabase.from('notifications').update({ is_read: true }).in('id', sourceIds)
-      .then(({ error }) => { if (error) console.warn('Mark read failed:', error); });
-  }
-
-  closeNotifPanel();
-
-  // ── DM short-circuit ──────────────────────────────────────────────────
-  // Always land in the inbox/thread for chat notifications, even if the
-  // legacy row predates the parent_target_type backfill and would
-  // otherwise miss the dispatch table below.
-  if (n.type === 'dm_message' || n.target_type === 'message' || n.parent_target_type === 'conversation') {
-    const convId = n.parent_target_type === 'conversation' ? n.parent_target_id : null;
-    if (convId) { showMessages(); setTimeout(() => openConversation(convId), 50); }
-    else        { showMessages(); }
-    return;
-  }
-
-  // ── Data-driven dispatch ──────────────────────────────────────────────
-  // Bell notifications carry a (kind, id) routing pair. Prefer the parent
-  // (the openable surface — post / video / book / profile) over the
-  // immediate target (which for a comment is the comment row itself,
-  // never directly openable). Falls back to target_type when the parent
-  // wasn't populated by the trigger (true for some legacy rows and for
-  // the repost / follow_new_post fanout triggers whose source isn't
-  // versioned in this repo).
-  //
-  // The kind→opener table is the single place to add a new notification
-  // surface. New notification types just need their write-side trigger
-  // to set parent_target_type / parent_target_id correctly — no edits
-  // needed here.
-  //
-  // See migration_notifications_parent_target_type.sql for the matching
-  // server-side change and historical-row backfill.
-  let kind = n.parent_target_type || n.target_type || null;
-  let id   = n.parent_target_id   || n.target_id   || null;
-
-  // 'follow' notifications carry target_type='profile' but target_id IS
-  // NULL (the row's actor_id is the followed-from user). Route to that
-  // profile directly.
-  if (n.type === 'follow') {
-    kind = 'profile';
-    id = n.actor_id || id;
-  }
-
-  // A bare 'comment' kind can survive on legacy reply rows where the
-  // parent comment had no post/video link at backfill time. Land the
-  // user on Home rather than open a non-openable target.
-  if (kind === 'comment') {
-    kind = null;
-  }
-
-  // Inline-comment notifications (annotations attached to a specific
-  // passage inside a chapter). Mobile routes to /book-reading with
-  // an `anchorKey` so the reader scrolls to the highlighted passage;
-  // web doesn't have a chapter anchor yet, so we land on the book
-  // detail page (acceptable degradation — user can navigate to the
-  // chapter themselves). Three variants handled.
-  //
-  // The bell row carries target_type='inline_comment' (or similar)
-  // and target_id pointing at the comment. parent_target_type may be
-  // 'book-chapter' or 'chapter', parent_target_id is the chapter id.
-  // If we have a chapter id, that's our routing key; fall back to
-  // any book id if the chapter info is missing.
-  const isInlineComment = (n.type === 'book_chapter_inline_comment'
-    || n.type === 'book_chapter_inline_comment_reply'
-    || n.type === 'book_chapter_inline_comment_mention');
-  if (isInlineComment) {
-    // Force kind=chapter (which the routes map points at openBookDetail
-    // anyway) so we land in the right place even if the trigger
-    // populated an unrecognized kebab-case parent_target_type.
-    kind = 'chapter';
-    id = n.parent_target_id || n.target_id || id;
-  }
-
-  const ROUTES = {
-    post:           (postId)    => openPostFromSearch(postId),
-    video:          (videoUuid) => playVideo('sb_' + videoUuid),
-    book:           (bookId)    => openBookDetail(bookId),
-    chapter:        (bookId)    => openBookDetail(bookId),
-    // Mobile uses kebab 'book-chapter' for the chapter kind on its
-    // adapter side; some trigger paths may write that token instead
-    // of the underscored 'chapter'. Alias both.
-    'book-chapter': (bookId)    => openBookDetail(bookId),
-    profile:        (userId)    => openProfile(userId),
-    // Withdrawal-status announcements (2026-05-15). The trigger writes
-    // target_type='withdrawal' + target_id=<author_withdrawals.id>.
-    // There's no per-withdrawal detail surface on web — land the
-    // creator on the Earnings page (the dashboard with balances +
-    // withdrawal history). showEarnings() already switches to the
-    // 'earnings' tab by default; we DON'T want to flip to 'payments'
-    // because that's the KYC/Payments-Info form, not the withdrawal
-    // status view. forceReload=true so the table reflects the very
-    // change they were just notified about (default 30s cache would
-    // show stale data after admin approval).
-    withdrawal:     ()          => { showEarnings(true); },
-  };
-
-  const opener = kind ? ROUTES[kind] : null;
-  if (opener && id) {
-    opener(id);
-    return;
-  }
-
-  // ── Final fallback ──
-  // App boot landed without a specific deep link — show the curated home
-  // landing as the default surface. Pre-May-2026 this called showFeed(),
-  // but Home now points at the curated landing while the social feed
-  // lives behind the Post tab.
-  setSidebarActive('btnHome');
-  showHomeLanding();
-}
-
-async function markAllNotificationsRead() {
-  if (!currentUser) return;
-  // Optimistic local update first so the UI doesn't lag the network.
-  _notifications.forEach((n) => { n.is_read = true; });
-  _notifUnreadCount = 0;
-  updateNotifBadge();
-  renderNotifications();
-
-  // Single sweeping UPDATE — covers EVERY unread row owned by the
-  // current user, not just the currently-loaded page. Two reasons
-  // the previous implementation was wrong:
-  //
-  //   1. `_notifications` after grouping holds only HEAD rows. A
-  //      grouped row collapses N raw rows into one — using its `id`
-  //      in the UPDATE only marks 1 of the N. The remaining N-1 stay
-  //      unread, so the badge resurrects the next time the panel
-  //      opens.
-  //   2. Loaded rows are paginated (page size 25). Anything past the
-  //      first page wasn't being touched at all.
-  //
-  // The `eq('recipient_id', me).eq('is_read', false)` filter scopes
-  // the UPDATE server-side — RLS already restricts to the user's
-  // own rows, but the explicit recipient_id keeps the query plan
-  // sane and the intent obvious. No round-trip per row.
-  const { error } = await supabase
-    .from('notifications')
-    .update({ is_read: true })
-    .eq('recipient_id', currentUser.id)
-    .eq('is_read', false);
-  if (error) console.warn('Mark all read failed:', error);
-}
-
-function toggleNotifPanel() {
-  if (_notifPanelOpen) closeNotifPanel();
-  else openNotifPanel();
-}
-function openNotifPanel() {
-  const panel = document.getElementById('notificationsPanel');
-  if (!panel) return;
-  panel.style.display = 'flex';
-  _notifPanelOpen = true;
-
-  // Mark-as-read on open — mirrors mobile's behavior (clears the
-  // badge the moment the bell opens). Only fires once per
-  // panel-open session so opening / closing / re-opening doesn't
-  // hammer the DB with redundant UPDATEs. Soft: only marks the
-  // currently-loaded rows; load-more pages stay unread until
-  // explicitly clicked or marked. mark-all-read button still works
-  // for the explicit "I want a clean slate" intent.
-  if (!_notifMarkedReadThisOpen && _notifUnreadCount > 0) {
-    _notifMarkedReadThisOpen = true;
-    markAllNotificationsRead();
-  }
-
-  // Install scroll handler for infinite-scroll. Idempotent — only
-  // attaches once per page lifetime (guard via dataset flag).
-  const list = document.getElementById('notificationsList');
-  if (list && !list.dataset.scrollWired) {
-    list.dataset.scrollWired = 'true';
-    list.addEventListener('scroll', () => {
-      // Fire when the user is within 80px of the bottom — gives the
-      // network request time to land before the user runs out of
-      // content. Threshold chosen to match the typical card height.
-      const nearBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 80;
-      if (nearBottom && _notifHasMore && !_notifLoadingMore) {
-        loadMoreNotifications();
-      }
-    });
-  }
-}
-function closeNotifPanel() {
-  const panel = document.getElementById('notificationsPanel');
-  if (!panel) return;
-  panel.style.display = 'none';
-  _notifPanelOpen = false;
-  // Reset the per-open guard so the NEXT open will mark-as-read
-  // again if any new unread arrived in the meantime (e.g. from
-  // realtime INSERT while the panel was closed).
-  _notifMarkedReadThisOpen = false;
-}
-
-document.getElementById('btnNotifications')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  toggleNotifPanel();
-});
-document.getElementById('notifMarkAll')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  markAllNotificationsRead();
-});
-// Filter tabs
-document.querySelectorAll('.notif-filter-tab').forEach(tab => {
-  tab.addEventListener('click', (e) => {
-    e.stopPropagation();
-    document.querySelectorAll('.notif-filter-tab').forEach(t => t.classList.toggle('active', t === tab));
-    _notifFilter = tab.dataset.filter || 'all';
-    renderNotifications();
-  });
-});
-// Click outside the panel → close
-document.addEventListener('click', (e) => {
-  if (!_notifPanelOpen) return;
-  if (e.target.closest('#notificationsPanel') || e.target.closest('#btnNotifications')) return;
-  closeNotifPanel();
-});
 
 // ════════════════════════════════════════════════════════════════════════════
 // DAILY QUESTS
@@ -20594,139 +10542,44 @@ document.addEventListener('click', (e) => {
 // Type @ in any .comment-input → dropdown with matching usernames.
 // Arrow keys navigate, Enter/Tab inserts, Esc closes.
 // ════════════════════════════════════════
-let _mentionDropdown = null;
-let _mentionTextarea = null;
-let _mentionResults  = [];
-let _mentionIdx      = 0;
-let _mentionDebounce = null;
+// (Mention dropdown state vars moved to js/messages.js in Stage 9B Codex
+// review pass — the mention helpers themselves moved as part of 9B but
+// their backing state was missed by the codemod's EXTRACT_STATE list,
+// causing ReferenceErrors at runtime when the dropdown tried to read
+// _mentionDropdown / _mentionResults / etc.)
 
-function getMentionDropdown() {
-  if (_mentionDropdown) return _mentionDropdown;
-  const el = document.createElement('div');
-  el.className = 'mention-dropdown';
-  el.style.display = 'none';
-  document.body.appendChild(el);
-  _mentionDropdown = el;
-  return el;
-}
-
-function closeMentionDropdown() {
-  if (_mentionDropdown) _mentionDropdown.style.display = 'none';
-  _mentionTextarea = null;
-  _mentionResults = [];
-  _mentionIdx = 0;
-}
-
-function positionMentionDropdown(textarea) {
-  const dd = getMentionDropdown();
-  const rect = textarea.getBoundingClientRect();
-  dd.style.position = 'fixed';
-  // Place below the textarea by default; flip above if it would clip the viewport
-  const wantTop = rect.bottom + 6;
-  const ddH = dd.offsetHeight || 220;
-  const flipAbove = wantTop + ddH > window.innerHeight - 12;
-  dd.style.top  = `${flipAbove ? Math.max(8, rect.top - ddH - 6) : wantTop}px`;
-  dd.style.left = `${Math.max(8, rect.left)}px`;
-  dd.style.minWidth = `${Math.min(260, Math.max(220, rect.width * 0.7))}px`;
-}
-
-async function maybeShowMentionDropdown(textarea) {
-  if (!textarea) return;
-  const cursor = textarea.selectionStart ?? textarea.value.length;
-  const before = textarea.value.slice(0, cursor);
-  // Match @<word> at end of `before`. Allow underscores and digits.
-  const match = before.match(/(?:^|\s)@([A-Za-z0-9_]{0,24})$/);
-  if (!match) {
-    closeMentionDropdown();
-    return;
-  }
-  _mentionTextarea = textarea;
-  const query = match[1] || '';
-  _mentionIdx = 0;
-
-  // Debounced profile search
-  clearTimeout(_mentionDebounce);
-  _mentionDebounce = setTimeout(async () => {
-    let q = supabase.from('profiles').select('id, username, avatar_url').limit(6);
-    if (query) q = q.ilike('username', `${query}%`);
-    else q = q.order('username', { ascending: true }).limit(6);
-    const { data } = await q;
-    _mentionResults = (data || []).filter(p => p.id !== currentUser?.id);
-    renderMentionDropdown();
-  }, 120);
-}
-
-function renderMentionDropdown() {
-  const dd = getMentionDropdown();
-  if (!_mentionResults.length || !_mentionTextarea) {
-    dd.style.display = 'none';
-    return;
-  }
-  dd.innerHTML = _mentionResults.map((p, i) => `
-    <div class="mention-item ${i === _mentionIdx ? 'active' : ''}" data-idx="${i}">
-      <div class="mention-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : escHTML((p.username || '?').slice(0,2).toUpperCase())}</div>
-      <div class="mention-name"><strong>@${escHTML(p.username || '')}</strong></div>
-    </div>
-  `).join('');
-  dd.querySelectorAll('.mention-item').forEach(item => {
-    item.addEventListener('mousedown', (e) => {
-      e.preventDefault();    // keep textarea focus
-      e.stopPropagation();
-      selectMention(parseInt(item.dataset.idx, 10));
-    });
-  });
-  dd.style.display = 'block';
-  positionMentionDropdown(_mentionTextarea);
-}
-
-function selectMention(index) {
-  const profile = _mentionResults[index];
-  const textarea = _mentionTextarea;
-  if (!profile || !textarea) return;
-  const cursor = textarea.selectionStart ?? textarea.value.length;
-  const before = textarea.value.slice(0, cursor);
-  const after  = textarea.value.slice(cursor);
-  // Replace the @<typed> at end of `before` with @username + space
-  const newBefore = before.replace(/(^|\s)@([A-Za-z0-9_]{0,24})$/, `$1@${profile.username} `);
-  textarea.value = newBefore + after;
-  const newCursor = newBefore.length;
-  textarea.setSelectionRange(newCursor, newCursor);
-  // Bubble an input event so any auto-resize textareas re-measure
-  textarea.dispatchEvent(new Event('input', { bubbles: true }));
-  textarea.focus();
-  closeMentionDropdown();
-}
-
-// Document-level event delegation — works for dynamically created comment textareas
+// Document-level event delegation — works for dynamically created
+// comment textareas AND the DM input (#dmInput on the full-page
+// Messages tab). Mobile has full @mention picker in DM composer
+// (especially important in group chats for pinging a specific member);
+// adding #dmInput to the filter brings web to parity (task #236).
+//
+// Floating-chat textareas in messages-dock.js would also benefit but
+// they're keyed by varying IDs per mini-chat — that wiring belongs
+// inside the dock module itself. Future work.
 document.addEventListener('input', (e) => {
   const ta = e.target;
   if (!ta || ta.tagName !== 'TEXTAREA') return;
-  if (!ta.classList.contains('comment-input')) return;
+  const isComment = ta.classList.contains('comment-input');
+  const isDm      = ta.id === 'dmInput';
+  const isDock    = ta.classList.contains('dm-mini-input');
+  if (!isComment && !isDm && !isDock) return;
   maybeShowMentionDropdown(ta);
 });
 
+// Delegate to messages.js — all of _mentionTextarea / _mentionResults /
+// _mentionDropdown / _mentionIdx live in that module after the Stage 9B
+// state move. Referencing them from app.js threw ReferenceError on every
+// keystroke (Stage 9 re-verification finding 1).
 document.addEventListener('keydown', (e) => {
-  if (!_mentionTextarea || !_mentionResults.length) return;
-  if (_mentionDropdown?.style.display !== 'block') return;
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    _mentionIdx = (_mentionIdx + 1) % _mentionResults.length;
-    renderMentionDropdown();
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    _mentionIdx = (_mentionIdx - 1 + _mentionResults.length) % _mentionResults.length;
-    renderMentionDropdown();
-  } else if (e.key === 'Enter' || e.key === 'Tab') {
-    e.preventDefault();
-    selectMention(_mentionIdx);
-  } else if (e.key === 'Escape') {
-    closeMentionDropdown();
-  }
+  handleMentionKeydown(e);
 });
 
 document.addEventListener('click', (e) => {
   if (e.target.closest('.mention-dropdown')) return;
   if (e.target.closest('.comment-input')) return;
+  if (e.target.closest('#dmInput')) return;
+  if (e.target.closest('.dm-mini-input')) return;
   closeMentionDropdown();
 });
 window.addEventListener('scroll', closeMentionDropdown, true);
@@ -20757,1794 +10610,20 @@ document.addEventListener('click', async (e) => {
   else toast(`User @${username} not found`, 'error');
 });
 
-// ── Reaction summary tap → modal listing who reacted ──────────────────────
-document.addEventListener('click', (e) => {
-  const summary = e.target.closest('.rcount');
-  if (!summary || !summary.textContent.trim()) return;   // empty summary = no reactions yet, ignore
-  if (e.target.closest('.reaction-trigger')) return;     // safety: don't hijack the trigger button
-  e.stopPropagation();
-  const targetId = summary.dataset.target;
-  const targetType = summary.dataset.type || 'post';
-  if (targetId) openReactorListModal(targetId, targetType);
-});
-
-// ── "N comments" tap → toggle the comment section open (same as the icon button) ──
-document.addEventListener('click', (e) => {
-  const counter = e.target.closest('.ccount');
-  if (!counter || !counter.textContent.trim()) return;   // empty = no comments yet, ignore
-  e.stopPropagation();
-  const postId = counter.dataset.postid;
-  if (!postId) return;
-  const section = document.getElementById(`comments-${postId}`);
-  if (!section) return;
-  if (section.style.display === 'none' || section.style.display === '') {
-    section.style.display = 'block';
-    loadComments(postId);
-  } else {
-    section.style.display = 'none';
-  }
-});
-
-// ── Reactor list modal ────────────────────────────────────────────────────
-async function openReactorListModal(targetId, targetType = 'post') {
-  closeAllModals('.modal-backdrop[data-modal="reactor-list"]');
-
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'reactor-list';
-  modal.innerHTML = `
-    <div class="modal-card follow-list-modal" role="dialog" aria-labelledby="reactor-list-title">
-      <div class="follow-list-header">
-        <h2 id="reactor-list-title">Reactions</h2>
-      </div>
-      <div class="reactor-tabs" id="reactorTabs"></div>
-      <div class="follow-list-body" id="reactorListBody">
-        <div class="loading">Loading…</div>
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">Close</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-  document.addEventListener('keydown', function onKey(ev) {
-    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
-  });
-
-  // Fetch reactions + reactor profiles
-  const { data: rxs, error } = await supabase
-    .from('reactions')
-    .select('emoji, user_id, created_at')
-    .eq('target_id', targetId)
-    .eq('target_type', targetType)
-    .order('created_at', { ascending: false })
-    .limit(500);
-  const body = modal.querySelector('#reactorListBody');
-  if (error) {
-    body.innerHTML = `<div class="dm-error">Couldn't load: ${escHTML(error.message)}</div>`;
-    return;
-  }
-  if (!rxs || !rxs.length) {
-    body.innerHTML = `<div class="follow-list-empty"><div class="follow-list-empty-icon">🤍</div><div>No reactions yet.</div></div>`;
-    return;
-  }
-
-  const userIds = [...new Set(rxs.map(r => r.user_id))];
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, username, avatar_url, is_guest')
-    .in('id', userIds);
-  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-
-  // Build emoji tabs (All, then per-emoji with counts)
-  const counts = {};
-  rxs.forEach(r => { counts[r.emoji] = (counts[r.emoji] || 0) + 1; });
-  const sortedEmojis = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  const tabsEl = modal.querySelector('#reactorTabs');
-  tabsEl.innerHTML = `
-    <button class="reactor-tab active" data-emoji-filter="">All ${rxs.length}</button>
-    ${sortedEmojis.map(([emoji, c]) =>
-      `<button class="reactor-tab" data-emoji-filter="${escHTML(emoji)}">${emoji} ${c}</button>`
-    ).join('')}
-  `;
-
-  function renderRows(filterEmoji) {
-    const rows = filterEmoji ? rxs.filter(r => r.emoji === filterEmoji) : rxs;
-    body.innerHTML = rows.map(r => {
-      const p = profileMap.get(r.user_id) || { id: r.user_id, username: 'Unknown', avatar_url: null };
-      const safeName = escHTML(p.username || '');
-      const safeAvatar = p.avatar_url ? escHTML(p.avatar_url) : '';
-      return `
-        <div class="follow-list-row">
-          <button class="follow-list-avatar" data-uid="${p.id}">
-            ${safeAvatar ? `<img src="${safeAvatar}"/>` : initials(p.username)}
-          </button>
-          <div class="follow-list-info">
-            <button class="follow-list-name" data-uid="${p.id}">@${safeName}</button>
-          </div>
-          <span class="reactor-emoji">${escHTML(r.emoji)}</span>
-        </div>
-      `;
-    }).join('');
-    body.querySelectorAll('[data-uid]').forEach(el => {
-      el.onclick = () => { close(); openProfile(el.dataset.uid); };
-    });
-  }
-
-  renderRows('');
-  tabsEl.querySelectorAll('.reactor-tab').forEach(t => {
-    t.onclick = () => {
-      tabsEl.querySelectorAll('.reactor-tab').forEach(x => x.classList.toggle('active', x === t));
-      renderRows(t.dataset.emojiFilter);
-    };
-  });
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// DIRECT MESSAGES — Phase 1 (FB Messenger-style with purple)
-// Two-pane layout: conversation list on left, active thread on right.
-// Realtime via Supabase channel on `messages` table.
-// ════════════════════════════════════════════════════════════════════════════
-
-let dmState = {
-  conversations: [],            // [{ id, isGroup, isSecret, archived, name, otherUser?, members?, lastMessageAt, lastMessagePreview, unread }]
-  activeConvId: null,           // currently-open conversation id
-  activeConv: null,             // full active conversation object (incl. is_group, name, members)
-  activeOther: null,            // for 1:1: the other user; for groups: null
-  messages: [],                 // current thread's messages
-  reactions: {},                // { messageId: [{ user_id, emoji }, ...] }
-  realtimeChannel: null,        // active Realtime subscription (DB changes for active thread)
-  presenceChannel: null,        // presence + typing broadcast for active thread
-  totalUnread: 0,
-  inboxChannel: null,           // realtime subscription for unread badge
-  otherIsTyping: false,         // is the other user currently typing?
-  typingUsers: {},              // groups: { userId: { name, lastSeen } } for "X is typing"
-  otherTypingTimer: null,       // auto-clear typing if no broadcast for N seconds
-  myTypingTimer: null,          // debounce my own typing broadcasts
-  otherIsOnline: false,
-  otherLastSeen: null,
-  hoverMenuEl: null,            // currently-open bubble hover menu
-  reactionPickerEl: null,       // currently-open reaction picker
-  convMenuEl: null,             // thread header ⋯ menu
-  editingMessageId: null,       // bubble being inline-edited
-  replyingTo: null,             // { id, body, sender_id, sender_name } when composing a reply
-  globalSearchResults: null,    // { conversations: [], messages: [] } when global search is active
-  viewMode: 'active',           // 'active' | 'archived' | 'secret' — which tab pill is selected
-};
-
-// ─────────────────────────────────────────────────────────────────────────
-// Secret-tab lock — web parity for the mobile lib/secret-lock.js module.
-//
-// PIN persists across browser restarts in localStorage (hashed + salted).
-// "Unlocked for this session" is held in sessionStorage so closing the
-// tab forgets the unlock — a closed tab in a coffee-shop browser stays
-// locked until re-authenticated. Visibility change (tab background)
-// triggers a re-lock after RELOCK_AFTER_BG_MS for an extra layer.
-//
-// Threat model: same as mobile — the PIN raises friction for a casual
-// snooper. Anyone with full access to the user's browser data can still
-// recover the salt + hash. For real privacy we'd put the hash on a
-// server profile column with per-device unlock; deferred.
-// ─────────────────────────────────────────────────────────────────────────
-
-const SECRET_LOCK = (() => {
-  const KEY_HASH = 'selebox.secretLock.pinHash.v1';
-  const KEY_SALT = 'selebox.secretLock.pinSalt.v1';
-  const SESSION_UNLOCKED = 'selebox.secretLock.unlocked';
-  const RELOCK_AFTER_BG_MS = 60 * 1000;
-
-  let backgroundedAt = null;
-
-  // djb2 with salt — fast non-crypto digest. Detail in mobile module's
-  // header comment.
-  const djb2 = (s) => {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
-    return (h >>> 0).toString(36);
-  };
-  const genSalt = () => {
-    let s = '';
-    for (let i = 0; i < 16; i++) s += Math.floor(Math.random() * 36).toString(36);
-    return s;
-  };
-  const hashPin = (pin, salt) => djb2(`${salt}:${pin}:${salt}`);
-
-  return {
-    hasPin: () => !!localStorage.getItem(KEY_HASH),
-    setPin: (pin) => {
-      if (!pin || String(pin).length < 4) throw new Error('PIN must be at least 4 digits');
-      const salt = genSalt();
-      localStorage.setItem(KEY_SALT, salt);
-      localStorage.setItem(KEY_HASH, hashPin(String(pin), salt));
-      sessionStorage.setItem(SESSION_UNLOCKED, '1');
-      backgroundedAt = null;
-    },
-    verifyPin: (pin) => {
-      const hash = localStorage.getItem(KEY_HASH);
-      const salt = localStorage.getItem(KEY_SALT);
-      if (!hash || !salt) return false;
-      return hashPin(String(pin), salt) === hash;
-    },
-    unlock: () => {
-      sessionStorage.setItem(SESSION_UNLOCKED, '1');
-      backgroundedAt = null;
-    },
-    lock: () => {
-      sessionStorage.removeItem(SESSION_UNLOCKED);
-      backgroundedAt = null;
-    },
-    isUnlocked: () => sessionStorage.getItem(SESSION_UNLOCKED) === '1',
-    onVisibilityChange: () => {
-      if (document.hidden) {
-        backgroundedAt = Date.now();
-      } else if (backgroundedAt && Date.now() - backgroundedAt > RELOCK_AFTER_BG_MS) {
-        sessionStorage.removeItem(SESSION_UNLOCKED);
-        backgroundedAt = null;
-        // Re-render the conversations list so the lock gate appears if
-        // the user is on the Secret tab.
-        if (typeof renderConversationList === 'function') renderConversationList();
-      }
-    },
-    clearPin: () => {
-      localStorage.removeItem(KEY_HASH);
-      localStorage.removeItem(KEY_SALT);
-      sessionStorage.removeItem(SESSION_UNLOCKED);
-      backgroundedAt = null;
-    },
-  };
-})();
-
-const secretLockIsUnlocked = () => SECRET_LOCK.isUnlocked();
+// ════════════════════════════════════════════════════════════════════════
+// Reactor list modal + tap handlers MOVED to js/engagement.js (Stage 12).
+// Was lines 11088-11265 pre-extraction. See engagement.js
+// for the implementation. App.js re-imports the exported functions so
+// the feed.js _cfg passthroughs (bulkLoadReactions, bulkLoadCommentCounts,
+// loadComments, loadReactions, loadCommentCount) keep receiving the real
+// impls.
+// ════════════════════════════════════════════════════════════════════════
+// (Dead const `secretLockIsUnlocked` removed in Stage 9 Codex review —
+// was a pre-9B bridge wrapper, no remaining callers.)
 
 // Wire visibility changes once at module load — covers tab switch,
 // minimize, lock screen on macOS, etc.
 document.addEventListener('visibilitychange', () => SECRET_LOCK.onVisibilityChange());
-
-// Wire the Secret-tab UI handlers — empty-state CTA, lock gate inputs,
-// PIN flow. Called from renderConversationList after the HTML is set.
-function wireSecretTabHandlers(wrap) {
-  // Empty-state CTA: "Start a Secret chat"
-  const startBtn = wrap.querySelector('#dmStartSecretBtn');
-  if (startBtn) startBtn.onclick = () => openSecretChatPicker();
-
-  // Lock gate
-  const gate = wrap.querySelector('.dm-secret-gate');
-  if (!gate) return;
-  const input = gate.querySelector('.dm-secret-input');
-  const submit = gate.querySelector('.dm-secret-submit');
-  const errorEl = gate.querySelector('.dm-secret-error');
-  let pendingPin = null; // first half of the create flow
-
-  const phase = SECRET_LOCK.hasPin() ? 'verify' : 'createNew';
-  let currentPhase = phase;
-
-  const reflect = (txt) => {
-    if (errorEl) errorEl.textContent = txt || '';
-  };
-
-  const onSubmit = () => {
-    const pin = (input?.value || '').replace(/[^0-9]/g, '').slice(0, 6);
-    if (pin.length < 4) { reflect('Use at least 4 digits.'); return; }
-    if (currentPhase === 'createNew') {
-      pendingPin = pin;
-      input.value = '';
-      reflect('');
-      currentPhase = 'createConfirm';
-      const titleEl = gate.querySelector('.dm-secret-title');
-      const subtitleEl = gate.querySelector('.dm-secret-subtitle');
-      if (titleEl) titleEl.textContent = 'Confirm your PIN';
-      if (subtitleEl) subtitleEl.textContent = 'Enter the same digits once more.';
-      input.focus();
-      return;
-    }
-    if (currentPhase === 'createConfirm') {
-      if (pin !== pendingPin) {
-        reflect("PINs don't match. Try again.");
-        pendingPin = null;
-        currentPhase = 'createNew';
-        input.value = '';
-        return;
-      }
-      try {
-        SECRET_LOCK.setPin(pin);
-        renderConversationList();
-      } catch (e) {
-        reflect(e?.message || 'Could not set PIN.');
-      }
-      return;
-    }
-    if (SECRET_LOCK.verifyPin(pin)) {
-      SECRET_LOCK.unlock();
-      renderConversationList();
-    } else {
-      reflect('Wrong PIN.');
-      input.value = '';
-    }
-  };
-
-  if (submit) submit.onclick = onSubmit;
-  if (input) {
-    input.oninput = () => {
-      input.value = input.value.replace(/[^0-9]/g, '').slice(0, 6);
-      reflect('');
-    };
-    input.onkeydown = (e) => { if (e.key === 'Enter') onSubmit(); };
-    setTimeout(() => input.focus(), 0);
-  }
-}
-
-// HTML for the PIN gate. Three phases: createNew, createConfirm, verify.
-// Phase logic lives in wireSecretTabHandlers; this just paints the
-// initial state based on whether a PIN exists.
-function renderSecretLockGateHtml() {
-  const has = SECRET_LOCK.hasPin();
-  const title = has ? 'Enter your Secret PIN' : 'Set a Secret PIN';
-  const subtitle = has
-    ? 'Enter your PIN to view Secret chats.'
-    : 'This PIN locks your Secret tab. Pick at least 4 digits.';
-  const buttonLabel = has ? 'Unlock' : 'Continue';
-  return `
-    <div class="dm-secret-gate">
-      <div class="dm-secret-gate-icon">🔒</div>
-      <div class="dm-secret-title">${title}</div>
-      <div class="dm-secret-subtitle">${subtitle}</div>
-      <input class="dm-secret-input" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••" />
-      <div class="dm-secret-error"></div>
-      <button class="dm-secret-submit" type="button">${buttonLabel}</button>
-    </div>
-  `;
-}
-
-// Quick-reaction emojis (FB-style — these match the existing post REACTIONS set)
-const DM_QUICK_REACTIONS = ['❤️','😂','😮','😢','😡','👍'];
-
-// IDs of messages already painted to the DOM. Used in renderMessages to skip
-// the entrance animation on bubbles that already existed — prevents the whole
-// list from flashing every time we re-render (sends, reactions, read receipts).
-const _renderedMessageIds = new Set();
-
-async function showMessages(targetUserId = null) {
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-  hideAllMainPages();
-  if (messagesPage) messagesPage.style.display = 'block';
-  document.body.classList.remove('on-videos');
-  history.pushState(null, '', '#messages');
-  setSidebarActive('btnMessages');
-
-  // DMs have a realtime subscription that keeps the list fresh — so on a
-  // quick tab-flick the list is already up to date. Only re-fetch on first
-  // load, when forced (targetUserId), or after 30 seconds.
-  const dmList = document.getElementById('dmList') || messagesPage?.querySelector('.dm-list');
-  const alreadyRendered = dmList && dmList.children.length > 0 && !dmList.querySelector('.loading');
-  const now = Date.now();
-  const stale = !window._dmListLoadedAt || (now - window._dmListLoadedAt) > 30_000;
-  if (!alreadyRendered || stale || targetUserId) {
-    await loadConversationList();
-    window._dmListLoadedAt = now;
-  }
-
-  if (targetUserId) {
-    // Open or create conversation with this user
-    await openConversationWithUser(targetUserId);
-  }
-}
-
-// ── Conversation list ─────────────────────────────────────────────────────
-const DM_EMPTY_HTML = `
-  <div class="dm-empty-list" id="dmEmptyList">
-    <div class="dm-empty-icon">💬</div>
-    <h3>No conversations yet</h3>
-    <p>Start one from anyone's profile.</p>
-  </div>
-`;
-
-async function loadConversationList() {
-  const wrap = document.getElementById('dmConvList');
-  if (!wrap || !currentUser) return;
-
-  // Skeleton while loading
-  if (!dmState.conversations.length) {
-    wrap.innerHTML = `
-      <div class="dm-conv-skel"></div>
-      <div class="dm-conv-skel"></div>
-      <div class="dm-conv-skel"></div>
-    `;
-  }
-
-  // Fetch the conversation ids the viewer can see. Two parallel sources,
-  // unioned client-side:
-  //   (1) conversation_participants — covers groups + most 1:1s.
-  //   (2) conversations.user_a / user_b — covers 1:1s where the participants
-  //       row was never written. Secret 1:1 conversations created via the
-  //       getOrCreateSecretConversation flow only insert into `conversations`
-  //       and don't always seed `conversation_participants` (depends on the
-  //       trigger pipeline). Without (2), Secret chats are invisible to web
-  //       even though they're correctly stored.
-  // Mobile already does this via direct user_a / user_b query in
-  // lib/messages-supabase.js → loadConversations; this matches that
-  // behavior for cross-platform parity.
-  const [partsRes, oneOnOneRes] = await Promise.all([
-    supabase
-      .from('conversation_participants')
-      .select('conversation_id')
-      .eq('user_id', currentUser.id),
-    supabase
-      .from('conversations')
-      .select('id')
-      .eq('is_group', false)
-      .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`),
-  ]);
-  if (partsRes.error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(partsRes.error.message)}</div>`;
-    return;
-  }
-  if (oneOnOneRes.error) {
-    // Non-fatal — fall back to participants-only. Logged so we notice if
-    // it starts failing universally.
-    console.warn('[dm] 1:1 fetch failed, falling back to participants-only:', oneOnOneRes.error?.message);
-  }
-  const idSet = new Set();
-  for (const p of partsRes.data || []) if (p.conversation_id) idSet.add(p.conversation_id);
-  for (const c of oneOnOneRes.data || []) if (c.id) idSet.add(c.id);
-  const convIds = [...idSet];
-  if (!convIds.length) {
-    wrap.innerHTML = DM_EMPTY_HTML;
-    dmState.conversations = [];
-    updateUnreadBadge(0);
-    return;
-  }
-
-  const { data: convs, error } = await supabase
-    .from('conversations')
-    .select('id, user_a, user_b, is_group, is_secret, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, created_at, archived_by_a, archived_by_b, muted_until_a, muted_until_b')
-    .in('id', convIds)
-    .order('last_message_at', { ascending: false, nullsFirst: false })
-    .limit(100);
-
-  if (error) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load chats: ${escHTML(error.message)}</div>`;
-    return;
-  }
-
-  if (!convs || !convs.length) {
-    wrap.innerHTML = DM_EMPTY_HTML;
-    dmState.conversations = [];
-    updateUnreadBadge(0);
-    return;
-  }
-
-  // We no longer filter at fetch time. The 3-tab pill (Active / Archived /
-  // Secret) lives in renderConversationList and decides which bucket
-  // each conversation belongs to. This means the user can switch tabs
-  // without re-fetching from the network.
-  const visibleConvs = convs;
-
-  // Pull all participants for groups so we can render stacked avatars
-  const groupConvIds = visibleConvs.filter(c => c.is_group).map(c => c.id);
-  const groupMembersByConv = {};
-  if (groupConvIds.length) {
-    const { data: members } = await supabase
-      .from('conversation_participants')
-      .select('conversation_id, user_id')
-      .in('conversation_id', groupConvIds);
-    (members || []).forEach(m => {
-      if (!groupMembersByConv[m.conversation_id]) groupMembersByConv[m.conversation_id] = [];
-      groupMembersByConv[m.conversation_id].push(m.user_id);
-    });
-  }
-
-  // Hydrate ALL profiles needed (1:1 partners + group members)
-  const allProfileIds = new Set();
-  visibleConvs.forEach(c => {
-    if (!c.is_group) {
-      const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
-      if (otherId) allProfileIds.add(otherId);
-    } else {
-      (groupMembersByConv[c.id] || []).forEach(id => allProfileIds.add(id));
-    }
-  });
-  const [{ data: profiles }, unreadByConv] = await Promise.all([
-    allProfileIds.size
-      ? supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', [...allProfileIds])
-      : Promise.resolve({ data: [] }),
-    fetchUnreadCounts(visibleConvs.map(c => c.id)),
-  ]);
-
-  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-  // totalUnread excludes:
-  //   - Archived (per-side flag)
-  //   - Muted
-  //   - Secret (stealth design — never count toward the global badge)
-  let totalUnread = 0;
-  dmState.conversations = visibleConvs.map(c => {
-    const unread = unreadByConv[c.id] || 0;
-    const isMutedNow = isConvMutedForMe(c);
-    const archivedByMe = c.is_group
-      ? false  // groups don't expose per-side archive yet
-      : ((c.user_a === currentUser.id && c.archived_by_a) ||
-         (c.user_b === currentUser.id && c.archived_by_b));
-    const isSecret = !!c.is_secret;
-    if (!isMutedNow && !archivedByMe && !isSecret) totalUnread += unread;
-
-    if (c.is_group) {
-      const memberIds = (groupMembersByConv[c.id] || []).filter(id => id !== currentUser.id);
-      const members = memberIds.map(id => profileMap.get(id)).filter(Boolean);
-      const allMembers = (groupMembersByConv[c.id] || []).map(id => profileMap.get(id) || { id, username: 'Unknown' });
-      // Auto-name: "Alice, Bob, Carol" from up to 3 other members
-      const autoName = c.name || members.slice(0, 3).map(m => m.username).join(', ') || 'Group chat';
-      return {
-        id: c.id,
-        isGroup: true,
-        isSecret,
-        archived: archivedByMe,
-        createdBy: c.created_by,
-        name: autoName,
-        members: allMembers,
-        memberCount: allMembers.length,
-        avatarUrl: c.avatar_url,
-        lastMessageAt: c.last_message_at,
-        lastMessagePreview: c.last_message_preview || '',
-        lastMessageSender: c.last_message_sender,
-        unread,
-        muted: isMutedNow,
-        raw: c,
-      };
-    }
-    const otherId = c.user_a === currentUser.id ? c.user_b : c.user_a;
-    return {
-      id: c.id,
-      isGroup: false,
-      isSecret,
-      archived: archivedByMe,
-      createdBy: c.created_by,
-      otherUser: profileMap.get(otherId) || { id: otherId, username: 'Unknown', avatar_url: null },
-      lastMessageAt: c.last_message_at,
-      lastMessagePreview: c.last_message_preview || '',
-      lastMessageSender: c.last_message_sender,
-      unread,
-      muted: isMutedNow,
-      raw: c,
-    };
-  });
-
-  renderConversationList();
-  updateUnreadBadge(totalUnread);
-}
-
-// Returns true if the conversation is currently muted for the current user
-function isConvMutedForMe(c) {
-  if (!c) return false;
-  const my = currentUser?.id;
-  let until;
-  if (c.is_group) return false; // group mute TBD
-  if (c.user_a === my)      until = c.muted_until_a;
-  else if (c.user_b === my) until = c.muted_until_b;
-  if (!until) return false;
-  return new Date(until).getTime() > Date.now();
-}
-
-async function fetchUnreadCounts(conversationIds) {
-  if (!conversationIds.length) return {};
-  // Pull only unread messages where I'm NOT the sender, group client-side
-  const { data } = await supabase
-    .from('messages')
-    .select('conversation_id, sender_id')
-    .in('conversation_id', conversationIds)
-    .is('read_at', null)
-    .is('deleted_at', null)
-    .neq('sender_id', currentUser.id);
-  const counts = {};
-  (data || []).forEach(m => {
-    counts[m.conversation_id] = (counts[m.conversation_id] || 0) + 1;
-  });
-  return counts;
-}
-
-function renderConversationList() {
-  const wrap = document.getElementById('dmConvList');
-  if (!wrap) return;
-
-  // ── Bucket conversations into Active / Archived / Secret ─────────────
-  // Secret wins over Archived — a Secret conversation that's somehow
-  // archived still shows under Secret only, never leaks back to
-  // Archived. This matches the mobile invariant.
-  const buckets = { active: [], archived: [], secret: [] };
-  for (const c of dmState.conversations) {
-    if (c.isSecret) buckets.secret.push(c);
-    else if (c.archived) buckets.archived.push(c);
-    else buckets.active.push(c);
-  }
-
-  const mode = dmState.viewMode || 'active';
-  const visible = buckets[mode] || [];
-
-  // ── 3-tab pill ───────────────────────────────────────────────────────
-  // Always show Active. Show Archived only when there's at least one
-  // archived chat OR the user is currently viewing it. Always show
-  // Secret so the lock affordance is discoverable.
-  const showArchivedTab = buckets.archived.length > 0 || mode === 'archived';
-  const pillHtml = `
-    <div class="dm-tab-pill">
-      <button class="dm-tab ${mode === 'active' ? 'is-active' : ''}" data-tab="active" type="button">
-        Active${mode !== 'active' ? ` (${buckets.active.length})` : ''}
-      </button>
-      ${showArchivedTab ? `
-        <button class="dm-tab ${mode === 'archived' ? 'is-active' : ''}" data-tab="archived" type="button">
-          Archived (${buckets.archived.length})
-        </button>` : ''}
-      <button class="dm-tab ${mode === 'secret' ? 'is-active' : ''}" data-tab="secret" type="button">
-        Secret
-      </button>
-    </div>
-  `;
-
-  // ── Body ─────────────────────────────────────────────────────────────
-  // Secret tab is gated by the lock module; if not unlocked, render the
-  // PIN gate instead of the list.
-  let bodyHtml;
-  if (mode === 'secret' && !secretLockIsUnlocked()) {
-    bodyHtml = renderSecretLockGateHtml();
-  } else if (visible.length === 0) {
-    bodyHtml = renderConvEmptyStateHtml(mode);
-  } else {
-    bodyHtml = visible.map(c => renderConvItemHtml(c)).join('');
-  }
-
-  wrap.innerHTML = pillHtml + bodyHtml;
-
-  // Wire pill clicks
-  wrap.querySelectorAll('.dm-tab').forEach(el => {
-    el.onclick = () => {
-      dmState.viewMode = el.dataset.tab;
-      renderConversationList();
-    };
-  });
-
-  // Wire conversation row clicks (only when not on the locked Secret gate)
-  wrap.querySelectorAll('.dm-conv-item').forEach(el => {
-    el.onclick = () => openConversation(el.dataset.convId);
-  });
-
-  // Wire Secret-tab CTA + lock-gate handlers (when present)
-  wireSecretTabHandlers(wrap);
-}
-
-// Empty-state HTML per tab. Secret gets a CTA inviting the user to
-// start one — others get the existing "no chats" copy.
-function renderConvEmptyStateHtml(mode) {
-  if (mode === 'secret') {
-    return `
-      <div class="dm-empty-list">
-        <div class="dm-empty-icon">🔒</div>
-        <div class="dm-empty-title">No Secret chats yet</div>
-        <div class="dm-empty-sub">
-          Secret chats are silent — no notifications, hidden from the unread badge,
-          and only available with mutual followers.
-        </div>
-        <button class="dm-cta-btn" id="dmStartSecretBtn" type="button">🔒 Start a Secret chat</button>
-      </div>
-    `;
-  }
-  if (mode === 'archived') {
-    return `
-      <div class="dm-empty-list">
-        <div class="dm-empty-icon">📥</div>
-        <div class="dm-empty-title">No archived chats.</div>
-      </div>
-    `;
-  }
-  return DM_EMPTY_HTML;
-}
-
-function renderConvItemHtml(c) {
-  let safeName, avatarHtml;
-  if (c.isGroup) {
-    safeName = escHTML(c.name || 'Group chat');
-    // If the creator has set an explicit group photo (avatar_url), prefer
-    // it. Falls back to the stacked-member avatars when no photo set.
-    // Without this branch, the group-photo edit feature was invisible
-    // anywhere outside the group settings modal — same root cause as
-    // the mobile bug we just fixed.
-    avatarHtml = c.avatarUrl
-      ? `<div class="dm-conv-avatar"><img src="${escHTML(c.avatarUrl)}" alt=""/></div>`
-      : renderGroupAvatarHtml(c.members, 'list');
-  } else {
-    const u = c.otherUser;
-    safeName = escHTML(u.username || 'Unknown');
-    avatarHtml = `<div class="dm-conv-avatar">${u.avatar_url
-      ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
-      : `<span class="dm-avatar-initials">${initials(u.username)}</span>`}</div>`;
-  }
-  // Secret rows get a small lock badge on the avatar so it's clear
-  // at a glance which conversations are stealth.
-  //
-  // We need to add the dm-conv-avatar-secret class to whatever the
-  // outer wrapper turned out to be — but the wrapper varies by branch:
-  //   1:1 with photo:        class="dm-conv-avatar"
-  //   1:1 initials:          class="dm-conv-avatar"
-  //   group with photo:      class="dm-conv-avatar"
-  //   group stacked avatars: class="dm-conv-avatar dm-group-avatar"
-  //   group empty (no others): class="dm-conv-avatar"
-  // A literal-string replace covered three of those but missed the
-  // stacked-group case (no badge for Secret groups). Use a regex that
-  // appends the modifier class regardless of what other classes are
-  // already on the wrapper.
-  if (c.isSecret) {
-    avatarHtml = avatarHtml.replace(/class="dm-conv-avatar([^"]*)"/, 'class="dm-conv-avatar$1 dm-conv-avatar-secret"');
-  }
-  const isMine = c.lastMessageSender === currentUser.id;
-  const senderPrefix = c.isGroup && c.lastMessageSender && !isMine
-    ? (escHTML(senderUsernameInGroup(c, c.lastMessageSender) || 'Someone') + ': ')
-    : (isMine ? 'You: ' : '');
-  // If preview body is whitespace-only (image-only message), show generic label
-  const previewText = (c.lastMessagePreview || '').trim();
-  const preview = c.lastMessagePreview && previewText
-    ? senderPrefix + escHTML(c.lastMessagePreview)
-    : (c.lastMessageAt ? senderPrefix + '<em>📷 Sent an attachment</em>' : '<em>No messages yet</em>');
-  const time = c.lastMessageAt ? timeAgo(c.lastMessageAt) : '';
-  const isActive = c.id === dmState.activeConvId;
-  const unreadCls = c.unread > 0 ? ' has-unread' : '';
-  const mutedIcon = c.muted ? '<span class="dm-conv-muted" title="Muted">🔕</span>' : '';
-  return `
-    <button class="dm-conv-item${isActive ? ' active' : ''}${unreadCls}" data-conv-id="${c.id}">
-      ${avatarHtml}
-      <div class="dm-conv-meta">
-        <div class="dm-conv-row">
-          <span class="dm-conv-name">${safeName}${mutedIcon}</span>
-          <span class="dm-conv-time">${time}</span>
-        </div>
-        <div class="dm-conv-preview">${preview}</div>
-      </div>
-      ${c.unread > 0 && !c.muted ? `<span class="dm-conv-unread">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
-    </button>
-  `;
-}
-
-function senderUsernameInGroup(conv, senderId) {
-  if (!conv?.members) return null;
-  const m = conv.members.find(p => p.id === senderId);
-  return m?.username || null;
-}
-
-// Stacked avatars for group conversations (list = small, header = large)
-function renderGroupAvatarHtml(members, variant = 'list') {
-  const others = (members || []).filter(m => m.id !== currentUser.id).slice(0, 2);
-  if (!others.length) {
-    return `<div class="dm-conv-avatar">👥</div>`;
-  }
-  const cls = variant === 'list' ? 'dm-conv-avatar dm-group-avatar' : 'dm-thread-avatar dm-group-avatar';
-  const tiles = others.map((m, i) => {
-    const safeAvatar = m.avatar_url ? escHTML(m.avatar_url) : '';
-    return `<span class="dm-group-tile dm-group-tile-${i}">${safeAvatar
-      ? `<img src="${safeAvatar}" alt=""/>`
-      : initials(m.username)}</span>`;
-  }).join('');
-  return `<div class="${cls}">${tiles}</div>`;
-}
-
-// ── Open a thread ─────────────────────────────────────────────────────────
-async function openConversationWithUser(otherUserId) {
-  // Resolve / create the conversation, then open it
-  const { data: convId, error } = await supabase
-    .rpc('get_or_create_conversation', { p_other_user_id: otherUserId });
-
-  if (error) {
-    if (/blocked/i.test(error.message)) toast('Cannot message blocked user', 'error');
-    else toast(error.message, 'error');
-    return;
-  }
-  await loadConversationList();
-  await openConversation(convId);
-}
-
-async function openConversation(convId) {
-  if (!convId || !currentUser) return;
-  dmState.activeConvId = convId;
-  dmState.replyingTo = null;
-  hideReplyPreview();
-
-  // Find conversation in cache (or refetch — also re-hydrate participants)
-  let conv = dmState.conversations.find(c => c.id === convId);
-  if (!conv) {
-    // Fetch conversation + participants in parallel (saves one round-trip).
-    // For 1:1 we still know the partner from user_a/user_b, but we kick off
-    // the participants query speculatively so groups don't pay an extra hop.
-    const [{ data, error: fetchErr }, { data: parts }] = await Promise.all([
-      supabase.from('conversations')
-        .select('id, user_a, user_b, is_group, is_secret, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, archived_by_a, archived_by_b, muted_until_a, muted_until_b, created_at')
-        .eq('id', convId)
-        .single(),
-      supabase.from('conversation_participants').select('user_id').eq('conversation_id', convId),
-    ]);
-    if (fetchErr || !data) { toast('Conversation not found', 'error'); console.warn('[dm] conv fetch failed', fetchErr); return; }
-    if (data.is_group) {
-      const memberIds = (parts || []).map(p => p.user_id);
-      const { data: profs } = memberIds.length
-        ? await supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', memberIds)
-        : { data: [] };
-      const members = (profs || []);
-      conv = {
-        id: data.id, isGroup: true, isSecret: !!data.is_secret, createdBy: data.created_by,
-        name: data.name || members.filter(m => m.id !== currentUser.id).slice(0,3).map(m => m.username).join(', '),
-        members, memberCount: members.length, avatarUrl: data.avatar_url,
-        lastMessageAt: data.last_message_at, lastMessagePreview: data.last_message_preview || '',
-        unread: 0, muted: false, raw: data,
-      };
-    } else {
-      const otherId = data.user_a === currentUser.id ? data.user_b : data.user_a;
-      const { data: prof } = await supabase.from('profiles').select('id, username, avatar_url, is_guest').eq('id', otherId).single();
-      conv = {
-        id: data.id, isGroup: false, isSecret: !!data.is_secret, createdBy: data.created_by,
-        otherUser: prof || { id: otherId, username: 'Unknown', avatar_url: null },
-        lastMessageAt: data.last_message_at,
-        lastMessagePreview: data.last_message_preview || '',
-        unread: 0, muted: isConvMutedForMe(data), raw: data,
-      };
-    }
-  }
-  // Carry the raw flags onto the activeConv for any downstream code that
-  // checks them by snake_case (the send-time mutuals gate, etc.).
-  if (conv && conv.raw) {
-    conv.is_secret = !!conv.raw.is_secret;
-    conv.is_group = !!conv.raw.is_group;
-    conv.user_a = conv.raw.user_a;
-    conv.user_b = conv.raw.user_b;
-  }
-  dmState.activeConv = conv;
-  dmState.activeOther = conv.isGroup ? null : conv.otherUser;
-
-  // Show active panel, hide empty placeholder
-  document.getElementById('dmThreadEmpty').style.display = 'none';
-  document.getElementById('dmThreadActive').style.display = 'flex';
-
-  // Header — different rendering for groups vs 1:1
-  const av = document.getElementById('dmThreadAvatar');
-  const nameBtn = document.getElementById('dmThreadName');
-  const statusEl = document.getElementById('dmThreadStatus');
-  if (conv.isGroup) {
-    // Prefer the explicitly-set group photo (creator-uploaded). Falls
-    // back to the stacked-member rendering when no photo is set. Same
-    // resolution rule as the conversation list — keeps the surfaces in
-    // sync with the group settings modal's avatar editor.
-    if (conv.avatarUrl) {
-      av.innerHTML = `<img src="${escHTML(conv.avatarUrl)}" alt=""/>`;
-    } else {
-      av.innerHTML = renderGroupAvatarHtml(conv.members, 'list')
-        .replace('class="dm-conv-avatar dm-group-avatar"', 'class="dm-group-avatar dm-group-avatar-header"');
-    }
-    av.onclick = () => openConvActionsMenu(); // tap header avatar → menu (View members)
-    nameBtn.textContent = (conv.isSecret ? '🔒 ' : '') + conv.name;
-    nameBtn.onclick = () => openConvActionsMenu();
-    statusEl.textContent = `${conv.memberCount} members`;
-  } else {
-    const u = conv.otherUser;
-    av.innerHTML = (u.avatar_url
-      ? `<img src="${escHTML(u.avatar_url)}" alt=""/>`
-      : `<span class="dm-avatar-initials">${initials(u.username)}</span>`) +
-      `<span class="dm-online-dot" id="dmOnlineDot" style="display:none"></span>`;
-    av.onclick = () => openProfile(u.id);
-    nameBtn.textContent = (conv.isSecret ? '🔒 ' : '') + (u.username || 'Unknown');
-    nameBtn.onclick = () => openProfile(u.id);
-    statusEl.textContent = '';
-  }
-
-  // Highlight in list
-  document.querySelectorAll('.dm-conv-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.convId === convId);
-  });
-
-  // Mobile: collapse list, show thread
-  document.querySelector('.dm-shell')?.classList.add('thread-open');
-
-  // Load messages
-  await loadMessages(convId);
-
-  // ── Optimistically clear unread BEFORE the RPC call ──
-  // Even if mark_conversation_read fails (RPC missing, network error, etc.),
-  // the user sees the badge clear immediately. Real-time correction happens
-  // on next loadConversationList if the server disagrees.
-  const _zeroUnread = () => {
-    const c = dmState.conversations.find(x => x.id === convId);
-    if (c) c.unread = 0;
-    renderConversationList();
-    const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
-    updateUnreadBadge(total);
-  };
-  _zeroUnread();
-  supabase.rpc('mark_conversation_read', { p_conversation_id: convId })
-    .then(_zeroUnread)
-    .catch(() => {});  // Already cleared optimistically; ignore RPC errors
-
-  // Subscribe to realtime updates for this conversation
-  subscribeToThread(convId);
-}
-
-async function loadMessages(convId) {
-  const wrap = document.getElementById('dmMessages');
-  if (!wrap) return;
-  wrap.innerHTML = '<div class="dm-loading">Loading messages…</div>';
-  // Fresh conversation → reset the "already-animated" tracker so first paint animates in
-  _renderedMessageIds.clear();
-
-  // Fetch messages + reactions in parallel (include reply_to_id + image fields).
-  // Pull the LATEST 100 (descending), then reverse to chronological order so
-  // newest sits at the bottom. Previously this was ascending+limit(200) which,
-  // on a thread with >200 messages, would silently miss the most recent ones.
-  // Older messages can be paged in via a future "load older" affordance.
-  const [{ data: msgs, error: msgErr }, reactionsByMsg] = await Promise.all([
-    supabase
-      .from('messages')
-      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id, image_url, image_urls, image_kind')
-      .eq('conversation_id', convId)
-      .order('created_at', { ascending: false })
-      .limit(100),
-    fetchReactionsForConversation(convId),
-  ]);
-
-  if (msgErr) {
-    wrap.innerHTML = `<div class="dm-error">Couldn't load messages: ${escHTML(msgErr.message)}</div>`;
-    return;
-  }
-  // Reverse to chronological order (oldest first → newest at bottom of thread)
-  // and normalize image fields so the renderer always sees image_urls as an
-  // array. Pre-2026-05-07 rows only have image_url populated; new rows have
-  // both. The mobile lib does the same shape promotion; matching here means
-  // renderMessages doesn't have to branch on legacy schema shape.
-  dmState.messages = (msgs || []).slice().reverse().map((m) => {
-    if (Array.isArray(m.image_urls) && m.image_urls.length > 0) return m;
-    if (m.image_url) return { ...m, image_urls: [m.image_url] };
-    return { ...m, image_urls: [] };
-  });
-  dmState.reactions = reactionsByMsg;
-  renderMessages();
-  // Initial open of a thread → always pin to bottom regardless of prior scroll.
-  scrollMessagesToBottom({ force: true });
-}
-
-// Fetch all reactions for messages in this conversation, indexed by message_id
-async function fetchReactionsForConversation(convId) {
-  // First get the message ids in this convo (RLS-protected)
-  const { data: msgIds } = await supabase
-    .from('messages')
-    .select('id')
-    .eq('conversation_id', convId);
-  if (!msgIds?.length) return {};
-  const ids = msgIds.map(m => m.id);
-  const { data: reactions } = await supabase
-    .from('message_reactions')
-    .select('message_id, user_id, emoji, created_at')
-    .in('message_id', ids);
-  const out = {};
-  (reactions || []).forEach(r => {
-    if (!out[r.message_id]) out[r.message_id] = [];
-    out[r.message_id].push(r);
-  });
-  return out;
-}
-
-// ── Render messages with FB-style grouping ────────────────────────────────
-function renderMessages() {
-  const wrap = document.getElementById('dmMessages');
-  if (!wrap) return;
-
-  if (!dmState.messages.length) {
-    if (dmState.activeConv?.isGroup) {
-      wrap.innerHTML = `
-        <div class="dm-thread-intro">
-          <div class="dm-thread-intro-avatar">${renderGroupAvatarHtml(dmState.activeConv.members, 'list')}</div>
-          <h3>${escHTML(dmState.activeConv.name || 'Group chat')}</h3>
-          <p>${dmState.activeConv.memberCount} members. Send a message to get the chat going.</p>
-        </div>
-      `;
-    } else {
-      wrap.innerHTML = `
-        <div class="dm-thread-intro">
-          <div class="dm-thread-intro-avatar">${dmState.activeOther?.avatar_url
-            ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-            : initials(dmState.activeOther?.username)}</div>
-          <h3>${escHTML(dmState.activeOther?.username || '')}</h3>
-          <p>Say hello — your first message starts the conversation.</p>
-        </div>
-      `;
-    }
-    return;
-  }
-  const isGroup = !!dmState.activeConv?.isGroup;
-  const memberMap = new Map();
-  if (isGroup) (dmState.activeConv.members || []).forEach(m => memberMap.set(m.id, m));
-
-  // Identify the LAST message sent by ME that the OTHER has already read,
-  // so we can stick the read avatar to it (FB pattern).
-  let lastReadOfMine = null;
-  for (let i = dmState.messages.length - 1; i >= 0; i--) {
-    const m = dmState.messages[i];
-    if (m.sender_id === currentUser.id && m.read_at) { lastReadOfMine = m.id; break; }
-  }
-
-  let lastDateStamp = '';
-  let html = '';
-  for (let i = 0; i < dmState.messages.length; i++) {
-    const m = dmState.messages[i];
-    const prev = dmState.messages[i - 1];
-    const next = dmState.messages[i + 1];
-    const mine = m.sender_id === currentUser.id;
-
-    // Date separator (every ~30 min gap or new day)
-    const stamp = formatMessageDateStamp(m.created_at, prev?.created_at);
-    if (stamp && stamp !== lastDateStamp) {
-      html += `<div class="dm-date-sep">${stamp}</div>`;
-      lastDateStamp = stamp;
-    }
-
-    // Grouping: this message belongs to the same "burst" if same sender as prev/next AND within 5 min
-    const isFirstInGroup = !prev || prev.sender_id !== m.sender_id || (new Date(m.created_at) - new Date(prev.created_at)) > 5 * 60000;
-    const isLastInGroup  = !next || next.sender_id !== m.sender_id || (new Date(next.created_at) - new Date(m.created_at)) > 5 * 60000;
-
-    // Only animate bubbles we haven't rendered before — prevents the whole
-    // list from flashing on every re-render (e.g. after optimistic→real swap).
-    const isNewBubble = !_renderedMessageIds.has(m.id);
-    const bubbleCls = `dm-bubble ${mine ? 'mine' : 'theirs'}` +
-      (isFirstInGroup ? ' first-in-group' : '') +
-      (isLastInGroup  ? ' last-in-group'  : '') +
-      (isNewBubble    ? ' is-new'         : '');
-
-    // Avatar: in groups, show the SENDER's avatar (different per message); in 1:1, the activeOther's
-    const senderProfile = isGroup ? memberMap.get(m.sender_id) : dmState.activeOther;
-    const showAvatar = !mine && isLastInGroup;
-    const avatarHtml = showAvatar
-      ? `<div class="dm-bubble-avatar">${senderProfile?.avatar_url
-          ? `<img src="${escHTML(senderProfile.avatar_url)}"/>`
-          : initials(senderProfile?.username)}</div>`
-      : '<div class="dm-bubble-avatar-spacer"></div>';
-    // In groups: show sender name above their FIRST bubble in a stretch
-    const senderNameHtml = (isGroup && !mine && isFirstInGroup && senderProfile)
-      ? `<div class="dm-sender-name">${escHTML(senderProfile.username || 'Unknown')}</div>`
-      : '';
-
-    const isDeleted = !!m.deleted_at;
-    // Build bubble content: deleted messages render as a static label (NOT through linkify),
-    // otherwise escape body, convert newlines, then linkify URLs.
-    let bubbleContent;
-    let linkPreviewHtml = '';
-    let imageHtml = '';
-    if (isDeleted) {
-      const who = mine ? 'You' : escHTML(dmState.activeOther?.username || 'User');
-      bubbleContent = `<span class="dm-bubble-deleted">${who} unsent a message</span>`;
-    } else {
-      // Image attachment(s) — multi-image post-2026-05-07. The loadMessages
-      // normalizer above guarantees `m.image_urls` is always an array
-      // (possibly empty); legacy `m.image_url` rows are promoted to
-      // length-1 arrays at fetch time. GIF detection still uses the lead
-      // url's image_kind/extension since GIFs are always single-attachment.
-      const imageUrls = Array.isArray(m.image_urls) && m.image_urls.length > 0
-        ? m.image_urls
-        : (m.image_url ? [m.image_url] : []);
-      if (imageUrls.length > 0) {
-        const leadUrl = imageUrls[0];
-        const isGif = m.image_kind === 'gif' || /\.gif(\?|$)/i.test(leadUrl);
-        if (imageUrls.length === 1) {
-          // Single image keeps the existing markup so the surrounding CSS
-          // (rounded corners, GIF tag, lightbox click handler) all still
-          // applies unchanged.
-          imageHtml = `
-            <div class="dm-bubble-image ${isGif ? 'is-gif' : ''}" data-img-url="${escHTML(leadUrl)}">
-              <img src="${escHTML(leadUrl)}" alt="Attachment" loading="lazy"/>
-              ${isGif ? '<span class="dm-bubble-image-tag">GIF</span>' : ''}
-            </div>
-          `;
-        } else {
-          // Gallery grid for 2+ images. We render up to 4 thumbs; if there
-          // are more, the 4th cell gets a "+N" overlay. Each thumb is
-          // tappable via the same data-img-url lightbox hook the single
-          // image uses, so existing click handlers keep working.
-          const visible = imageUrls.slice(0, 4);
-          const overflow = imageUrls.length - 4;
-          imageHtml = `
-            <div class="dm-bubble-gallery dm-bubble-gallery-${visible.length}">
-              ${visible.map((url, idx) => {
-                const isOverflow = idx === 3 && overflow > 0;
-                return `
-                  <div class="dm-bubble-gallery-cell" data-img-url="${escHTML(url)}">
-                    <img src="${escHTML(url)}" alt="Attachment" loading="lazy"/>
-                    ${isOverflow ? `<span class="dm-bubble-gallery-overflow">+${overflow}</span>` : ''}
-                  </div>
-                `;
-              }).join('')}
-            </div>
-          `;
-        }
-      }
-      // Body text (skip if message is image-only with whitespace body)
-      const trimmedBody = (m.body || '').trim();
-      if (trimmedBody) {
-        const escaped = escHTML(m.body || '').replace(/\n/g, '<br>');
-        bubbleContent = linkify(escaped);
-        linkPreviewHtml = renderDmLinkPreview(m.body || '');
-      } else {
-        bubbleContent = '';
-      }
-    }
-
-    const editedTag = (!isDeleted && m.edited_at) ? '<span class="dm-edited-tag" title="Edited">(edited)</span>' : '';
-
-    const readBadge = mine && m.id === lastReadOfMine
-      ? `<div class="dm-bubble-read" title="Seen ${timeAgo(m.read_at)}">
-          ${dmState.activeOther?.avatar_url
-            ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-            : `<span>${initials(dmState.activeOther?.username)}</span>`}
-        </div>`
-      : '';
-
-    // Reaction pills (groups by emoji)
-    const reactions = (dmState.reactions[m.id] || []);
-    let reactionsHtml = '';
-    if (reactions.length) {
-      const grouped = {};
-      const myReacts = new Set();
-      reactions.forEach(r => {
-        grouped[r.emoji] = (grouped[r.emoji] || 0) + 1;
-        if (r.user_id === currentUser.id) myReacts.add(r.emoji);
-      });
-      reactionsHtml = `<div class="dm-bubble-reactions">${
-        Object.entries(grouped).map(([emoji, count]) =>
-          `<button class="dm-rx-pill ${myReacts.has(emoji) ? 'mine' : ''}" data-msg="${m.id}" data-emoji="${escHTML(emoji)}" title="${myReacts.has(emoji) ? 'Remove your reaction' : 'React'}">
-            <span>${emoji}</span>${count > 1 ? `<span class="dm-rx-count">${count}</span>` : ''}
-          </button>`
-        ).join('')
-      }</div>`;
-    }
-
-    const canEditDelete = mine && !isDeleted && !m.image_url; // can't inline-edit images
-    const deletedCls = isDeleted ? ' is-deleted' : '';
-    const imageOnlyCls = (!isDeleted && imageHtml && !bubbleContent) ? ' is-image-only' : '';
-
-    // Reply quote chip — show the quoted message above the bubble
-    let replyQuoteHtml = '';
-    if (m.reply_to_id) {
-      const parent = dmState.messages.find(x => x.id === m.reply_to_id);
-      if (parent) {
-        const parentSender = isGroup
-          ? memberMap.get(parent.sender_id)
-          : (parent.sender_id === currentUser.id ? { username: 'You' } : dmState.activeOther);
-        const parentName = parent.sender_id === currentUser.id ? 'You' : (parentSender?.username || 'Unknown');
-        const parentBody = parent.deleted_at ? '(unsent message)' : (parent.body || '').slice(0, 100);
-        replyQuoteHtml = `
-          <button class="dm-reply-quote ${mine ? 'mine' : 'theirs'}" data-jump-to="${parent.id}">
-            <span class="dm-reply-quote-name">${escHTML(parentName)}</span>
-            <span class="dm-reply-quote-body">${escHTML(parentBody)}</span>
-          </button>
-        `;
-      } else {
-        replyQuoteHtml = `<div class="dm-reply-quote ${mine ? 'mine' : 'theirs'} dm-reply-orphan">Original message unavailable</div>`;
-      }
-    }
-
-    html += `
-      <div class="dm-bubble-row ${mine ? 'mine' : 'theirs'}" data-msg-id="${m.id}">
-        ${!mine ? avatarHtml : ''}
-        <div class="dm-bubble-wrap">
-          ${senderNameHtml}
-          ${replyQuoteHtml}
-          <div class="${bubbleCls}${deletedCls}${imageOnlyCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
-            ${imageHtml}
-            ${bubbleContent ? `<div class="dm-bubble-text">${bubbleContent}${editedTag ? ' ' + editedTag : ''}</div>` : (editedTag && !imageHtml ? editedTag : '')}
-          </div>
-          ${linkPreviewHtml}
-          ${reactionsHtml}
-          ${mine ? readBadge : ''}
-        </div>
-      </div>
-    `;
-  }
-
-  // Typing indicator at bottom (only if other is typing AND we have at least one msg)
-  if (dmState.otherIsTyping) {
-    html += `
-      <div class="dm-bubble-row theirs dm-typing-row">
-        <div class="dm-bubble-avatar">${dmState.activeOther?.avatar_url
-          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-          : initials(dmState.activeOther?.username)}</div>
-        <div class="dm-bubble theirs first-in-group last-in-group dm-typing-bubble" aria-label="Typing">
-          <span class="dm-typing-dot"></span><span class="dm-typing-dot"></span><span class="dm-typing-dot"></span>
-        </div>
-      </div>
-    `;
-  }
-
-  wrap.innerHTML = html;
-
-  // Mark all currently-rendered message ids as "seen" so future re-renders
-  // don't re-trigger the entrance animation on existing bubbles.
-  _renderedMessageIds.clear();
-  dmState.messages.forEach(m => _renderedMessageIds.add(m.id));
-
-  // Async-fill any Selebox-internal preview placeholders (videos/books/profiles)
-  hydrateDmInternalPreviews();
-}
-
-function formatMessageDateStamp(current, previous) {
-  const cur = new Date(current);
-  if (!previous) {
-    // Always show stamp for the first message
-    return formatStampLabel(cur);
-  }
-  const prev = new Date(previous);
-  const gapMs = cur - prev;
-  if (gapMs > 30 * 60 * 1000 || cur.toDateString() !== prev.toDateString()) {
-    return formatStampLabel(cur);
-  }
-  return null;
-}
-
-function formatStampLabel(d) {
-  const today = new Date(); today.setHours(0,0,0,0);
-  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
-  const dayStart = new Date(d); dayStart.setHours(0,0,0,0);
-  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (dayStart.getTime() === today.getTime())     return `Today at ${t}`;
-  if (dayStart.getTime() === yesterday.getTime()) return `Yesterday at ${t}`;
-  // older
-  const dateStr = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-  return `${dateStr} at ${t}`;
-}
-
-// True when the messages pane is scrolled to (or within 80px of) the bottom.
-function isDmAtBottom(wrap) {
-  if (!wrap) return false;
-  return wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 80;
-}
-
-// Pin the messages pane to the latest message.
-//
-// Why this is more involved than a one-shot scrollTop: bubbles can grow AFTER
-// the initial pin — lazy-loaded image attachments, link-preview thumbnails
-// (favicons / YouTube), and the hydrated internal-preview cards (skeleton →
-// full card swap). Each of those landings nudges the latest message above
-// the fold. So we re-pin in a few passes as content settles, AND once per
-// <img> load.
-//
-// Pass `{ force: true }` for "I just opened the thread / I just sent" — those
-// must pin regardless of prior scroll position. Without `force`, we only
-// re-pin when the user was already at the bottom (so we don't yank them
-// back if they've scrolled up to read older messages).
-function scrollMessagesToBottom(opts = {}) {
-  const wrap = document.getElementById('dmMessages');
-  if (!wrap) return;
-  const force = !!opts.force;
-  // Capture once: was the user at the bottom at the moment of this call?
-  // Subsequent stick() calls honor that snapshot so we don't fight the user
-  // if they scroll up between passes.
-  const wasAtBottom = force || isDmAtBottom(wrap);
-  const stick = () => {
-    if (wasAtBottom) wrap.scrollTop = wrap.scrollHeight;
-  };
-  requestAnimationFrame(stick);
-  // Re-pin as async content settles (link previews, hydrated cards, fonts).
-  setTimeout(stick, 80);
-  setTimeout(stick, 300);
-  setTimeout(stick, 800);
-  // Pin once each not-yet-loaded <img> finishes — covers slower networks
-  // where attachments / link thumbnails arrive long after the timeouts.
-  wrap.querySelectorAll('img').forEach(img => {
-    if (img.complete && img.naturalWidth > 0) return;
-    img.addEventListener('load',  stick, { once: true });
-    img.addEventListener('error', stick, { once: true });
-  });
-}
-
-// ── Send a message ────────────────────────────────────────────────────────
-async function sendDmMessage() {
-  const input = document.getElementById('dmInput');
-  if (!input || !dmState.activeConvId) return;
-  const body = input.value.trim();
-  if (!body) {
-    // Empty composer + send click = thumbs-up emoji (FB classic)
-    return sendDmThumbsUp();
-  }
-
-  // Capture & clear reply state up front
-  const replyToId = dmState.replyingTo?.id || null;
-  dmState.replyingTo = null;
-  if (typeof hideReplyPreview === 'function') hideReplyPreview();
-
-  // Secret-conversation send-time mutuals re-check. Mirrors mobile's
-  // sendMessage gate. The conversation row's is_secret never changes,
-  // so we trust dmState.activeConv (already loaded). For Secret 1:1's
-  // we re-verify the mutual-follow invariant — if either side has
-  // unfollowed since the conversation was created, the message is
-  // refused with a friendly toast. The conversation row stays visible
-  // (frozen) so the user can see the shared history.
-  const ac = dmState.activeConv;
-  if (ac && ac.is_secret && !ac.is_group) {
-    const otherId = ac.user_a === currentUser.id ? ac.user_b : ac.user_a;
-    if (otherId) {
-      const stillMutual = await dmIsMutualFollow(currentUser.id, otherId);
-      if (!stillMutual) {
-        toast('You and this person are no longer mutuals. Secret chat is frozen.', 'error');
-        return;
-      }
-    }
-  }
-
-  // Optimistic render
-  const tempId = 'temp-' + Date.now();
-  const optimistic = {
-    id: tempId,
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body,
-    reply_to_id: replyToId,
-    created_at: new Date().toISOString(),
-    read_at: null,
-    _pending: true,
-  };
-  dmState.messages.push(optimistic);
-  renderMessages();
-  // Sending my own message → always pin so I see it land.
-  scrollMessagesToBottom({ force: true });
-  input.value = '';
-  resizeDmInput();
-  updateSendButton();
-
-  const { data, error } = await supabase.from('messages').insert({
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body,
-    reply_to_id: replyToId,
-  }).select().single();
-
-  if (error) {
-    // Rollback optimistic
-    dmState.messages = dmState.messages.filter(m => m.id !== tempId);
-    renderMessages();
-    toast(error.message, 'error');
-    return;
-  }
-  // Replace temp with real — transfer the "already-rendered" status so the
-  // bubble doesn't re-animate (otherwise the whole list would flash).
-  const idx = dmState.messages.findIndex(m => m.id === tempId);
-  if (idx >= 0) dmState.messages[idx] = data;
-  if (_renderedMessageIds.has(tempId)) {
-    _renderedMessageIds.delete(tempId);
-    _renderedMessageIds.add(data.id);
-  }
-  // Also update the DOM in place so we don't need a full re-render at all.
-  // The bubble keeps its position + animation state; we just swap the IDs.
-  document.querySelectorAll(`[data-msg-id="${tempId}"]`).forEach(el => {
-    el.dataset.msgId = data.id;
-  });
-}
-
-async function sendDmThumbsUp() {
-  if (!dmState.activeConvId) return;
-  const { data, error } = await supabase.from('messages').insert({
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body: '👍',
-  }).select().single();
-  if (error) { toast(error.message, 'error'); return; }
-  dmState.messages.push(data);
-  renderMessages();
-  // Sending my own thumbs-up → always pin.
-  scrollMessagesToBottom({ force: true });
-}
-
-function updateSendButton() {
-  const btn = document.getElementById('dmSendBtn');
-  const input = document.getElementById('dmInput');
-  if (!btn || !input) return;
-  const hasText = input.value.trim().length > 0;
-  btn.classList.toggle('has-text', hasText);
-}
-
-function resizeDmInput() {
-  const input = document.getElementById('dmInput');
-  if (!input) return;
-  // Capture whether the user was anchored to the bottom BEFORE the resize
-  const messages = document.getElementById('dmMessages');
-  const wasAtBottom = messages
-    ? (messages.scrollTop + messages.clientHeight >= messages.scrollHeight - 80)
-    : false;
-
-  input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-
-  // Composer just got taller → messages area shrunk. If user was at the
-  // bottom before, keep them at the bottom (so latest message stays visible).
-  if (wasAtBottom && messages) {
-    requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
-  }
-}
-
-// ── Realtime ──────────────────────────────────────────────────────────────
-function subscribeToThread(convId) {
-  // Tear down previous channels
-  if (dmState.realtimeChannel) {
-    supabase.removeChannel(dmState.realtimeChannel);
-    dmState.realtimeChannel = null;
-  }
-  if (dmState.presenceChannel) {
-    supabase.removeChannel(dmState.presenceChannel);
-    dmState.presenceChannel = null;
-  }
-  // Reset transient state
-  dmState.otherIsTyping = false;
-  if (dmState.otherTypingTimer) { clearTimeout(dmState.otherTypingTimer); dmState.otherTypingTimer = null; }
-  if (dmState.myTypingTimer) { clearTimeout(dmState.myTypingTimer); dmState.myTypingTimer = null; }
-  dmState.otherIsOnline = false;
-
-  // — Channel A: postgres_changes for this thread (messages + reactions) —
-  dmState.realtimeChannel = supabase
-    .channel(`dm-thread-${convId}`)
-    .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'messages',
-      filter: `conversation_id=eq.${convId}`,
-    }, (payload) => {
-      const newMsg = payload.new;
-      // Already in the array by real id? skip (covers the case where the
-      // HTTP insert response landed first and we already swapped tempId → real).
-      if (dmState.messages.some(m => m.id === newMsg.id)) return;
-
-      // Race fix: if MY own message echoes back from realtime BEFORE the HTTP
-      // insert response returns, the temp-XXX placeholder is still in the
-      // array. Without this match, we'd push a second copy and the user
-      // would see the message twice. Find the matching temp and swap in
-      // place rather than push.
-      if (newMsg.sender_id === currentUser.id) {
-        const tempIdx = dmState.messages.findIndex(m =>
-          String(m.id).startsWith('temp-') &&
-          m.sender_id === currentUser.id &&
-          (m.body || '') === (newMsg.body || '')
-        );
-        if (tempIdx >= 0) {
-          const oldId = dmState.messages[tempIdx].id;
-          dmState.messages[tempIdx] = newMsg;
-          // Migrate the rendered-id tracker so the bubble doesn't re-animate
-          if (_renderedMessageIds.has(oldId)) {
-            _renderedMessageIds.delete(oldId);
-            _renderedMessageIds.add(newMsg.id);
-          }
-          // Update the DOM in-place — same as the HTTP-response path does
-          document.querySelectorAll(`[data-msg-id="${oldId}"]`).forEach(el => {
-            el.dataset.msgId = newMsg.id;
-          });
-          return;
-        }
-      }
-
-      dmState.messages.push(newMsg);
-      renderMessages();
-      scrollMessagesToBottom();
-      if (newMsg.sender_id !== currentUser.id) {
-        // The other side just sent — clear typing indicator
-        dmState.otherIsTyping = false;
-        supabase.rpc('mark_conversation_read', { p_conversation_id: convId });
-        // Also reset local unread immediately so the sidebar badge doesn't
-        // tick up while the user is actively reading the thread. The inbox
-        // channel's guard already skips totalUnread bump, but the per-conv
-        // count needs explicit clearing here in case it drifted.
-        const c = dmState.conversations.find(x => x.id === convId);
-        if (c) c.unread = 0;
-        const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
-        updateUnreadBadge(total);
-        renderConversationList();
-      }
-    })
-    .on('postgres_changes', {
-      event: 'UPDATE', schema: 'public', table: 'messages',
-      filter: `conversation_id=eq.${convId}`,
-    }, (payload) => {
-      const idx = dmState.messages.findIndex(m => m.id === payload.new.id);
-      if (idx >= 0) {
-        dmState.messages[idx] = payload.new;
-        renderMessages();
-      }
-    })
-    .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'message_reactions',
-    }, (payload) => {
-      const r = payload.new;
-      // Only handle reactions on messages in this thread
-      if (!dmState.messages.some(m => m.id === r.message_id)) return;
-      if (!dmState.reactions[r.message_id]) dmState.reactions[r.message_id] = [];
-      // Avoid duplicates from optimistic insert
-      const exists = dmState.reactions[r.message_id].some(x => x.user_id === r.user_id && x.emoji === r.emoji);
-      if (!exists) {
-        dmState.reactions[r.message_id].push(r);
-        renderMessages();
-      }
-    })
-    .on('postgres_changes', {
-      event: 'DELETE', schema: 'public', table: 'message_reactions',
-    }, (payload) => {
-      const r = payload.old;
-      if (!dmState.reactions[r.message_id]) return;
-      dmState.reactions[r.message_id] = dmState.reactions[r.message_id].filter(x =>
-        !(x.user_id === r.user_id && x.emoji === r.emoji));
-      renderMessages();
-    })
-    .subscribe();
-
-  // — Channel B: presence + typing broadcast (lighter weight, ephemeral) —
-  subscribeToPresenceAndTyping(convId);
-}
-
-function subscribeToPresenceAndTyping(convId) {
-  const channel = supabase.channel(`dm-presence-${convId}`, {
-    config: { presence: { key: currentUser.id } },
-  });
-
-  channel
-    .on('presence', { event: 'sync' }, () => {
-      const state = channel.presenceState();
-      const otherId = dmState.activeOther?.id;
-      const otherPresent = otherId && state[otherId];
-      dmState.otherIsOnline = !!otherPresent;
-      updateThreadPresenceUI();
-    })
-    .on('broadcast', { event: 'typing' }, (payload) => {
-      const fromId = payload.payload?.userId;
-      if (!fromId || fromId === currentUser.id) return;
-      // Show typing for ~3s; if more broadcasts arrive, refresh the timer
-      dmState.otherIsTyping = true;
-      if (dmState.otherTypingTimer) clearTimeout(dmState.otherTypingTimer);
-      dmState.otherTypingTimer = setTimeout(() => {
-        dmState.otherIsTyping = false;
-        renderMessages();
-        scrollMessagesToBottom();
-      }, 3500);
-      renderMessages();
-      scrollMessagesToBottom();
-    })
-    .subscribe(async (status) => {
-      if (status === 'SUBSCRIBED') {
-        await channel.track({ userId: currentUser.id, online_at: new Date().toISOString() });
-      }
-    });
-
-  dmState.presenceChannel = channel;
-}
-
-function updateThreadPresenceUI() {
-  const dot = document.getElementById('dmOnlineDot');
-  const status = document.getElementById('dmThreadStatus');
-  if (dot) dot.style.display = dmState.otherIsOnline ? '' : 'none';
-  if (status) status.textContent = dmState.otherIsOnline ? 'Active now' : '';
-}
-
-// Broadcast that I'm typing (debounced)
-function broadcastTyping() {
-  if (!dmState.presenceChannel) return;
-  if (dmState.myTypingTimer) return;  // already broadcasted recently — wait
-  dmState.presenceChannel.send({
-    type: 'broadcast',
-    event: 'typing',
-    payload: { userId: currentUser.id },
-  });
-  // Throttle: don't re-broadcast more than once every 1.5s
-  dmState.myTypingTimer = setTimeout(() => {
-    dmState.myTypingTimer = null;
-  }, 1500);
-}
-
-// ── Reactions API ──────────────────────────────────────────────────────────
-async function toggleReaction(messageId, emoji) {
-  if (!currentUser) return;
-  const existing = (dmState.reactions[messageId] || []).find(r =>
-    r.user_id === currentUser.id && r.emoji === emoji);
-
-  if (existing) {
-    // Remove (optimistic)
-    dmState.reactions[messageId] = dmState.reactions[messageId].filter(r =>
-      !(r.user_id === currentUser.id && r.emoji === emoji));
-    renderMessages();
-    const { error } = await supabase.from('message_reactions')
-      .delete()
-      .eq('message_id', messageId)
-      .eq('user_id', currentUser.id)
-      .eq('emoji', emoji);
-    if (error) toast(error.message, 'error');
-  } else {
-    // Add (optimistic)
-    if (!dmState.reactions[messageId]) dmState.reactions[messageId] = [];
-    dmState.reactions[messageId].push({ message_id: messageId, user_id: currentUser.id, emoji });
-    renderMessages();
-    const { error } = await supabase.from('message_reactions').insert({
-      message_id: messageId, user_id: currentUser.id, emoji,
-    });
-    if (error) {
-      // Rollback
-      dmState.reactions[messageId] = dmState.reactions[messageId].filter(r =>
-        !(r.user_id === currentUser.id && r.emoji === emoji));
-      renderMessages();
-      toast(error.message, 'error');
-    }
-  }
-  closeReactionPicker();
-}
-
-// ── Edit / delete own message ─────────────────────────────────────────────
-async function deleteMessage(messageId) {
-  const ok = await confirmDialog({
-    title: 'Delete message?',
-    body: 'This message will be replaced with "Message deleted" for both of you. Can\'t be undone.',
-    confirmLabel: 'Delete',
-  });
-  if (!ok) return;
-  const { error } = await supabase.from('messages')
-    .update({ deleted_at: new Date().toISOString() })
-    .eq('id', messageId)
-    .eq('sender_id', currentUser.id);
-  if (error) { toast(error.message, 'error'); return; }
-  // Local update — realtime UPDATE will also fire
-  const idx = dmState.messages.findIndex(m => m.id === messageId);
-  if (idx >= 0) {
-    dmState.messages[idx] = { ...dmState.messages[idx], deleted_at: new Date().toISOString() };
-    renderMessages();
-  }
-}
-
-function startEditMessage(messageId) {
-  const msg = dmState.messages.find(m => m.id === messageId);
-  if (!msg || msg.sender_id !== currentUser.id) return;
-  dmState.editingMessageId = messageId;
-  // Replace the bubble's contents with an inline editor
-  const bubble = document.querySelector(`.dm-bubble[data-msg-id="${messageId}"]`);
-  if (!bubble) return;
-  const original = msg.body || '';
-  bubble.innerHTML = `
-    <textarea class="dm-edit-textarea" maxlength="4000">${escHTML(original)}</textarea>
-    <div class="dm-edit-actions">
-      <button class="dm-edit-cancel" type="button">Cancel</button>
-      <button class="dm-edit-save" type="button">Save</button>
-    </div>
-  `;
-  const ta = bubble.querySelector('.dm-edit-textarea');
-  ta.focus();
-  ta.setSelectionRange(ta.value.length, ta.value.length);
-  bubble.querySelector('.dm-edit-cancel').onclick = () => {
-    dmState.editingMessageId = null;
-    renderMessages();
-  };
-  bubble.querySelector('.dm-edit-save').onclick = () => saveEditMessage(messageId, ta.value);
-  ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      saveEditMessage(messageId, ta.value);
-    } else if (e.key === 'Escape') {
-      dmState.editingMessageId = null;
-      renderMessages();
-    }
-  });
-}
-
-async function saveEditMessage(messageId, newBody) {
-  const trimmed = (newBody || '').trim();
-  const msg = dmState.messages.find(m => m.id === messageId);
-  if (!msg) return;
-  if (!trimmed) { toast('Message can\'t be empty', 'error'); return; }
-  if (trimmed === msg.body) {
-    dmState.editingMessageId = null;
-    renderMessages();
-    return;
-  }
-  const nowIso = new Date().toISOString();
-  const { error } = await supabase.from('messages')
-    .update({ body: trimmed, edited_at: nowIso })
-    .eq('id', messageId)
-    .eq('sender_id', currentUser.id);
-  if (error) { toast(error.message, 'error'); return; }
-  const idx = dmState.messages.findIndex(m => m.id === messageId);
-  if (idx >= 0) {
-    dmState.messages[idx] = { ...dmState.messages[idx], body: trimmed, edited_at: nowIso };
-  }
-  dmState.editingMessageId = null;
-  renderMessages();
-}
-
-// ── Hover menu + reaction picker ──────────────────────────────────────────
-function closeHoverMenu() {
-  if (dmState.hoverMenuEl) { dmState.hoverMenuEl.remove(); dmState.hoverMenuEl = null; }
-}
-function closeReactionPicker() {
-  if (dmState.reactionPickerEl) { dmState.reactionPickerEl.remove(); dmState.reactionPickerEl = null; }
-}
-
-function openHoverMenu(bubbleEl) {
-  closeHoverMenu();
-  if (!bubbleEl) return;
-  const messageId = bubbleEl.dataset.msgId;
-  const isMine = bubbleEl.dataset.isMine === '1';
-  const canEdit = bubbleEl.dataset.canEdit === '1';
-
-  const menu = document.createElement('div');
-  menu.className = 'dm-hover-menu' + (isMine ? ' mine' : ' theirs');
-  menu.innerHTML = `
-    <button class="dm-hover-btn" data-act="react" title="React">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
-    </button>
-    <button class="dm-hover-btn" data-act="reply" title="Reply">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
-    </button>
-    <button class="dm-hover-btn" data-act="copy" title="Copy text">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-    </button>
-    ${canEdit ? `
-      <button class="dm-hover-btn" data-act="edit" title="Edit">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
-      </button>
-      <button class="dm-hover-btn dm-hover-danger" data-act="delete" title="Delete">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      </button>
-    ` : ''}
-  `;
-  document.body.appendChild(menu);
-
-  // Position above the bubble
-  const r = bubbleEl.getBoundingClientRect();
-  menu.style.position = 'fixed';
-  menu.style.top = `${Math.max(8, r.top - 44)}px`;
-  if (isMine) {
-    menu.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
-  } else {
-    menu.style.left = `${Math.max(8, r.left)}px`;
-  }
-  dmState.hoverMenuEl = menu;
-
-  menu.querySelectorAll('[data-act]').forEach(btn => {
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      const act = btn.dataset.act;
-      closeHoverMenu();
-      if      (act === 'react')  openReactionPicker(bubbleEl);
-      else if (act === 'reply')  startReplyToMessage(messageId);
-      else if (act === 'copy')   copyMessageText(messageId);
-      else if (act === 'edit')   startEditMessage(messageId);
-      else if (act === 'delete') deleteMessage(messageId);
-    };
-  });
-}
-
-function openReactionPicker(bubbleEl) {
-  closeReactionPicker();
-  if (!bubbleEl) return;
-  const messageId = bubbleEl.dataset.msgId;
-  const picker = document.createElement('div');
-  picker.className = 'dm-reaction-picker';
-  picker.innerHTML = DM_QUICK_REACTIONS.map(emoji =>
-    `<button class="dm-rx-pick" data-emoji="${emoji}">${emoji}</button>`
-  ).join('');
-  document.body.appendChild(picker);
-
-  const r = bubbleEl.getBoundingClientRect();
-  picker.style.position = 'fixed';
-  picker.style.top = `${Math.max(8, r.top - 50)}px`;
-  const isMine = bubbleEl.dataset.isMine === '1';
-  if (isMine) picker.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
-  else        picker.style.left  = `${Math.max(8, r.left)}px`;
-
-  dmState.reactionPickerEl = picker;
-  picker.querySelectorAll('[data-emoji]').forEach(btn => {
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      toggleReaction(messageId, btn.dataset.emoji);
-    };
-  });
-}
-
-async function copyMessageText(messageId) {
-  const m = dmState.messages.find(x => x.id === messageId);
-  if (!m) return;
-  try {
-    await navigator.clipboard.writeText(m.body || '');
-    toast('Copied', 'success');
-  } catch {
-    toast('Copy failed', 'error');
-  }
-}
 
 // Bubble hover/click → show menu (works on mobile via tap)
 document.addEventListener('click', (e) => {
@@ -22581,68 +10660,6 @@ document.addEventListener('click', (e) => {
     closeReactionPicker();
   }
 });
-
-// Inbox-wide subscription so the unread badge updates even when DMs page is closed
-// Per-conversation cache of { user_a, user_b, is_secret } — the inbox
-// subscription would otherwise SELECT the same row on every message,
-// burning a round-trip per inbound message. The fields cached here
-// don't change for a conversation's lifetime.
-const __convInboxCache = new Map();
-
-function subscribeToInbox() {
-  if (!currentUser) return;
-  if (dmState.inboxChannel) supabase.removeChannel(dmState.inboxChannel);
-  // Drop the cache when re-subscribing — different user could be signed
-  // in, different conversations.
-  __convInboxCache.clear();
-  dmState.inboxChannel = supabase
-    .channel(`dm-inbox-${currentUser.id}`)
-    .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'messages',
-    }, async (payload) => {
-      const m = payload.new;
-      if (m.sender_id === currentUser.id) return; // my own message
-
-      let meta = __convInboxCache.get(m.conversation_id);
-      if (!meta) {
-        const { data: c } = await supabase
-          .from('conversations')
-          .select('user_a, user_b, is_secret')
-          .eq('id', m.conversation_id)
-          .single();
-        if (!c) return;
-        meta = { user_a: c.user_a, user_b: c.user_b, is_secret: !!c.is_secret };
-        __convInboxCache.set(m.conversation_id, meta);
-      }
-
-      if (meta.user_a !== currentUser.id && meta.user_b !== currentUser.id) return;
-      // Secret conversations are stealth — never bump the global badge,
-      // never surface a notification. The user discovers them only by
-      // opening the Secret tab. Mirrors mobile's useTotalUnreadCount
-      // suppression and chat-push.js Secret skip.
-      if (meta.is_secret) return;
-      // If we're already viewing this thread, the thread channel will mark it read.
-      if (dmState.activeConvId === m.conversation_id && messagesPage?.style.display === 'block') return;
-      // Otherwise bump unread
-      dmState.totalUnread++;
-      updateUnreadBadge(dmState.totalUnread);
-    })
-    .subscribe();
-}
-
-function updateUnreadBadge(total) {
-  dmState.totalUnread = total;
-  const badge = document.getElementById('messagesUnreadBadge');
-  if (!badge) return;
-  if (total > 0) {
-    badge.textContent = total > 99 ? '99+' : String(total);
-    badge.style.display = '';
-  } else {
-    badge.style.display = 'none';
-  }
-}
 
 // ── Wire up sidebar + composer + back button ─────────────────────────────
 document.getElementById('btnMessages')?.addEventListener('click', () => showMessages());
@@ -22693,24 +10710,6 @@ document.getElementById('dmSearchInput')?.addEventListener('input', (e) => {
   });
 });
 
-// Initial badge load + inbox subscription on app boot
-async function bootstrapDmBadge() {
-  if (!currentUser) return;
-  // Pull is_secret too so we can exclude Secret conversations from the
-  // global unread total.
-  const { data: convs } = await supabase
-    .from('conversations')
-    .select('id, is_secret')
-    .or(`user_a.eq.${currentUser.id},user_b.eq.${currentUser.id}`);
-  if (!convs?.length) { updateUnreadBadge(0); return; }
-  const eligibleIds = convs.filter(c => !c.is_secret).map(c => c.id);
-  if (!eligibleIds.length) { updateUnreadBadge(0); return; }
-  const counts = await fetchUnreadCounts(eligibleIds);
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  updateUnreadBadge(total);
-  subscribeToInbox();
-}
-
 // Run on initial sign-in (delayed so currentUser is set)
 setTimeout(() => bootstrapDmBadge(), 1500);
 
@@ -22737,13 +10736,15 @@ window.addEventListener('popstate', () => {
   const chapterMatch = path.match(/^\/books?\/([^\/?#]+)\/chapter\/([^\/?#]+)/);
   const bookMatch = !chapterMatch ? path.match(/^\/books?\/([^\/?#]+)$/) : null;
   if (chapterMatch) {
-    _pendingChapterFromUrl = chapterMatch[2];
+    // Thread the chapter through openBookDetail(opts) so the deep-link
+    // auto-opens the right chapter after the chapters list lands
+    // (Stage 8B Codex P1 — previously set _pendingChapterFromUrl, which
+    // nothing read).
     setSidebarActive('btnBook');
-    openBookDetail(chapterMatch[1]);
+    openBookDetail(chapterMatch[1], { chapter: chapterMatch[2] });
     return;
   }
   if (bookMatch) {
-    _pendingChapterFromUrl = null;
     setSidebarActive('btnBook');
     openBookDetail(bookMatch[1]);
     return;
@@ -22758,763 +10759,16 @@ window.addEventListener('popstate', () => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
-// DMs Phase 3 — reply, conv menu, group creation, search
-// ════════════════════════════════════════════════════════════════════════════
-
-// ── Reply state ───────────────────────────────────────────────────────────
-function startReplyToMessage(messageId) {
-  const m = dmState.messages.find(x => x.id === messageId);
-  if (!m) return;
-  const senderProfile = m.sender_id === currentUser.id
-    ? { username: 'yourself' }
-    : (dmState.activeConv?.isGroup
-        ? (dmState.activeConv.members || []).find(p => p.id === m.sender_id)
-        : dmState.activeOther);
-  dmState.replyingTo = {
-    id: m.id,
-    body: m.body,
-    sender_id: m.sender_id,
-    sender_name: senderProfile?.username || 'Unknown',
-  };
-  showReplyPreview();
-  document.getElementById('dmInput')?.focus();
-}
-
-function showReplyPreview() {
-  const el = document.getElementById('dmReplyPreview');
-  if (!el || !dmState.replyingTo) return;
-  document.getElementById('dmReplyName').textContent = dmState.replyingTo.sender_name;
-  document.getElementById('dmReplyText').textContent = (dmState.replyingTo.body || '').slice(0, 140);
-  el.style.display = '';
-}
-function hideReplyPreview() {
-  const el = document.getElementById('dmReplyPreview');
-  if (el) el.style.display = 'none';
-}
-
 document.getElementById('dmReplyCancel')?.addEventListener('click', () => {
   dmState.replyingTo = null;
   hideReplyPreview();
 });
 
 
-// ── Conversation actions menu (thread header ⋯) ───────────────────────────
-function closeConvMenu() {
-  if (dmState.convMenuEl) { dmState.convMenuEl.remove(); dmState.convMenuEl = null; }
-}
-
-function openConvActionsMenu() {
-  closeConvMenu();
-  if (!dmState.activeConv) return;
-  const c = dmState.activeConv;
-  const isGroup = c.isGroup;
-  const isMuted = c.muted || isConvMutedForMe(c.raw);
-
-  const menu = document.createElement('div');
-  menu.className = 'post-action-menu dm-conv-menu';
-  menu.innerHTML = isGroup ? `
-    <button data-act="members">View members (${c.memberCount})</button>
-    <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
-    <button data-act="archive">Archive chat</button>
-    <button data-act="leave" class="pam-danger">Leave group</button>
-  ` : `
-    <button data-act="profile">View profile</button>
-    <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
-    <button data-act="archive">Archive chat</button>
-    <button data-act="report">Report user</button>
-    <button data-act="delete" class="pam-danger">Delete conversation</button>
-  `;
-  document.body.appendChild(menu);
-
-  // Position below the header ⋯ button
-  const trigger = document.getElementById('dmThreadMenu');
-  const r = trigger?.getBoundingClientRect() || { top: 80, right: window.innerWidth - 20 };
-  menu.style.position = 'fixed';
-  menu.style.top   = `${r.bottom + 6}px`;
-  menu.style.right = `${Math.max(12, window.innerWidth - r.right)}px`;
-  dmState.convMenuEl = menu;
-
-  menu.querySelectorAll('[data-act]').forEach(btn => {
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      const act = btn.dataset.act;
-      closeConvMenu();
-      if      (act === 'profile')  openProfile(dmState.activeOther?.id);
-      else if (act === 'members')  showGroupMembersDialog();
-      else if (act === 'mute')     toggleConvMute(isMuted);
-      else if (act === 'archive')  archiveConversation();
-      else if (act === 'report')   openReportUserModal(dmState.activeOther?.id, dmState.activeOther?.username || 'this user');
-      else if (act === 'delete')   confirmDeleteConversation();
-      else if (act === 'leave')    confirmLeaveGroup();
-    };
-  });
-
-  setTimeout(() => {
-    const onDocClick = (ev) => {
-      if (!dmState.convMenuEl?.contains(ev.target)) {
-        closeConvMenu();
-        document.removeEventListener('click', onDocClick);
-      }
-    };
-    document.addEventListener('click', onDocClick);
-  }, 0);
-}
-
 document.getElementById('dmThreadMenu')?.addEventListener('click', (e) => {
   e.stopPropagation();
   openConvActionsMenu();
 });
-
-async function toggleConvMute(currentlyMuted) {
-  const c = dmState.activeConv;
-  if (!c || c.isGroup) { toast('Group mute coming soon', ''); return; }
-  const conv = c.raw;
-  const myCol = conv.user_a === currentUser.id ? 'muted_until_a' : 'muted_until_b';
-  const newVal = currentlyMuted ? null : new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(); // mute 7 days
-  const { error } = await supabase.from('conversations').update({ [myCol]: newVal }).eq('id', conv.id);
-  if (error) { toast(error.message, 'error'); return; }
-  toast(currentlyMuted ? 'Unmuted' : 'Muted for 7 days', 'success');
-  conv[myCol] = newVal;
-  c.muted = !currentlyMuted;
-  renderConversationList();
-  // Recompute unread badge
-  const total = dmState.conversations.reduce((s, x) => x.muted ? s : s + (x.unread || 0), 0);
-  updateUnreadBadge(total);
-}
-
-async function archiveConversation() {
-  const c = dmState.activeConv;
-  if (!c || c.isGroup) { toast('Group archive coming soon', ''); return; }
-  const conv = c.raw;
-  const myCol = conv.user_a === currentUser.id ? 'archived_by_a' : 'archived_by_b';
-  const { error } = await supabase.from('conversations').update({ [myCol]: true }).eq('id', conv.id);
-  if (error) { toast(error.message, 'error'); return; }
-  toast('Archived', 'success');
-  // Remove from list, close thread
-  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
-  document.getElementById('dmBackBtn')?.click();
-  renderConversationList();
-}
-
-async function confirmDeleteConversation() {
-  const c = dmState.activeConv;
-  if (!c) return;
-  const ok = await confirmDialog({
-    title: 'Delete this conversation?',
-    body: 'All messages will be removed for both of you. This can\'t be undone.',
-    confirmLabel: 'Delete',
-  });
-  if (!ok) return;
-  const { error } = await supabase.from('conversations').delete().eq('id', c.id);
-  if (error) { toast(error.message, 'error'); return; }
-  toast('Deleted', 'success');
-  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
-  document.getElementById('dmBackBtn')?.click();
-  renderConversationList();
-}
-
-async function confirmLeaveGroup() {
-  const c = dmState.activeConv;
-  if (!c?.isGroup) return;
-  const ok = await confirmDialog({
-    title: 'Leave this group?',
-    body: 'You\'ll stop receiving messages and won\'t see new ones unless you\'re re-added.',
-    confirmLabel: 'Leave',
-  });
-  if (!ok) return;
-  const { error } = await supabase.rpc('leave_conversation', { p_conversation_id: c.id });
-  if (error) { toast(error.message, 'error'); return; }
-  toast('Left the group', 'success');
-  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
-  document.getElementById('dmBackBtn')?.click();
-  renderConversationList();
-}
-
-// Group settings modal — full parity with mobile's group-info screen.
-// Creator-only manage affordances (rename, photo, add, kick); everyone
-// can view + leave. Reuses follow-list-modal styles for the body since
-// the row layout matches.
-function showGroupMembersDialog() {
-  const c = dmState.activeConv;
-  if (!c?.isGroup) return;
-  const isCreator = c.createdBy === currentUser.id || c.raw?.created_by === currentUser.id;
-  closeAllModals('.modal-backdrop[data-modal="group-members"]');
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'group-members';
-
-  // Sort members: creator first, then alphabetical by username.
-  const creatorId = c.createdBy || c.raw?.created_by;
-  const sortedMembers = [...c.members].sort((a, b) => {
-    if (a.id === creatorId && b.id !== creatorId) return -1;
-    if (b.id === creatorId && a.id !== creatorId) return 1;
-    return (a.username || '').toLowerCase().localeCompare((b.username || '').toLowerCase());
-  });
-
-  const headerAvatar = c.avatarUrl
-    ? `<img src="${escHTML(c.avatarUrl)}" alt=""/>`
-    : `<span class="dm-avatar-initials">${initials(c.name || '?')}</span>`;
-
-  modal.innerHTML = `
-    <div class="modal-card group-info-modal">
-      <div class="group-info-identity">
-        <div class="group-info-avatar-wrap">
-          <div class="group-info-avatar">${headerAvatar}</div>
-          ${isCreator ? `
-            <button class="group-info-avatar-edit" data-action="edit-avatar" title="Change group photo">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            </button>
-            <input type="file" accept="image/*" id="groupInfoFile" style="display:none"/>
-          ` : ''}
-        </div>
-        <div class="group-info-name-row">
-          <h2 class="group-info-name" data-action="${isCreator ? 'edit-name' : ''}">
-            ${escHTML(c.name || 'Group chat')}
-            ${isCreator ? '<span class="group-info-pencil">✎</span>' : ''}
-          </h2>
-        </div>
-        <p class="modal-sub">${c.memberCount} ${c.memberCount === 1 ? 'member' : 'members'}</p>
-      </div>
-
-      ${isCreator ? `
-        <button class="group-info-add-row" data-action="add-members" type="button">
-          <span class="group-info-add-icon">+</span>
-          <span>Add members</span>
-        </button>
-      ` : ''}
-
-      <div class="follow-list-body group-info-members-body">
-        ${sortedMembers.map(m => {
-          const isCreatorRow = m.id === creatorId;
-          const isYou = m.id === currentUser.id;
-          const showKick = isCreator && !isCreatorRow;
-          return `
-            <div class="follow-list-row">
-              <button class="follow-list-avatar" data-uid="${m.id}">
-                ${m.avatar_url ? `<img src="${escHTML(m.avatar_url)}"/>` : initials(m.username)}
-              </button>
-              <div class="follow-list-info">
-                <button class="follow-list-name" data-uid="${m.id}">@${escHTML(m.username || '')}${isYou ? ' (You)' : ''}</button>
-                ${isCreatorRow ? '<span class="group-info-creator-badge">Creator</span>' : ''}
-              </div>
-              ${showKick ? `<button class="group-info-kick" data-kick="${m.id}" title="Remove from group">×</button>` : ''}
-            </div>
-          `;
-        }).join('')}
-      </div>
-
-      <div class="modal-actions">
-        <button class="btn-danger" data-action="leave">Leave group</button>
-        <button class="btn-ghost" data-action="cancel">Close</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-
-  // Member row → open profile.
-  modal.querySelectorAll('.follow-list-avatar[data-uid], .follow-list-name[data-uid]').forEach(el => {
-    el.onclick = () => { close(); openProfile(el.dataset.uid); };
-  });
-
-  // Inline rename — creator only.
-  if (isCreator) {
-    const nameEl = modal.querySelector('[data-action="edit-name"]');
-    if (nameEl) {
-      nameEl.style.cursor = 'pointer';
-      nameEl.onclick = () => promptRenameGroup(c, modal);
-    }
-    const addBtn = modal.querySelector('[data-action="add-members"]');
-    if (addBtn) addBtn.onclick = () => { close(); openAddMembersModal(c); };
-    const editAvatarBtn = modal.querySelector('[data-action="edit-avatar"]');
-    const fileInput = modal.querySelector('#groupInfoFile');
-    if (editAvatarBtn && fileInput) {
-      editAvatarBtn.onclick = () => fileInput.click();
-      fileInput.onchange = (ev) => handleGroupAvatarPicked(ev, c, modal);
-    }
-    modal.querySelectorAll('.group-info-kick').forEach(btn => {
-      btn.onclick = () => kickGroupMember(c, btn.dataset.kick, btn);
-    });
-  }
-
-  modal.querySelector('[data-action="leave"]').onclick = () => { close(); confirmLeaveGroup(); };
-}
-
-// Inline rename — replaces the heading with an input + save button.
-function promptRenameGroup(c, modal) {
-  const newName = window.prompt('New group name', c.name || '');
-  if (newName == null) return; // cancelled
-  const trimmed = newName.trim().slice(0, 60);
-  if (!trimmed) { toast('Name cannot be empty', 'error'); return; }
-  if (trimmed === c.name) return;
-  supabase.from('conversations').update({ name: trimmed }).eq('id', c.id)
-    .then(({ error }) => {
-      if (error) { toast(error.message || 'Could not rename', 'error'); return; }
-      c.name = trimmed;
-      if (c.raw) c.raw.name = trimmed;
-      toast('Group renamed', 'success');
-      modal.remove();
-      // Reflect in list + thread header.
-      const cached = dmState.conversations.find(x => x.id === c.id);
-      if (cached) cached.name = trimmed;
-      renderConversationList();
-      const nameBtn = document.getElementById('dmThreadName');
-      if (nameBtn) nameBtn.textContent = trimmed;
-    });
-}
-
-// Avatar picker — uploads the picked file to Supabase Storage under
-// group-avatars/<convId>/, then patches conversations.avatar_url.
-async function handleGroupAvatarPicked(ev, c, modal) {
-  const file = ev.target.files?.[0];
-  if (!file) return;
-  if (!file.type.startsWith('image/')) {
-    toast('Please pick an image', 'error');
-    return;
-  }
-  if (file.size > 10 * 1024 * 1024) {
-    toast('Image too large (max 10MB)', 'error');
-    return;
-  }
-  toast('Uploading…', '');
-  try {
-    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
-    const path = `group-avatars/${c.id}/${currentUser.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const { error: upErr } = await supabase.storage.from('images').upload(path, file, {
-      contentType: file.type || `image/${ext}`,
-      cacheControl: '3600',
-      upsert: false,
-    });
-    if (upErr) throw upErr;
-    const { data } = supabase.storage.from('images').getPublicUrl(path);
-    const url = data?.publicUrl;
-    if (!url) throw new Error('Could not resolve uploaded URL');
-    const { error: updErr } = await supabase.from('conversations').update({ avatar_url: url }).eq('id', c.id);
-    if (updErr) throw updErr;
-
-    // Reflect everywhere
-    c.avatarUrl = url;
-    if (c.raw) c.raw.avatar_url = url;
-    const cached = dmState.conversations.find(x => x.id === c.id);
-    if (cached) cached.avatarUrl = url;
-    renderConversationList();
-    const headerAv = document.getElementById('dmThreadAvatar');
-    if (headerAv) headerAv.innerHTML = `<img src="${escHTML(url)}" alt=""/>`;
-    toast('Group photo updated', 'success');
-    modal.remove();
-  } catch (err) {
-    console.error('[dm] group avatar upload failed', err);
-    toast(err?.message || 'Could not update photo', 'error');
-  }
-}
-
-// Add members modal — search profiles excluding existing members, multi-
-// select, on submit insert into conversation_participants.
-function openAddMembersModal(c) {
-  if (!c?.isGroup) return;
-  const existingIds = new Set(c.members.map(m => m.id));
-  closeAllModals('.modal-backdrop[data-modal="group-add"]');
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'group-add';
-  modal.innerHTML = `
-    <div class="modal-card dm-new-modal">
-      <h2>Add members</h2>
-      <p class="modal-sub">People already in the group are hidden from results.</p>
-      <input type="text" class="dm-new-search" id="groupAddSearch" placeholder="Search by username…" autocomplete="off"/>
-      <div class="dm-new-selected" id="groupAddSelected"></div>
-      <div class="dm-new-results" id="groupAddResults">
-        <div class="dm-new-hint">Start typing a username…</div>
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">Cancel</button>
-        <button class="btn-primary" data-action="add" disabled>Add</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-
-  const selected = []; // [{id, username, avatar_url}]
-  const search = modal.querySelector('#groupAddSearch');
-  const selectedWrap = modal.querySelector('#groupAddSelected');
-  const results = modal.querySelector('#groupAddResults');
-  const addBtn = modal.querySelector('[data-action="add"]');
-
-  const refreshSelected = () => {
-    selectedWrap.innerHTML = selected.map(u => `
-      <span class="dm-new-chip" data-uid="${u.id}">
-        ${u.avatar_url ? `<img src="${escHTML(u.avatar_url)}"/>` : `<span class="dm-new-chip-init">${initials(u.username)}</span>`}
-        <span>@${escHTML(u.username)}</span>
-        <button class="dm-new-chip-x" aria-label="Remove">×</button>
-      </span>
-    `).join('');
-    selectedWrap.querySelectorAll('.dm-new-chip-x').forEach((btn, i) => {
-      btn.onclick = (ev) => {
-        ev.stopPropagation();
-        selected.splice(i, 1);
-        refreshSelected();
-        addBtn.disabled = selected.length === 0;
-      };
-    });
-  };
-
-  let timer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(timer);
-    const q = search.value.trim();
-    if (!q) { results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>'; return; }
-    timer = setTimeout(async () => {
-      const excludeIds = [...existingIds, ...selected.map(s => s.id)];
-      let qb = supabase.from('profiles').select('id, username, avatar_url, is_guest').ilike('username', `%${q}%`).limit(20);
-      if (excludeIds.length) qb = qb.not('id', 'in', `(${excludeIds.join(',')})`);
-      const { data } = await qb;
-      if (!data?.length) { results.innerHTML = '<div class="dm-new-hint">No matches.</div>'; return; }
-      results.innerHTML = data.map(p => `
-        <button class="dm-new-result" data-uid="${p.id}" type="button">
-          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
-          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
-        </button>
-      `).join('');
-      results.querySelectorAll('[data-uid]').forEach(btn => {
-        btn.onclick = () => {
-          const profile = data.find(p => p.id === btn.dataset.uid);
-          if (!profile) return;
-          if (selected.some(s => s.id === profile.id)) return;
-          selected.push(profile);
-          search.value = '';
-          results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
-          refreshSelected();
-          addBtn.disabled = selected.length === 0;
-        };
-      });
-    }, 200);
-  });
-  search.focus();
-
-  addBtn.onclick = async () => {
-    if (selected.length === 0) return;
-    addBtn.disabled = true;
-    addBtn.textContent = 'Adding…';
-    try {
-      const rows = selected.map(s => ({ conversation_id: c.id, user_id: s.id }));
-      const { error } = await supabase
-        .from('conversation_participants')
-        .upsert(rows, { onConflict: 'conversation_id,user_id', ignoreDuplicates: true });
-      if (error) throw error;
-      toast(`Added ${selected.length}`, 'success');
-      close();
-      // Refresh the active conv's members list + the conversations list.
-      await refreshActiveConvMembers(c.id);
-      renderConversationList();
-    } catch (err) {
-      console.error('[dm] add members failed', err);
-      toast(err.message || 'Could not add members', 'error');
-      addBtn.disabled = false;
-      addBtn.textContent = 'Add';
-    }
-  };
-}
-
-// Remove a member from a group. Creator-only — UI hides the X for
-// non-creator viewers; this is the second line of defense in case the
-// markup is tampered with.
-async function kickGroupMember(c, userId, btnEl) {
-  if (!c?.isGroup) return;
-  if (c.createdBy && c.createdBy !== currentUser.id) {
-    toast('Only the group creator can remove members', 'error');
-    return;
-  }
-  if (userId === currentUser.id) {
-    toast('Use Leave group to leave', 'error');
-    return;
-  }
-  if (userId === c.createdBy) {
-    toast('Cannot remove the group creator', 'error');
-    return;
-  }
-  if (!window.confirm('Remove this member from the group?')) return;
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '…'; }
-  const { error } = await supabase
-    .from('conversation_participants')
-    .delete()
-    .eq('conversation_id', c.id)
-    .eq('user_id', userId);
-  if (error) {
-    toast(error.message || 'Could not remove', 'error');
-    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '×'; }
-    return;
-  }
-  toast('Removed', 'success');
-  // Patch local state and re-render the modal.
-  c.members = c.members.filter(m => m.id !== userId);
-  c.memberCount = c.members.length;
-  document.querySelector('.modal-backdrop[data-modal="group-members"]')?.remove();
-  showGroupMembersDialog();
-  renderConversationList();
-}
-
-// Re-fetch the active group's members after a mutation (add). Local
-// state has the old list; we want the canonical server view.
-async function refreshActiveConvMembers(convId) {
-  const c = dmState.activeConv;
-  if (!c || c.id !== convId) return;
-  const { data: parts } = await supabase
-    .from('conversation_participants')
-    .select('user_id')
-    .eq('conversation_id', convId);
-  const memberIds = (parts || []).map(p => p.user_id);
-  if (!memberIds.length) return;
-  const { data: profs } = await supabase
-    .from('profiles')
-    .select('id, username, avatar_url, is_guest')
-    .in('id', memberIds);
-  c.members = profs || [];
-  c.memberCount = c.members.length;
-  // Update the cached row in the conversations list too.
-  const cached = dmState.conversations.find(x => x.id === convId);
-  if (cached) {
-    cached.members = c.members;
-    cached.memberCount = c.memberCount;
-  }
-  // Refresh the open settings modal if the user's still looking at it.
-  const openModal = document.querySelector('.modal-backdrop[data-modal="group-members"]');
-  if (openModal) {
-    openModal.remove();
-    showGroupMembersDialog();
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Mutuals helper — both directions of public.follows must exist.
-// Mirrors lib/messages-supabase.js's isMutualFollow on mobile. One round-
-// trip via the OR-of-AND postgrest filter; checks the result client-side
-// for both edges.
-// ─────────────────────────────────────────────────────────────────────────
-async function dmIsMutualFollow(uuidA, uuidB) {
-  if (!uuidA || !uuidB || uuidA === uuidB) return false;
-  const { data, error } = await supabase
-    .from('follows')
-    .select('follower_id, following_id')
-    .or(`and(follower_id.eq.${uuidA},following_id.eq.${uuidB}),and(follower_id.eq.${uuidB},following_id.eq.${uuidA})`);
-  if (error) {
-    console.warn('[dm] isMutualFollow failed:', error.message);
-    return false;
-  }
-  const ab = (data || []).some(r => r.follower_id === uuidA && r.following_id === uuidB);
-  const ba = (data || []).some(r => r.follower_id === uuidB && r.following_id === uuidA);
-  return ab && ba;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Get-or-create Secret 1:1. Direct DB calls on web (no parallel RPC yet).
-// Parity with mobile's getOrCreateSecretConversation:
-//   - Mutuals-only floor (throws if not mutual)
-//   - Self-conversation rejected
-//   - Canonical (smaller, larger) ordering for the unique-pair index
-//   - Fully separate from non-Secret 1:1's (creating a Secret with someone
-//     you already DM does NOT touch the existing thread)
-// ─────────────────────────────────────────────────────────────────────────
-async function dmGetOrCreateSecretConv(otherUserId) {
-  if (!currentUser) throw new Error('Please sign in');
-  if (!otherUserId || otherUserId === currentUser.id) {
-    throw new Error('Cannot start a conversation with yourself');
-  }
-  const mutual = await dmIsMutualFollow(currentUser.id, otherUserId);
-  if (!mutual) throw new Error('Both of you must follow each other to start a Secret chat');
-
-  const [a, b] = currentUser.id < otherUserId
-    ? [currentUser.id, otherUserId]
-    : [otherUserId, currentUser.id];
-
-  const lookup = async () => {
-    const { data } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('is_group', false)
-      .eq('is_secret', true)
-      .eq('user_a', a)
-      .eq('user_b', b)
-      .maybeSingle();
-    return data;
-  };
-
-  const existing = await lookup();
-  if (existing) return existing.id;
-
-  const { data: created, error } = await supabase
-    .from('conversations')
-    .insert({
-      user_a: a,
-      user_b: b,
-      is_group: false,
-      is_secret: true,
-      created_by: currentUser.id,
-      last_message_at: new Date().toISOString(),
-    })
-    .select()
-    .single();
-  if (!error) return created.id;
-  if (error.code === '23505') {
-    // Race — another tab inserted first. Re-fetch.
-    const winner = await lookup();
-    if (winner) return winner.id;
-  }
-  throw error;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Secret-chat picker modal — mutuals-only search. Reuses the structure of
-// openNewConvModal but pre-filters profiles to your mutual followers.
-// ─────────────────────────────────────────────────────────────────────────
-async function openSecretChatPicker() {
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-  closeAllModals('.modal-backdrop[data-modal="dm-new-secret"]');
-
-  // Pre-fetch mutual UUIDs once. Same trick as mobile's SupabaseNewChat.
-  let mutualIds = null;
-  try {
-    const [iFollow, followsMe] = await Promise.all([
-      supabase.from('follows').select('following_id').eq('follower_id', currentUser.id),
-      supabase.from('follows').select('follower_id').eq('following_id', currentUser.id),
-    ]);
-    const aSet = new Set((iFollow.data || []).map(r => r.following_id));
-    const bSet = new Set((followsMe.data || []).map(r => r.follower_id));
-    mutualIds = [];
-    for (const id of aSet) if (bSet.has(id)) mutualIds.push(id);
-  } catch (e) {
-    toast('Could not load mutuals', 'error');
-    return;
-  }
-
-  // Pre-load up to 5 mutual profiles to render as a "Suggested" row of
-  // avatar chips above the search input. Reduces friction for the common
-  // case where you want to start a Secret chat with a frequent contact —
-  // tapping an avatar skips the search entirely.
-  let suggestedMutuals = [];
-  if (mutualIds.length > 0) {
-    try {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, username, avatar_url, is_guest')
-        .in('id', mutualIds.slice(0, 50)) // upper bound for the IN list
-        .order('username', { ascending: true })
-        .limit(5);
-      suggestedMutuals = data || [];
-    } catch (e) {
-      // Non-fatal — search still works.
-      console.warn('[secret] suggested mutuals load failed', e?.message);
-    }
-  }
-  const moreThanShown = mutualIds.length > suggestedMutuals.length;
-
-  const suggestedHtml = suggestedMutuals.length > 0 ? `
-    <div class="dm-secret-suggested">
-      <div class="dm-secret-suggested-label">Suggested mutuals</div>
-      <div class="dm-secret-suggested-row">
-        ${suggestedMutuals.map(p => `
-          <button class="dm-secret-suggested-chip" data-uid="${p.id}" data-username="${escHTML(p.username || '')}" type="button" title="@${escHTML(p.username || '')}">
-            ${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}" alt=""/>` : `<span class="dm-secret-suggested-initials">${initials(p.username)}</span>`}
-          </button>
-        `).join('')}
-      </div>
-      ${moreThanShown ? '<div class="dm-secret-suggested-more">Search below to find more mutuals.</div>' : ''}
-    </div>` : '';
-
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'dm-new-secret';
-  modal.innerHTML = `
-    <div class="modal-card dm-new-modal">
-      <h2>🔒 New Secret chat</h2>
-      <p class="modal-sub">
-        ${mutualIds.length === 0
-          ? "You don't have any mutual followers yet. Both people must follow each other to start a Secret chat."
-          : 'Pick a mutual follower. The chat is silent — no notifications.'}
-      </p>
-      ${mutualIds.length > 0 ? `
-        ${suggestedHtml}
-        <input type="text" class="dm-new-search" id="dmSecretSearch" placeholder="Search mutuals by username…" autocomplete="off"/>
-        <div class="dm-new-results" id="dmSecretResults">
-          <div class="dm-new-hint">Start typing a username…</div>
-        </div>` : ''}
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">${mutualIds.length === 0 ? 'Close' : 'Cancel'}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-  if (mutualIds.length === 0) return;
-
-  // Shared handler — used by both the suggested-mutuals chips and the
-  // search-result rows. Both call dmGetOrCreateSecretConv and then jump
-  // into the new conversation.
-  const startSecretWith = async (uid, btnEl) => {
-    if (!uid) return;
-    if (btnEl) btnEl.disabled = true;
-    try {
-      const convId = await dmGetOrCreateSecretConv(uid);
-      close();
-      dmState.viewMode = 'secret';
-      await loadConversationList();
-      await openConversation(convId);
-    } catch (err) {
-      console.error('[dm] secret create failed', err);
-      toast(err.message || 'Failed to start Secret chat', 'error');
-      if (btnEl) btnEl.disabled = false;
-    }
-  };
-
-  // Wire the suggested-mutuals chips
-  modal.querySelectorAll('.dm-secret-suggested-chip').forEach((chip) => {
-    chip.onclick = () => startSecretWith(chip.dataset.uid, chip);
-  });
-
-  const search = modal.querySelector('#dmSecretSearch');
-  const results = modal.querySelector('#dmSecretResults');
-  let timer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(timer);
-    const q = search.value.trim();
-    if (!q) {
-      results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
-      return;
-    }
-    timer = setTimeout(async () => {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, username, avatar_url, is_guest')
-        .ilike('username', `%${q}%`)
-        .in('id', mutualIds)
-        .neq('id', currentUser.id)
-        .limit(20);
-      if (!data?.length) {
-        results.innerHTML = '<div class="dm-new-hint">No matching mutuals.</div>';
-        return;
-      }
-      results.innerHTML = data.map(p => `
-        <button class="dm-new-result" data-uid="${p.id}" type="button">
-          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
-          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
-          <span class="dm-new-result-arrow">→</span>
-        </button>
-      `).join('');
-      results.querySelectorAll('[data-uid]').forEach(btn => {
-        btn.onclick = () => startSecretWith(btn.dataset.uid, btn);
-      });
-    }, 200);
-  });
-  search.focus();
-}
 
 // ── New conversation modal (1:1 OR group) ────────────────────────────────
 document.getElementById('dmNewBtn')?.addEventListener('click', () => openNewConvModal());
@@ -23524,158 +10778,10 @@ document.getElementById('dmNewBtn')?.addEventListener('click', () => openNewConv
 // button in renderConvEmptyStateHtml.
 document.getElementById('dmNewSecretBtn')?.addEventListener('click', () => openSecretChatPicker());
 
-function openNewConvModal() {
-  if (!currentUser) { toast('Please sign in', 'error'); return; }
-  closeAllModals('.modal-backdrop[data-modal="dm-new"]');
-  const modal = document.createElement('div');
-  modal.className = 'modal-backdrop';
-  modal.dataset.modal = 'dm-new';
-  modal.innerHTML = `
-    <div class="modal-card dm-new-modal">
-      <h2>New message</h2>
-      <p class="modal-sub">Pick one person for a 1:1 chat, or 2+ for a group.</p>
-      <input type="text" class="dm-new-search" id="dmNewSearch" placeholder="Search users by username…" autocomplete="off"/>
-      <div class="dm-new-selected" id="dmNewSelected"></div>
-      <div class="dm-new-results" id="dmNewResults">
-        <div class="dm-new-hint">Start typing a username…</div>
-      </div>
-      <div class="dm-new-name-wrap" id="dmNewNameWrap" style="display:none">
-        <input type="text" class="dm-new-name" id="dmNewName" placeholder="Group name (optional)" maxlength="120"/>
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" data-action="cancel">Cancel</button>
-        <button class="btn-primary" data-action="create" disabled>Start chat</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  const selectedUsers = []; // [{id, username, avatar_url}]
-  const search = modal.querySelector('#dmNewSearch');
-  const results = modal.querySelector('#dmNewResults');
-  const selectedWrap = modal.querySelector('#dmNewSelected');
-  const nameWrap = modal.querySelector('#dmNewNameWrap');
-  const nameInput = modal.querySelector('#dmNewName');
-  const createBtn = modal.querySelector('[data-action="create"]');
-
-  const close = () => modal.remove();
-  modal.querySelector('[data-action="cancel"]').onclick = close;
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
-
-  function refreshSelected() {
-    selectedWrap.innerHTML = selectedUsers.map(u => `
-      <span class="dm-new-chip" data-uid="${u.id}">
-        ${u.avatar_url ? `<img src="${escHTML(u.avatar_url)}"/>` : `<span class="dm-new-chip-init">${initials(u.username)}</span>`}
-        <span>@${escHTML(u.username)}</span>
-        <button class="dm-new-chip-x" aria-label="Remove">×</button>
-      </span>
-    `).join('');
-    selectedWrap.querySelectorAll('.dm-new-chip-x').forEach((btn, i) => {
-      btn.onclick = (ev) => {
-        ev.stopPropagation();
-        const id = selectedUsers[i].id;
-        const idx = selectedUsers.findIndex(u => u.id === id);
-        if (idx >= 0) selectedUsers.splice(idx, 1);
-        refreshSelected();
-        updateButton();
-      };
-    });
-    nameWrap.style.display = selectedUsers.length >= 2 ? '' : 'none';
-  }
-  function updateButton() {
-    createBtn.disabled = selectedUsers.length === 0;
-    createBtn.textContent = selectedUsers.length >= 2 ? 'Start group chat' : 'Start chat';
-  }
-
-  let searchTimer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    const q = search.value.trim();
-    if (!q) {
-      results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
-      return;
-    }
-    searchTimer = setTimeout(async () => {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, username, avatar_url, is_guest')
-        .ilike('username', `%${q}%`)
-        .neq('id', currentUser.id)
-        .limit(20);
-      if (!data?.length) {
-        results.innerHTML = '<div class="dm-new-hint">No users found.</div>';
-        return;
-      }
-      results.innerHTML = data.map(p => `
-        <button class="dm-new-result" data-uid="${p.id}" ${selectedUsers.some(u => u.id === p.id) ? 'data-already-selected="1"' : ''}>
-          <span class="dm-new-result-avatar">${p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username)}</span>
-          <span class="dm-new-result-name">@${escHTML(p.username || '')}</span>
-          ${selectedUsers.some(u => u.id === p.id) ? '<span class="dm-new-result-check">✓</span>' : ''}
-        </button>
-      `).join('');
-      results.querySelectorAll('[data-uid]').forEach(btn => {
-        btn.onclick = () => {
-          const uid = btn.dataset.uid;
-          const profile = data.find(p => p.id === uid);
-          const idx = selectedUsers.findIndex(u => u.id === uid);
-          if (idx >= 0) selectedUsers.splice(idx, 1);
-          else selectedUsers.push(profile);
-          refreshSelected();
-          updateButton();
-          search.dispatchEvent(new Event('input')); // re-render results with check state
-        };
-      });
-    }, 200);
-  });
-  search.focus();
-
-  createBtn.onclick = async () => {
-    if (!selectedUsers.length) return;
-    createBtn.disabled = true;
-    createBtn.textContent = 'Creating…';
-    try {
-      let convId;
-      if (selectedUsers.length === 1) {
-        const { data, error } = await supabase.rpc('get_or_create_conversation', {
-          p_other_user_id: selectedUsers[0].id,
-        });
-        if (error) throw error;
-        convId = data;
-      } else {
-        const payload = {
-          p_name: nameInput.value.trim() || '',
-          p_participant_ids: selectedUsers.map(u => u.id),
-        };
-        const { data, error } = await supabase.rpc('create_group_conversation', payload);
-        if (error) {
-          console.error('[dm] create_group_conversation failed', error, 'payload:', payload);
-          throw error;
-        }
-        if (!data) {
-          console.error('[dm] create_group_conversation returned no id', { data });
-          throw new Error('No conversation id returned from server');
-        }
-        convId = data;
-      }
-      if (!convId) throw new Error('Could not resolve conversation');
-      close();
-      await loadConversationList();
-      await openConversation(convId);
-    } catch (err) {
-      console.error('[dm] create chat failed', err);
-      toast(err.message || 'Failed to create chat', 'error');
-      createBtn.disabled = false;
-      createBtn.textContent = selectedUsers.length >= 2 ? 'Start group chat' : 'Start chat';
-    }
-  };
-}
-
-// ── Global search (across conversations + message bodies) ─────────────────
-let _dmSearchTimer = null;
 const _origSearchHandler = (e) => {
   // Replace the simple-filter behavior with debounced server search if length > 1
   const q = e.target.value.trim();
-  clearTimeout(_dmSearchTimer);
+  clearTimeout(getDmSearchTimer());
   if (!q) {
     dmState.globalSearchResults = null;
     renderConversationList();
@@ -23688,7 +10794,7 @@ const _origSearchHandler = (e) => {
     el.style.display = (name.includes(q.toLowerCase()) || preview.includes(q.toLowerCase())) ? '' : 'none';
   });
   // Then debounced server message search
-  _dmSearchTimer = setTimeout(async () => {
+  setDmSearchTimer(setTimeout(async () => {
     const { data: hits } = await supabase
       .from('messages')
       .select('id, conversation_id, sender_id, body, created_at')
@@ -23698,7 +10804,7 @@ const _origSearchHandler = (e) => {
       .limit(40);
     if (!hits?.length) return;
     renderGlobalSearchResults(hits, q);
-  }, 280);
+  }, 280));
 };
 const dmSearchInput = document.getElementById('dmSearchInput');
 if (dmSearchInput) {
@@ -23708,81 +10814,24 @@ if (dmSearchInput) {
   dmSearchInput.addEventListener('input', _origSearchHandler);
 }
 
-function renderGlobalSearchResults(hits, query) {
-  const wrap = document.getElementById('dmConvList');
-  if (!wrap) return;
-  // Group hits by conversation
-  const byConv = {};
-  hits.forEach(h => {
-    if (!byConv[h.conversation_id]) byConv[h.conversation_id] = [];
-    byConv[h.conversation_id].push(h);
-  });
-  // Map convs we already have in state
-  const convsById = new Map(dmState.conversations.map(c => [c.id, c]));
-  const html = Object.entries(byConv).map(([cid, msgs]) => {
-    const conv = convsById.get(cid);
-    if (!conv) return '';
-    const name = conv.isGroup ? conv.name : conv.otherUser?.username;
-    return `
-      <div class="dm-search-group">
-        <div class="dm-search-group-name">${escHTML(name || 'Conversation')}</div>
-        ${msgs.map(m => `
-          <button class="dm-search-hit" data-conv="${cid}" data-msg="${m.id}">
-            <span class="dm-search-hit-time">${timeAgo(m.created_at)}</span>
-            <span class="dm-search-hit-body">${highlightSearchMatch(m.body, query)}</span>
-          </button>
-        `).join('')}
-      </div>
-    `;
-  }).join('');
-  wrap.innerHTML = `
-    <div class="dm-search-results">
-      ${html || '<div class="dm-empty-list"><h3>No matches</h3></div>'}
-    </div>
-  `;
-  wrap.querySelectorAll('.dm-search-hit').forEach(el => {
-    el.onclick = () => openConversation(el.dataset.conv);
-  });
-}
-
-function highlightSearchMatch(body, query) {
-  const text = (body || '').slice(0, 200);
-  const safe = escHTML(text);
-  const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig');
-  return safe.replace(re, '<mark>$1</mark>');
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // DMs Phase 4 — image attachments (2.5 MB), GIF picker, emoji picker
 // ════════════════════════════════════════════════════════════════════════════
 
+// DM_MAX_IMAGE_BYTES stays here — only app.js's file-picker handler reads
+// it directly (passed as 2nd arg to compressImageToJpeg). The picker is
+// part of the DM wiring block still pending migration to wireMessagesPage().
 const DM_MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;   // 2.5 MB
-const DM_BUCKET = 'dm-attachments';
 
-// ─── GIF picker key ───────────────────────────────────────────────────────
-// Giphy API key from developers.giphy.com/dashboard. Free tier = 100k req/day.
-// Public client-side use is the intended exposure — Giphy rate-limits per IP.
-const DM_GIPHY_KEY = 'UYrH9t3qUegWfBNynMFTHL3uEHsySkSm';
+// (DM_BUCKET, DM_GIPHY_KEY, DM_EMOJI_GROUPS moved to js/messages.js in
+// the Stage 9B Codex review pass — they're consumed by sendDmAttachment /
+// openDmGifPicker / loadGifResults / openScopedEmojiPicker which all live
+// in messages.js now. Leaving them as top-level app.js consts caused
+// ReferenceErrors as soon as the emoji button or attach-send fired.)
 
-// _dmPendingAttachment shapes (post-2026-05-07 multi-image):
-//   { kind: 'upload', files: File[], dataUrls: string[] } — 1..10 photos
-//   { kind: 'gif',    gifUrl: string }                     — single Giphy
-// Kept as one variable so the existing show/hide/send paths can keep
-// switching on `.kind`. The legacy { file, dataUrl } shape is gone —
-// the upload path always uses arrays now (single-photo sends just have
-// length-1 arrays).
-let _dmPendingAttachment = null;
-let _dmAttachMenuEl = null;
-let _dmGifPickerEl = null;
-let _dmEmojiPickerEl = null;
-
-// ── + (attach) button → small menu: Photo · GIF ───────────────────────────
-function closeDmAttachMenu() {
-  if (_dmAttachMenuEl) { _dmAttachMenuEl.remove(); _dmAttachMenuEl = null; }
-}
 document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
   e.stopPropagation();
-  if (_dmAttachMenuEl) { closeDmAttachMenu(); return; }
+  if (getDmAttachMenuEl()) { closeDmAttachMenu(); return; }
   closeDmGifPicker();
   closeDmEmojiPicker();
 
@@ -23802,7 +10851,7 @@ document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
   menu.style.position = 'fixed';
   menu.style.bottom = `${window.innerHeight - r.top + 6}px`;
   menu.style.left   = `${r.left}px`;
-  _dmAttachMenuEl = menu;
+  setDmAttachMenuEl(menu);
 
   menu.querySelectorAll('[data-act]').forEach(b => {
     b.onclick = (ev) => {
@@ -23816,7 +10865,7 @@ document.getElementById('dmAttachBtn')?.addEventListener('click', (e) => {
 
   setTimeout(() => {
     const onDoc = (ev) => {
-      if (!_dmAttachMenuEl?.contains(ev.target)) {
+      if (!getDmAttachMenuEl()?.contains(ev.target)) {
         closeDmAttachMenu();
         document.removeEventListener('click', onDoc);
       }
@@ -23833,7 +10882,7 @@ document.getElementById('dmFileInput')?.addEventListener('change', async (e) => 
 
   // Cap at 10 total — combine with anything already staged. If the user
   // exceeds the cap we keep the first N and toast the rest.
-  const existing = _dmPendingAttachment?.kind === 'upload' ? _dmPendingAttachment.files : [];
+  const existing = getDmPendingAttachment()?.kind === 'upload' ? getDmPendingAttachment().files : [];
   const remainingSlots = Math.max(0, 10 - existing.length);
   if (remainingSlots === 0) {
     toast('Limit reached — up to 10 photos per message.', 'warning');
@@ -23874,250 +10923,21 @@ document.getElementById('dmFileInput')?.addEventListener('change', async (e) => 
 
   // Merge with anything already staged so the user can pick in batches.
   const allFiles = [...existing, ...processed];
-  const allDataUrls = _dmPendingAttachment?.kind === 'upload'
-    ? [..._dmPendingAttachment.dataUrls, ...dataUrls]
+  const allDataUrls = getDmPendingAttachment()?.kind === 'upload'
+    ? [...getDmPendingAttachment().dataUrls, ...dataUrls]
     : dataUrls;
 
-  _dmPendingAttachment = { kind: 'upload', files: allFiles, dataUrls: allDataUrls };
+  setDmPendingAttachment({ kind: 'upload', files: allFiles, dataUrls: allDataUrls });
   showDmAttachPreview(allDataUrls, allFiles);
   updateSendButton();
 });
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
-
-// Canvas-based JPEG compression — reduces a photo to fit under maxBytes
-async function compressImageToJpeg(file, maxBytes) {
-  const dataUrl = await fileToDataUrl(file);
-  const img = await new Promise((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.onerror = reject;
-    i.src = dataUrl;
-  });
-
-  // Step down quality until under cap (or stop at 0.5)
-  let quality = 0.85;
-  let scale = 1;
-  // Cap dimensions at 1920px for sanity
-  const maxDim = 1920;
-  if (img.width > maxDim || img.height > maxDim) {
-    scale = Math.min(maxDim / img.width, maxDim / img.height);
-  }
-
-  const canvas = document.createElement('canvas');
-  canvas.width  = Math.round(img.width  * scale);
-  canvas.height = Math.round(img.height * scale);
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality));
-    if (!blob) break;
-    if (blob.size <= maxBytes) {
-      return new File([blob], (file.name.replace(/\.[^.]+$/, '') || 'image') + '.jpg', { type: 'image/jpeg' });
-    }
-    quality -= 0.12;
-    if (quality < 0.5) break;
-  }
-  return file;
-}
-
-// Now takes either:
-//   showDmAttachPreview(dataUrl, name, size)              — legacy single-image / GIF call sites
-//   showDmAttachPreview(dataUrls: string[], files: File[]) — multi-image upload path
-// We detect the multi-image shape by Array.isArray on the first arg and
-// render a thumbnail strip; the legacy callers (gif preview) still get
-// the original single-image markup so nothing else has to change.
-function showDmAttachPreview(srcOrUrls, nameOrFiles, size) {
-  const wrap = document.getElementById('dmAttachPreview');
-  const isMulti = Array.isArray(srcOrUrls);
-  if (isMulti) {
-    const dataUrls = srcOrUrls;
-    const files = Array.isArray(nameOrFiles) ? nameOrFiles : [];
-    // Lead image goes in the existing single-image slot; the rest get
-    // injected as a horizontal thumb row right after. Each thumb has its
-    // own X overlay that drops just that file from the staged batch.
-    const leadImg = document.getElementById('dmAttachPreviewImg');
-    if (leadImg) leadImg.src = dataUrls[0] || '';
-    document.getElementById('dmAttachPreviewName').textContent = files.length === 1
-      ? (files[0]?.name || 'Image')
-      : `${files.length} photos`;
-    const totalBytes = files.reduce((sum, f) => sum + (f?.size || 0), 0);
-    document.getElementById('dmAttachPreviewSize').textContent = totalBytes ? `· ${formatBytes(totalBytes)}` : '';
-    // Render the supplementary thumb strip if more than one. Reuses the
-    // existing #dmAttachPreviewExtra container when present, otherwise
-    // appends one inside #dmAttachPreview so no HTML change is required.
-    let extra = document.getElementById('dmAttachPreviewExtra');
-    if (files.length > 1) {
-      if (!extra) {
-        extra = document.createElement('div');
-        extra.id = 'dmAttachPreviewExtra';
-        extra.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;';
-        wrap?.appendChild(extra);
-      }
-      extra.style.display = '';
-      extra.innerHTML = dataUrls.map((u, idx) => `
-        <div style="position:relative;width:48px;height:48px;border-radius:6px;overflow:hidden;background:#222">
-          <img src="${u}" style="width:100%;height:100%;object-fit:cover" alt=""/>
-          <button type="button" data-dm-remove-idx="${idx}" style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:rgba(0,0,0,0.85);color:#fff;border:none;font-size:11px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Remove">×</button>
-        </div>
-      `).join('');
-      // Wire per-thumb X buttons.
-      extra.querySelectorAll('[data-dm-remove-idx]').forEach((btn) => {
-        btn.addEventListener('click', (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          const idx = parseInt(btn.dataset.dmRemoveIdx, 10);
-          if (!_dmPendingAttachment || _dmPendingAttachment.kind !== 'upload') return;
-          _dmPendingAttachment.files.splice(idx, 1);
-          _dmPendingAttachment.dataUrls.splice(idx, 1);
-          if (_dmPendingAttachment.files.length === 0) {
-            hideDmAttachPreview();
-          } else {
-            showDmAttachPreview(_dmPendingAttachment.dataUrls, _dmPendingAttachment.files);
-          }
-          updateSendButton();
-        });
-      });
-    } else if (extra) {
-      extra.style.display = 'none';
-      extra.innerHTML = '';
-    }
-  } else {
-    // Legacy single-image path (still used by GIF preview).
-    document.getElementById('dmAttachPreviewImg').src = srcOrUrls;
-    document.getElementById('dmAttachPreviewName').textContent = nameOrFiles || 'Image';
-    document.getElementById('dmAttachPreviewSize').textContent = size ? `· ${formatBytes(size)}` : '';
-    const extra = document.getElementById('dmAttachPreviewExtra');
-    if (extra) { extra.style.display = 'none'; extra.innerHTML = ''; }
-  }
-  if (wrap) wrap.style.display = '';
-}
-function hideDmAttachPreview() {
-  const wrap = document.getElementById('dmAttachPreview');
-  if (wrap) wrap.style.display = 'none';
-  _dmPendingAttachment = null;
-  updateSendButton();
-}
-function formatBytes(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
-  return (n / 1024 / 1024).toFixed(1) + ' MB';
-}
 document.getElementById('dmAttachCancel')?.addEventListener('click', hideDmAttachPreview);
-
-// ── Override sendDmMessage to handle attachments + GIFs ─────────────────
-// Rather than re-declaring the function, we wrap upload logic into a helper
-// that the existing sendDmMessage delegates to when an attachment is staged.
-// We do this by hooking into the send button click before it runs sendDmMessage.
-async function sendDmAttachment() {
-  if (!dmState.activeConvId || !_dmPendingAttachment) return false;
-  const att = _dmPendingAttachment;
-
-  let imageUrls = [];
-  let imageKind = att.kind;
-
-  if (att.kind === 'gif') {
-    // GIFs are always single-attachment.
-    imageUrls = [att.gifUrl];
-  } else {
-    // Upload all picked files in parallel. Order is preserved by Promise.all
-    // so the gallery grid renders in the user's selection order. A single
-    // failed upload aborts the whole send so the user knows something went
-    // wrong rather than silently shipping a partial batch.
-    const uploads = att.files.map(async (file) => {
-      const ext = (file.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
-      const path = `${currentUser.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-      const { error: upErr } = await supabase.storage.from(DM_BUCKET).upload(path, file, {
-        contentType: file.type,
-        cacheControl: '3600',
-        upsert: false,
-      });
-      if (upErr) throw upErr;
-      const { data: urlData } = supabase.storage.from(DM_BUCKET).getPublicUrl(path);
-      if (!urlData?.publicUrl) throw new Error('No public URL returned');
-      return urlData.publicUrl;
-    });
-    try {
-      imageUrls = await Promise.all(uploads);
-    } catch (upErr) {
-      console.error('[dm] upload failed', upErr);
-      toast(upErr.message || 'Upload failed', 'error');
-      return false;
-    }
-  }
-  if (!imageUrls.length) { toast('Failed to attach image(s)', 'error'); return false; }
-
-  const input = document.getElementById('dmInput');
-  const body = (input?.value || '').trim();
-  const replyToId = dmState.replyingTo?.id || null;
-  dmState.replyingTo = null;
-  hideReplyPreview();
-
-  // Optimistic render — image_url stays = the lead image so any code that
-  // still reads the singular field (legacy code paths, push notifications)
-  // sees something; image_urls is the canonical ordered list.
-  const tempId = 'temp-' + Date.now();
-  dmState.messages.push({
-    id: tempId,
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body: body || '',
-    image_url: imageUrls[0],
-    image_urls: imageUrls,
-    image_kind: imageKind,
-    reply_to_id: replyToId,
-    created_at: new Date().toISOString(),
-    read_at: null,
-    _pending: true,
-  });
-  hideDmAttachPreview();
-  if (input) { input.value = ''; resizeDmInput(); updateSendButton(); }
-  renderMessages();
-  // Image/GIF I just sent → always pin so it lands in view.
-  scrollMessagesToBottom({ force: true });
-
-  const { data, error } = await supabase.from('messages').insert({
-    conversation_id: dmState.activeConvId,
-    sender_id: currentUser.id,
-    body: body || ' ',     // body has a NOT-NULL/length constraint; one-space passes
-    image_url: imageUrls[0],
-    image_urls: imageUrls,
-    image_kind: imageKind,
-    reply_to_id: replyToId,
-  }).select().single();
-  if (error) {
-    dmState.messages = dmState.messages.filter(m => m.id !== tempId);
-    _renderedMessageIds.delete(tempId);
-    renderMessages();
-    toast(error.message, 'error');
-    return false;
-  }
-  // Replace temp with real — transfer the "already-rendered" status so the
-  // bubble doesn't re-animate (would cause the whole list to flash).
-  const idx = dmState.messages.findIndex(m => m.id === tempId);
-  if (idx >= 0) dmState.messages[idx] = data;
-  if (_renderedMessageIds.has(tempId)) {
-    _renderedMessageIds.delete(tempId);
-    _renderedMessageIds.add(data.id);
-  }
-  document.querySelectorAll(`[data-msg-id="${tempId}"]`).forEach(el => {
-    el.dataset.msgId = data.id;
-  });
-  return true;
-}
 
 // Intercept the send button: if an attachment is pending, send it via the
 // attachment path; otherwise fall through to the normal text send.
 document.getElementById('dmSendBtn')?.addEventListener('click', (e) => {
-  if (_dmPendingAttachment) {
+  if (getDmPendingAttachment()) {
     e.stopImmediatePropagation();
     sendDmAttachment();
   }
@@ -24125,191 +10945,27 @@ document.getElementById('dmSendBtn')?.addEventListener('click', (e) => {
 
 // Also intercept Enter key in textarea when an attachment is staged
 document.getElementById('dmInput')?.addEventListener('keydown', (e) => {
-  if (_dmPendingAttachment && e.key === 'Enter' && !e.shiftKey) {
+  if (getDmPendingAttachment() && e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     e.stopImmediatePropagation();
     sendDmAttachment();
   }
 }, true);
 
-// ── GIF picker (Giphy) ───────────────────────────────────────────────────
-function closeDmGifPicker() {
-  if (_dmGifPickerEl) { _dmGifPickerEl.remove(); _dmGifPickerEl = null; }
-}
-async function openDmGifPicker() {
-  if (_dmGifPickerEl) { closeDmGifPicker(); return; }
-  closeDmEmojiPicker();
-  closeDmAttachMenu();
+// (DM_EMOJI_GROUPS moved to js/messages.js in Stage 9B Codex review pass —
+// openScopedEmojiPicker is the only consumer and it lives in messages.js.)
 
-  const composer = document.getElementById('dmComposer');
-  if (!composer) return;
-  const picker = document.createElement('div');
-  picker.className = 'dm-gif-picker';
-  picker.innerHTML = `
-    <div class="dm-gif-header">
-      <input type="text" class="dm-gif-search" placeholder="Search GIFs…" id="dmGifSearch"/>
-      <button type="button" class="dm-gif-close" aria-label="Close">×</button>
-    </div>
-    <div class="dm-gif-grid" id="dmGifGrid">
-      <div class="dm-gif-loading">Loading trending…</div>
-    </div>
-  `;
-  document.body.appendChild(picker);
-  // Position above composer
-  const r = composer.getBoundingClientRect();
-  picker.style.position = 'fixed';
-  picker.style.bottom = `${window.innerHeight - r.top + 6}px`;
-  picker.style.left   = `${r.left}px`;
-  picker.style.width  = `${r.width}px`;
-  _dmGifPickerEl = picker;
-
-  picker.querySelector('.dm-gif-close').onclick = closeDmGifPicker;
-  const search = picker.querySelector('#dmGifSearch');
-  search.focus();
-
-  // Initial: trending
-  loadGifResults('', picker.querySelector('#dmGifGrid'));
-
-  let timer = null;
-  search.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      loadGifResults(search.value.trim(), picker.querySelector('#dmGifGrid'));
-    }, 250);
-  });
-}
-async function loadGifResults(query, gridEl) {
-  if (!gridEl) return;
-
-  // No key configured → show setup instructions instead of empty results
-  if (!DM_GIPHY_KEY) {
-    gridEl.innerHTML = `
-      <div class="dm-gif-setup">
-        <div class="dm-gif-setup-icon">🔑</div>
-        <h4>GIF picker needs an API key</h4>
-        <p>Giphy's free public key was retired. Get your own (takes 3 min):</p>
-        <ol>
-          <li>Open <a href="https://developers.giphy.com/dashboard/" target="_blank" rel="noopener">developers.giphy.com</a></li>
-          <li>Create an API-type app</li>
-          <li>Copy your API key</li>
-          <li>Paste it into <code>DM_GIPHY_KEY</code> in app.js</li>
-        </ol>
-        <p class="dm-gif-setup-note">Free tier: 100,000 requests/day.</p>
-      </div>
-    `;
-    return;
-  }
-
-  gridEl.innerHTML = '<div class="dm-gif-loading">Loading…</div>';
-  const endpoint = query
-    ? `https://api.giphy.com/v1/gifs/search?api_key=${DM_GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=24&rating=pg-13`
-    : `https://api.giphy.com/v1/gifs/trending?api_key=${DM_GIPHY_KEY}&limit=24&rating=pg-13`;
-  try {
-    const res = await fetch(endpoint);
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      console.error('[dm] giphy non-OK', res.status, errBody);
-      const friendlyMsg = res.status === 401 || res.status === 403
-        ? 'Invalid Giphy API key — check the DM_GIPHY_KEY constant in app.js.'
-        : `Giphy returned ${res.status}. Try again later.`;
-      gridEl.innerHTML = `<div class="dm-gif-loading">${escHTML(friendlyMsg)}</div>`;
-      return;
-    }
-    const json = await res.json();
-    const gifs = json?.data || [];
-    if (!gifs.length) {
-      gridEl.innerHTML = '<div class="dm-gif-loading">No GIFs found</div>';
-      return;
-    }
-    gridEl.innerHTML = gifs.map(g => {
-      const preview = g.images?.fixed_height_small?.url || g.images?.fixed_height?.url || g.images?.original?.url;
-      const send    = g.images?.fixed_height?.url   || g.images?.original?.url;
-      if (!preview || !send) return '';
-      return `<button class="dm-gif-tile" type="button" data-send="${escHTML(send)}" title="${escHTML(g.title || 'GIF')}">
-        <img src="${escHTML(preview)}" alt="${escHTML(g.title || 'GIF')}" loading="lazy"/>
-      </button>`;
-    }).join('');
-    gridEl.querySelectorAll('.dm-gif-tile').forEach(tile => {
-      tile.onclick = () => sendDmGif(tile.dataset.send);
-    });
-  } catch (err) {
-    console.error('[dm] giphy fetch failed', err);
-    gridEl.innerHTML = `<div class="dm-gif-loading">Couldn't load GIFs — ${escHTML(err.message || 'network error')}</div>`;
-  }
-}
-async function sendDmGif(gifUrl) {
-  if (!gifUrl) return;
-  closeDmGifPicker();
-  _dmPendingAttachment = { file: null, dataUrl: gifUrl, kind: 'gif', gifUrl };
-  await sendDmAttachment();
-}
-
-// ── Emoji picker ─────────────────────────────────────────────────────────
-const DM_EMOJI_GROUPS = [
-  { label: 'Smileys', emojis: '😀 😃 😄 😁 😆 😅 🤣 😂 🙂 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐'.split(' ') },
-  { label: 'Gestures', emojis: '👍 👎 👏 🙌 🤝 🙏 👋 🤚 ✋ 🖐 ✊ 👊 🤛 🤜 🫶 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝ 💪 🦾'.split(' ') },
-  { label: 'Hearts', emojis: '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❤️‍🔥 ❤️‍🩹 💖 💗 💓 💞 💕 💘 💝 💟'.split(' ') },
-  { label: 'Animals', emojis: '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦄 🐝'.split(' ') },
-  { label: 'Food', emojis: '🍕 🍔 🍟 🌭 🥪 🌮 🌯 🥗 🍝 🍜 🍣 🍱 🍤 🍙 🍘 🍚 🍛 🍦 🍰 🎂 🍩 🍪 🍫 🍬 🍭 ☕ 🍺'.split(' ') },
-  { label: 'Activities', emojis: '⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🏸 🥊 🎯 🎳 🎮 🎲 🎰 🎬 🎤 🎧 🎵 🎶 📚 ✏️ 📝 💻 📱'.split(' ') },
-  { label: 'Travel', emojis: '✈️ 🚗 🚕 🚙 🚌 🚎 🏎 🚓 🚑 🚒 🚐 🚚 🚛 🚜 🏍 🛵 🚲 🛴 🛹 🚂 🚆 🚇 ⛵ 🛳 🚀'.split(' ') },
-  { label: 'Symbols', emojis: '✨ 💫 ⭐ 🌟 💥 🔥 ⚡ 💧 🌈 ☀️ 🌙 🎉 🎊 🎁 🏆 🥇 ✅ ❌ ❗ ❓ 💯 ‼️ ⁉️ 💬 💭 🔔'.split(' ') },
-];
-function closeDmEmojiPicker() {
-  if (_dmEmojiPickerEl) { _dmEmojiPickerEl.remove(); _dmEmojiPickerEl = null; }
-}
-document.getElementById('dmEmojiBtn')?.addEventListener('click', (e) => {
+// Delegated handler for the full-page composer's emoji button. The dock's
+// per-mini-chat triggers wire their OWN delegated handler in messages-dock.js
+// (Commit 2) so this one doesn't have to know about future selectors.
+document.addEventListener('click', (e) => {
+  const trigger = e.target.closest('#dmEmojiBtn');
+  if (!trigger) return;
+  e.preventDefault();
   e.stopPropagation();
-  if (_dmEmojiPickerEl) { closeDmEmojiPicker(); return; }
-  closeDmGifPicker();
-  closeDmAttachMenu();
-
-  const trigger = e.currentTarget;
-  const picker = document.createElement('div');
-  picker.className = 'dm-emoji-picker';
-  picker.innerHTML = DM_EMOJI_GROUPS.map(g => `
-    <div class="dm-emoji-group">
-      <div class="dm-emoji-label">${g.label}</div>
-      <div class="dm-emoji-grid">
-        ${g.emojis.map(em => `<button type="button" class="dm-emoji-cell" data-emoji="${escHTML(em)}">${em}</button>`).join('')}
-      </div>
-    </div>
-  `).join('');
-  document.body.appendChild(picker);
-
-  const r = trigger.getBoundingClientRect();
-  picker.style.position = 'fixed';
-  picker.style.bottom = `${window.innerHeight - r.top + 8}px`;
-  picker.style.right  = `${Math.max(8, window.innerWidth - r.right)}px`;
-  _dmEmojiPickerEl = picker;
-
-  picker.querySelectorAll('.dm-emoji-cell').forEach(cell => {
-    cell.onclick = (ev) => {
-      ev.stopPropagation();
-      insertEmojiIntoComposer(cell.dataset.emoji);
-    };
+  openScopedEmojiPicker({
+    trigger,
+    input: document.getElementById('dmInput'),
+    onInsert: insertEmojiIntoComposer,  // full-page-specific insert
   });
-
-  setTimeout(() => {
-    const onDoc = (ev) => {
-      if (!_dmEmojiPickerEl?.contains(ev.target) && ev.target !== trigger) {
-        closeDmEmojiPicker();
-        document.removeEventListener('click', onDoc);
-      }
-    };
-    document.addEventListener('click', onDoc);
-  }, 0);
 });
-
-function insertEmojiIntoComposer(emoji) {
-  const input = document.getElementById('dmInput');
-  if (!input) return;
-  const start = input.selectionStart ?? input.value.length;
-  const end   = input.selectionEnd   ?? input.value.length;
-  input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
-  const newPos = start + emoji.length;
-  input.setSelectionRange(newPos, newPos);
-  input.focus();
-  resizeDmInput();
-  updateSendButton();
-}

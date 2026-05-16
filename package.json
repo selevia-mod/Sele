@@ -1,0 +1,12 @@
+{
+  "name": "selebox-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Selebox web app source. Static HTML/CSS/JS — no build step. The package.json exists ONLY to track dev tooling like jscodeshift used by refactor scripts. None of these dependencies ship to the browser.",
+  "scripts": {
+    "extract-stage": "jscodeshift --parser=babel"
+  },
+  "devDependencies": {
+    "jscodeshift": "^17.3.0"
+  }
+}

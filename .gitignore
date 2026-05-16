@@ -1,0 +1,3 @@
+
+# Stage 5+ — npm dev tooling (jscodeshift). Never ship to browser.
+node_modules/
