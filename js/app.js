@@ -4,6 +4,16 @@ import { initScheduledPosts, refreshScheduledPostsBadge } from './scheduled-post
 import { initComposer } from './composer.js';
 import { initStudio, loadStudio } from './studio.js';
 import { initProfile, openProfile, setViewingProfileId, refreshProfilePostsIfViewing } from './profile.js';
+// Stage 10 — Search module. Owns the topbar search input (recent-searches
+// dropdown, context-aware placeholder, debounced fan-out to feed/videos/
+// books runners) + the People/Videos/Books/Posts dropdown for feed-context
+// searches. Re-exports the 3 pure helpers (sanitize / escape / normalize)
+// so videos.js + books.js + composer.js can keep passing them through
+// their existing _cfg blocks without churn.
+import {
+  initSearch,
+  sanitizeSearchQuery, escapeIlike, normalizeForSearch,
+} from './search.js';
 import {
   initVideos, showVideos, loadVideos, fetchSupabaseVideos,
   renderVideoCard, renderVideoResults, renderTagPills, runSearch,
@@ -563,6 +573,28 @@ async function onSignedIn(user) {
     storiesEl,
     composeEl,
   });
+
+// ─── search.js (Stage 10) ─────────────────────────────────────
+// Wires the topbar input + recent-searches dropdown. Module-load-time
+// listeners attach when search.js imports above; initSearch only injects
+// cross-feature handles (currentUser getter, profile/post openers,
+// videos/books runners + active-query setters).
+initSearch({
+  getCurrentUser:           () => currentUser,
+  renderRoleSeal,
+  openProfile,
+  openPostFromSearch,
+  // Result-click openers (Stage 10 smoke test fix #247)
+  playVideo,
+  openBookDetail,
+  // Videos page search
+  setActiveSearchQuery,
+  runSearch,
+  // Books page search
+  setActiveBookSearchQuery,
+  runBookSearch,
+  getActiveBookTab,
+});
 
 // ─── videos.js (Stage 7A) ──────────────────────────────
 initVideos({
@@ -3238,30 +3270,10 @@ function linkify(str) {
 }
 
 // ── Search helpers ────────────────────────────────────────────────────────────
-// PostgREST's .or() filter splits on commas and uses parens for grouping.
-// If those characters end up inside the user's query, the entire OR clause
-// breaks (causing "no results" for searches like `Romeo, Juliet` or `What's up?`).
-// Strip them defensively — users still get matches on the remaining tokens.
-function sanitizeSearchQuery(raw) {
-  return (raw || '')
-    .replace(/[,\(\)"]/g, ' ')   // PostgREST or() splitters / quote chars
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-// Escape ilike wildcards (% _ \) so a literal underscore doesn't match every char.
-function escapeIlike(s) {
-  return (s || '').replace(/[\\%_]/g, m => '\\' + m);
-}
-// Strip diacritics + lowercase, so "café" matches "cafe" on local cache filters.
-// (Server-side ilike is bytewise; full diacritic-insensitive search would need
-// a Postgres `unaccent` index — tracked as a future improvement.)
-function normalizeForSearch(s) {
-  return (s || '')
-    .toString()
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase();
-}
+// sanitizeSearchQuery / escapeIlike / normalizeForSearch moved to
+// js/search.js (Stage 10). The names are still imported at the top of
+// this file so existing _cfg.sanitizeSearchQuery bridges into books.js
+// and videos.js continue to receive the real implementation.
 
 // Translate vertical mouse-wheel scrolling into horizontal scroll on chip rails
 // (Trackpads already do this natively; this fixes mouse-wheel users.)
@@ -5655,221 +5667,12 @@ window.addEventListener('popstate', () => {
 });
 
 // ── Smart context-aware search ──
-const searchInput = document.getElementById('searchInput');
-const searchResultsEl = document.getElementById('searchResults');
-const topbarSearchClear = document.getElementById('topbarSearchClear');
-let searchDebounce = null;
-
-// ── Recent searches (web parity with mobile lib/recent-searches.js) ──
-// Local-only history of recent search queries. Capped at 10 entries.
-// Persists in localStorage across sessions; wiped only when the user
-// taps Clear all in the dropdown. Per-user keying so signing in/out
-// doesn't show another user's history.
-const RECENT_SEARCHES_LIMIT = 10;
-const recentSearchesKey = () => {
-  const uid = currentUser?.id || 'anon';
-  return `selebox.recentSearches.${uid}`;
-};
-function getRecentSearches() {
-  try {
-    const raw = localStorage.getItem(recentSearchesKey());
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((q) => typeof q === 'string' && q.trim()) : [];
-  } catch (_) {
-    return [];
-  }
-}
-function addRecentSearch(q) {
-  const trimmed = (q || '').trim();
-  if (!trimmed) return;
-  const existing = getRecentSearches();
-  // Move-to-front semantics: drop any existing match (case-insensitive)
-  // then prepend, so the same term searched twice doesn't duplicate.
-  const filtered = existing.filter((x) => x.toLowerCase() !== trimmed.toLowerCase());
-  const next = [trimmed, ...filtered].slice(0, RECENT_SEARCHES_LIMIT);
-  try { localStorage.setItem(recentSearchesKey(), JSON.stringify(next)); } catch (_) { /* swallow */ }
-}
-function removeRecentSearch(q) {
-  const trimmed = (q || '').trim();
-  if (!trimmed) return;
-  const existing = getRecentSearches();
-  const next = existing.filter((x) => x.toLowerCase() !== trimmed.toLowerCase());
-  try { localStorage.setItem(recentSearchesKey(), JSON.stringify(next)); } catch (_) { /* swallow */ }
-}
-function clearRecentSearches() {
-  try { localStorage.removeItem(recentSearchesKey()); } catch (_) { /* swallow */ }
-}
-
-// Render the recent-searches dropdown when the input is focused with
-// empty value. Tapping a recent re-runs the search; tapping the X
-// removes that entry.
-function renderRecentSearchesPanel() {
-  const recents = getRecentSearches();
-  if (!recents.length) {
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-  const html = `
-    <div class="search-result-section" style="display:flex;align-items:center;justify-content:space-between">
-      <span>Recent searches</span>
-      <button class="search-recent-clear" type="button" style="font-size:0.75rem;background:none;border:none;color:var(--text3);cursor:pointer">Clear all</button>
-    </div>
-    ${recents.map((q) => `
-      <div class="search-result-item search-recent-item" data-recent="${escHTML(q)}">
-        <div class="search-result-info" style="display:flex;align-items:center;gap:8px;flex:1">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text3);flex-shrink:0">
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
-          <div class="search-result-title" style="flex:1">${escHTML(q)}</div>
-        </div>
-        <button class="search-recent-remove" data-remove="${escHTML(q)}" type="button" aria-label="Remove" style="background:none;border:none;color:var(--text3);cursor:pointer;padding:4px">×</button>
-      </div>
-    `).join('')}
-  `;
-  searchResultsEl.innerHTML = html;
-  searchResultsEl.classList.add('open');
-
-  searchResultsEl.querySelector('.search-recent-clear')?.addEventListener('click', () => {
-    clearRecentSearches();
-    searchResultsEl.classList.remove('open');
-  });
-  searchResultsEl.querySelectorAll('.search-recent-item').forEach((el) => {
-    el.addEventListener('click', (ev) => {
-      // X button propagates here too — ignore if the click target is
-      // the remove control, since its own handler runs first.
-      if (ev.target.closest('.search-recent-remove')) return;
-      const q = el.dataset.recent;
-      if (!q) return;
-      searchInput.value = q;
-      if (topbarSearchClear) topbarSearchClear.style.display = 'flex';
-      runFeedSearch(q);
-    });
-  });
-  searchResultsEl.querySelectorAll('.search-recent-remove').forEach((btn) => {
-    btn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      removeRecentSearch(btn.dataset.remove);
-      renderRecentSearchesPanel();
-    });
-  });
-}
-
-// Search context decides which renderer the topbar search input feeds.
-//   'videos' → renders into the videos page grid
-//   'books'  → renders into the books page See-All view
-//   default  → home-feed dropdown (People / Videos / Books / Posts)
-//
-// Important: book DETAIL pages (#book/<uuid>) used to be 'books' too, which
-// meant typing in search tried to render into a hidden bookPage and the
-// search results vanished into the void. We now route detail pages to the
-// feed dropdown, so users can find another book without leaving the reader.
-function getSearchContext() {
-  const hash = window.location.hash;
-  if (hash === '#videos' || hash.startsWith('#video/')) return 'videos';
-  if (hash === '#book') return 'books'; // listing only — detail pages use the feed dropdown
-  return 'feed';
-}
-
-let _lastSearchContext = null;
-function updateSearchPlaceholder() {
-  const ctx = getSearchContext();
-  if (ctx === 'videos')      searchInput.placeholder = 'Search videos · creator · tags · category…';
-  else if (ctx === 'books')  searchInput.placeholder = 'Search books · author · tags · genre…';
-  else                       searchInput.placeholder = 'Search posts and people…';
-
-  // Reset any active query when moving between contexts (videos ↔ books ↔ feed)
-  if (_lastSearchContext && _lastSearchContext !== ctx) {
-    searchInput.value = '';
-    if (topbarSearchClear) topbarSearchClear.style.display = 'none';
-    setActiveSearchQuery('');
-    setActiveBookSearchQuery('');
-    searchResultsEl.classList.remove('open');
-  }
-  _lastSearchContext = ctx;
-}
-
-searchInput.addEventListener('input', (e) => {
-  const value = e.target.value;
-  if (topbarSearchClear) topbarSearchClear.style.display = value ? 'flex' : 'none';
-
-  const ctx = getSearchContext();
-
-  if (ctx === 'videos') {
-    setActiveSearchQuery(value);
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => runSearch(), 200);
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-
-  if (ctx === 'books') {
-    setActiveBookSearchQuery(value);
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => runBookSearch(), 200);
-    searchResultsEl.classList.remove('open');
-    return;
-  }
-
-  // Feed (default): show dropdown of matching people + posts
-  clearTimeout(searchDebounce);
-  if (!value.trim()) {
-    // Empty value while focused → show recent-searches dropdown so the
-    // user can re-run a previous query without retyping.
-    if (document.activeElement === searchInput) {
-      renderRecentSearchesPanel();
-    } else {
-      searchResultsEl.classList.remove('open');
-    }
-    return;
-  }
-  searchDebounce = setTimeout(() => runFeedSearch(value), 250);
-});
-
-// On focus with empty input, surface recent searches.
-searchInput.addEventListener('focus', () => {
-  if (!searchInput.value.trim() && getSearchContext() === 'feed') {
-    renderRecentSearchesPanel();
-  }
-});
-
-// On Enter, persist the term as a recent search. Same trigger on
-// clicking a result handled below.
-searchInput.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter') return;
-  const v = searchInput.value.trim();
-  if (v) addRecentSearch(v);
-});
-
-if (topbarSearchClear) {
-  topbarSearchClear.addEventListener('click', () => {
-    searchInput.value = '';
-    topbarSearchClear.style.display = 'none';
-    searchResultsEl.classList.remove('open');
-    const ctx = getSearchContext();
-    if (ctx === 'videos') {
-      setActiveSearchQuery('');
-      runSearch();
-    } else if (ctx === 'books') {
-      setActiveBookSearchQuery('');
-      // Close the See-All search view and return to the active tab panel.
-      // (No "restore the cached grid" step — the v2 books page is tabbed.)
-      const seeAll = document.getElementById('bookSeeAllView');
-      if (seeAll) seeAll.style.display = 'none';
-      const activeTab = getActiveBookTab();
-      document.querySelectorAll('.book-tab-panel').forEach(p => {
-        const isActive = p.dataset.bookPanel === activeTab;
-        p.style.display = isActive ? '' : 'none';
-        p.classList.toggle('active', isActive);
-      });
-    }
-  });
-}
-
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('#topbarSearch') && !e.target.closest('.search-results')) {
-    searchResultsEl.classList.remove('open');
-  }
-});
+// MOVED to js/search.js (Stage 10). Topbar input wiring, recent-searches
+// dropdown, context-aware placeholder, hashchange listener, runFeedSearch,
+// and all 5 search helpers (sanitize / escape / normalize / getRecent /
+// renderRecentSearchesPanel) live in search.js now. The import at the
+// top of this file pulls in the 3 pure helpers so existing _cfg
+// passthroughs into books.js + videos.js keep receiving the real impls.
 
 // Document-level delegation: clicking any profile avatar/name in the feed
 // (or future cards) opens that user's profile.
@@ -5883,145 +5686,9 @@ document.addEventListener('click', (e) => {
   openProfile(uid);
 });
 
-async function runFeedSearch(query) {
-  const raw = (query || '').trim();
-  if (!raw) { searchResultsEl.classList.remove('open'); return; }
-
-  // Sanitize FIRST so commas / parens / quotes in the user's query don't
-  // break the PostgREST .or() filter (the silent root cause behind
-  // "search returns nothing" reports).
-  const safeQ = sanitizeSearchQuery(raw);
-  if (!safeQ) { searchResultsEl.classList.remove('open'); return; }
-  const term = `%${escapeIlike(safeQ)}%`;
-
-  searchResultsEl.classList.add('open');
-  searchResultsEl.innerHTML = '<div style="padding:1rem;color:var(--text3)">Searching...</div>';
-
-  // YouTube-style: a single search bar reaches People, Posts, Videos, AND Books.
-  // Profiles overfetched (20) so substring matches like "Ligaya" pull users like
-  // "LIGAYA_ba1f" too — explicit username ordering for predictability.
-  const [profilesRes, postsRes, videosRes, booksRes] = await Promise.all([
-    supabase.from('profiles')
-      .select('id, username, avatar_url, bio, is_guest, is_banned, role')
-      .ilike('username', term)
-      .eq('is_banned', false)
-      .order('username', { ascending: true })
-      .limit(20),
-    supabase.from('posts')
-      .select('*, profiles!user_id(username, avatar_url, is_guest, is_banned, role)')
-      .eq('is_hidden', false)
-      .ilike('body', term)
-      .order('created_at', { ascending: false })
-      .limit(6),
-    supabase.from('videos')
-      .select('id, title, thumbnail_url, uploader_id, profiles!videos_uploader_id_fkey(username, avatar_url, is_banned, role)')
-      .eq('status', 'ready').eq('is_hidden', false)
-      .or(`title.ilike.${term},description.ilike.${term}`)
-      .order('created_at', { ascending: false })
-      .limit(5),
-    supabase.from('books')
-      .select('id, title, cover_url, author_id, profiles!books_author_id_fkey(username, avatar_url, is_banned, role)')
-      .eq('is_public', true).eq('is_hidden', false).in('status', ['ongoing', 'completed'])
-      .or(`title.ilike.${term},description.ilike.${term}`)
-      .limit(5),
-  ]);
-
-  // Stale-query guard — user kept typing, abandon this run.
-  if ((searchInput.value || '').trim() !== raw) return;
-
-  const profiles = profilesRes?.data || [];
-  const posts    = (postsRes?.data || []).filter(p => !p.profiles?.is_banned);
-  const videos   = (videosRes?.data || []).filter(v => !v.profiles?.is_banned);
-  const books    = (booksRes?.data || []).filter(b => !b.profiles?.is_banned);
-
-  let html = '';
-  if (profiles.length) {
-    html += `<div class="search-result-section">People</div>`;
-    profiles.forEach(p => {
-      const avatar = p.avatar_url ? `<img src="${escHTML(p.avatar_url)}"/>` : initials(p.username);
-      html += `
-        <div class="search-result-item" data-type="profile" data-id="${p.id}">
-          <div class="avatar">${avatar}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(p.username)}${renderRoleSeal(p)}</div>
-            <div class="search-result-meta">${p.is_guest ? 'Guest' : 'Member'}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (videos.length) {
-    html += `<div class="search-result-section">Videos</div>`;
-    videos.forEach(v => {
-      const thumb = v.thumbnail_url
-        ? `<img src="${escHTML(v.thumbnail_url)}" alt="" loading="lazy"/>`
-        : '';
-      html += `
-        <div class="search-result-item" data-type="video" data-id="${v.id}">
-          <div class="search-result-thumb">${thumb}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(v.title || 'Untitled')}</div>
-            <div class="search-result-meta">by ${escHTML(v.profiles?.username || 'Unknown')}${renderRoleSeal(v.profiles)}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (books.length) {
-    html += `<div class="search-result-section">Books</div>`;
-    books.forEach(b => {
-      const cover = b.cover_url
-        ? `<img src="${escHTML(b.cover_url)}" alt="" loading="lazy"/>`
-        : `<span class="search-creator-initials">${escHTML((b.title || '?').charAt(0).toUpperCase())}</span>`;
-      html += `
-        <div class="search-result-item" data-type="book" data-id="${b.id}">
-          <div class="search-result-thumb search-result-thumb-book">${cover}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(b.title || 'Untitled')}</div>
-            <div class="search-result-meta">by ${escHTML(b.profiles?.username || 'Unknown')}${renderRoleSeal(b.profiles)}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (posts.length) {
-    html += `<div class="search-result-section">Posts</div>`;
-    posts.forEach(p => {
-      const author = p.profiles || {};
-      const avatar = author.avatar_url ? `<img src="${escHTML(author.avatar_url)}"/>` : initials(author.username || 'U');
-      const snippet = (p.body || '').slice(0, 80);
-      html += `
-        <div class="search-result-item" data-type="post" data-id="${p.id}">
-          <div class="avatar">${avatar}</div>
-          <div class="search-result-info">
-            <div class="search-result-title">${escHTML(snippet)}${p.body && p.body.length > 80 ? '...' : ''}</div>
-            <div class="search-result-meta">by ${escHTML(author.username || 'Unknown')}${renderRoleSeal(author)}</div>
-          </div>
-        </div>`;
-    });
-  }
-  if (!html) html = '<div style="padding:1rem;color:var(--text3);text-align:center">No results found</div>';
-
-  searchResultsEl.innerHTML = html;
-
-  searchResultsEl.querySelectorAll('.search-result-item').forEach(item => {
-    item.onclick = () => {
-      const type = item.dataset.type;
-      const id = item.dataset.id;
-      // Persist the term that produced this result. Successful clicks
-      // (the user found what they wanted) are the strongest signal
-      // for "remember this query."
-      const termAtClick = (searchInput.value || '').trim();
-      if (termAtClick) addRecentSearch(termAtClick);
-
-      searchResultsEl.classList.remove('open');
-      searchInput.value = '';
-      if (topbarSearchClear) topbarSearchClear.style.display = 'none';
-
-      if (type === 'profile')      openProfile(id);
-      else if (type === 'post')    openPostFromSearch(id);
-      else if (type === 'video')   { location.hash = `#video/sb_${id}`; }
-      else if (type === 'book')    { location.hash = `#book/${id}`; }
-    };
-  });
-}
+// runFeedSearch MOVED to js/search.js (Stage 10). Comment kept as a
+// breadcrumb so grep-driven audits land in the right place. The function
+// is exported from search.js; nothing in app.js calls it directly.
 
 // Open a focused post detail modal — works for ANY post, even old ones not
 // in the loaded feed. Reuses renderPost so the post stays visually identical
@@ -6072,8 +5739,8 @@ document.getElementById('postDetailModal')?.addEventListener('click', (e) => {
   if (e.target.id === 'postDetailModal') _closePostDetailModal();
 });
 
-window.addEventListener('hashchange', updateSearchPlaceholder);
-updateSearchPlaceholder();
+// hashchange listener + updateSearchPlaceholder boot call MOVED to
+// js/search.js (Stage 10). search.js wires both at module-load time.
 
 // ── Videos title click behavior ──
 const videosTitle = document.querySelector('.videos-title');
