@@ -3435,7 +3435,12 @@ body.light .ql-editor { color: #1f2937; }
 .post-stats .ccount { padding: 2px 6px; border-radius: 6px; transition: background 0.15s ease; }
 .post-stats .ccount:not(:empty) { cursor: pointer; }
 .post-stats .ccount:not(:empty):hover { background: rgba(124, 58, 237, 0.06); color: var(--text2); text-decoration: underline; }
-.post-stats .rcount-emojis { display: inline-flex; font-size: 15px; letter-spacing: -2px; margin-right: 4px; }
+/* Stacked SVG reactions in the post-stats summary. Width/height are
+   baked into the <img> tags themselves (15px). Inline-flex keeps the
+   icons + count on one baseline; vertical-align middle aligns with the
+   accompanying count text. */
+.post-stats .rcount-emojis { display: inline-flex; align-items: center; margin-right: 4px; vertical-align: middle; }
+.post-stats .rcount-svg { display: block; border-radius: 50%; }
 body:not(.light) .post-stats .rcount:not(:empty):hover { background: rgba(167, 139, 250, 0.10); }
 body:not(.light) .post-stats .ccount:not(:empty):hover { background: rgba(167, 139, 250, 0.10); }
 
@@ -3561,8 +3566,17 @@ body.light .reaction-picker {
 }
 .reaction-option:hover  { transform: scale(1.4) translateY(-3px); }
 .reaction-option.active { background: rgba(167, 139, 250, 0.14); }
-.r-emoji { font-size: 24px; line-height: 1; display: block; }
+/* Picker reaction icons — now custom FB-style SVG badges sized by the
+   <img width/height> attrs (26px). The old font-size rule was for the
+   emoji-glyph era; keep `.r-emoji` as the class hook for the reaction
+   picker buttons (matches data-key dispatch on the parent button). */
+.r-emoji { display: block; border-radius: 50%; }
+img.r-emoji { width: 26px; height: 26px; }
 .r-label { font-size: 9px; color: var(--text3); letter-spacing: 0.02em; }
+/* Reacted-state action button icon — same SVG family, smaller (18px).
+   Vertical-align middle so the SVG sits on the text baseline of the
+   adjacent label ("Love" / "Haha" / etc.) without dropping below it. */
+.r-icon img.r-emoji-svg { display: inline-block; vertical-align: middle; border-radius: 50%; }
 
 /* ── SHARE MENU ── */
 .share-menu {

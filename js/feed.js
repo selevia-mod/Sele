@@ -912,7 +912,7 @@ function renderPost(post, idScope = '') {
         <div class="reaction-picker">
           ${REACTIONS.map(r => `
             <button class="reaction-option" data-key="${r.key}" data-target="${post.id}" data-type="post" title="${r.label}">
-              <span class="r-emoji">${r.emoji}</span>
+              <img class="r-emoji" src="${r.svg}" alt="${r.label}" width="26" height="26">
               <span class="r-label">${r.label}</span>
             </button>
           `).join('')}
