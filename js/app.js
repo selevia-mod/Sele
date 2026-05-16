@@ -22,10 +22,11 @@ import {
   initEarnings, showEarnings, loadAuthorEarnings,
   openEarningsBreakdown, closeEarningsBreakdown, _loadMoreEarningsBreakdown,
   formatPhpFromMinor,
-  // Read-only getters for state that 11B (KYC handlers) + 11C (withdrawal
-  // request) need until they're extracted. `resolveEarningsTitles` is
-  // borrowed by the wallet-history block (Stage 13 territory).
-  getAuthorBalance, getAuthorKyc, resolveEarningsTitles,
+  // resolveEarningsTitles borrowed by the wallet-history block until
+  // Stage 13 extracts wallet. getAuthorBalance/getAuthorKyc were used by
+  // the KYC + withdrawal handlers before 11B/11C extracted them — those
+  // sites are all gone now, so dropping the getters from this import.
+  resolveEarningsTitles,
 } from './earnings.js';
 import {
   initVideos, showVideos, loadVideos, fetchSupabaseVideos,
@@ -7812,239 +7813,17 @@ function ensureLockPromptHandler() {
 //
 // Stage 11C — withdrawal request flow — still below.
 // ════════════════════════════════════════════════════════════════════════
-// ── Withdrawal modal wiring (strict — server pulls saved Payments Info) ─
-const PAYMENT_METHOD_LABELS = { gcash: 'GCash', maya: 'Maya', bank: 'Bank transfer', gotyme: 'GoTyme' };
-
-document.getElementById('btnRequestPayout')?.addEventListener('click', () => {
-  // Always re-derive these from cache so admin rate changes are reflected
-  const minPhpMinor   = _walletConfigDefaults.min_payout_php_minor || 10000;
-  const availPhpMinor = getAuthorBalance()?._computed_available_minor ??
-                        (getAuthorBalance()?.available_php_minor || 0);
-
-  const minModal = document.getElementById('minPayoutModal');
-
-  // ── PRIORITY 1: No Payments Info saved → walk them to it ──
-  // Even if they have ₱0 they should know payment info is required.
-  if (!getAuthorKyc()?.payment_method) {
-    document.getElementById('minPayoutMsg').innerHTML =
-      "You haven't saved your Payments Info yet — we need that before sending money. It only takes a minute.";
-    const okBtn = document.getElementById('minPayoutOk');
-    okBtn.textContent = 'Open Payments Info';
-    okBtn.dataset.action = 'go-to-payments-info';
-    const progress = minModal.querySelector('.min-payout-progress');
-    if (progress) progress.style.display = 'none';
-    const title = minModal.querySelector('.modal-title');
-    if (title) title.textContent = 'Add Payments Info first';
-    // Show with both inline display + .open class to be safe across themes
-    minModal.style.display = 'flex';
-    minModal.classList.add('open');
-    return;
-  }
-
-  // ── PRIORITY 2: Below minimum → friendly explainer popup ──
-  if (availPhpMinor < minPhpMinor) {
-    const haveStr = formatPhpFromMinor(availPhpMinor);
-    const minStr  = formatPhpFromMinor(minPhpMinor);
-    const needStr = formatPhpFromMinor(Math.max(0, minPhpMinor - availPhpMinor));
-    document.getElementById('minPayoutMsg').innerHTML =
-      `You need at least <strong>${minStr}</strong> available to request a payout. Keep earning and you'll unlock withdrawals soon.`;
-    document.getElementById('minPayoutHave').textContent = haveStr;
-    document.getElementById('minPayoutMin').textContent  = minStr;
-    document.getElementById('minPayoutNeed').textContent = needStr;
-    const okBtn = document.getElementById('minPayoutOk');
-    okBtn.textContent = 'Got it';
-    okBtn.dataset.action = 'close';
-    const progress = minModal.querySelector('.min-payout-progress');
-    if (progress) progress.style.display = '';
-    const title = minModal.querySelector('.modal-title');
-    if (title) title.textContent = 'Not enough to withdraw yet';
-    minModal.style.display = 'flex';
-    minModal.classList.add('open');
-    return;
-  }
-
-  // ── Open the simple modal ──
-  const m = document.getElementById('withdrawalModal');
-  if (!m) return;
-
-  const amountInput = document.getElementById('withdrawalAmount');
-  amountInput.min  = (minPhpMinor / 100).toFixed(2);
-  amountInput.max  = (availPhpMinor / 100).toFixed(2);
-  amountInput.value = (availPhpMinor / 100).toFixed(2);   // default to full balance
-  amountInput.step = '0.01';
-  document.getElementById('withdrawalAmountHint').textContent =
-    `Minimum ${formatPhpFromMinor(minPhpMinor)}. Max available: ${formatPhpFromMinor(availPhpMinor)}.`;
-
-  // Read-only saved account display
-  const methodLabel = PAYMENT_METHOD_LABELS[getAuthorKyc().payment_method] || getAuthorKyc().payment_method;
-  document.getElementById('withdrawalAccountMethod').textContent = methodLabel;
-  document.getElementById('withdrawalAccountName').textContent   = getAuthorKyc().full_name || '(no name on file)';
-
-  // Programmatic value sets don't fire `input`, so seed the fee preview +
-  // Pioneer banner manually on modal open. After this, the listeners
-  // wired further down handle live updates as the user edits.
-  if (typeof _renderWithdrawalFeePreview === 'function') _renderWithdrawalFeePreview();
-
-  m.style.display = 'flex';
-});
-
-// Min-payout popup helpers — close fully (both inline display + .open class)
-function _closeMinPayoutModal() {
-  const m = document.getElementById('minPayoutModal');
-  if (!m) return;
-  m.style.display = 'none';
-  m.classList.remove('open');
-}
-document.getElementById('minPayoutClose')?.addEventListener('click', _closeMinPayoutModal);
-document.getElementById('minPayoutOk')?.addEventListener('click', (e) => {
-  const action = e.currentTarget.dataset.action;
-  _closeMinPayoutModal();
-  if (action === 'go-to-payments-info') {
-    if (typeof switchEarningsTab === 'function') switchEarningsTab('payments');
-  }
-});
-document.getElementById('minPayoutModal')?.addEventListener('click', (e) => {
-  if (e.target.id === 'minPayoutModal') _closeMinPayoutModal();
-});
-
-document.getElementById('withdrawalClose')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
-document.getElementById('withdrawalCancel')?.addEventListener('click', () => { document.getElementById('withdrawalModal').style.display = 'none'; });
-
-// ── Pioneer-exemption + fee-preview helpers ──────────────────────────
-// Mirror of mobile lib/utils/calculateWithdrawal.js. Kept in sync so the
-// preview a Pioneer sees in the web modal matches what mobile would show
-// AND what the server's request_author_withdrawal RPC will charge.
+// ════════════════════════════════════════════════════════════════════════
+// Withdrawal request flow MOVED to js/earnings.js (Stage 11C).
+// ~232 lines, 4 fns + 3 listeners + PAYMENT_METHOD_LABELS constant:
+// btnRequestPayout click handler, _closeMinPayoutModal,
+// _isPioneerExempt, _pioneerDaysRemaining, _renderWithdrawalFeePreview,
+// withdrawalAmount input/change listeners, withdrawalSubmit handler.
 //
-// Reads PLATFORM_COST and TRANSFER_FEE from _walletConfigDefaults
-// (loaded from app_config). Both are stored as fractions (0.2, 0.02).
-// pioneer_exemption_days defaults to 365 if the config key isn't set.
-
-function _isPioneerExempt(profile, exemptionDays) {
-  if (!profile) return false;
-  if (profile.role !== 'pioneer') return false;
-  if (!profile.pioneer_at) return false;
-  const grantedAt = new Date(profile.pioneer_at).getTime();
-  if (!Number.isFinite(grantedAt)) return false;
-  const days = exemptionDays || 365;
-  const expiresAt = grantedAt + days * 24 * 60 * 60 * 1000;
-  return Date.now() <= expiresAt;
-}
-
-function _pioneerDaysRemaining(profile, exemptionDays) {
-  if (!profile?.pioneer_at || profile.role !== 'pioneer') return 0;
-  const grantedAt = new Date(profile.pioneer_at).getTime();
-  if (!Number.isFinite(grantedAt)) return 0;
-  const days = exemptionDays || 365;
-  const expiresAt = grantedAt + days * 24 * 60 * 60 * 1000;
-  const ms = expiresAt - Date.now();
-  return ms <= 0 ? 0 : Math.floor(ms / (24 * 60 * 60 * 1000));
-}
-
-// Render the fee preview rows live as the user types in the amount input.
-// Wired via input listener at the bottom of this block.
-function _renderWithdrawalFeePreview() {
-  const amountPhp   = parseFloat(document.getElementById('withdrawalAmount')?.value || '0') || 0;
-  const exemptDays  = _walletConfigDefaults.pioneer_exemption_days || 365;
-  const exempt      = _isPioneerExempt(currentProfile, exemptDays);
-  const daysLeft    = _pioneerDaysRemaining(currentProfile, exemptDays);
-
-  // Pioneer banner visibility + days-left copy
-  const banner = document.getElementById('withdrawalPioneerBanner');
-  const daysEl = document.getElementById('withdrawalPioneerDays');
-  if (banner) banner.style.display = exempt ? 'flex' : 'none';
-  if (daysEl) {
-    daysEl.textContent = daysLeft > 0
-      ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} of free withdrawals remaining`
-      : 'Exemption window ending soon';
-  }
-
-  const platformFraction = Number(_walletConfigDefaults.PLATFORM_COST ?? 0.2) || 0;
-  const transferFraction = Number(_walletConfigDefaults.TRANSFER_FEE  ?? 0.02) || 0;
-  const platformPct = (platformFraction <= 1 ? platformFraction : platformFraction / 100);
-  const transferPct = (transferFraction <= 1 ? transferFraction : transferFraction / 100);
-
-  const platformCost = exempt ? 0 : amountPhp * platformPct;
-  const transferFee  = exempt ? 0 : amountPhp * transferPct;
-  const net          = Math.max(0, amountPhp - platformCost - transferFee);
-
-  const fmt = (n) => '₱' + n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
-  const setClass = (id, cls, on) => { const el = document.getElementById(id); if (el) el.classList.toggle(cls, on); };
-
-  setText('withdrawalFeeGross',    fmt(amountPhp));
-  setText('withdrawalFeePlatform', exempt ? 'Waived' : fmt(platformCost));
-  setText('withdrawalFeeTransfer', exempt ? 'Waived' : fmt(transferFee));
-  setText('withdrawalFeeNet',      fmt(net));
-  setClass('withdrawalFeePlatform', 'is-waived', exempt);
-  setClass('withdrawalFeeTransfer', 'is-waived', exempt);
-
-  // Update label percentages so they reflect the current config rates.
-  const pctTxt = (frac) => {
-    const p = (frac <= 1 ? frac * 100 : frac);
-    return `${(Math.round(p * 10) / 10)}%`;
-  };
-  setText('withdrawalFeePlatformLabel', `Platform cost (${pctTxt(platformFraction)})`);
-  setText('withdrawalFeeTransferLabel', `Transfer fee (${pctTxt(transferFraction)})`);
-}
-
-// Re-run the preview every keystroke; also once when the modal opens
-// (the existing modal-open code sets the input value, which doesn't fire
-// `input`, so we hook the open click separately further down).
-document.getElementById('withdrawalAmount')?.addEventListener('input', _renderWithdrawalFeePreview);
-document.getElementById('withdrawalAmount')?.addEventListener('change', _renderWithdrawalFeePreview);
-
-document.getElementById('withdrawalSubmit')?.addEventListener('click', async () => {
-  const amountPhp   = parseFloat(document.getElementById('withdrawalAmount').value);
-  const minPhpMinor = _walletConfigDefaults.min_payout_php_minor || 10000;
-
-  if (!Number.isFinite(amountPhp) || amountPhp <= 0) { toast('Enter a valid amount', 'error'); return; }
-  const amountMinor = Math.round(amountPhp * 100);
-  if (amountMinor < minPhpMinor) {
-    toast(`Need at least ${formatPhpFromMinor(minPhpMinor)}`, 'error');
-    return;
-  }
-
-  const btn = document.getElementById('withdrawalSubmit');
-  btn.disabled = true; btn.textContent = 'Submitting…';
-
-  // Switched (May 2026 earnings overhaul) from request_author_withdrawal_php
-  // to the unified request_author_withdrawal — the new RPC computes
-  // Pioneer-aware fees server-side and earmarks across both coin and
-  // star earnings FIFO. Payout method + account details still come from
-  // author_kyc (the saved Payments Info row); we forward them through
-  // p_payout_method + p_payout_details so the new RPC's signature is
-  // satisfied without losing the strict-saved-account guarantee.
-  const payoutMethod  = getAuthorKyc()?.payment_method || '';
-  const payoutDetails = {
-    full_name:      getAuthorKyc()?.full_name      || null,
-    account_number: getAuthorKyc()?.account_number || null,
-    account_name:   getAuthorKyc()?.account_name   || null,
-  };
-  const { data, error } = await supabase.rpc('request_author_withdrawal', {
-    p_amount_php_minor: amountMinor,
-    p_payout_method:    payoutMethod,
-    p_payout_details:   payoutDetails,
-  });
-
-  btn.disabled = false; btn.textContent = 'Submit request';
-  if (error) { toast(error.message, 'error'); return; }
-  if (data?.ok === false) {
-    const msg = data.error === 'kyc_not_approved'         ? 'KYC must be approved first.' :
-                data.error === 'kyc_not_submitted'        ? 'Submit Payments Info first.' :
-                data.error === 'no_payment_method_saved'  ? 'Save a payment method in Payments Info first.' :
-                data.error === 'below_minimum'            ? `Need at least ${formatPhpFromMinor(data.minimum_php_minor || minPhpMinor)}.` :
-                data.error === 'insufficient_available'   ? `Only ${formatPhpFromMinor(data.available_php_minor || 0)} available.` :
-                data.error === 'withdrawal_in_progress'   ? 'You already have a pending or approved request.' :
-                data.error === 'no_eligible_earnings'     ? 'No eligible earnings yet — your balance might still be in the hold period.' :
-                data.error || 'Failed';
-    toast(msg, 'error');
-    return;
-  }
-  document.getElementById('withdrawalModal').style.display = 'none';
-  toast('Withdrawal request submitted. Admin review usually within 1-3 business days.', 'success');
-  await loadAuthorEarnings();
-});
-
+// With 11C landed, ALL Earnings page logic lives in earnings.js. The
+// only earnings touchpoint in app.js is the initEarnings({...}) call
+// (which wires the 5 cross-feature _cfg handles) and the import line.
+// ════════════════════════════════════════════════════════════════════════
 // ── New book modal ──
 const newBookModal = document.getElementById('newBookModal');
 function openNewBookModal() {
