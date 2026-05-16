@@ -16733,3 +16733,760 @@ body:not(.light) .lock-prompt-banner-pick:hover:not(:disabled) {
    row's banner doesn't dominate the card next to it. */
 .lock-prompt-banner-compact .lock-prompt-banner-body { padding: 0.75rem 0.95rem; }
 .lock-prompt-banner-compact .lock-prompt-banner-sub { margin-bottom: 0.55rem; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Floating Messages dock (js/messages-dock.js, Commit 2 — 2026-05-16)
+   Facebook-style hybrid: launcher pill bottom-right, inbox panel above,
+   max 2 mini-chat windows stacked from the right. Premium feel — white
+   cards, brand purple accent (#7c3aed), purple-tinted shadows, smooth
+   180ms easing on hover/open. Hidden <768px (mobile uses full Messages).
+   ════════════════════════════════════════════════════════════════════════ */
+
+#dmFloatingRoot {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 9000;            /* above feed, below modals (.unlock-modal-backdrop=10000) */
+  pointer-events: none;     /* children re-enable; lets clicks pass through gaps */
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  font-family: inherit;
+}
+#dmFloatingRoot > * { pointer-events: auto; }
+
+/* Right column: inbox panel + avatar overflow stack + launcher pill.
+   Vertical flex with launcher always at the bottom, anything else
+   stacks above it (newest closest to the launcher). */
+.dm-dock-rightcol {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+/* Avatar overflow column (Facebook-style). Sits above the launcher and
+   below the inbox (when open). Capped at DM_FLOAT_MAX_AVATARS (3). */
+.dm-dock-avatar-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.dm-dock-avatar-stack:empty { display: none; }
+
+.dm-mini-avatar-bubble {
+  position: relative;
+  width: 48px; height: 48px;
+}
+.dm-mini-avatar-bubble-btn {
+  width: 48px; height: 48px;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  cursor: pointer;
+  overflow: hidden;
+  box-shadow:
+    0 10px 22px rgba(124, 58, 237, 0.22),
+    0 3px 8px rgba(15, 10, 28, 0.10);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 0.85rem;
+}
+.dm-mini-avatar-bubble-btn:hover { transform: translateY(-2px); box-shadow: 0 14px 28px rgba(124, 58, 237, 0.28), 0 4px 10px rgba(15, 10, 28, 0.12); }
+.dm-mini-avatar-bubble-btn img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.dm-mini-avatar-bubble-close {
+  position: absolute;
+  top: -4px; right: -4px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid #fff;
+  background: #6b7280;
+  color: #fff;
+  font-size: 13px; font-weight: 600; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 140ms ease, transform 140ms ease, background 140ms ease;
+  padding: 0;
+}
+.dm-mini-avatar-bubble:hover .dm-mini-avatar-bubble-close { opacity: 1; transform: scale(1); }
+.dm-mini-avatar-bubble-close:hover { background: #1f2937; }
+
+@media (max-width: 767px) { #dmFloatingRoot { display: none; } }
+
+/* ── Launcher pill — full state by default, collapses to avatar-only
+      when the inbox panel is open (user feedback 2026-05-16). CSS
+      transition on width + label opacity gives a Messenger-style
+      smooth collapse/expand. */
+.dm-dock-launcher {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px 6px 10px;
+  background: #fff;
+  border: 1px solid rgba(124, 58, 237, 0.10);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow:
+    0 12px 32px rgba(124, 58, 237, 0.14),
+    0 4px 10px rgba(15, 10, 28, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1f2937;
+  /* No overflow:hidden on the root — would clip the unread badge.
+     The label clips itself via its own overflow rule (.dm-dock-launcher-label). */
+  /* The transition list is intentionally explicit — `all` would also
+     animate transform on :hover, making the lift feel sluggish. */
+  transition:
+    padding 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    gap     240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 180ms ease;
+}
+.dm-dock-launcher:hover {
+  box-shadow: 0 16px 36px rgba(124, 58, 237, 0.18), 0 6px 12px rgba(15, 10, 28, 0.08);
+}
+
+.dm-dock-launcher-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px; height: 32px;
+  color: #7c3aed;
+  flex: none;
+  overflow: hidden;          /* clip the SVG as the icon collapses */
+  /* Icon fades + zeroes its width when the launcher collapses so the
+     avatar slides flush against the (eliminated) padding. */
+  max-width: 32px;
+  opacity: 1;
+  transition:
+    max-width 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 180ms ease,
+    margin 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.dm-dock-launcher-icon svg { width: 22px; height: 22px; }
+
+.dm-dock-launcher-badge {
+  /* Sits at the top-right of the launcher root (NOT nested under the
+     icon span, which collapses in compact mode). z-index 2 keeps it
+     above the avatar in case they visually overlap on small viewports. */
+  position: absolute;
+  top: -4px; right: -4px;
+  min-width: 18px; height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 6px rgba(239, 68, 68, 0.45), 0 0 0 2px #fff;
+  z-index: 2;
+}
+.dm-dock-launcher-badge[data-empty="1"] { display: none; }
+
+.dm-dock-launcher-label {
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;          /* clip the text as it shrinks */
+  /* max-width carries the collapse — animating width directly with
+     content doesn't work cross-browser, but max-width with overflow
+     hidden gives a clean shrink-to-zero. 120px covers the longest
+     localizations of "Messages" we'll realistically see. */
+  max-width: 120px;
+  opacity: 1;
+  transition:
+    max-width 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 180ms ease,
+    margin 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.dm-dock-launcher-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 13px;
+  flex: none;
+  border: 2px solid #fff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+  transition: width 240ms cubic-bezier(0.2, 0.8, 0.2, 1), height 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.dm-dock-launcher-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* Compact state — driven by .is-compact toggle in openMessagesDock /
+   closeMessagesDock. Pill collapses to a 52px circle by hiding the
+   icon + label (max-width 0) and tightening padding/gap to zero. */
+.dm-dock-launcher.is-compact {
+  padding: 2px;
+  gap: 0;
+  border-radius: 50%;
+}
+.dm-dock-launcher.is-compact .dm-dock-launcher-icon {
+  max-width: 0;
+  opacity: 0;
+  margin-right: 0;
+}
+.dm-dock-launcher.is-compact .dm-dock-launcher-label {
+  max-width: 0;
+  opacity: 0;
+  margin-right: 0;
+}
+.dm-dock-launcher.is-compact .dm-dock-launcher-avatar {
+  width: 48px; height: 48px;
+}
+
+.dm-dock-initials {
+  width: 100%; height: 100%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  color: #fff; font-weight: 700;
+}
+
+/* ── Inbox panel (sits in the right column, above avatars + launcher) ── */
+/* Compact Messenger-style: ~300px wide, ~420px tall. User feedback
+   2026-05-16 rounds 1 (320x440) and 2 (this) progressively tightened
+   from the original 360x560. Lighter shadow + smaller radius — the
+   panel should feel "floating" rather than "modal-heavy." */
+.dm-dock-inbox {
+  width: 300px;
+  max-height: min(420px, calc(100vh - 130px));
+  background: #fff;
+  border: 1px solid rgba(124, 58, 237, 0.08);
+  border-radius: 14px;
+  box-shadow:
+    0 12px 32px rgba(124, 58, 237, 0.12),
+    0 4px 12px rgba(15, 10, 28, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  animation: dm-dock-pop 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes dm-dock-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+/* Header — tightened so the conv list gets more vertical real estate.
+   Was 11/12/9 with 0.98rem h2 — now 7/10/6 with 0.92rem. */
+.dm-dock-inbox-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 8px 6px 12px;
+  border-bottom: 1px solid rgba(15, 10, 28, 0.05);
+}
+.dm-dock-inbox-header h2 {
+  margin: 0; font-size: 0.92rem; font-weight: 700; color: #111827;
+  display: inline-flex; align-items: center; gap: 6px;
+  letter-spacing: -0.005em;
+}
+.dm-dock-inbox-badge {
+  min-width: 18px; height: 17px;
+  padding: 0 6px;
+  background: rgba(124, 58, 237, 0.10);
+  color: #6d28d9;
+  border-radius: 999px;
+  font-size: 0.68rem; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.dm-dock-inbox-badge[data-empty="1"] { display: none; }
+.dm-dock-inbox-actions { display: inline-flex; gap: 2px; }
+.dm-dock-inbox-actions button {
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 8px;
+  cursor: pointer; color: #9ca3af;
+  transition: background 120ms ease, color 120ms ease;
+}
+.dm-dock-inbox-actions button:hover { background: rgba(124, 58, 237, 0.08); color: #7c3aed; }
+.dm-dock-inbox-actions button svg { width: 14px; height: 14px; }
+
+.dm-dock-inbox-list {
+  overflow-y: auto;
+  padding: 4px 0 8px;
+  /* Subtle scroll affordance without scrollbar chrome bleeding into
+     the rounded corners. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124, 58, 237, 0.20) transparent;
+}
+.dm-dock-inbox-list::-webkit-scrollbar { width: 6px; }
+.dm-dock-inbox-list::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.18); border-radius: 999px; }
+.dm-dock-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+/* Conv list rows — denser, single-line preview, lighter timestamps.
+   36px avatar (was 40), 6px vertical padding (was 8). */
+.dm-dock-conv-item {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px 6px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background 120ms ease;
+}
+.dm-dock-conv-item:hover { background: rgba(124, 58, 237, 0.05); }
+.dm-dock-conv-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%; overflow: hidden;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+  color: #fff; font-weight: 700; font-size: 0.78rem;
+}
+.dm-dock-conv-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.dm-dock-conv-meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; line-height: 1.25; }
+.dm-dock-conv-name { font-weight: 600; color: #111827; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.005em; }
+.dm-dock-conv-preview { font-size: 0.78rem; color: #9ca3af; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dm-dock-conv-empty-preview { color: #c4c0cc; font-weight: 400; }
+.dm-dock-conv-aside { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; padding-top: 1px; }
+.dm-dock-conv-time { font-size: 0.66rem; color: #b6b3c0; letter-spacing: 0.01em; }
+.dm-dock-conv-unread-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #7c3aed;
+  box-shadow: 0 0 0 1.5px #fff;
+}
+
+/* ── Mini chat stack ────────────────────────────────────────────────── */
+.dm-dock-mini-stack {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  /* Newest mini opens at the rightmost of the stack, closest to the
+     launcher. flex-direction stays default so order matches DOM order
+     (newest appended → rightmost). */
+}
+
+.dm-mini-chat {
+  width: 306px;                       /* was 340 — shrunk ~10% per user feedback */
+  height: min(432px, calc(100vh - 80px));  /* was 480 — same shrink ratio */
+  background: #fff;
+  border: 1px solid rgba(124, 58, 237, 0.10);
+  border-radius: 16px;
+  box-shadow:
+    0 18px 44px rgba(124, 58, 237, 0.16),
+    0 6px 14px rgba(15, 10, 28, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  position: relative;                 /* drop-hint overlay anchor */
+  animation: dm-dock-pop 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+/* Drag-over overlay — shows when a file is hovering. The hint div is
+   absolutely positioned over the message list, fades in/out via opacity. */
+.dm-mini-drop-hint {
+  position: absolute;
+  inset: 50px 8px 60px 8px;           /* clear header + composer */
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(124, 58, 237, 0.10);
+  border: 2px dashed rgba(124, 58, 237, 0.45);
+  border-radius: 14px;
+  color: #6d28d9;
+  font-weight: 600; font-size: 0.92rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+  z-index: 5;
+}
+.dm-mini-chat.is-dragover .dm-mini-drop-hint { opacity: 1; }
+
+.dm-mini-header {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 6px 6px 8px;
+  border-bottom: 1px solid rgba(15, 10, 28, 0.06);
+  background: linear-gradient(180deg, #fff, #fbfaff);
+  min-height: 44px;
+}
+.dm-mini-back {
+  width: 32px; height: 32px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 50%;
+  cursor: pointer; color: #6b7280;
+  transition: background 120ms ease, color 120ms ease;
+}
+.dm-mini-back:hover { background: rgba(124, 58, 237, 0.08); color: #7c3aed; }
+.dm-mini-back svg { width: 16px; height: 16px; }
+
+.dm-mini-peek {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-width: 0;
+  padding: 4px 6px;
+  background: transparent; border: none; cursor: pointer;
+  border-radius: 10px;
+  font-family: inherit;
+  transition: background 120ms ease;
+}
+.dm-mini-peek:hover { background: rgba(124, 58, 237, 0.06); }
+.dm-mini-avatar {
+  width: 30px; height: 30px; border-radius: 50%; overflow: hidden;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.dm-mini-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.dm-mini-name-wrap { display: flex; flex-direction: column; min-width: 0; text-align: left; }
+.dm-mini-name { font-weight: 700; color: #111827; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dm-mini-handle { font-size: 0.68rem; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.dm-mini-spacer { flex: 1; }
+.dm-mini-header > button:not(.dm-mini-peek):not(.dm-mini-back) {
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 50%;
+  cursor: pointer; color: #6b7280;
+  transition: background 120ms ease, color 120ms ease;
+}
+.dm-mini-header > button:not(.dm-mini-peek):not(.dm-mini-back):hover {
+  background: rgba(124, 58, 237, 0.08); color: #7c3aed;
+}
+.dm-mini-header > button svg { width: 13px; height: 13px; }
+
+/* Message list */
+.dm-mini-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 10px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: linear-gradient(180deg, #fff, #fafaff);
+}
+.dm-mini-empty {
+  margin: auto;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 0.88rem;
+  padding: 12px;
+}
+.dm-mini-date-divider {
+  display: flex; align-items: center; justify-content: center;
+  margin: 10px 0 4px;
+  font-size: 0.7rem; color: #9ca3af;
+}
+.dm-mini-date-divider span {
+  background: #fff;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 10, 28, 0.06);
+}
+
+.dm-mini-row {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 6px;
+  align-items: flex-end;
+}
+.dm-mini-row.is-mine {
+  grid-template-columns: 1fr;
+  justify-items: end;
+}
+.dm-mini-row-avatar {
+  width: 28px; height: 28px; border-radius: 50%; overflow: hidden;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.dm-mini-row-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.dm-mini-row-avatar-spacer { background: transparent; visibility: hidden; }
+
+.dm-mini-bubble-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dm-mini-row.is-mine .dm-mini-bubble-wrap { align-items: flex-end; }
+.dm-mini-bubble {
+  max-width: 200px;
+  padding: 7px 11px;
+  border-radius: 16px;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+/* Image bubbles — render the picture itself, no text container chrome.
+   Drop shadow gives separation against the gray gutter without a border. */
+.dm-mini-image {
+  max-width: 200px;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(15, 10, 28, 0.10);
+  background: #f3f4f6;
+}
+.dm-mini-image img { display: block; width: 100%; max-height: 280px; object-fit: cover; cursor: zoom-in; transition: transform 200ms ease; }
+.dm-mini-image:hover img { transform: scale(1.02); }
+.dm-mini-image.is-pending { opacity: 0.6; }
+.dm-mini-image.is-pending img { cursor: progress; }
+
+/* Image collages — Messenger-style layouts for 2/3/4+ photos in one
+   message. Each cell is a square crop; +N overlay on the 4th when >4. */
+.dm-mini-image-grid {
+  width: 220px;
+  display: grid;
+  gap: 3px;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(15, 10, 28, 0.10);
+  background: #f3f4f6;
+  position: relative;
+}
+.dm-mini-image-grid.is-2 {
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 110px;
+}
+.dm-mini-image-grid.is-3 {
+  grid-template-columns: 2fr 1fr;
+  grid-template-rows: 110px 110px;
+}
+.dm-mini-image-grid.is-3 > .dm-mini-image-cell:first-child {
+  grid-row: 1 / span 2;
+}
+.dm-mini-image-grid.is-4 {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 110px 110px;
+}
+.dm-mini-image-cell {
+  position: relative;
+  overflow: hidden;
+  background: #e5e7eb;
+}
+.dm-mini-image-cell img {
+  display: block;
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+.dm-mini-image-cell.has-overflow img { filter: brightness(0.55); }
+.dm-mini-image-overflow {
+  position: absolute;
+  right: 0; bottom: 0;
+  width: 50%; height: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  font-weight: 700; font-size: 1.05rem;
+  letter-spacing: 0.5px;
+  pointer-events: none;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.dm-mini-image-grid.is-pending { opacity: 0.6; }
+
+/* Attach popover — anchored to the + button. Shows "Photo" and "GIF"
+   choices. Each opens the native file picker filtered to the right
+   image MIME types. */
+.dm-mini-attach-wrap { position: relative; }
+.dm-mini-attach-menu {
+  position: absolute;
+  bottom: 38px;   /* clears the + button */
+  left: -4px;
+  background: #fff;
+  border: 1px solid rgba(124, 58, 237, 0.10);
+  border-radius: 14px;
+  box-shadow:
+    0 14px 30px rgba(124, 58, 237, 0.18),
+    0 4px 10px rgba(15, 10, 28, 0.08);
+  padding: 6px;
+  min-width: 140px;
+  display: flex; flex-direction: column;
+  gap: 2px;
+  animation: dm-dock-pop 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  z-index: 20;
+}
+.dm-mini-attach-menu[hidden] { display: none; }
+.dm-mini-attach-opt {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  color: #1f2937;
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background 120ms ease, color 120ms ease;
+}
+.dm-mini-attach-opt:hover { background: rgba(124, 58, 237, 0.08); color: #6d28d9; }
+.dm-mini-attach-opt-icon {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px;
+  background: rgba(124, 58, 237, 0.10);
+  color: #7c3aed;
+  flex: none;
+}
+.dm-mini-attach-opt-icon svg { width: 16px; height: 16px; }
+.dm-mini-attach-opt-gif {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #7c3aed;
+}
+.dm-mini-row.is-theirs .dm-mini-bubble {
+  background: #f3f4f6;
+  color: #1f2937;
+  border-bottom-left-radius: 6px;
+}
+.dm-mini-row.is-theirs:not(.is-tail) .dm-mini-bubble { border-bottom-left-radius: 18px; }
+.dm-mini-row.is-mine .dm-mini-bubble {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: #fff;
+  border-bottom-right-radius: 6px;
+  box-shadow: 0 4px 10px rgba(124, 58, 237, 0.25);
+}
+.dm-mini-row.is-mine:not(.is-tail) .dm-mini-bubble { border-bottom-right-radius: 18px; }
+.dm-mini-bubble.is-pending { opacity: 0.6; }
+
+/* Composer */
+.dm-mini-composer {
+  display: flex; align-items: flex-end; gap: 4px;
+  padding: 8px 8px 10px;
+  border-top: 1px solid rgba(15, 10, 28, 0.06);
+  background: #fff;
+}
+.dm-mini-attach,
+.dm-mini-emoji {
+  width: 30px; height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 50%;
+  cursor: pointer; color: #6b7280;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+  flex: none;
+}
+.dm-mini-attach:hover,
+.dm-mini-emoji:hover { background: rgba(124, 58, 237, 0.08); color: #7c3aed; }
+.dm-mini-attach:active { transform: scale(0.92); }
+.dm-mini-attach svg,
+.dm-mini-emoji svg { width: 16px; height: 16px; }
+
+.dm-mini-input {
+  flex: 1; min-width: 0;
+  resize: none;
+  border: 1px solid rgba(15, 10, 28, 0.10);
+  border-radius: 16px;
+  padding: 7px 11px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  background: #fafaff;
+  color: #1f2937;
+  max-height: 110px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.dm-mini-input:focus {
+  outline: none;
+  border-color: rgba(124, 58, 237, 0.35);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.10);
+}
+.dm-mini-input:disabled { opacity: 0.6; cursor: progress; }
+
+.dm-mini-send {
+  width: 30px; height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  border: none; border-radius: 50%;
+  color: #fff; cursor: pointer;
+  flex: none;
+  box-shadow: 0 4px 10px rgba(124, 58, 237, 0.30);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.dm-mini-send:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(124, 58, 237, 0.40); }
+.dm-mini-send:active { transform: translateY(0); }
+.dm-mini-send:disabled { opacity: 0.5; cursor: progress; transform: none; box-shadow: none; }
+.dm-mini-send svg { width: 14px; height: 14px; }
+
+/* Minimized chip — replaces the mini-chat while it's collapsed */
+.dm-mini-chip {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 6px 12px 6px 6px;
+  background: #fff;
+  border: 1px solid rgba(124, 58, 237, 0.10);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow:
+    0 10px 24px rgba(124, 58, 237, 0.14),
+    0 4px 8px rgba(15, 10, 28, 0.06);
+  transition: transform 180ms ease, box-shadow 180ms ease;
+  font-family: inherit;
+  font-size: 0.88rem; font-weight: 600;
+  color: #1f2937;
+}
+.dm-mini-chip:hover { transform: translateY(-1px); }
+.dm-mini-chip-avatar {
+  width: 28px; height: 28px; border-radius: 50%; overflow: hidden;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.dm-mini-chip-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.dm-mini-chip-name { max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dm-mini-chip-close {
+  width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  color: #9ca3af;
+  font-size: 14px;
+  transition: background 120ms ease, color 120ms ease;
+}
+.dm-mini-chip-close:hover { background: rgba(124, 58, 237, 0.08); color: #7c3aed; }
+
+/* Dark-mode adjustments (body.dark or :not(.light)) */
+body:not(.light) .dm-dock-launcher,
+body:not(.light) .dm-dock-inbox,
+body:not(.light) .dm-mini-chat,
+body:not(.light) .dm-mini-chip {
+  background: #1f1b2e;
+  border-color: rgba(167, 139, 250, 0.20);
+  color: #e7e2f5;
+}
+body:not(.light) .dm-dock-launcher { color: #e7e2f5; }
+body:not(.light) .dm-dock-inbox-header { border-bottom-color: rgba(167, 139, 250, 0.14); }
+body:not(.light) .dm-dock-inbox-header h2 { color: #f3effa; }
+body:not(.light) .dm-dock-conv-item:hover,
+body:not(.light) .dm-mini-peek:hover,
+body:not(.light) .dm-dock-inbox-actions button:hover,
+body:not(.light) .dm-mini-emoji:hover,
+body:not(.light) .dm-mini-attach:hover,
+body:not(.light) .dm-mini-back:hover,
+body:not(.light) .dm-mini-header > button:not(.dm-mini-peek):not(.dm-mini-back):hover {
+  background: rgba(167, 139, 250, 0.14);
+  color: #c4b5fd;
+}
+body:not(.light) .dm-mini-drop-hint {
+  background: rgba(167, 139, 250, 0.16);
+  border-color: rgba(167, 139, 250, 0.50);
+  color: #c4b5fd;
+}
+body:not(.light) .dm-mini-image,
+body:not(.light) .dm-mini-image-grid { background: #2a2440; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
+body:not(.light) .dm-mini-image-cell { background: #1f1b2e; }
+body:not(.light) .dm-mini-attach-menu {
+  background: #1f1b2e;
+  border-color: rgba(167, 139, 250, 0.20);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5), 0 4px 10px rgba(0, 0, 0, 0.3);
+}
+body:not(.light) .dm-mini-attach-opt { color: #e7e2f5; }
+body:not(.light) .dm-mini-attach-opt:hover { background: rgba(167, 139, 250, 0.14); color: #c4b5fd; }
+body:not(.light) .dm-mini-attach-opt-icon { background: rgba(167, 139, 250, 0.14); color: #c4b5fd; }
+body:not(.light) .dm-mini-attach-opt-gif { color: #c4b5fd; }
+body:not(.light) .dm-dock-conv-name,
+body:not(.light) .dm-mini-name { color: #f3effa; }
+body:not(.light) .dm-dock-conv-preview,
+body:not(.light) .dm-mini-handle { color: #a89ec7; }
+body:not(.light) .dm-mini-messages { background: linear-gradient(180deg, #1f1b2e, #181527); }
+body:not(.light) .dm-mini-row.is-theirs .dm-mini-bubble { background: #2a2440; color: #e7e2f5; }
+body:not(.light) .dm-mini-date-divider span { background: #1f1b2e; border-color: rgba(167, 139, 250, 0.14); color: #a89ec7; }
+body:not(.light) .dm-mini-input { background: #181527; color: #e7e2f5; border-color: rgba(167, 139, 250, 0.20); }
+body:not(.light) .dm-mini-input:focus { background: #211c33; border-color: rgba(167, 139, 250, 0.50); }
+body:not(.light) .dm-mini-composer,
+body:not(.light) .dm-mini-header { background: #1f1b2e; border-color: rgba(167, 139, 250, 0.14); }
+body:not(.light) .dm-mini-header { background: linear-gradient(180deg, #1f1b2e, #25203a); }
