@@ -136,7 +136,7 @@ async function gateAccess() {
 // incoming hash before passing it to switchTab).
 const VALID_ADMIN_TABS = new Set([
   'inbox', 'users', 'content', 'bans', 'wallet',
-  'earnings', 'payouts', 'recovery', 'activity', 'settings',
+  'earnings', 'payouts', 'broadcasts', 'recovery', 'activity', 'settings',
 ]);
 
 function switchTab(name) {
@@ -207,6 +207,9 @@ function switchTab(name) {
   }
   if (name === 'recovery') {
     lazyInit('recoveryFilter', typeof initRecoveryTab === 'function' ? initRecoveryTab : null, typeof loadRecovery === 'function' ? loadRecovery : null);
+  }
+  if (name === 'broadcasts') {
+    lazyInit('btnSendBroadcast', typeof initBroadcastsTab === 'function' ? initBroadcastsTab : null, typeof loadBroadcasts === 'function' ? loadBroadcasts : null);
   }
   if (name === 'settings') {
     lazyInit('settingsSearch', typeof initSettingsTab === 'function' ? initSettingsTab : null, typeof loadSettings === 'function' ? loadSettings : null);
@@ -4369,3 +4372,247 @@ window.addEventListener('hashchange', _restoreTabFromHash);
   const ok = await gateAccess();
   if (ok) _restoreTabFromHash();
 })();
+
+
+// ════════════════════════════════════════════════════════════════════════
+// BROADCASTS — admin push + in-app composer with optional scheduling
+// ════════════════════════════════════════════════════════════════════════
+// Flow:
+//   1. Admin fills in audience / title / body / cta_url / channels.
+//   2. Optionally toggles "Schedule for later" and picks a datetime.
+//   3. Hits Send. Calls admin_send_blast RPC (security definer).
+//      • If immediate: RPC dispatches synchronously (in-app insert +
+//        Expo push fan-out via net.http_post). Returns counts.
+//      • If scheduled: RPC just stores the row. pg_cron's
+//        process_due_admin_blasts job picks it up at fire time.
+//   4. History list refreshes.
+// ════════════════════════════════════════════════════════════════════════
+
+function initBroadcastsTab() {
+  const scheduleToggle = document.getElementById('bcSchedule');
+  const scheduleInput  = document.getElementById('bcScheduledFor');
+  const sendBtn        = document.getElementById('btnSendBroadcast');
+
+  if (scheduleToggle && scheduleInput) {
+    scheduleToggle.addEventListener('change', () => {
+      scheduleInput.disabled = !scheduleToggle.checked;
+      sendBtn.textContent = scheduleToggle.checked ? 'Schedule blast' : 'Send now';
+      if (scheduleToggle.checked && !scheduleInput.value) {
+        // Default to 1 hour from now in the user's local time, formatted
+        // for the <input type="datetime-local"> field (YYYY-MM-DDTHH:mm).
+        const d = new Date(Date.now() + 60 * 60 * 1000);
+        const pad = (n) => String(n).padStart(2, '0');
+        scheduleInput.value =
+          `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+          `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      }
+    });
+  }
+
+  if (sendBtn) {
+    sendBtn.addEventListener('click', _sendBroadcast);
+  }
+}
+
+async function _sendBroadcast() {
+  const statusEl   = document.getElementById('bcStatus');
+  const sendBtn    = document.getElementById('btnSendBroadcast');
+  const audience   = (document.querySelector('input[name="bcAudience"]:checked') || {}).value;
+  const title      = (document.getElementById('bcTitle').value || '').trim();
+  const body       = (document.getElementById('bcBody').value || '').trim();
+  const ctaUrl     = (document.getElementById('bcCtaUrl').value || '').trim();
+  const inApp      = document.getElementById('bcChannelInApp').checked;
+  const push       = document.getElementById('bcChannelPush').checked;
+  const scheduled  = document.getElementById('bcSchedule').checked;
+  const schedVal   = document.getElementById('bcScheduledFor').value;
+
+  // Build channels array — at least one must be checked.
+  const channels = [];
+  if (inApp) channels.push('in_app');
+  if (push)  channels.push('push');
+
+  // Client-side validation. Mirrors the server RPC's validation so we
+  // can give a friendlier error before the round-trip.
+  const setStatus = (msg, kind) => {
+    statusEl.textContent = msg;
+    statusEl.className = `admin-broadcast-status is-${kind}`;
+  };
+  if (!audience)            return setStatus('Pick an audience.', 'error');
+  if (!title)               return setStatus('Title is required.', 'error');
+  if (!body)                return setStatus('Message is required.', 'error');
+  if (channels.length === 0) return setStatus('Pick at least one channel.', 'error');
+  if (ctaUrl && !/^https?:\/\//i.test(ctaUrl)) {
+    return setStatus('CTA URL must start with http:// or https://', 'error');
+  }
+
+  // datetime-local gives us a local-time string with no timezone — we
+  // send it as an ISO string in the user's local tz so the server
+  // interprets it correctly.
+  let scheduledFor = null;
+  if (scheduled) {
+    if (!schedVal) return setStatus('Pick a date + time, or uncheck Schedule.', 'error');
+    const localDate = new Date(schedVal);
+    if (isNaN(localDate.getTime())) return setStatus('Invalid date/time.', 'error');
+    if (localDate.getTime() < Date.now() - 60 * 1000) {
+      return setStatus('Scheduled time must be in the future.', 'error');
+    }
+    scheduledFor = localDate.toISOString();
+  }
+
+  // Confirmation — broadcasts can hit thousands of users; one accidental
+  // click shouldn't be enough.
+  const audienceLabel = {
+    all_users: 'All users',
+    pioneers:  'Pioneers',
+    creators:  'Creators',
+    writers:   'Writers',
+  }[audience] || audience;
+  const verb = scheduled ? 'Schedule' : 'Send';
+  if (!confirm(`${verb} this broadcast to "${audienceLabel}"?\n\n${title}\n${body}\n\nThis cannot be undone once delivered.`)) {
+    return;
+  }
+
+  sendBtn.disabled = true;
+  setStatus(scheduled ? 'Scheduling…' : 'Sending…', 'pending');
+
+  try {
+    const { data, error } = await supabase.rpc('admin_send_blast', {
+      p_audience:      audience,
+      p_title:         title,
+      p_body:          body,
+      p_cta_url:       ctaUrl || null,
+      p_channels:      channels,
+      p_scheduled_for: scheduledFor,
+    });
+    if (error) {
+      setStatus(`Failed: ${error.message}`, 'error');
+      return;
+    }
+    if (!data?.ok) {
+      setStatus(`Failed: ${data?.error || 'unknown'}`, 'error');
+      return;
+    }
+    if (data.status === 'scheduled') {
+      setStatus(
+        `Scheduled for ${new Date(data.scheduled_for).toLocaleString()}.`,
+        'ok',
+      );
+    } else {
+      setStatus(
+        `Sent. In-app: ${data.in_app_count}. Push dispatched: ${data.push_dispatched}.`,
+        'ok',
+      );
+    }
+    // Reset the composer (keep audience selection so admin can quickly
+    // send a follow-up to the same group).
+    document.getElementById('bcTitle').value = '';
+    document.getElementById('bcBody').value  = '';
+    document.getElementById('bcCtaUrl').value = '';
+    document.getElementById('bcSchedule').checked = false;
+    document.getElementById('bcScheduledFor').value = '';
+    document.getElementById('bcScheduledFor').disabled = true;
+    sendBtn.textContent = 'Send now';
+    // Refresh history so the new row appears.
+    loadBroadcasts();
+  } catch (e) {
+    setStatus(`Failed: ${e.message || e}`, 'error');
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+async function loadBroadcasts() {
+  const listEl = document.getElementById('bcHistoryList');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="admin-empty">Loading…</div>';
+
+  const { data, error } = await supabase.rpc('admin_list_blasts', {
+    p_limit:  50,
+    p_offset: 0,
+  });
+
+  if (error) {
+    listEl.innerHTML = `<div class="admin-empty">Couldn't load history: ${error.message}</div>`;
+    return;
+  }
+  if (!data || data.length === 0) {
+    listEl.innerHTML = '<div class="admin-empty">No broadcasts yet.</div>';
+    return;
+  }
+
+  const escHTML = (s) =>
+    String(s ?? '').replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+
+  const audienceLabel = {
+    all_users: 'All users',
+    pioneers:  'Pioneers',
+    creators:  'Creators',
+    writers:   'Writers',
+  };
+
+  const statusBadge = (status) => {
+    const map = {
+      pending:   ['Pending',   'pending'],
+      scheduled: ['Scheduled', 'pending'],
+      sending:   ['Sending',   'pending'],
+      sent:      ['Sent',      'ok'],
+      failed:    ['Failed',    'error'],
+      cancelled: ['Cancelled', 'muted'],
+    };
+    const [label, kind] = map[status] || [status, 'muted'];
+    return `<span class="admin-broadcast-badge is-${kind}">${label}</span>`;
+  };
+
+  listEl.innerHTML = data.map((b) => {
+    const when = b.scheduled_for
+      ? `Scheduled ${new Date(b.scheduled_for).toLocaleString()}`
+      : (b.sent_at
+          ? `Sent ${new Date(b.sent_at).toLocaleString()}`
+          : `Created ${new Date(b.created_at).toLocaleString()}`);
+    const counts = (b.status === 'sent')
+      ? `<div class="admin-broadcast-row-counts">In-app: <strong>${b.in_app_count}</strong> · Push: <strong>${b.push_dispatched}</strong></div>`
+      : '';
+    const err = b.error_message
+      ? `<div class="admin-broadcast-row-error">${escHTML(b.error_message)}</div>`
+      : '';
+    const cancelBtn = (b.status === 'scheduled')
+      ? `<button class="admin-btn admin-btn-danger-ghost" data-act="cancel-broadcast" data-id="${escHTML(b.id)}">Cancel</button>`
+      : '';
+    return `
+      <div class="admin-broadcast-row" data-id="${escHTML(b.id)}">
+        <div class="admin-broadcast-row-top">
+          <div class="admin-broadcast-row-meta">
+            ${statusBadge(b.status)}
+            <span class="admin-broadcast-row-audience">${escHTML(audienceLabel[b.audience] || b.audience)}</span>
+            <span class="admin-broadcast-row-when">${escHTML(when)}</span>
+          </div>
+          ${cancelBtn}
+        </div>
+        <div class="admin-broadcast-row-title">${escHTML(b.title)}</div>
+        <div class="admin-broadcast-row-body">${escHTML(b.body)}</div>
+        ${counts}
+        ${err}
+      </div>
+    `;
+  }).join('');
+
+  // Wire cancel buttons (event delegation would also work but the
+  // history list is small enough that a direct listener per row is
+  // fine and keeps the code inline).
+  listEl.querySelectorAll('[data-act="cancel-broadcast"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      if (!confirm('Cancel this scheduled broadcast? It will not be sent.')) return;
+      btn.disabled = true;
+      const { data, error } = await supabase.rpc('admin_cancel_blast', { p_blast_id: id });
+      if (error || !data?.ok) {
+        alert(`Couldn't cancel: ${error?.message || data?.error || 'unknown'}`);
+        btn.disabled = false;
+        return;
+      }
+      loadBroadcasts();
+    });
+  });
+}

@@ -2462,3 +2462,157 @@ textarea.settings-input {
   .admin-queue-card-actions { justify-content: stretch; }
   .admin-queue-action { flex: 1 1 auto; }
 }
+
+
+/* ════════════════════════════════════════════════════════════════════════
+   BROADCASTS — composer + history. Two-column layout on desktop, stacks
+   on narrow viewports. Uses the same .admin-card frame as Settings.
+   ════════════════════════════════════════════════════════════════════════ */
+.admin-broadcast-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 1.25rem;
+  margin-top: 1rem;
+}
+@media (max-width: 980px) {
+  .admin-broadcast-grid { grid-template-columns: 1fr; }
+}
+
+.admin-broadcast-composer h3,
+.admin-broadcast-history h3 {
+  margin: 0 0 0.85rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--admin-text);
+}
+
+.admin-broadcast-composer .admin-form-label {
+  display: block;
+  margin: 0.85rem 0 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--admin-text-muted, #6b7280);
+}
+.admin-broadcast-composer .admin-form-label:first-of-type { margin-top: 0; }
+
+.admin-broadcast-audience,
+.admin-broadcast-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.1rem;
+  align-items: center;
+}
+.admin-broadcast-audience label,
+.admin-broadcast-channels label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.88rem;
+  color: var(--admin-text);
+  cursor: pointer;
+  user-select: none;
+}
+.admin-broadcast-audience input[type="radio"],
+.admin-broadcast-channels input[type="checkbox"] {
+  accent-color: var(--admin-purple, #7c3aed);
+}
+
+#bcScheduledFor { margin-top: 0.4rem; }
+#bcScheduledFor:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.admin-broadcast-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-top: 1.1rem;
+}
+.admin-broadcast-status {
+  font-size: 0.85rem;
+  color: var(--admin-text-muted, #6b7280);
+}
+.admin-broadcast-status.is-error   { color: #dc2626; }
+.admin-broadcast-status.is-ok      { color: #16a34a; }
+.admin-broadcast-status.is-pending { color: var(--admin-text-muted, #6b7280); }
+
+/* History list */
+.admin-broadcast-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.admin-broadcast-row {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--admin-border, #e5e7eb);
+  border-radius: 10px;
+  background: var(--admin-card-bg, #fff);
+  transition: border-color 0.12s ease;
+}
+.admin-broadcast-row:hover { border-color: rgba(124, 58, 237, 0.35); }
+
+.admin-broadcast-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+.admin-broadcast-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.78rem;
+  color: var(--admin-text-muted, #6b7280);
+  flex-wrap: wrap;
+}
+.admin-broadcast-row-audience {
+  font-weight: 600;
+  color: var(--admin-text);
+}
+.admin-broadcast-row-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--admin-text);
+  margin-bottom: 0.2rem;
+}
+.admin-broadcast-row-body {
+  font-size: 0.85rem;
+  color: var(--admin-text-muted, #4b5563);
+  line-height: 1.4;
+}
+.admin-broadcast-row-counts {
+  margin-top: 0.45rem;
+  font-size: 0.78rem;
+  color: var(--admin-text-muted, #6b7280);
+}
+.admin-broadcast-row-counts strong { color: var(--admin-text); }
+.admin-broadcast-row-error {
+  margin-top: 0.45rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(220, 38, 38, 0.08);
+  color: #dc2626;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.admin-broadcast-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.admin-broadcast-badge.is-ok      { background: rgba(22, 163, 74, 0.12);  color: #16a34a; }
+.admin-broadcast-badge.is-pending { background: rgba(124, 58, 237, 0.12); color: #7c3aed; }
+.admin-broadcast-badge.is-error   { background: rgba(220, 38, 38, 0.12);  color: #dc2626; }
+.admin-broadcast-badge.is-muted   { background: rgba(107, 114, 128, 0.12); color: #6b7280; }

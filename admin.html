@@ -61,6 +61,7 @@
         Earnings <span class="admin-tab-count" id="earningsFlagCount">0</span>
       </button>
       <button class="admin-tab" data-tab="payouts">Payouts</button>
+      <button class="admin-tab" data-tab="broadcasts">Broadcasts</button>
       <button class="admin-tab" data-tab="recovery">
         Recovery <span class="admin-tab-count" id="recoveryCount">0</span>
       </button>
@@ -510,6 +511,64 @@
           </div>
           <div id="changeRequestsList" class="admin-list">
             <div class="admin-empty">Loading…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- BROADCASTS — admin push + in-app blast composer + history -->
+      <section class="admin-tab-content" data-tab-content="broadcasts" style="display:none">
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-left">
+            <h2>Broadcasts</h2>
+            <span class="admin-toolbar-sub">Send push + in-app notifications to a user segment. Schedule for later or send now.</span>
+          </div>
+        </div>
+
+        <div class="admin-broadcast-grid">
+          <!-- Composer card -->
+          <div class="admin-card admin-broadcast-composer">
+            <h3>New broadcast</h3>
+
+            <label class="admin-form-label">Audience</label>
+            <div class="admin-broadcast-audience" id="bcAudienceGroup">
+              <label><input type="radio" name="bcAudience" value="all_users" checked> All users</label>
+              <label><input type="radio" name="bcAudience" value="pioneers"> Pioneers</label>
+              <label><input type="radio" name="bcAudience" value="creators"> Creators</label>
+              <label><input type="radio" name="bcAudience" value="writers"> Writers</label>
+            </div>
+
+            <label class="admin-form-label" for="bcTitle">Title</label>
+            <input type="text" id="bcTitle" class="admin-input" maxlength="200" placeholder="Short, eye-catching" />
+
+            <label class="admin-form-label" for="bcBody">Message</label>
+            <textarea id="bcBody" class="admin-input" rows="3" maxlength="1000" placeholder="What's the news? Keep it to 1–2 sentences."></textarea>
+
+            <label class="admin-form-label" for="bcCtaUrl">CTA URL (optional)</label>
+            <input type="url" id="bcCtaUrl" class="admin-input" placeholder="https://selebox.com/…" />
+
+            <label class="admin-form-label">Channels</label>
+            <div class="admin-broadcast-channels">
+              <label><input type="checkbox" id="bcChannelInApp" checked> In-app bell</label>
+              <label><input type="checkbox" id="bcChannelPush" checked> Push (Expo)</label>
+            </div>
+
+            <label class="admin-form-label">
+              <input type="checkbox" id="bcSchedule"> Schedule for later
+            </label>
+            <input type="datetime-local" id="bcScheduledFor" class="admin-input" disabled />
+
+            <div class="admin-broadcast-actions">
+              <button class="admin-btn admin-btn-primary" id="btnSendBroadcast">Send now</button>
+              <span class="admin-broadcast-status" id="bcStatus"></span>
+            </div>
+          </div>
+
+          <!-- History card -->
+          <div class="admin-card admin-broadcast-history">
+            <h3>History</h3>
+            <div id="bcHistoryList" class="admin-broadcast-list">
+              <div class="admin-empty">Loading…</div>
+            </div>
           </div>
         </div>
       </section>
