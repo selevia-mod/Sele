@@ -1658,18 +1658,28 @@ function renderBookDetail() {
     `<button class="book-chip" data-tag="${escHTML(t)}" type="button">${escHTML(t)}</button>`
   ).join('');
 
-  // Single-source lock-detection helper. Used by both the per-row lock badge
-  // AND the bulk-unlock CTA cost calculation, so the row icons and the
-  // "Unlock all N chapters" count CANNOT diverge by construction. Two-signal
-  // logic mirrors mobile's BookUnlocksService.isChapterLockedForDisplay:
+  // ─── Owner bypass ────────────────────────────────────────────────────
+  // Mirrors mobile's BookUnlocksServiceSupabase.isBookOwnedByUser
+  // (lib/book-unlocks.js:79-87). Authors should never be paywalled on
+  // their own books — they don't need to "unlock" content they wrote.
   //
+  // We still SHOW the lock badge in the TOC (informational — the author
+  // wants to see which chapters readers will pay for), matching mobile's
+  // split between isChapterLockedForDisplay (badges) and isChapterLocked
+  // (paywall enforcement). The owner-bypass only suppresses enforcement,
+  // not visual signal. The bulk-unlock CTA is hidden though — "Unlock
+  // all 5 chapters for X coins" is wrong UX for the owner.
+  const _viewer = _cfg.getCurrentProfile?.();
+  const _viewerId = _viewer?.id || null;
+  const isOwnerViewing = !!(_viewerId && book?.author_id && _viewerId === book.author_id);
+
+  // Display-only lock check — used for the lock badge in the TOC row.
+  // Authors see badges on their own paid chapters (matches mobile's
+  // isChapterLockedForDisplay). Two-signal logic:
   //   • Book-level threshold: book.lock_from_chapter is set AND
   //     chapter.chapter_number >= lock_from_chapter
   //   • Per-chapter override:  chapter.is_locked === true
-  //
-  // …minus already-unlocked chapters (the user has already paid for them, no
-  // lock should display). No owner-bypass here — author + reader both see
-  // locks, matching what mobile now does too.
+  // …minus already-unlocked chapters.
   const lockFrom = book.lock_from_chapter || null;
   const isChapterLockedForReader = (c) => {
     if (!lockFrom && !c.is_locked) return false;
@@ -1720,7 +1730,10 @@ function renderBookDetail() {
   );
   const bulkCoin = Math.max(1, bulkBefore - Math.floor((bulkBefore * bulkDiscount) / 100));
   const bulkStar = Math.max(1, bulkStarBefore - Math.floor((bulkStarBefore * bulkDiscount) / 100));
-  const bulkUnlockCard = lockedChapterCount > 0 ? `
+  // Owners never see the bulk-unlock CTA — they own the book, asking
+  // them to pay to unlock it is nonsense. The lock badges in the TOC
+  // remain (informational).
+  const bulkUnlockCard = (lockedChapterCount > 0 && !isOwnerViewing) ? `
     <div class="book-bulk-unlock">
       <div class="book-bulk-unlock-icon">📚</div>
       <div class="book-bulk-unlock-meta">
@@ -2034,7 +2047,7 @@ async function openChapterReader(chapterIndex) {
   // PAYWALL: locked + not unlocked → render the lock CTA instead of content.
   //
   // Two-signal lock check, matching the row-rendering logic above and mobile's
-  // isAuthorChapterLocked / isChapterLocked helpers. A chapter is locked when:
+  // isChapterLocked. A chapter is locked when:
   //   • chapter.is_locked === true (per-chapter explicit override), OR
   //   • book.lock_from_chapter is set AND chapter_number >= lock_from_chapter
   //     (book-level paywall threshold cascade).
@@ -2043,10 +2056,21 @@ async function openChapterReader(chapterIndex) {
   // was only locked via the book-level threshold (the common case for writers
   // using the picker) silently rendered for free even though the TOC row
   // showed a lock badge — a real revenue-leak bug.
+  //
+  // OWNER BYPASS — mirrors mobile's BookUnlocksServiceSupabase.isChapterLocked
+  // (lib/book-unlocks.js:114). Authors never get paywalled on their own books;
+  // they wrote the content and shouldn't pay to read it. Direct id-to-id
+  // comparison is safe here because both currentProfile.id and book.author_id
+  // are the Supabase profile UUID (post auth-flip). The TOC lock badges still
+  // render so the author can see what readers will pay for.
+  const _viewerProfile  = _cfg.getCurrentProfile?.();
+  const _viewerProfId   = _viewerProfile?.id || null;
+  const _bookAuthorId   = currentBookDetail?.book?.author_id || null;
+  const _readerIsOwner  = !!(_viewerProfId && _bookAuthorId && _viewerProfId === _bookAuthorId);
   const bookLockFrom = currentBookDetail?.book?.lock_from_chapter;
   const isThresholdLocked = bookLockFrom != null && Number(chapterRow.chapter_number) >= Number(bookLockFrom);
   const chapterIsLocked = !!chapterRow.is_locked || isThresholdLocked;
-  if (chapterIsLocked && !_cfg.isUnlocked('chapter', resolvedChapterId)) {
+  if (chapterIsLocked && !_readerIsOwner && !_cfg.isUnlocked('chapter', resolvedChapterId)) {
     const coinCost = _cfg.resolveUnlockCost('chapter', 'coin', chapterRow);
     const starCost = _cfg.resolveUnlockCost('chapter', 'star', chapterRow);
     content.style.fontSize = '';

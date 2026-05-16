@@ -11148,6 +11148,9 @@ body:not(.light) .topbar-star-tip {
 body:not(.light) .lock-cost-row input { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.12); color: #f3f4f6; }
 
 /* ── Lock badge on chapter rows ─────────────────────────────────────────── */
+/* Flat inline glyph (Wattpad/Webtoon-style). No circle, no shadow — sits on
+   the same baseline as the word count for a clean horizontal alignment.
+   Sized to match the meta text so the row stays a uniform height. */
 .chapter-row.is-locked {
   position: relative;
 }
@@ -11158,30 +11161,22 @@ body:not(.light) .lock-cost-row input { background: rgba(255,255,255,0.06); bord
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  margin: 0 0.7rem;            /* breathing room on both sides so word count doesn't overlap */
-  background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
-  border-radius: 999px;
-  color: #fff;
+  margin-right: 0.45rem;       /* small gap before the word count */
+  color: #7c3aed;              /* matches chapter-row-num purple */
   flex-shrink: 0;
-  box-shadow:
-    0 4px 12px rgba(124, 58, 237, 0.30),
-    inset 0 1px 0 rgba(255, 255, 255, 0.20);
-  transition: transform 0.12s ease, box-shadow 0.18s ease;
+  opacity: 0.85;
+  transition: opacity 0.12s ease;
 }
 .chapter-row:hover .chapter-row-lock {
-  transform: scale(1.05);
-  box-shadow:
-    0 6px 16px rgba(124, 58, 237, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  opacity: 1;
 }
-.chapter-row-lock svg { width: 13px; height: 13px; }
+.chapter-row-lock svg {
+  width: 14px;
+  height: 14px;
+  display: block;              /* kill baseline gap under inline SVG */
+}
 body:not(.light) .chapter-row-lock {
-  background: linear-gradient(135deg, #a78bfa 0%, #c4b5fd 100%);
-  box-shadow:
-    0 4px 14px rgba(167, 139, 250, 0.36),
-    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  color: #a78bfa;              /* lighter purple for dark theme contrast */
 }
 
 /* ════════════════════════════════════════════════════════════════════════════

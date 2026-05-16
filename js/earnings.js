@@ -1906,7 +1906,7 @@ document.getElementById('withdrawalSubmit')?.addEventListener('click', async () 
                 data.error === 'no_payment_method_saved'  ? 'Save a payment method in Payments Info first.' :
                 data.error === 'below_minimum'            ? `Need at least ${formatPhpFromMinor(data.minimum_php_minor || minPhpMinor)}.` :
                 data.error === 'insufficient_available'   ? `Only ${formatPhpFromMinor(data.available_php_minor || 0)} available.` :
-                data.error === 'withdrawal_in_progress'   ? 'You already have a pending or approved request.' :
+                data.error === 'withdrawal_in_progress'   ? 'You already have a withdrawal request waiting for admin review. You\'ll be able to request again once it\'s approved or rejected.' :
                 data.error === 'no_eligible_earnings'     ? 'No eligible earnings yet — your balance might still be in the hold period.' :
                 data.error || 'Failed';
     toast(msg, 'error');
