@@ -9261,6 +9261,51 @@ body:not(.light) .dm-composer-input-wrap { background: rgba(167, 139, 250, 0.08)
 body:not(.light) .dm-composer-input-wrap:focus-within { background: rgba(167, 139, 250, 0.12); border-color: rgba(167, 139, 250, 0.45); }
 body:not(.light) .dm-bubble-read { box-shadow: 0 0 0 2px var(--bg2); }
 
+/* Group seen badge — stacked overlapping mini avatars (Charles bug
+   2026-05-16 / #288). Earlier this used a single .dm-bubble-read with
+   a stray initials fallback that produced a "G" character because
+   dmState.activeOther is null in groups. The .is-group variant
+   resets the round-single-avatar styling and renders a horizontal
+   stack instead. */
+.dm-bubble-read.is-group {
+  width: auto; height: auto;
+  background: transparent;
+  border-radius: 0;
+  margin-top: 4px;
+  margin-right: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+.dm-bubble-read.is-group img,
+.dm-bubble-read.is-group span:not(.dm-bubble-read-overflow) {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: #fff;
+  font-size: 0.55rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: -4px;        /* overlap */
+  border: 1.5px solid #fff;
+  box-sizing: content-box;
+  object-fit: cover;
+}
+.dm-bubble-read.is-group > *:first-child { margin-left: 0; }
+.dm-bubble-read-overflow {
+  margin-left: 5px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: #7c3aed;
+}
+body:not(.light) .dm-bubble-read.is-group img,
+body:not(.light) .dm-bubble-read.is-group span:not(.dm-bubble-read-overflow) {
+  border-color: var(--bg2);
+}
+body:not(.light) .dm-bubble-read-overflow { color: #c4b5fd; }
+
 /* ── MOBILE ────────────────────────────────────────────────────────────── */
 @media (max-width: 760px) {
   .dm-shell { border-radius: 0; height: calc(100vh - 60px); }
@@ -16637,6 +16682,40 @@ body:not(.light) .rank-card-badge-paid {
   color: var(--accent-purple, #8b5cf6);
   font-weight: 600;
 }
+/* Admin role badge — same family as creator but a softer accent so the
+   creator still reads as the highest tier. Migration
+   2026-05-16_group_chat_300_cap_and_admin_role.sql introduced the role. */
+.group-info-admin-badge {
+  font-size: 0.68rem;
+  color: #f59e0b;
+  font-weight: 600;
+  margin-left: 6px;
+}
+/* Promote/demote pill buttons in the group members dialog. Creator-only
+   per the showGroupMembersDialog gate. */
+.group-info-promote,
+.group-info-demote {
+  margin-right: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.group-info-promote:hover { background: rgba(139, 92, 246, 0.10); color: var(--accent-purple, #8b5cf6); border-color: var(--accent-purple, #8b5cf6); }
+.group-info-demote:hover  { background: rgba(245, 158, 11, 0.10); color: #f59e0b; border-color: #f59e0b; }
+/* Member-cap counter shown in openNewConvModal + openAddMembersModal.
+   Inline next to the modal sub-text. */
+.dm-cap-counter {
+  margin-left: 6px;
+  font-size: 0.78rem;
+  color: var(--text3);
+  font-weight: 500;
+}
 .group-info-kick {
   width: 28px;
   height: 28px;
@@ -17201,9 +17280,42 @@ body:not(.light) .lock-prompt-banner-pick:hover:not(:disabled) {
   flex: 1;
   overflow-y: auto;
   padding: 12px 10px;
-  display: flex; flex-direction: column; gap: 2px;
+  display: flex; flex-direction: column;
+  justify-content: flex-start;
+  align-content: stretch;
+  /* No flex `gap` here — earlier impl used gap: 2px + negative margins
+     on .is-run-* rows which fought itself and made spacing hard to
+     reason about. Inter-row spacing now lives explicitly on
+     .dm-mini-row.margin-top. Codex 2026-05-16. */
+  gap: 0;
   background: linear-gradient(180deg, #fff, #fafaff);
 }
+/* Loading state shown during the progressive open (Charles 2026-05-16
+   perf fix #290). Three pulsing dots in the message area while the
+   first page of bubbles is in flight. Centered so it doesn't shift the
+   layout when real messages replace it. */
+.dm-mini-loading {
+  margin: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 0;
+}
+.dm-mini-loading-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #c4b5fd;
+  opacity: 0.5;
+  animation: dmMiniLoadingDot 1.2s infinite ease-in-out;
+}
+.dm-mini-loading-dot:nth-child(2) { animation-delay: 0.15s; }
+.dm-mini-loading-dot:nth-child(3) { animation-delay: 0.30s; }
+@keyframes dmMiniLoadingDot {
+  0%, 60%, 100% { opacity: 0.4; transform: translateY(0); }
+  30%           { opacity: 1;   transform: translateY(-3px); }
+}
+body:not(.light) .dm-mini-loading-dot { background: #7c3aed; }
+
 .dm-mini-empty {
   margin: auto;
   text-align: center;
@@ -17228,6 +17340,7 @@ body:not(.light) .lock-prompt-banner-pick:hover:not(:disabled) {
   grid-template-columns: 28px 1fr;
   gap: 6px;
   align-items: flex-end;
+  flex: 0 0 auto;
 }
 .dm-mini-row.is-mine {
   grid-template-columns: 1fr;
@@ -17242,15 +17355,35 @@ body:not(.light) .lock-prompt-banner-pick:hover:not(:disabled) {
 .dm-mini-row-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .dm-mini-row-avatar-spacer { background: transparent; visibility: hidden; }
 
-.dm-mini-bubble-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.dm-mini-row.is-mine .dm-mini-bubble-wrap { align-items: flex-end; }
+.dm-mini-bubble-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+.dm-mini-row.is-mine   .dm-mini-bubble-wrap { align-items: flex-end; }
+/* Incoming bubbles need explicit flex-start — without it, default
+   align-items: stretch makes the bubble fill the row's full width,
+   which is why "hi" looked like a giant block instead of a chat
+   bubble. Codex 2026-05-16. */
+.dm-mini-row.is-theirs .dm-mini-bubble-wrap { align-items: flex-start; }
 .dm-mini-bubble {
-  max-width: 200px;
+  /* Width must be max-content, not fit-content/auto inside a shrink-sized
+     grid item. fit-content collapsed short words like "Hey" into one
+     character per line in the floating dock. The wrapper owns the full
+     row width; the bubble uses its natural text width, capped to the
+     available chat width. */
+  width: max-content;
+  max-width: min(76%, 220px);
+  min-width: 0;
   padding: 7px 11px;
   border-radius: 16px;
   font-size: 0.85rem;
   line-height: 1.4;
-  word-wrap: break-word;
+  overflow-wrap: break-word;
+  word-break: normal;
   white-space: pre-wrap;
 }
 /* Image bubbles — render the picture itself, no text container chrome.
@@ -17386,6 +17519,652 @@ body:not(.light) .lock-prompt-banner-pick:hover:not(:disabled) {
 .dm-mini-row.is-mine:not(.is-tail) .dm-mini-bubble { border-bottom-right-radius: 18px; }
 .dm-mini-bubble.is-pending { opacity: 0.6; }
 
+/* ── Bubble grouping for consecutive same-sender runs (Messenger
+   pattern). Tightens the corner on the "tail" side of the bubble
+   when it's adjacent to another bubble from the same sender, and
+   collapses the row gap so the run reads as one block. Charles bug
+   2026-05-16. The `.dm-mini-messages` container has `gap: 2px`
+   already, so to truly pull grouped bubbles together we override the
+   margin (negative) AND tighten corners. Older rules used 18px
+   border-radius which was visually identical to the default 16px;
+   the new 3px is intentionally bold so the grouping is unmistakable. */
+/* (Old `.dm-mini-bubble-stack .dm-mini-bubble` companion selectors
+   removed alongside the hover action menu — the stack wrapper no
+   longer exists. Charles 2026-05-16 #291.) */
+.dm-mini-row.is-run-first.is-mine   .dm-mini-bubble { border-bottom-right-radius: 3px; }
+.dm-mini-row.is-run-mid.is-mine     .dm-mini-bubble { border-top-right-radius: 3px; border-bottom-right-radius: 3px; }
+.dm-mini-row.is-run-last.is-mine    .dm-mini-bubble { border-top-right-radius: 3px; }
+.dm-mini-row.is-run-first.is-theirs .dm-mini-bubble { border-bottom-left-radius: 3px; }
+.dm-mini-row.is-run-mid.is-theirs   .dm-mini-bubble { border-top-left-radius: 3px; border-bottom-left-radius: 3px; }
+.dm-mini-row.is-run-last.is-theirs  .dm-mini-bubble { border-top-left-radius: 3px; }
+/* Inter-row spacing — explicit margins instead of the prior
+   gap-then-negative-margin pattern (Codex 2026-05-16). Standalone
+   rows get a tight 6px separation; rows that continue a same-sender
+   run get only 1px so consecutive bubbles snug almost-touching.
+   Dividers (date + unread) reset the next row to 0 so they don't
+   compound with the divider's own spacing. */
+.dm-mini-row { margin-top: 6px; }
+.dm-mini-row.is-run-mid,
+.dm-mini-row.is-run-last { margin-top: 1px; }
+.dm-mini-date-divider + .dm-mini-row,
+.dm-mini-unread-divider + .dm-mini-row,
+.dm-mini-row:first-child { margin-top: 0; }
+
+/* Kill the bubble's purple drop-shadow on bubbles that have another
+   bubble directly below them in the same run — otherwise the 14px
+   shadow paints into the gap and makes grouped bubbles look spaced
+   apart even when they're geometrically touching. Singletons +
+   is-run-last keep their shadow so the bottom of the group still
+   feels grounded. Charles 2026-05-16. */
+.dm-mini-row.is-mine.is-run-first .dm-mini-bubble,
+.dm-mini-row.is-mine.is-run-mid   .dm-mini-bubble {
+  box-shadow: none;
+}
+
+/* Soft-deleted ("unsent") bubble — render path lives in
+   _renderMessagesMarkup's deleted_at branch. Visually distinct from
+   live bubbles so users immediately recognize the row was unsent:
+   outlined instead of filled, italic, faded, trash glyph inline.
+   Charles 2026-05-16, Codex review P0-2. */
+.dm-mini-bubble.is-deleted {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px dashed rgba(15, 10, 28, 0.18);
+  color: #6b7280;
+  font-style: italic;
+  font-size: 0.78rem;
+  padding: 5px 10px;
+}
+.dm-mini-bubble.is-deleted .dm-mini-deleted-icon {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.7;
+}
+body:not(.light) .dm-mini-bubble.is-deleted {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #9b91b8;
+}
+
+/* ── Reactions: pills + hover react button + picker ──────────────────
+   Pattern matches the full-page DM reactions so a reaction added from
+   the dock and one added from the full Messages screen look identical.
+   The hover react button is a tiny smiley that slides in alongside the
+   bubble on hover (or always-visible on touch — no hover concept).
+   Charles 2026-05-16 dock parity (#258). */
+.dm-mini-bubble-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dm-mini-row.is-mine .dm-mini-bubble-inline { justify-content: flex-end; }
+.dm-mini-bubble-content { min-width: 0; }
+
+/* ── Unread badge in inbox list (Codex #280) ──────────────────────── */
+.dm-dock-conv-unread-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ── Unread divider line (Codex #281) ─────────────────────────────── */
+.dm-mini-unread-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #7c3aed;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dm-mini-unread-divider::before,
+.dm-mini-unread-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(124, 58, 237, 0.25);
+}
+body:not(.light) .dm-mini-unread-divider { color: #c4b5fd; }
+body:not(.light) .dm-mini-unread-divider::before,
+body:not(.light) .dm-mini-unread-divider::after { background: rgba(167, 139, 250, 0.25); }
+
+/* ── Load-older button at top of messages (Codex #282) ────────────── */
+.dm-mini-older-row {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 6px 8px;
+  padding: 6px 12px;
+  background: rgba(124, 58, 237, 0.06);
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  border-radius: 14px;
+  color: #7c3aed;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  transition: background 120ms ease;
+}
+.dm-mini-older-row:hover { background: rgba(124, 58, 237, 0.12); }
+.dm-mini-older-row.is-loading {
+  background: transparent;
+  border: none;
+  color: #9ca3af;
+  font-weight: 500;
+  cursor: default;
+}
+body:not(.light) .dm-mini-older-row {
+  background: rgba(167, 139, 250, 0.10);
+  border-color: rgba(167, 139, 250, 0.20);
+  color: #c4b5fd;
+}
+body:not(.light) .dm-mini-older-row:hover { background: rgba(167, 139, 250, 0.18); }
+
+/* ── Typing indicator (Codex #283) ────────────────────────────────── */
+.dm-mini-typing-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  background: #f1eef9;
+  border-radius: 16px;
+}
+.dm-mini-typing-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #7c3aed;
+  opacity: 0.4;
+  animation: dmMiniTypingDot 1.4s infinite ease-in-out;
+}
+.dm-mini-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.dm-mini-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dmMiniTypingDot {
+  0%, 60%, 100% { opacity: 0.4; transform: translateY(0); }
+  30%           { opacity: 1;   transform: translateY(-2px); }
+}
+body:not(.light) .dm-mini-typing-bubble { background: #2a2440; }
+
+/* ── Seen indicator avatar under last-read own message (Codex #283) ─
+   Earlier this rendered as a full-bubble-width circle — the `img`
+   was `width: 100%` inside an unconstrained flex container, so it
+   stretched to the messages-list width. Fixed by explicit sizing on
+   the actual elements (img + initials span) instead of using `> *`
+   + `img { width: 100% }`. Charles bug 2026-05-16.
+   2026-05-16 (Codex polish): seen-row now lives INSIDE the bubble-
+   wrap (was rendered as a row sibling), so it hugs the message it
+   belongs to instead of floating as a detached item. Tightened
+   padding + line-height for that placement. */
+.dm-mini-seen-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 1px 4px 0 0;
+  line-height: 1;
+}
+.dm-mini-seen-row img {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  flex: none;
+}
+.dm-mini-seen-row .dm-dock-initials {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #a78bfa, #7c3aed);
+  font-size: 0.5rem;
+  color: #fff;
+  font-weight: 600;
+  flex: none;
+}
+/* Group seen — stacked avatars (overlapping) of members who read past
+   the most recent own message. Codex follow-up for Charles 2026-05-16. */
+.dm-mini-seen-row.is-group {
+  gap: 0;
+  align-items: center;
+}
+.dm-mini-seen-row.is-group img,
+.dm-mini-seen-row.is-group .dm-dock-initials {
+  margin-left: -4px;       /* overlap */
+  border: 1.5px solid #fff;
+  box-sizing: content-box; /* keeps the 14px avatar visible after border */
+}
+.dm-mini-seen-row.is-group > *:first-child { margin-left: 0; }
+.dm-mini-seen-overflow {
+  margin-left: 4px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: #7c3aed;
+}
+body:not(.light) .dm-mini-seen-row.is-group img,
+body:not(.light) .dm-mini-seen-row.is-group .dm-dock-initials {
+  border-color: #1f1a36;
+}
+body:not(.light) .dm-mini-seen-overflow { color: #c4b5fd; }
+
+/* ── Lightbox gallery nav (Codex #284) ────────────────────────────── */
+.lightbox-nav {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 0.85rem;
+  z-index: 2010;
+}
+.lightbox-prev,
+.lightbox-next {
+  width: 32px; height: 32px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-size: 1.4rem;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: background 120ms ease;
+}
+.lightbox-prev:hover,
+.lightbox-next:hover { background: rgba(255, 255, 255, 0.15); }
+.lightbox-counter {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  min-width: 50px;
+  text-align: center;
+}
+
+/* Group chat sender name — appears above the first bubble in each
+   incoming run (Messenger group pattern). Charles 2026-05-16 group
+   avatar/name fix. */
+.dm-mini-sender-name {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #7c3aed;
+  margin-bottom: 2px;
+  padding: 0 6px;
+}
+body:not(.light) .dm-mini-sender-name { color: #c4b5fd; }
+
+/* ── Tap-to-open action popover (Charles 2026-05-16 #291) ────────────
+   Replaces the hover-revealed action strip that used absolute
+   positioning above each bubble. The bubble-wrap itself is now the
+   tap target (no extra inline-block wrapper that was introducing
+   baseline whitespace between rows). The wrap is already part of the
+   row layout — adding role/tabindex/data-msg costs zero pixels. */
+.dm-mini-bubble-wrap[data-msg] {
+  cursor: pointer;
+  outline: none;
+}
+.dm-mini-bubble-wrap[data-msg]:focus-visible .dm-mini-bubble {
+  outline: 2px solid rgba(124, 58, 237, 0.5);
+  outline-offset: 2px;
+}
+.dm-mini-bubble-wrap[data-msg]:active .dm-mini-bubble { opacity: 0.88; }
+
+/* Image-only message actions overlay — small ⋯ button bottom-right
+   of the image. Codex P1-3 2026-05-16. Image messages don't have a
+   .dm-mini-bubble to tap, so this gives users a way to React /
+   Reply / Delete pure-image messages without losing the
+   tap-image-opens-lightbox UX. */
+.dm-mini-bubble-wrap[data-msg] { position: relative; }
+.dm-mini-img-actions {
+  position: absolute;
+  bottom: 6px; right: 6px;
+  width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 120ms ease, background 120ms ease, transform 120ms ease;
+}
+.dm-mini-bubble-wrap[data-msg]:hover .dm-mini-img-actions { opacity: 1; }
+.dm-mini-img-actions:hover {
+  background: rgba(0, 0, 0, 0.75);
+  transform: scale(1.06);
+}
+.dm-mini-img-actions:active { transform: scale(0.92); }
+@media (hover: none) {
+  /* Touch — always visible since there's no hover state. */
+  .dm-mini-img-actions { opacity: 0.85; }
+}
+/* Keep links + interactive elements inside the bubble (reply quote,
+   reaction pills, edit textarea) showing their own cursor. */
+.dm-mini-bubble-wrap[data-msg] .dm-mini-rx-pill,
+.dm-mini-bubble-wrap[data-msg] .dm-mini-reply-quote,
+.dm-mini-bubble-wrap[data-msg] .dm-mini-edit-textarea,
+.dm-mini-bubble-wrap[data-msg] .dm-mini-edit-save,
+.dm-mini-bubble-wrap[data-msg] .dm-mini-edit-cancel,
+.dm-mini-bubble-wrap[data-msg] .dm-mini-image img,
+.dm-mini-bubble-wrap[data-msg] .dm-mini-image-cell img { cursor: pointer; }
+
+.dm-mini-action-popover {
+  display: inline-flex;
+  gap: 2px;
+  padding: 4px 6px;
+  background: #fff;
+  border: 1px solid rgba(15, 10, 28, 0.08);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(15, 10, 28, 0.18);
+  /* Above the dock root (z 9000), below modals (10000). */
+  z-index: 9150;
+  animation: dmMiniActionPopIn 140ms cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+@keyframes dmMiniActionPopIn {
+  from { transform: translateY(4px) scale(0.94); opacity: 0; }
+  to   { transform: translateY(0)    scale(1);    opacity: 1; }
+}
+.dm-mini-pop-act {
+  width: 30px; height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: none; border-radius: 50%;
+  color: #6b7280; cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+}
+.dm-mini-pop-act:hover {
+  background: rgba(124, 58, 237, 0.10);
+  color: #7c3aed;
+  transform: scale(1.08);
+}
+.dm-mini-pop-act-danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+}
+.dm-mini-pop-act:active { transform: scale(0.92); }
+body:not(.light) .dm-mini-action-popover {
+  background: #1f1a36;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+body:not(.light) .dm-mini-pop-act { color: #9b91b8; }
+body:not(.light) .dm-mini-pop-act:hover {
+  background: rgba(167, 139, 250, 0.18);
+  color: #c4b5fd;
+}
+
+/* Inline edit textarea (replaces bubble body when editing). */
+.dm-mini-edit-wrap {
+  display: flex; flex-direction: column; gap: 4px;
+  background: rgba(124, 58, 237, 0.05);
+  border: 1px solid rgba(124, 58, 237, 0.20);
+  border-radius: 14px;
+  padding: 6px 8px;
+  max-width: 240px;
+}
+.dm-mini-edit-textarea {
+  resize: none;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  min-height: 32px;
+  padding: 0;
+  color: inherit;
+}
+.dm-mini-edit-actions {
+  display: flex; gap: 6px; justify-content: flex-end;
+}
+.dm-mini-edit-cancel,
+.dm-mini-edit-save {
+  font-size: 0.72rem;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.dm-mini-edit-cancel {
+  background: transparent;
+  color: #6b7280;
+}
+.dm-mini-edit-cancel:hover { background: rgba(15, 10, 28, 0.06); }
+.dm-mini-edit-save {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa);
+  color: #fff;
+}
+.dm-mini-edit-save:hover { transform: translateY(-1px); }
+.dm-mini-edited {
+  font-size: 0.65rem;
+  opacity: 0.55;
+  margin-left: 4px;
+}
+
+/* Reply quote chip above the bubble (when this message replies to one). */
+.dm-mini-reply-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 8px;
+  border-left: 3px solid #a78bfa;
+  background: rgba(124, 58, 237, 0.06);
+  border-radius: 6px;
+  max-width: 220px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  margin-bottom: 2px;
+  transition: background 120ms ease;
+}
+.dm-mini-reply-quote:hover { background: rgba(124, 58, 237, 0.12); }
+.dm-mini-reply-quote.is-mine    { align-self: flex-end; border-left: 0; border-right: 3px solid #a78bfa; }
+.dm-mini-reply-quote.is-theirs  { align-self: flex-start; }
+.dm-mini-reply-quote-name {
+  font-weight: 600;
+  color: #7c3aed;
+  font-size: 0.65rem;
+}
+.dm-mini-reply-quote-body {
+  color: #4b5563;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dm-mini-reply-quote.is-orphan {
+  font-style: italic;
+  color: #9ca3af;
+  cursor: default;
+}
+body:not(.light) .dm-mini-reply-quote {
+  background: rgba(167, 139, 250, 0.10);
+}
+body:not(.light) .dm-mini-reply-quote-name { color: #c4b5fd; }
+body:not(.light) .dm-mini-reply-quote-body { color: #cfc8e6; }
+
+/* Reply chip above the composer (while drafting a reply). */
+.dm-mini-reply-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(124, 58, 237, 0.08);
+  border-top: 1px solid rgba(124, 58, 237, 0.18);
+  border-left: 3px solid #7c3aed;
+  font-size: 0.72rem;
+}
+.dm-mini-reply-chip-meta {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.dm-mini-reply-chip-name {
+  font-weight: 600;
+  color: #7c3aed;
+}
+.dm-mini-reply-chip-body {
+  color: #4b5563;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dm-mini-reply-chip-close {
+  width: 20px; height: 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 50%;
+  color: #6b7280; cursor: pointer;
+  font-size: 1rem; line-height: 1;
+}
+.dm-mini-reply-chip-close:hover { background: rgba(15, 10, 28, 0.08); color: #1f2937; }
+body:not(.light) .dm-mini-reply-chip {
+  background: rgba(167, 139, 250, 0.12);
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+body:not(.light) .dm-mini-reply-chip-name { color: #c4b5fd; }
+body:not(.light) .dm-mini-reply-chip-body { color: #cfc8e6; }
+
+/* Jump-to highlight pulse when clicking a reply quote. */
+.dm-mini-row.is-jump-highlight .dm-mini-bubble {
+  animation: dmMiniJumpPulse 1200ms ease;
+}
+@keyframes dmMiniJumpPulse {
+  0%, 100% { box-shadow: none; }
+  30%      { box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.35); }
+}
+.dm-mini-react-btn {
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(124, 58, 237, 0.06);
+  border: 1px solid rgba(124, 58, 237, 0.12);
+  border-radius: 50%;
+  color: #7c3aed; cursor: pointer;
+  /* Always visible at moderate opacity so users discover the button;
+     hover bumps to full intensity. Earlier opacity: 0 + hover-only
+     reveal made the button effectively invisible, which is why reactions
+     looked broken even though the click path worked. Charles 2026-05-16. */
+  opacity: 0.65;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease, transform 120ms ease;
+  flex: none;
+}
+.dm-mini-row:hover .dm-mini-react-btn { opacity: 1; }
+.dm-mini-react-btn:hover {
+  background: rgba(124, 58, 237, 0.16);
+  color: #5b21b6;
+  transform: scale(1.08);
+}
+.dm-mini-react-btn:active { transform: scale(0.92); }
+.dm-mini-react-btn svg { width: 16px; height: 16px; }
+body:not(.light) .dm-mini-react-btn {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.25);
+  color: #c4b5fd;
+}
+body:not(.light) .dm-mini-react-btn:hover {
+  background: rgba(167, 139, 250, 0.22);
+  color: #e7e2f5;
+}
+@media (hover: none) {
+  /* Touch — the `.dm-mini-row:hover .dm-mini-react-btn { opacity: 1 }`
+     rule above never fires (no hover state on touch), so the button
+     would sit permanently at the resting opacity and read as disabled
+     on iPad/iPhone Safari. Pin to full opacity on touch — the button
+     IS the tap target, so there's no "subtle on rest, prominent on
+     hover" affordance to preserve. Codex review P2-271 fix. */
+  .dm-mini-react-btn { opacity: 1; }
+}
+
+.dm-mini-bubble-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: -4px;          /* overlap onto the bubble's bottom edge */
+  padding: 0 4px;
+}
+.dm-mini-bubble-reactions.is-mine    { justify-content: flex-end; }
+.dm-mini-bubble-reactions.is-theirs  { justify-content: flex-start; }
+.dm-mini-rx-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid rgba(15, 10, 28, 0.08);
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+  color: #4b5563;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.dm-mini-rx-pill:hover { background: #fafaff; transform: translateY(-1px); }
+.dm-mini-rx-pill.is-mine {
+  background: rgba(124, 58, 237, 0.12);
+  border-color: rgba(124, 58, 237, 0.35);
+  color: #5b21b6;
+}
+.dm-mini-rx-pill-emoji { font-size: 0.85rem; line-height: 1; }
+.dm-mini-rx-pill-count { font-weight: 600; }
+
+/* Quick-reactions picker — Messenger-style horizontal strip with a
+   subtle pop-in. Positioned by JS via fixed-top/left. */
+.dm-mini-rx-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(15, 10, 28, 0.18);
+  border: 1px solid rgba(15, 10, 28, 0.05);
+  /* Must sit ABOVE the dock root (#dmFloatingRoot z-index: 9000) so it
+     doesn't get clipped by the right-column avatar stack / launcher
+     when the picker pops up next to a mini-chat near the dock's edge.
+     Stays below modals (10000) so an open modal still covers it.
+     Charles 2026-05-16: picker visible-but-clipped bug fix. */
+  z-index: 9100;
+  animation: dmMiniRxPickerIn 140ms cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+@keyframes dmMiniRxPickerIn {
+  from { transform: translateY(4px) scale(0.92); opacity: 0; }
+  to   { transform: translateY(0) scale(1);     opacity: 1; }
+}
+.dm-mini-rx-pick {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 50%;
+  font-size: 1.2rem; line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease;
+}
+.dm-mini-rx-pick:hover { background: rgba(124, 58, 237, 0.10); transform: scale(1.18); }
+.dm-mini-rx-pick:active { transform: scale(0.92); }
+
+body.light .dm-mini-rx-pill { background: #fff; }
+body:not(.light) .dm-mini-rx-pill {
+  background: #1f1a36;
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #cfc8e6;
+}
+body:not(.light) .dm-mini-rx-pill:hover { background: #2a2440; }
+body:not(.light) .dm-mini-rx-pill.is-mine {
+  background: rgba(167, 139, 250, 0.18);
+  border-color: rgba(167, 139, 250, 0.4);
+  color: #e7e2f5;
+}
+body:not(.light) .dm-mini-rx-picker {
+  background: #1f1a36;
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
 /* Composer */
 .dm-mini-composer {
   display: flex; align-items: flex-end; gap: 4px;
@@ -17444,6 +18223,20 @@ body:not(.light) .lock-prompt-banner-pick:hover:not(:disabled) {
 .dm-mini-send:active { transform: translateY(0); }
 .dm-mini-send:disabled { opacity: 0.5; cursor: progress; transform: none; box-shadow: none; }
 .dm-mini-send svg { width: 14px; height: 14px; }
+/* Send-button icon swap: empty input → thumbs-up; typed input →
+   paper-plane. Visible affordance for the thumbs-up quick send so
+   users discover the mobile + full-page parity behavior. Charles
+   2026-05-16 dock parity. */
+.dm-mini-send-icon-plane,
+.dm-mini-send-icon-thumb { width: 14px; height: 14px; display: none; }
+.dm-mini-send:not(.is-thumb) .dm-mini-send-icon-plane { display: block; }
+.dm-mini-send.is-thumb     .dm-mini-send-icon-thumb { display: block; }
+.dm-mini-send.is-thumb {
+  /* Slightly larger glyph + lighter gradient signals "this is a
+     one-tap thumbs-up shortcut", not a normal send. */
+  background: linear-gradient(135deg, #8b5cf6, #c4b5fd);
+}
+.dm-mini-send.is-thumb svg { width: 16px; height: 16px; }
 
 /* Minimized chip — replaces the mini-chat while it's collapsed */
 .dm-mini-chip {

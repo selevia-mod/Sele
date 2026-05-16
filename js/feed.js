@@ -167,6 +167,12 @@ let _cfg = {
 
 export function initFeed(config) {
   if (config) _cfg = { ..._cfg, ...config };
+  // Defensive: nuke any stray "new posts" pill left over from a prior
+  // session. The pill lives on document.body, so when a user signs out
+  // the rest of the page swaps but the pill sticks around. Charles
+  // request 2026-05-16 — feature is fully disabled (see
+  // _renderNewPostsPill + _pollForNewPosts below).
+  document.getElementById('feedNewPill')?.remove();
 }
 
 // Lazy DOM refs — elements exist in index.html, both this module and
@@ -354,26 +360,21 @@ function _applyNewPostsBuffer() {
   return inserted;
 }
 
-// Render / update / hide the "↑ N new posts" pill. Idempotent — safe to
-// call after every buffer change. The pill is created lazily once and
-// then just toggled visible.
+// Render / update / hide the "↑ N new posts" pill.
+//
+// DISABLED 2026-05-16 (Charles request): the pill was distracting and
+// notably persisted on screen after sign-out because the orphan DOM
+// node lived on document.body, outside any auth-scoped container. This
+// is now a no-op that also defensively removes any existing pill node
+// — so a stale pill from a prior session gets cleaned up on the next
+// render call (which still happens from various code paths even when
+// the buffer is empty).
+//
+// To restore the pill, revert this function and re-enable the
+// _pollForNewPosts loop below.
 function _renderNewPostsPill() {
-  let pill = document.getElementById('feedNewPill');
-  if (!_newPostsBuffer.length) {
-    if (pill) pill.classList.remove('is-visible');
-    return;
-  }
-  if (!pill) {
-    pill = document.createElement('button');
-    pill.id = 'feedNewPill';
-    pill.className = 'feed-new-pill';
-    pill.type = 'button';
-    pill.onclick = () => _applyNewPostsBuffer();
-    document.body.appendChild(pill);
-  }
-  const n = _newPostsBuffer.length;
-  pill.textContent = n === 1 ? '↑ 1 new post' : `↑ ${n} new posts`;
-  pill.classList.add('is-visible');
+  const existing = document.getElementById('feedNewPill');
+  if (existing) try { existing.remove(); } catch {}
 }
 
 // Background poller — every 60s while the tab is visible, calls
@@ -382,38 +383,12 @@ function _renderNewPostsPill() {
 // based on the buffer size. NO mutation of the live feed until the
 // user taps the pill (or pull-to-refresh applies the buffer).
 async function _pollForNewPosts() {
-  if (document.hidden) return;
-  if (!_cfg.getCurrentUser()?.id) return;
-  if (_feedMode !== 'foryou' || !_cfg.getFeedLastSeenAt()) return;
-  try {
-    const { data, error } = await supabase.rpc('feed_new_since', {
-      p_user_id: _cfg.getCurrentUser().id,
-      p_since: _cfg.getFeedLastSeenAt(),
-      p_limit: 30,
-    });
-    if (error) throw error;
-    const ids = (data || []).map(r => r.id).filter(Boolean);
-    if (!ids.length) return;
-    // Skip ids already in the buffer or in the live feed.
-    const liveIds = new Set(_cfg.getPosts().map(p => p?.id).filter(Boolean));
-    const newIds = ids.filter(id => !_newPostsBufferIds.has(id) && !liveIds.has(id));
-    if (!newIds.length) return;
-    // Hydrate the new ones through FEED_SELECT.
-    const { data: hydrated, error: hydErr } = await supabase
-      .from('posts').select(FEED_SELECT).in('id', newIds);
-    if (hydErr) throw hydErr;
-    const byId = new Map((hydrated || []).map(p => [p.id, p]));
-    const ordered = newIds.map(id => byId.get(id)).filter(Boolean);
-    const filtered = ordered.filter(p => !shouldHidePost(p));
-    if (!filtered.length) return;
-    // Buffer (newest first to match feed ordering).
-    _newPostsBuffer = [...filtered, ..._newPostsBuffer];
-    for (const p of filtered) _newPostsBufferIds.add(p.id);
-    _renderNewPostsPill();
-  } catch (err) {
-    // Polling errors are non-fatal — the next tick will retry.
-    console.warn('[feed] poll error:', err?.message);
-  }
+  // DISABLED 2026-05-16 (Charles request — same change that no-op'd
+  // _renderNewPostsPill above). Without the pill there's no way to
+  // surface buffered posts to the user, so polling for them just
+  // wastes round-trips. Pull-to-refresh + manual reload still get
+  // the latest content. To re-enable, restore both functions.
+  return;
 }
 
 async function _buildAndExecFeedQuery({ offset }) {

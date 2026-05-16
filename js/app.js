@@ -427,9 +427,76 @@ async function uploadImage(file) {
 window.openLightbox = (url) => {
   document.getElementById('lightboxImg').src = url;
   document.getElementById('lightbox').classList.add('open');
+  // Reset gallery state when opening single-image so prev/next from a
+  // prior gallery don't bleed through.
+  _lightboxGallery = null;
+  _lightboxIndex = 0;
+  _renderLightboxNav();
 };
+
+// Gallery mode — open a list of urls starting at startIndex. Each open
+// renders the current url + prev/next arrows that cycle through the
+// list. Used by message image groups (2-up, 3-up, 4-up grids) so users
+// can swipe through the whole group instead of getting stuck on the
+// one they clicked. Codex review 2026-05-16 (#284).
+let _lightboxGallery = null;
+let _lightboxIndex   = 0;
+window.openLightboxGallery = (urls, startIndex = 0) => {
+  const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
+  if (!list.length) return;
+  _lightboxGallery = list;
+  _lightboxIndex   = Math.max(0, Math.min(startIndex, list.length - 1));
+  document.getElementById('lightboxImg').src = list[_lightboxIndex];
+  document.getElementById('lightbox').classList.add('open');
+  _renderLightboxNav();
+};
+
+function _renderLightboxNav() {
+  const lb = document.getElementById('lightbox');
+  if (!lb) return;
+  let nav = lb.querySelector('.lightbox-nav');
+  // Single image → hide nav entirely.
+  if (!_lightboxGallery || _lightboxGallery.length <= 1) {
+    nav?.remove();
+    return;
+  }
+  if (!nav) {
+    nav = document.createElement('div');
+    nav.className = 'lightbox-nav';
+    nav.innerHTML = `
+      <button type="button" class="lightbox-prev" aria-label="Previous image">‹</button>
+      <span class="lightbox-counter"></span>
+      <button type="button" class="lightbox-next" aria-label="Next image">›</button>
+    `;
+    nav.addEventListener('click', (ev) => ev.stopPropagation());
+    nav.querySelector('.lightbox-prev').addEventListener('click', () => _stepLightbox(-1));
+    nav.querySelector('.lightbox-next').addEventListener('click', () => _stepLightbox(+1));
+    lb.appendChild(nav);
+  }
+  nav.querySelector('.lightbox-counter').textContent = `${_lightboxIndex + 1} / ${_lightboxGallery.length}`;
+}
+
+function _stepLightbox(delta) {
+  if (!_lightboxGallery?.length) return;
+  const n = _lightboxGallery.length;
+  _lightboxIndex = (_lightboxIndex + delta + n) % n;
+  document.getElementById('lightboxImg').src = _lightboxGallery[_lightboxIndex];
+  _renderLightboxNav();
+}
+
+// Keyboard nav (arrows) — only active while the lightbox is open.
+document.addEventListener('keydown', (e) => {
+  if (!document.getElementById('lightbox')?.classList.contains('open')) return;
+  if (e.key === 'ArrowLeft')  _stepLightbox(-1);
+  else if (e.key === 'ArrowRight') _stepLightbox(+1);
+  else if (e.key === 'Escape')     document.getElementById('lightbox').classList.remove('open');
+});
+
 document.getElementById('lightbox').addEventListener('click', (e) => {
-  if (e.target.id === 'lightbox' || e.target.id === 'lightboxClose') document.getElementById('lightbox').classList.remove('open');
+  if (e.target.id === 'lightbox' || e.target.id === 'lightboxClose') {
+    document.getElementById('lightbox').classList.remove('open');
+    _lightboxGallery = null;
+  }
 });
 
 // ── Auth ──
@@ -466,6 +533,10 @@ async function initAuth() {
     } else if (event === 'SIGNED_OUT') {
       // showAuth() touches DOM only — safe to call directly.
       showAuth();
+      // Nuke any orphan "new posts" pill so it doesn't outlive the
+      // session (Charles 2026-05-16 — feature retired; this is belt
+      // + suspenders on top of the no-op renderer in feed.js).
+      document.getElementById('feedNewPill')?.remove();
     }
     // TOKEN_REFRESHED / USER_UPDATED / PASSWORD_RECOVERY: intentional no-op.
   });
@@ -944,6 +1015,18 @@ window.shareTo = shareTo;
     showMessages,               // hand-off to full-page Messages
     closeAllModals,
     uploadImage,                // for + button + drag-drop attach
+    openDmGifPicker,            // shared GIF picker — mini-chats pass an
+                                // { anchor, onPick } pair so the picker
+                                // anchors to the mini composer + sends
+                                // through the dock's send path (#257).
+    confirmDialog,              // shared confirm modal — used by dock
+                                // Delete action for parity with full
+                                // page (#268).
+    openConversation,           // dock expand → full-page navigation
+                                // targets a specific conv id (works for
+                                // groups too, where showMessages(userId)
+                                // alone can't resolve the thread). Codex
+                                // review 2026-05-16 (#279).
   });
 
   // Daily-goal: tick "Log in today". Dedupe key is the date so
@@ -4294,11 +4377,34 @@ async function _replaceBookCoverFromHome(bookId) {
         const { data: { publicUrl } } = supabase.storage
           .from('book-covers')
           .getPublicUrl(path);
-        const { error: updErr } = await supabase
-          .from('books')
-          .update({ cover_url: publicUrl, updated_at: new Date().toISOString() })
-          .eq('id', bookId);
-        if (updErr) { toast('Saved file but DB update failed: ' + updErr.message, 'error'); return; }
+        // Server-side admin gate (#231). The previous direct
+        // .update() relied on a client-side role check for visibility
+        // and on books-table RLS for enforcement — neither is a true
+        // moderation gate. admin_replace_book_cover RPC verifies the
+        // caller is admin/moderator inside Postgres and rejects
+        // forbidden / invalid / missing-book cases with structured
+        // JSON so we can show actionable toasts.
+        const { data: result, error: rpcErr } = await supabase.rpc('admin_replace_book_cover', {
+          p_book_id:   bookId,
+          p_cover_url: publicUrl,
+        });
+        if (rpcErr) {
+          toast('Saved file but DB update failed: ' + rpcErr.message, 'error');
+          return;
+        }
+        if (!result?.ok) {
+          const errCode = result?.error || 'unknown';
+          const friendly = {
+            not_authenticated: 'Please sign in again',
+            forbidden:         'Only admins can replace covers from here',
+            missing_book_id:   'Could not identify the book',
+            missing_cover_url: 'Cover URL was empty',
+            invalid_cover_url: 'Cover URL was rejected by the server',
+            book_not_found:    'This book no longer exists',
+          }[errCode] || `Server rejected the update (${errCode})`;
+          toast(friendly, 'error');
+          return;
+        }
 
         toast('Cover replaced', 'success');
 
@@ -10442,11 +10548,22 @@ document.addEventListener('click', (e) => {
 // causing ReferenceErrors at runtime when the dropdown tried to read
 // _mentionDropdown / _mentionResults / etc.)
 
-// Document-level event delegation — works for dynamically created comment textareas
+// Document-level event delegation — works for dynamically created
+// comment textareas AND the DM input (#dmInput on the full-page
+// Messages tab). Mobile has full @mention picker in DM composer
+// (especially important in group chats for pinging a specific member);
+// adding #dmInput to the filter brings web to parity (task #236).
+//
+// Floating-chat textareas in messages-dock.js would also benefit but
+// they're keyed by varying IDs per mini-chat — that wiring belongs
+// inside the dock module itself. Future work.
 document.addEventListener('input', (e) => {
   const ta = e.target;
   if (!ta || ta.tagName !== 'TEXTAREA') return;
-  if (!ta.classList.contains('comment-input')) return;
+  const isComment = ta.classList.contains('comment-input');
+  const isDm      = ta.id === 'dmInput';
+  const isDock    = ta.classList.contains('dm-mini-input');
+  if (!isComment && !isDm && !isDock) return;
   maybeShowMentionDropdown(ta);
 });
 
@@ -10461,6 +10578,8 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('click', (e) => {
   if (e.target.closest('.mention-dropdown')) return;
   if (e.target.closest('.comment-input')) return;
+  if (e.target.closest('#dmInput')) return;
+  if (e.target.closest('.dm-mini-input')) return;
   closeMentionDropdown();
 });
 window.addEventListener('scroll', closeMentionDropdown, true);

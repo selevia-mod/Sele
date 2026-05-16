@@ -185,8 +185,20 @@ const DM_EMPTY_HTML = `
     <p>Start one from anyone's profile.</p>
   </div>
 `;
-// Quick-reaction emojis (FB-style — these match the existing post REACTIONS set)
-const DM_QUICK_REACTIONS = ['❤️','😂','😮','😢','😡','👍'];
+// Group chats are hard-capped at 300 members. Enforced server-side in
+// migration 2026-05-16_group_chat_300_cap_and_admin_role.sql (BEFORE
+// INSERT trigger on conversation_participants); this client constant
+// is the friendly UX gate so users don't pick 50 names just to get
+// rejected at submit.
+const GROUP_MAX_MEMBERS = 300;
+
+// Quick-reaction emojis. Mobile and web align on this 6-emoji set per
+// the Stage 12 follow-up parity audit (2026-05-16). Mobile's source:
+// components/SupabaseThread.jsx:60 — `["❤️","😂","😢","😡","👍","🔥"]`.
+// Note this is DM-only — feed posts use the 5-emoji REACTIONS set from
+// supabase.js (heart/laugh/sad/cry/angry). DMs add 👍 (thumbs-up) and
+// 🔥 (fire) because the FB-Messenger reaction tray includes both.
+const DM_QUICK_REACTIONS = ['❤️','😂','😢','😡','👍','🔥'];
 // Inbox-wide subscription so the unread badge updates even when DMs page is closed
 // Per-conversation cache of { user_a, user_b, is_secret } — the inbox
 // subscription would otherwise SELECT the same row on every message,
@@ -239,15 +251,25 @@ async function openConversation(convId) {
         .select('id, user_a, user_b, is_group, is_secret, name, avatar_url, created_by, last_message_at, last_message_preview, last_message_sender, archived_by_a, archived_by_b, muted_until_a, muted_until_b, created_at')
         .eq('id', convId)
         .single(),
-      supabase.from('conversation_participants').select('user_id').eq('conversation_id', convId),
+      supabase.from('conversation_participants').select('user_id, role, last_read_at').eq('conversation_id', convId),
     ]);
     if (fetchErr || !data) { toast('Conversation not found', 'error'); console.warn('[dm] conv fetch failed', fetchErr); return; }
     if (data.is_group) {
-      const memberIds = (parts || []).map(p => p.user_id);
+      // Build maps of user_id → role + last_read_at so we can decorate
+      // the profile rows. role drives the members dialog badges +
+      // promote/demote UI; last_read_at drives the group seen indicator
+      // under own messages (Charles bug 2026-05-16).
+      const roleByUid     = new Map((parts || []).map(p => [p.user_id, p.role || 'member']));
+      const lastReadByUid = new Map((parts || []).map(p => [p.user_id, p.last_read_at || null]));
+      const memberIds = [...roleByUid.keys()];
       const { data: profs } = memberIds.length
         ? await supabase.from('profiles').select('id, username, avatar_url, is_guest').in('id', memberIds)
         : { data: [] };
-      const members = (profs || []);
+      const members = (profs || []).map(p => ({
+        ...p,
+        role:         roleByUid.get(p.id) || 'member',
+        last_read_at: lastReadByUid.get(p.id) || null,
+      }));
       conv = {
         id: data.id, isGroup: true, isSecret: !!data.is_secret, createdBy: data.created_by,
         name: data.name || members.filter(m => m.id !== _cfg.getCurrentUser().id).slice(0,3).map(m => m.username).join(', '),
@@ -819,11 +841,45 @@ function renderMessages() {
   if (isGroup) (dmState.activeConv.members || []).forEach(m => memberMap.set(m.id, m));
 
   // Identify the LAST message sent by ME that the OTHER has already read,
-  // so we can stick the read avatar to it (FB pattern).
+  // so we can stick the read avatar to it (FB pattern). 1:1 only.
   let lastReadOfMine = null;
   for (let i = dmState.messages.length - 1; i >= 0; i--) {
     const m = dmState.messages[i];
     if (m.sender_id === _cfg.getCurrentUser().id && m.read_at) { lastReadOfMine = m.id; break; }
+  }
+
+  // ── Group-seen compute — for groups, build a map of messageId →
+  //    [members who have read past it] using each member's
+  //    last_read_at vs message.created_at. Then keep only the most
+  //    recent of MY messages that has any seers, so we render a single
+  //    stacked-avatars row instead of per-bubble noise. Charles bug
+  //    2026-05-16 (#288). Without this groups fell back to dmState
+  //    .activeOther (null) → broken initials badge ("G").
+  let groupSeenByMsg = {};
+  let groupSeenLatestMsgId = null;
+  if (isGroup) {
+    const myId = _cfg.getCurrentUser().id;
+    for (const m of dmState.messages) {
+      if (m.sender_id !== myId || m.deleted_at || !m.created_at) continue;
+      const seers = [];
+      const mCreated = new Date(m.created_at);
+      for (const member of (dmState.activeConv?.members || [])) {
+        if (member.id === myId) continue;
+        if (!member.last_read_at) continue;
+        if (new Date(member.last_read_at) >= mCreated) seers.push(member);
+      }
+      if (seers.length) {
+        groupSeenByMsg[m.id] = seers;
+        groupSeenLatestMsgId = m.id;
+      }
+    }
+    // Compact — only keep the latest entry so seen indicator shows
+    // just once at the bottom of my run.
+    if (groupSeenLatestMsgId) {
+      groupSeenByMsg = { [groupSeenLatestMsgId]: groupSeenByMsg[groupSeenLatestMsgId] };
+    } else {
+      groupSeenByMsg = {};
+    }
   }
 
   let lastDateStamp = '';
@@ -932,13 +988,30 @@ function renderMessages() {
 
     const editedTag = (!isDeleted && m.edited_at) ? '<span class="dm-edited-tag" title="Edited">(edited)</span>' : '';
 
-    const readBadge = mine && m.id === lastReadOfMine
-      ? `<div class="dm-bubble-read" title="Seen ${timeAgo(m.read_at)}">
-          ${dmState.activeOther?.avatar_url
-            ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
-            : `<span>${initials(dmState.activeOther?.username)}</span>`}
-        </div>`
-      : '';
+    // Read receipt rendering — branches on conversation type. Codex
+    // follow-up Charles bug 2026-05-16 (#288). The earlier impl always
+    // used dmState.activeOther which is null in groups → fallback
+    // initials of undefined username produced a stray "G" badge.
+    let readBadge = '';
+    if (mine && !isGroup && m.id === lastReadOfMine) {
+      // 1:1 — single small avatar of the other user.
+      readBadge = `<div class="dm-bubble-read" title="Seen ${timeAgo(m.read_at)}">
+        ${dmState.activeOther?.avatar_url
+          ? `<img src="${escHTML(dmState.activeOther.avatar_url)}"/>`
+          : `<span>${escHTML(initials(dmState.activeOther?.username || '?'))}</span>`}
+      </div>`;
+    } else if (mine && isGroup && groupSeenByMsg[m.id]?.length) {
+      // Group — stacked mini avatars of every member (other than me)
+      // who has read past this message. Tooltip lists their names.
+      const seers = groupSeenByMsg[m.id];
+      const stack = seers.slice(0, 4).map(p => p.avatar_url
+        ? `<img src="${escHTML(p.avatar_url)}" alt="${escHTML(p.username || '?')}" title="${escHTML(p.username || '?')}"/>`
+        : `<span title="${escHTML(p.username || '?')}">${escHTML(initials(p.username || '?'))}</span>`
+      ).join('');
+      const overflow = seers.length > 4 ? `<span class="dm-bubble-read-overflow">+${seers.length - 4}</span>` : '';
+      const names = seers.map(p => p.username || '?').join(', ');
+      readBadge = `<div class="dm-bubble-read is-group" title="Seen by ${escHTML(names)}">${stack}${overflow}</div>`;
+    }
 
     // Reaction pills (groups by emoji)
     const reactions = (dmState.reactions[m.id] || []);
@@ -959,7 +1032,14 @@ function renderMessages() {
       }</div>`;
     }
 
-    const canEditDelete = mine && !isDeleted && !m.image_url; // can't inline-edit images
+    // Edit vs Delete split — Codex review 2026-05-16 (#278). Earlier
+    // these were one flag (`canEditDelete`) which got false-set for
+    // image messages because we can't inline-edit a photo. That
+    // *also* hid Delete, leaving users with no way to remove their
+    // own image messages. Now: edit is text-only, delete is any own
+    // non-deleted message.
+    const canEdit   = mine && !isDeleted && !m.image_url && !(Array.isArray(m.image_urls) && m.image_urls.length);
+    const canDelete = mine && !isDeleted;
     const deletedCls = isDeleted ? ' is-deleted' : '';
     const imageOnlyCls = (!isDeleted && imageHtml && !bubbleContent) ? ' is-image-only' : '';
 
@@ -990,7 +1070,7 @@ function renderMessages() {
         <div class="dm-bubble-wrap">
           ${senderNameHtml}
           ${replyQuoteHtml}
-          <div class="${bubbleCls}${deletedCls}${imageOnlyCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEditDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
+          <div class="${bubbleCls}${deletedCls}${imageOnlyCls}" data-msg-id="${m.id}" data-is-mine="${mine ? '1' : '0'}" data-can-edit="${canEdit ? '1' : '0'}" data-can-delete="${canDelete ? '1' : '0'}" title="${new Date(m.created_at).toLocaleString()}">
             ${imageHtml}
             ${bubbleContent ? `<div class="dm-bubble-text">${bubbleContent}${editedTag ? ' ' + editedTag : ''}</div>` : (editedTag && !imageHtml ? editedTag : '')}
           </div>
@@ -1350,15 +1430,30 @@ async function deleteMessage(messageId) {
     confirmLabel: 'Delete',
   });
   if (!ok) return;
+  const nowIso = new Date().toISOString();
+  // Mirror mobile (lib/messages-supabase.js:1189) — set BOTH deleted_at
+  // AND clear body. This ensures the bubble shows "Message deleted"
+  // regardless of which client (or render-branch fallback) picks up
+  // the row. The body field stays in the DB if a recipient client
+  // already cached this message before our UPDATE landed; clearing it
+  // here means a refetch (or any client that re-reads the row) sees
+  // empty body + deleted_at and renders the deleted-state correctly
+  // even if the isDeleted check is missed. Image URLs are NOT cleared
+  // — the image is already on the CDN and not in the row; the bubble's
+  // isDeleted branch hides the image preview.
   const { error } = await supabase.from('messages')
-    .update({ deleted_at: new Date().toISOString() })
+    .update({ deleted_at: nowIso, body: '' })
     .eq('id', messageId)
     .eq('sender_id', _cfg.getCurrentUser().id);
   if (error) { toast(error.message, 'error'); return; }
-  // Local update — realtime UPDATE will also fire
+  // Local update — realtime UPDATE will also fire for both sides.
+  // (If recipient still sees the message after sender's delete, the
+  // most likely cause is the messages-table RLS not allowing the
+  // recipient to receive UPDATE events. Investigate separately if
+  // reports persist.)
   const idx = dmState.messages.findIndex(m => m.id === messageId);
   if (idx >= 0) {
-    dmState.messages[idx] = { ...dmState.messages[idx], deleted_at: new Date().toISOString() };
+    dmState.messages[idx] = { ...dmState.messages[idx], deleted_at: nowIso, body: '' };
     renderMessages();
   }
 }
@@ -1426,7 +1521,12 @@ function openHoverMenu(bubbleEl) {
   if (!bubbleEl) return;
   const messageId = bubbleEl.dataset.msgId;
   const isMine = bubbleEl.dataset.isMine === '1';
-  const canEdit = bubbleEl.dataset.canEdit === '1';
+  // Independent capability flags — image-only own messages now get
+  // delete without edit. Codex review 2026-05-16 (#278). Old impl
+  // gated both behind a single canEdit flag set false for images,
+  // hiding delete too.
+  const canEdit   = bubbleEl.dataset.canEdit   === '1';
+  const canDelete = bubbleEl.dataset.canDelete === '1';
 
   const menu = document.createElement('div');
   menu.className = 'dm-hover-menu' + (isMine ? ' mine' : ' theirs');
@@ -1444,6 +1544,8 @@ function openHoverMenu(bubbleEl) {
       <button class="dm-hover-btn" data-act="edit" title="Edit">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
       </button>
+    ` : ''}
+    ${canDelete ? `
       <button class="dm-hover-btn dm-hover-danger" data-act="delete" title="Delete">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
@@ -2374,17 +2476,25 @@ async function confirmLeaveGroup() {
 function showGroupMembersDialog() {
   const c = dmState.activeConv;
   if (!c?.isGroup) return;
-  const isCreator = c.createdBy === _cfg.getCurrentUser().id || c.raw?.created_by === _cfg.getCurrentUser().id;
+  const meId = _cfg.getCurrentUser().id;
+  const isCreator = c.createdBy === meId || c.raw?.created_by === meId;
+  // My role in THIS group — used to gate Add-members (creator + admin
+  // both can add) and to hide promote/demote (admins can't promote
+  // other admins; only creator can change roles).
+  const myRole = c.members.find(m => m.id === meId)?.role || 'member';
+  const canAddMembers = isCreator || myRole === 'admin';
   _cfg.closeAllModals('.modal-backdrop[data-modal="group-members"]');
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
   modal.dataset.modal = 'group-members';
 
-  // Sort members: creator first, then alphabetical by username.
+  // Sort members: creator first, then admins (alpha), then everyone else (alpha).
   const creatorId = c.createdBy || c.raw?.created_by;
+  const rolePriority = (m) =>
+    m.id === creatorId ? 0 : (m.role === 'admin' ? 1 : 2);
   const sortedMembers = [...c.members].sort((a, b) => {
-    if (a.id === creatorId && b.id !== creatorId) return -1;
-    if (b.id === creatorId && a.id !== creatorId) return 1;
+    const pa = rolePriority(a), pb = rolePriority(b);
+    if (pa !== pb) return pa - pb;
     return (a.username || '').toLowerCase().localeCompare((b.username || '').toLowerCase());
   });
 
@@ -2413,18 +2523,25 @@ function showGroupMembersDialog() {
         <p class="modal-sub">${c.memberCount} ${c.memberCount === 1 ? 'member' : 'members'}</p>
       </div>
 
-      ${isCreator ? `
+      ${canAddMembers ? `
         <button class="group-info-add-row" data-action="add-members" type="button">
           <span class="group-info-add-icon">+</span>
-          <span>Add members</span>
+          <span>Add members (${c.memberCount}/${GROUP_MAX_MEMBERS})</span>
         </button>
       ` : ''}
 
       <div class="follow-list-body group-info-members-body">
         ${sortedMembers.map(m => {
           const isCreatorRow = m.id === creatorId;
-          const isYou = m.id === _cfg.getCurrentUser().id;
+          const isAdminRow   = m.role === 'admin';
+          const isYou = m.id === meId;
+          // Kick: creator can kick anyone except themselves. Admins
+          // CANNOT kick (kept tighter than mobile pending separate
+          // decision on admin removal powers).
           const showKick = isCreator && !isCreatorRow;
+          // Promote/demote: creator-only, never on the creator themselves.
+          const showPromote = isCreator && !isCreatorRow && !isAdminRow;
+          const showDemote  = isCreator && !isCreatorRow && isAdminRow;
           return `
             <div class="follow-list-row">
               <button class="follow-list-avatar" data-uid="${m.id}">
@@ -2433,7 +2550,10 @@ function showGroupMembersDialog() {
               <div class="follow-list-info">
                 <button class="follow-list-name" data-uid="${m.id}">@${escHTML(m.username || '')}${isYou ? ' (You)' : ''}</button>
                 ${isCreatorRow ? '<span class="group-info-creator-badge">Creator</span>' : ''}
+                ${isAdminRow ? '<span class="group-info-admin-badge">Admin</span>' : ''}
               </div>
+              ${showPromote ? `<button class="group-info-promote" data-promote="${m.id}" title="Make admin" type="button">+ Admin</button>` : ''}
+              ${showDemote ? `<button class="group-info-demote" data-demote="${m.id}" title="Remove admin" type="button">− Admin</button>` : ''}
               ${showKick ? `<button class="group-info-kick" data-kick="${m.id}" title="Remove from group">×</button>` : ''}
             </div>
           `;
@@ -2457,15 +2577,18 @@ function showGroupMembersDialog() {
     el.onclick = () => { close(); _cfg.openProfile(el.dataset.uid); };
   });
 
-  // Inline rename — creator only.
+  // Add-members button is visible for creator OR admin per the
+  // canAddMembers gate above. Wire it whenever it's present.
+  const addBtn = modal.querySelector('[data-action="add-members"]');
+  if (addBtn) addBtn.onclick = () => { close(); openAddMembersModal(c); };
+
+  // Creator-only affordances: rename, photo, kick, promote, demote.
   if (isCreator) {
     const nameEl = modal.querySelector('[data-action="edit-name"]');
     if (nameEl) {
       nameEl.style.cursor = 'pointer';
       nameEl.onclick = () => promptRenameGroup(c, modal);
     }
-    const addBtn = modal.querySelector('[data-action="add-members"]');
-    if (addBtn) addBtn.onclick = () => { close(); openAddMembersModal(c); };
     const editAvatarBtn = modal.querySelector('[data-action="edit-avatar"]');
     const fileInput = modal.querySelector('#groupInfoFile');
     if (editAvatarBtn && fileInput) {
@@ -2475,9 +2598,54 @@ function showGroupMembersDialog() {
     modal.querySelectorAll('.group-info-kick').forEach(btn => {
       btn.onclick = () => kickGroupMember(c, btn.dataset.kick, btn);
     });
+    modal.querySelectorAll('.group-info-promote').forEach(btn => {
+      btn.onclick = () => setGroupMemberRole(c, btn.dataset.promote, 'admin', btn);
+    });
+    modal.querySelectorAll('.group-info-demote').forEach(btn => {
+      btn.onclick = () => setGroupMemberRole(c, btn.dataset.demote, 'member', btn);
+    });
   }
 
   modal.querySelector('[data-action="leave"]').onclick = () => { close(); confirmLeaveGroup(); };
+}
+
+// Promote/demote a group member. Wraps the set_group_member_role RPC
+// with friendly toasts mapped to the server's error codes. Refreshes
+// the active conv members + re-renders the dialog on success.
+async function setGroupMemberRole(c, userId, newRole, btnEl) {
+  if (!c?.isGroup || !userId) return;
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '…'; }
+  const { data, error } = await supabase.rpc('set_group_member_role', {
+    p_conv_id: c.id,
+    p_user_id: userId,
+    p_role:    newRole,
+  });
+  if (error) {
+    toast(error.message || 'Could not update role', 'error');
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = newRole === 'admin' ? '+ Admin' : '− Admin'; }
+    return;
+  }
+  if (data?.ok === false) {
+    // Friendly copy for every code the RPC can return. Codex review
+    // 2026-05-16 P1-4 — earlier version fell through to raw codes
+    // for `not_authenticated` and `conversation_not_found`, leaving
+    // users with a developer-string toast on session-expired or
+    // deleted-mid-action paths.
+    const msg =
+      data.error === 'only_creator'           ? 'Only the group creator can change roles.' :
+      data.error === 'cannot_demote_creator'  ? 'Cannot demote the group creator.' :
+      data.error === 'user_not_in_group'      ? 'That person is not in this group.' :
+      data.error === 'invalid_role'           ? 'Invalid role.' :
+      data.error === 'not_a_group'            ? 'Only groups have admins.' :
+      data.error === 'not_authenticated'      ? 'Please sign in again to update roles.' :
+      data.error === 'conversation_not_found' ? 'This conversation no longer exists.' :
+      data.error || 'Could not update role';
+    toast(msg, 'error');
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = newRole === 'admin' ? '+ Admin' : '− Admin'; }
+    return;
+  }
+  toast(newRole === 'admin' ? 'Promoted to admin' : 'Removed admin', 'success');
+  await refreshActiveConvMembers(c.id);
 }
 
 // Inline rename — replaces the heading with an input + save button.
@@ -2550,9 +2718,20 @@ async function handleGroupAvatarPicked(ev, c, modal) {
 
 // Add members modal — search profiles excluding existing members, multi-
 // select, on submit insert into conversation_participants.
+//
+// Member cap: GROUP_MAX_MEMBERS (300). Enforced both here (friendly UX
+// when picking) and server-side (BEFORE INSERT trigger, see migration
+// 2026-05-16_group_chat_300_cap_and_admin_role.sql). The server is the
+// safety net; this client cap is just so users don't waste time picking
+// 50 names only to get rejected.
 function openAddMembersModal(c) {
   if (!c?.isGroup) return;
   const existingIds = new Set(c.members.map(m => m.id));
+  const remainingSlots = Math.max(0, GROUP_MAX_MEMBERS - (c.members?.length || 0));
+  if (remainingSlots <= 0) {
+    toast(`Group is full (${GROUP_MAX_MEMBERS}-member cap).`, 'warning');
+    return;
+  }
   _cfg.closeAllModals('.modal-backdrop[data-modal="group-add"]');
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
@@ -2560,7 +2739,7 @@ function openAddMembersModal(c) {
   modal.innerHTML = `
     <div class="modal-card dm-new-modal">
       <h2>Add members</h2>
-      <p class="modal-sub">People already in the group are hidden from results.</p>
+      <p class="modal-sub">People already in the group are hidden. <span id="groupAddCounter" class="dm-cap-counter">0/${remainingSlots} slots</span></p>
       <input type="text" class="dm-new-search" id="groupAddSearch" placeholder="Search by username…" autocomplete="off"/>
       <div class="dm-new-selected" id="groupAddSelected"></div>
       <div class="dm-new-results" id="groupAddResults">
@@ -2583,6 +2762,10 @@ function openAddMembersModal(c) {
   const results = modal.querySelector('#groupAddResults');
   const addBtn = modal.querySelector('[data-action="add"]');
 
+  const counterEl = modal.querySelector('#groupAddCounter');
+  const refreshCounter = () => {
+    if (counterEl) counterEl.textContent = `${selected.length}/${remainingSlots} slots`;
+  };
   const refreshSelected = () => {
     selectedWrap.innerHTML = selected.map(u => `
       <span class="dm-new-chip" data-uid="${u.id}">
@@ -2596,9 +2779,11 @@ function openAddMembersModal(c) {
         ev.stopPropagation();
         selected.splice(i, 1);
         refreshSelected();
+        refreshCounter();
         addBtn.disabled = selected.length === 0;
       };
     });
+    refreshCounter();
   };
 
   let timer = null;
@@ -2623,6 +2808,10 @@ function openAddMembersModal(c) {
           const profile = data.find(p => p.id === btn.dataset.uid);
           if (!profile) return;
           if (selected.some(s => s.id === profile.id)) return;
+          if (selected.length >= remainingSlots) {
+            toast(`Group cap is ${GROUP_MAX_MEMBERS} — ${remainingSlots} slots left.`, 'warning');
+            return;
+          }
           selected.push(profile);
           search.value = '';
           results.innerHTML = '<div class="dm-new-hint">Start typing a username…</div>';
@@ -2703,15 +2892,16 @@ async function refreshActiveConvMembers(convId) {
   if (!c || c.id !== convId) return;
   const { data: parts } = await supabase
     .from('conversation_participants')
-    .select('user_id')
+    .select('user_id, role')
     .eq('conversation_id', convId);
-  const memberIds = (parts || []).map(p => p.user_id);
+  const roleByUid = new Map((parts || []).map(p => [p.user_id, p.role || 'member']));
+  const memberIds = [...roleByUid.keys()];
   if (!memberIds.length) return;
   const { data: profs } = await supabase
     .from('profiles')
     .select('id, username, avatar_url, is_guest')
     .in('id', memberIds);
-  c.members = profs || [];
+  c.members = (profs || []).map(p => ({ ...p, role: roleByUid.get(p.id) || 'member' }));
   c.memberCount = c.members.length;
   // Update the cached row in the conversations list too.
   const cached = dmState.conversations.find(x => x.id === convId);
@@ -2958,10 +3148,13 @@ function openNewConvModal() {
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
   modal.dataset.modal = 'dm-new';
+  // Cap = GROUP_MAX_MEMBERS minus 1 (the creator's own slot). We let
+  // users pick up to 299 others for a 300-total group.
+  const NEW_CONV_MAX_PICKS = GROUP_MAX_MEMBERS - 1;
   modal.innerHTML = `
     <div class="modal-card dm-new-modal">
       <h2>New message</h2>
-      <p class="modal-sub">Pick one person for a 1:1 chat, or 2+ for a group.</p>
+      <p class="modal-sub">Pick one person for a 1:1 chat, or 2+ for a group (up to ${GROUP_MAX_MEMBERS} members incl. you). <span id="dmNewCounter" class="dm-cap-counter"></span></p>
       <input type="text" class="dm-new-search" id="dmNewSearch" placeholder="Search users by username…" autocomplete="off"/>
       <div class="dm-new-selected" id="dmNewSelected"></div>
       <div class="dm-new-results" id="dmNewResults">
@@ -2990,6 +3183,15 @@ function openNewConvModal() {
   modal.querySelector('[data-action="cancel"]').onclick = close;
   modal.addEventListener('click', (ev) => { if (ev.target === modal) close(); });
 
+  const counterEl = modal.querySelector('#dmNewCounter');
+  function refreshCounter() {
+    if (!counterEl) return;
+    if (selectedUsers.length === 0) {
+      counterEl.textContent = '';
+    } else {
+      counterEl.textContent = `${selectedUsers.length}/${NEW_CONV_MAX_PICKS} selected`;
+    }
+  }
   function refreshSelected() {
     selectedWrap.innerHTML = selectedUsers.map(u => `
       <span class="dm-new-chip" data-uid="${u.id}">
@@ -3005,10 +3207,12 @@ function openNewConvModal() {
         const idx = selectedUsers.findIndex(u => u.id === id);
         if (idx >= 0) selectedUsers.splice(idx, 1);
         refreshSelected();
+        refreshCounter();
         updateButton();
       };
     });
     nameWrap.style.display = selectedUsers.length >= 2 ? '' : 'none';
+    refreshCounter();
   }
   function updateButton() {
     createBtn.disabled = selectedUsers.length === 0;
@@ -3046,8 +3250,15 @@ function openNewConvModal() {
           const uid = btn.dataset.uid;
           const profile = data.find(p => p.id === uid);
           const idx = selectedUsers.findIndex(u => u.id === uid);
-          if (idx >= 0) selectedUsers.splice(idx, 1);
-          else selectedUsers.push(profile);
+          if (idx >= 0) {
+            selectedUsers.splice(idx, 1);
+          } else {
+            if (selectedUsers.length >= NEW_CONV_MAX_PICKS) {
+              toast(`Group cap is ${GROUP_MAX_MEMBERS} members (you + ${NEW_CONV_MAX_PICKS} others).`, 'warning');
+              return;
+            }
+            selectedUsers.push(profile);
+          }
           refreshSelected();
           updateButton();
           search.dispatchEvent(new Event('input')); // re-render results with check state
@@ -3398,13 +3609,26 @@ function closeDmGifPicker() {
   if (_dmGifPickerEl) { _dmGifPickerEl.remove(); _dmGifPickerEl = null; }
 }
 
-async function openDmGifPicker() {
+// openDmGifPicker
+//
+// No args → full-page composer (legacy default). Picks a GIF and sends it
+// through the full-page sendDmGif path.
+//
+// Args { anchor, onPick }:
+//   anchor  — DOMRect-able element to position the picker against (defaults
+//             to the full-page #dmComposer). The picker positions above the
+//             anchor and matches its width when given.
+//   onPick  — async (gifUrl) => void callback. When supplied, we skip the
+//             full-page sendDmGif and hand the URL to the caller — that's
+//             how the floating chat dock attaches GIFs to whichever mini
+//             chat triggered the picker. Charles 2026-05-16 parity (#257).
+async function openDmGifPicker(opts = {}) {
   if (_dmGifPickerEl) { closeDmGifPicker(); return; }
   closeDmEmojiPicker();
   closeDmAttachMenu();
 
-  const composer = document.getElementById('dmComposer');
-  if (!composer) return;
+  const anchor = opts.anchor || document.getElementById('dmComposer');
+  if (!anchor) return;
   const picker = document.createElement('div');
   picker.className = 'dm-gif-picker';
   picker.innerHTML = `
@@ -3417,31 +3641,44 @@ async function openDmGifPicker() {
     </div>
   `;
   document.body.appendChild(picker);
-  // Position above composer
-  const r = composer.getBoundingClientRect();
+  // Position above anchor.
+  const r = anchor.getBoundingClientRect();
   picker.style.position = 'fixed';
   picker.style.bottom = `${window.innerHeight - r.top + 6}px`;
-  picker.style.left   = `${r.left}px`;
-  picker.style.width  = `${r.width}px`;
+  // Dock mini-chats are narrow (~320px). Cap the picker width on the
+  // narrow side so the dock anchor doesn't pin a too-skinny grid that
+  // can't fit two thumbnails per row. The full-page composer is already
+  // wide enough that this clamp is a no-op for it.
+  const minW = 320;
+  const w = Math.max(minW, r.width);
+  picker.style.width  = `${w}px`;
+  // Keep the picker on screen — push right if anchor would clip the
+  // viewport on the left (dock mini chats sit on the right edge so the
+  // picker naturally fits, but expanded ones near the left can clip).
+  let left = r.left;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
+  if (left < 8) left = 8;
+  picker.style.left   = `${left}px`;
   _dmGifPickerEl = picker;
 
   picker.querySelector('.dm-gif-close').onclick = closeDmGifPicker;
   const search = picker.querySelector('#dmGifSearch');
   search.focus();
 
-  // Initial: trending
-  loadGifResults('', picker.querySelector('#dmGifGrid'));
+  // Initial: trending. onPick is forwarded so the grid's click handler
+  // hands the URL back to the caller instead of full-page sendDmGif.
+  loadGifResults('', picker.querySelector('#dmGifGrid'), opts.onPick);
 
   let timer = null;
   search.addEventListener('input', () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
-      loadGifResults(search.value.trim(), picker.querySelector('#dmGifGrid'));
+      loadGifResults(search.value.trim(), picker.querySelector('#dmGifGrid'), opts.onPick);
     }, 250);
   });
 }
 
-async function loadGifResults(query, gridEl) {
+async function loadGifResults(query, gridEl, onPick) {
   if (!gridEl) return;
 
   // No key configured → show setup instructions instead of empty results
@@ -3493,7 +3730,18 @@ async function loadGifResults(query, gridEl) {
       </button>`;
     }).join('');
     gridEl.querySelectorAll('.dm-gif-tile').forEach(tile => {
-      tile.onclick = () => sendDmGif(tile.dataset.send);
+      tile.onclick = async () => {
+        const url = tile.dataset.send;
+        if (typeof onPick === 'function') {
+          // Dock-style: hand the URL back, the caller owns the send + the
+          // picker teardown. Close before invoking so the caller's
+          // optimistic UI re-render isn't fighting the picker overlay.
+          closeDmGifPicker();
+          try { await onPick(url); } catch (e) { console.warn('[gif] onPick threw:', e?.message); }
+        } else {
+          sendDmGif(url);
+        }
+      };
     });
   } catch (err) {
     console.error('[dm] giphy fetch failed', err);

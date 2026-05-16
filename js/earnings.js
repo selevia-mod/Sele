@@ -145,7 +145,27 @@ export async function loadAuthorEarnings() {
       .order('requested_at', { ascending: false })
       .limit(200),
     supabase.from('author_kyc')
-      .select('status, rejection_reason, submitted_at, reviewed_at')
+      // 2026-05-16 BUG FIX (Charles): the previous SELECT only pulled
+      // 4 columns (status/rejection/submitted/reviewed), so every
+      // downstream read of _authorKyc.payment_method, .full_name,
+      // .payment_qr_url, etc. came back undefined. Symptoms:
+      //   • Withdraw click showed "Add Payments Info first" even
+      //     when the user already had approved Payments Info (the
+      //     gate at btnRequestPayout click checks
+      //     `!_authorKyc?.payment_method`).
+      //   • Payments Info form pre-fill was blank, so
+      //     `hasRecord = !!(k && k.full_name)` was false, the form
+      //     stayed editable, and submitting on top of an approved
+      //     record errored.
+      // Pull all author-facing columns so the snapshot is complete.
+      // Column list cross-checked against selebox-mobile-main's
+      // lib/user-documents.js (the canonical mobile read). Mobile
+      // doesn't use account_number / account_name — those columns
+      // don't exist in author_kyc, and including them in the SELECT
+      // makes Postgres return PGRST204 and the whole row comes back
+      // null. Earlier attempt (with account_number/_name in the
+      // list) is why the gate STILL fired after the first fix.
+      .select('status, rejection_reason, submitted_at, reviewed_at, payment_method, payment_qr_url, id_document_url, signature_url, full_name, phone, email, date_of_birth, address, supabase_confirmed_at')
       .eq('user_id', _cfg.getCurrentUser().id)
       .maybeSingle(),
   ]);

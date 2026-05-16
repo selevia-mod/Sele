@@ -35,11 +35,27 @@ let _cfg = {
   // Cross-module helpers used by Commit 2 UI.
   openProfile:           (_userId) => {},
   showMessages:          (_targetUserId) => {},   // hand-off to full page
+  // For "open in full chat" the dock needs to direct the full Messages
+  // page to a specific conversation id (works for both 1:1 and groups).
+  // showMessages() with a userId only resolves 1:1 chats; for groups
+  // we follow up with openConversation(convId). Codex review (#279).
+  openConversation:      async (_convId) => {},
   closeAllModals:        () => {},
 
   // Image upload — shared with the full-page composer + post composer.
   // Receives a File, returns the uploaded URL (or throws).
   uploadImage:           async (_file) => null,
+
+  // Shared GIF picker. The full-page implementation lives in messages.js
+  // and supports an `{ anchor, onPick }` callback shape so the dock can
+  // anchor the picker to a mini-chat composer and route the picked URL
+  // to the mini's own send path. Charles 2026-05-16 parity pass (#257).
+  openDmGifPicker:       (_opts) => {},
+
+  // Shared confirm dialog — used by the dock's Delete action to mirror
+  // the full-page "Are you sure?" UX before soft-deleting a message.
+  // Returns a Promise<boolean>. Charles 2026-05-16 dock parity (#268).
+  confirmDialog:         async (_opts) => false,
 };
 
 // ─── DOM refs (lazy — resolved on first mount, cleared on teardown) ──────
@@ -81,6 +97,36 @@ export function initMessagesDock(config) {
 export const DM_FLOAT_MAX_THREADS = 2;       // expanded chat windows
 export const DM_FLOAT_MAX_AVATARS = 3;       // collapsed-to-bubble overflow
 export const DM_FLOAT_MAX_VISIBLE = DM_FLOAT_MAX_THREADS + DM_FLOAT_MAX_AVATARS;
+
+// Quick-reactions strip — same set as full-page DM_QUICK_REACTIONS so a
+// reaction added from the dock and a reaction added from the full page
+// render identically (no extra grouping). Charles 2026-05-16 dock parity
+// (#258).
+export const DOCK_QUICK_REACTIONS = ['❤️','😂','😢','😡','👍','🔥'];
+
+// Module-level reaction picker handle. Only one strip can be open at a
+// time across all mini chats — opening on a new bubble closes the prior
+// one. Click-outside teardown is wired in _openDockReactionPicker.
+// `_dockReactionPickerAnchor` tracks which trigger element opened it so
+// clicking the SAME trigger a second time toggles the picker off
+// (Messenger-style). Without this, the user couldn't dismiss the
+// picker by re-clicking the smiley they used to open it — every click
+// re-ran open which closes-and-reopens, visibly keeping the strip up.
+// Charles 2026-05-16 bug fix.
+let _dockReactionPickerEl     = null;
+let _dockReactionPickerAnchor = null;
+
+// Action popover — single instance across the dock. Opened by tapping
+// any message bubble, closed by tap-outside / Esc / picking an action.
+// Charles 2026-05-16 (#291) replaces the hover-revealed action strip.
+let _dockActionPopoverEl       = null;
+let _dockActionPopoverAnchorId = null;
+// Module-level refs to the deferred document listeners so close can
+// explicitly remove them. Previously they were closure-scoped and
+// only self-unhooked on the next event after teardown — so a stale
+// onDoc/onKey fired once orphaned after dock unmount. Codex P2-2.
+let _dockActionPopoverDocHandler = null;
+let _dockActionPopoverKeyHandler = null;
 
 export const dmDockState = {
   inboxOpen: false,
@@ -159,13 +205,19 @@ export async function loadConversationList() {
     for (const p of (profiles || [])) profilesById[p.id] = p;
   }
 
+  // Per-conv unread counts in parallel with the profile fetch above —
+  // structured this way so future additions (presence pings etc.)
+  // can join the parallel block. Codex review 2026-05-16 (#280).
+  const unreadCounts = await loadUnreadCountsForConvIds([...idSet]);
+
   return (convs || []).map((c) => {
     const otherId = !c.is_group && (c.user_a === user.id ? c.user_b : c.user_a);
     return {
       ...c,
-      _otherUser:  otherId ? profilesById[otherId] || null : null,
-      _archived:   user.id === c.user_a ? !!c.archived_by_a : !!c.archived_by_b,
-      _mutedUntil: user.id === c.user_a ? c.muted_until_a   : c.muted_until_b,
+      _otherUser:    otherId ? profilesById[otherId] || null : null,
+      _archived:     user.id === c.user_a ? !!c.archived_by_a : !!c.archived_by_b,
+      _mutedUntil:   user.id === c.user_a ? c.muted_until_a   : c.muted_until_b,
+      _unreadCount:  unreadCounts[c.id] || 0,
     };
   });
 }
@@ -270,6 +322,209 @@ export async function sendMessageToConversation(convId, payload = {}) {
   }
   // Surface the nonce on the returned row so callers can reconcile.
   return { ...data, _clientNonce: nonce };
+}
+
+// Load group members + their profiles for a given conversation.
+// Returns a Map keyed by user_id → { id, username, display_name,
+// avatar_url, role }. Used by the dock to resolve sender identity in
+// group chats — 1:1 DMs already get _otherUser via fetchConversationById,
+// but groups have N senders and need per-message lookup. Charles
+// 2026-05-16 group chat avatar/name fix.
+export async function loadGroupMembers(convId) {
+  if (!convId) return new Map();
+  // Pull last_read_at too so the dock can render per-member seen
+  // indicators in groups (mini avatars stacked under own messages
+  // every member has read past). Codex follow-up 2026-05-16.
+  const { data: parts, error } = await supabase
+    .from('conversation_participants')
+    .select('user_id, role, last_read_at')
+    .eq('conversation_id', convId);
+  if (error) {
+    console.warn('[dock] group members fetch failed:', error.message);
+    return new Map();
+  }
+  const ids = (parts || []).map(p => p.user_id).filter(Boolean);
+  if (!ids.length) return new Map();
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, username, display_name, avatar_url, role')
+    .in('id', ids);
+  const out = new Map();
+  for (const p of (profiles || [])) {
+    out.set(p.id, p);
+  }
+  for (const part of (parts || [])) {
+    const profile = out.get(part.user_id);
+    if (profile) {
+      profile._convRole    = part.role;
+      profile._lastReadAt  = part.last_read_at || null;
+    }
+  }
+  return out;
+}
+
+// Build a map of messageId → array of group members (other than me)
+// who have read past that message. Walks members.last_read_at against
+// each own message's created_at — a member counts as "has read message
+// M" iff their last_read_at >= M.created_at. Cheap O(messages × members).
+// Codex follow-up for Charles's group-seen question 2026-05-16.
+function _computeGroupSeenByMsg(thread) {
+  const out = {};
+  if (!thread.conv.is_group || !thread.members?.size) return out;
+  const myId = _cfg.getCurrentUser()?.id;
+  const renderMessages = (thread.messages || []).filter(_isRenderableDockMessage);
+  for (const m of renderMessages) {
+    if (m.sender_id !== myId || m.deleted_at) continue;
+    if (!m.created_at) continue;
+    const seers = [];
+    for (const [, member] of thread.members) {
+      if (member.id === myId) continue;
+      if (!member._lastReadAt) continue;
+      if (new Date(member._lastReadAt) >= new Date(m.created_at)) {
+        seers.push(member);
+      }
+    }
+    if (seers.length) out[m.id] = seers;
+  }
+  // Compress: only show seen badge on the LATEST own message every
+  // member has read. Lower messages are implicitly seen, so showing
+  // the badge on each one is visual clutter. Keep only the highest
+  // id (latest) entry per unique seer-set signature.
+  let latestSeenMsgId = null;
+  let latestSeenAt = 0;
+  for (const m of renderMessages) {
+    if (!out[m.id]) continue;
+    const t = new Date(m.created_at).getTime();
+    if (t > latestSeenAt) { latestSeenAt = t; latestSeenMsgId = m.id; }
+  }
+  if (!latestSeenMsgId) return {};
+  const compact = {};
+  compact[latestSeenMsgId] = out[latestSeenMsgId];
+  return compact;
+}
+
+function _messageImageUrls(m) {
+  if (!m) return [];
+  if (Array.isArray(m.image_urls)) return m.image_urls.filter(Boolean);
+  return m.image_url ? [m.image_url] : [];
+}
+
+function _isRenderableDockMessage(m) {
+  if (!m) return false;
+  if (m.deleted_at || m._pending) return true;
+  if ((m.body || '').trim()) return true;
+  return _messageImageUrls(m).length > 0;
+}
+
+// Merge two reaction maps without losing entries that landed via
+// realtime or optimistic toggle while a fetch was in flight. Earlier
+// the lazy-load did `thread.reactions = reactions` wholesale, which
+// silently dropped any (user_id, emoji) added between the fetch
+// starting and resolving. Codex 2026-05-16 P0-1.
+function _mergeReactionMaps(existing = {}, incoming = {}) {
+  const out = { ...existing };
+  for (const [messageId, rows] of Object.entries(incoming || {})) {
+    const merged = [...(out[messageId] || [])];
+    const seen = new Set(merged.map(r => `${r.user_id}:${r.emoji}`));
+    for (const r of rows || []) {
+      const key = `${r.user_id}:${r.emoji}`;
+      if (!seen.has(key)) {
+        merged.push(r);
+        seen.add(key);
+      }
+    }
+    out[messageId] = merged;
+  }
+  return out;
+}
+
+// Per-conv unread counts. Mirrors full-page fetchUnreadCounts at
+// js/messages.js — counts messages where I'm NOT the sender, read_at
+// is null, and deleted_at is null. Earlier the dock approximated
+// "unread" as "last_message_sender !== me", which flagged convs as
+// unread even after they'd been read. Codex review 2026-05-16 (#280).
+export async function loadUnreadCountsForConvIds(convIds) {
+  if (!convIds.length) return {};
+  const user = _cfg.getCurrentUser();
+  if (!user?.id) return {};
+  const { data, error } = await supabase
+    .from('messages')
+    .select('conversation_id, sender_id')
+    .in('conversation_id', convIds)
+    .is('read_at', null)
+    .is('deleted_at', null)
+    .neq('sender_id', user.id);
+  if (error) {
+    console.warn('[dock] unread counts failed:', error.message);
+    return {};
+  }
+  const counts = {};
+  for (const m of (data || [])) {
+    counts[m.conversation_id] = (counts[m.conversation_id] || 0) + 1;
+  }
+  return counts;
+}
+
+// Load all reactions for a set of message ids, grouped by message_id.
+// Returns { [messageId]: [{ user_id, emoji, message_id }, ...] } so
+// callers can store the map on their thread and pass it straight into
+// the bubble renderer. Empty {} on no messages / no reactions. Mirrors
+// fetchReactionsForConversation in messages.js but avoids a second
+// round-trip to fetch message ids (the dock already has them).
+export async function loadReactionsForMessageIds(messageIds = []) {
+  if (!messageIds.length) return {};
+  const { data, error } = await supabase
+    .from('message_reactions')
+    .select('message_id, user_id, emoji, created_at')
+    .in('message_id', messageIds);
+  if (error) {
+    console.warn('[dock] reactions fetch failed:', error.message);
+    return {};
+  }
+  const out = {};
+  for (const r of (data || [])) {
+    if (!out[r.message_id]) out[r.message_id] = [];
+    out[r.message_id].push(r);
+  }
+  return out;
+}
+
+// Toggle a reaction. Returns 'added' / 'removed' / null (on failure).
+// Optimistic mutation of the passed `reactionsMap` happens in the
+// caller; this helper just handles the supabase round-trip + rollback
+// signaling.
+export async function toggleMessageReaction(messageId, emoji) {
+  const user = _cfg.getCurrentUser();
+  if (!user?.id || !messageId || !emoji) return null;
+  // Check existing first to choose insert vs delete branch — same
+  // pattern as the full-page toggleReaction. A duplicate insert would
+  // hit the unique index and fail; a missing delete is a no-op.
+  const { data: existing, error: lookupErr } = await supabase
+    .from('message_reactions')
+    .select('message_id')
+    .eq('message_id', messageId)
+    .eq('user_id', user.id)
+    .eq('emoji', emoji)
+    .maybeSingle();
+  if (lookupErr) {
+    console.warn('[dock] reaction lookup failed:', lookupErr.message);
+    return null;
+  }
+  if (existing) {
+    const { error } = await supabase.from('message_reactions')
+      .delete()
+      .eq('message_id', messageId)
+      .eq('user_id', user.id)
+      .eq('emoji', emoji);
+    if (error) { toast(error.message, 'error'); return null; }
+    return 'removed';
+  } else {
+    const { error } = await supabase.from('message_reactions').insert({
+      message_id: messageId, user_id: user.id, emoji,
+    });
+    if (error) { toast(error.message, 'error'); return null; }
+    return 'added';
+  }
 }
 
 // Mark a conversation as read. Best-effort — failures are logged but
@@ -378,42 +633,159 @@ export async function openMessagesDockToConv(convId) {
     return;
   }
 
-  // Load conv + initial messages in parallel before we render.
-  const [conv, messages] = await Promise.all([
-    fetchConversationById(convId),
-    loadMessagesForConversation(convId, { limit: 30 }),
-  ]);
+  // ── Progressive open (Charles 2026-05-16 perf fix #290) ──
+  // Old flow: await fetchConversationById + loadMessages (parallel) →
+  // await loadReactions → await loadGroupMembers → render. Total
+  // wait before the mini chat appeared was 600-1000ms.
+  //
+  // New flow (Messenger-style):
+  //   1. Use cached conv from _convCache (the inbox click implies it's
+  //      already there). Skip the conv fetch entirely. → render shell
+  //      in <50ms.
+  //   2. Subscribe to realtime channels concurrently with data loads,
+  //      so a message arriving during the load still lands in state.
+  //   3. Fire messages + members loads in PARALLEL via Promise.all.
+  //   4. Fetch reactions LAST — they're decorative, can land late
+  //      without blocking the bubble render. Patch the markup again
+  //      when they arrive.
+  //
+  // Falls back to fetchConversationById ONLY for deep-link / notification
+  // taps where the conv isn't in the inbox cache yet.
+
+  let conv = _convCache.find(c => c.id === convId);
   if (!conv) {
-    toast('Could not load conversation', 'error');
+    // Cold path — no cache. This is the rare deep-link case.
+    conv = await fetchConversationById(convId);
+    if (!conv) { toast('Could not load conversation', 'error'); return; }
+  }
+  // Secret chats can NEVER render in the dock — they require the PIN
+  // gate that lives on the full-page Messages view.
+  // Codex P1-1 (2026-05-16): the cached `is_secret` flag is NOT
+  // authoritative — a conv flipped to secret server-side may still
+  // appear non-secret in our local cache for ~minutes until the
+  // conversations.UPDATE realtime echo lands. Do a fresh fetch in
+  // parallel with the rest of the open flow; if the live row says
+  // secret, redirect to full-page PIN gate after tearing down the
+  // mini we may have already rendered.
+  if (conv.is_secret) {
+    _cfg.showMessages?.();
     return;
   }
 
+  // Build the thread shell IMMEDIATELY with placeholders. The render
+  // path handles empty messages/members/reactions gracefully (renders
+  // a small "Loading…" stub via the new isLoadingMessages flag).
+  // openingUnreadCount snapshot — captured before _markDockConvReadLocal
+  // zeroes the cache, so the unread-divider computation has the right
+  // anchor even after the badge updates locally. Codex P1-4.
+  const openingUnreadCount = conv._unreadCount || 0;
   const thread = {
     conv,
-    messages,
+    messages: [],
+    reactions: {},
+    members: new Map(),
+    groupSeenByMsg: {},
+    unreadAnchorId: null,
+    openingUnreadCount,        // captured before local cache clears
+    otherIsTyping: false,
+    typingTimer:   null,
+    presenceChannel: null,
+    myTypingThrottle: null,
     displayState: 'expanded',
     sendInFlight: false,
     subscription: null,
+    reactionSubscription: null,
     focusedAt: Date.now(),
+    hasOlder: false,
+    loadingOlder: false,
+    isLoadingMessages: true,    // render loader until messages land (#290)
   };
-  // Subscribe BEFORE rendering so an incoming message during the initial
-  // render still hits the handler.
+  dmDockState.openThreads.set(convId, thread);
+  _bumpFocus(convId);
+  _displaceIfOverCap(convId);
+  _renderAllChats();              // ← INSTANT shell render
+  _syncLauncherCompact();
+
+  // Subscribe to realtime BEFORE the data load — any insert/update
+  // arriving mid-load gets buffered into state correctly. Channels
+  // are cheap (free until messages flow).
   thread.subscription = subscribeToConversation(convId, {
     onInsert: (msg) => _handleIncomingMessage(convId, msg),
     onUpdate: (msg) => _handleMessageUpdate(convId, msg),
     onDelete: (msg) => _handleMessageDelete(convId, msg),
   });
-  dmDockState.openThreads.set(convId, thread);
-  _bumpFocus(convId);
-  _displaceIfOverCap(convId);   // demote / drop neighbors as needed
-  _renderAllChats();
-  _syncLauncherCompact();       // first chat → compact pill
+  thread.reactionSubscription = _subscribeReactionsForThread(convId);
+  thread.presenceChannel = _subscribeDockPresence(convId);
 
-  markConversationRead(convId).then(() => _refreshUnreadBadge());
-  setTimeout(() => {
+  // Fire messages + members in parallel. Reactions wait for messages
+  // (need their ids) but launch as soon as messages return — they
+  // don't block the bubble render. markConversationRead also kicks
+  // off in parallel.
+  // Mark read on the server + IMMEDIATELY zero the local cache so the
+  // inbox badge drops without waiting for the next conversations.UPDATE
+  // round-trip. _markDockConvReadLocal also patches the inbox list in
+  // place if it's open. Codex P1-4.
+  _markDockConvReadLocal(convId);
+  markConversationRead(convId);
+
+  // Verify is_secret against the live row in parallel — protects
+  // against the case where the cached conv is stale and the chat
+  // has been flipped to secret server-side. If verified secret, tear
+  // down the mini we just rendered and bounce to full-page PIN gate.
+  // Codex P1-1.
+  fetchConversationById(convId).then((live) => {
+    if (!live) return;
+    // Refresh local cache copy so subsequent opens use accurate data.
+    const cached = _convCache.find(c => c.id === convId);
+    if (cached) Object.assign(cached, live);
+    if (live.is_secret) {
+      _closeMini(convId);
+      _cfg.showMessages?.();
+    }
+  }).catch(() => {});
+
+  try {
+    const [messages, members] = await Promise.all([
+      loadMessagesForConversation(convId, { limit: 30 }),
+      conv.is_group ? loadGroupMembers(convId) : Promise.resolve(new Map()),
+    ]);
+    thread.messages = messages;
+    thread.members  = members;
+    thread.hasOlder = messages.length >= 30;
+    thread.isLoadingMessages = false;
+
+    // Unread divider anchor (#281). Use openingUnreadCount snapshot,
+    // NOT conv._unreadCount — the local cache was zeroed in
+    // _markDockConvReadLocal above. Codex P1-4.
+    if (thread.openingUnreadCount > 0 && messages.length > 0) {
+      const idx = Math.max(0, messages.length - thread.openingUnreadCount);
+      const anchor = messages.slice(idx).find(_isRenderableDockMessage) || messages.find(_isRenderableDockMessage);
+      thread.unreadAnchorId = anchor?.id || null;
+    }
+    if (conv.is_group) {
+      thread.groupSeenByMsg = _computeGroupSeenByMsg(thread);
+    }
+    _patchMessagesMarkup(thread, { preserveScroll: false });
     _scrollMiniToBottom(convId);
     _focusMiniInput(convId);
-  }, 30);
+
+    // Reactions — lazy, non-blocking. Decorative so it's OK if they
+    // appear a beat after the bubbles. Merge instead of wholesale-
+    // assign so any realtime echo / optimistic toggle that landed
+    // during the fetch isn't dropped. Codex 2026-05-16 P0-1.
+    if (messages.length) {
+      loadReactionsForMessageIds(messages.map(m => m.id))
+        .then((reactions) => {
+          thread.reactions = _mergeReactionMaps(thread.reactions, reactions);
+          _patchMessagesMarkup(thread);
+        })
+        .catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[dock] progressive load failed:', err?.message);
+    thread.isLoadingMessages = false;
+    _patchMessagesMarkup(thread);
+  }
 }
 
 // Enforce the visible cap: at most DM_FLOAT_MAX_THREADS expanded +
@@ -461,11 +833,25 @@ export function teardownMessagesDock() {
   // their thread.
   for (const [, thread] of dmDockState.openThreads) {
     teardownConversationSubscription(thread.subscription);
+    if (thread.reactionSubscription) {
+      try { supabase.removeChannel(thread.reactionSubscription); } catch {}
+    }
+    if (thread.presenceChannel) {
+      try { supabase.removeChannel(thread.presenceChannel); } catch {}
+    }
+    if (thread.typingTimer) clearTimeout(thread.typingTimer);
+    if (thread.myTypingThrottle) clearTimeout(thread.myTypingThrottle);
   }
+  // Close any open reaction picker so its outside-click listener doesn't
+  // outlive the dock.
+  _closeDockReactionPicker();
+  _closeDockActionPopover();   // #291 — tap-to-open action popover
   dmDockState.openThreads.clear();
   dmDockState.focusOrder.length = 0;
   dmDockState.inboxOpen = false;
   if (_inboxChannel) { try { supabase.removeChannel(_inboxChannel); } catch {} _inboxChannel = null; }
+  // Clear pending inbox-refresh debounce (Codex P2-1).
+  if (_refreshUnreadTimer) { clearTimeout(_refreshUnreadTimer); _refreshUnreadTimer = null; }
   if (_root) _root.innerHTML = '';
   _launcherEl = _inboxEl = _miniContainerEl = null;
   _convCache = [];
@@ -604,7 +990,14 @@ function _renderInbox() {
 
 function _renderConvListMarkup() {
   const user = _cfg.getCurrentUser();
-  const list = _convCache.filter(c => !c._archived).slice(0, 30);
+  // Exclude is_secret too — Secret chats live behind the full-page PIN
+  // gate. Showing them in the always-visible dock inbox would let a
+  // single click open a mini chat that bypasses PIN entry, which is
+  // exactly the gate the Secret feature is supposed to enforce.
+  // (Codex review 2026-05-16, P0 extra finding. The unread-badge
+  // calculation at _refreshUnreadBadge already excludes is_secret —
+  // this brings the inbox list to the same invariant.)
+  const list = _convCache.filter(c => !c._archived && !c.is_secret).slice(0, 30);
   if (!list.length) {
     return `<div class="dm-dock-empty">No conversations yet.<br/>Open someone's profile and tap Message to start.</div>`;
   }
@@ -617,12 +1010,16 @@ function _renderConvListMarkup() {
       : `<span class="dm-dock-initials">${escHTML(initials(otherName))}</span>`;
     const preview = c.last_message_preview ? escHTML(c.last_message_preview).slice(0, 60) : '<span class="dm-dock-conv-empty-preview">Say hi 👋</span>';
     const time = c.last_message_at ? timeAgo(c.last_message_at) : '';
-    // Unread is computed from conversations.last_read_a/b vs last_message_at —
-    // not always reliable from a single column. For v1 just show a dot if
-    // the last message wasn't from me; a fuller unread state lands with
-    // task #215 (Stage 9 extraction).
-    const mineLast = c.last_message_sender === user?.id;
-    const unreadDot = !mineLast && c.last_message_at ? '<span class="dm-dock-conv-unread-dot" aria-hidden="true"></span>' : '';
+    // Real unread count (Codex review 2026-05-16 #280). Prior impl
+    // showed a dot for ANY conv whose last message wasn't mine, even
+    // if I'd already read it. Now we render a numeric badge when
+    // there are actually unread messages I haven't seen, and nothing
+    // otherwise. Muted convs suppress the badge entirely.
+    const unread = c._unreadCount || 0;
+    const muted = c._mutedUntil && new Date(c._mutedUntil) > new Date();
+    const unreadBadge = (unread > 0 && !muted)
+      ? `<span class="dm-dock-conv-unread-count">${unread > 99 ? '99+' : unread}</span>`
+      : '';
     return `
       <button type="button" class="dm-dock-conv-item" data-conv-id="${escHTML(c.id)}">
         <span class="dm-dock-conv-avatar">${avatarHTML}</span>
@@ -632,7 +1029,7 @@ function _renderConvListMarkup() {
         </span>
         <span class="dm-dock-conv-aside">
           ${time ? `<span class="dm-dock-conv-time">${escHTML(time)}</span>` : ''}
-          ${unreadDot}
+          ${unreadBadge}
         </span>
       </button>
     `;
@@ -761,8 +1158,13 @@ function _renderMini(thread) {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
       </button>
       <textarea class="dm-mini-input" placeholder="Message..." rows="1" maxlength="2000"></textarea>
-      <button type="submit" class="dm-mini-send" title="Send" aria-label="Send">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      <button type="submit" class="dm-mini-send is-thumb" title="Send" aria-label="Send">
+        <!-- Two icons; CSS swaps visibility based on .is-thumb (empty
+             input → thumbs-up quick send) vs the default paper-plane.
+             Empty composer + tap = ship 👍 (mirrors mobile + full page).
+             Charles 2026-05-16 dock parity. -->
+        <svg class="dm-mini-send-icon-plane" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        <svg class="dm-mini-send-icon-thumb" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2 21h4V9H2v12zM23 10c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>
       </button>
     </form>
   `;
@@ -776,9 +1178,15 @@ function _renderMini(thread) {
     thread.displayState = 'avatar';
     _renderAllChats();
   });
-  section.querySelector('.dm-mini-expand').addEventListener('click', () => {
+  section.querySelector('.dm-mini-expand').addEventListener('click', async () => {
     _closeMini(convId);
-    _cfg.showMessages(other.id);
+    // Two-step open: showMessages() routes to the full Messages page,
+    // then openConversation(convId) selects the specific thread. The
+    // userId variant of showMessages only resolves 1:1 chats — for
+    // groups (and for safety in 1:1 too) we explicitly target by
+    // convId. Codex review 2026-05-16 (#279).
+    await _cfg.showMessages();
+    try { await _cfg.openConversation?.(convId); } catch (e) { console.warn('[dock] openConversation failed:', e?.message); }
   });
   section.querySelector('[data-action="open-profile"]').addEventListener('click', () => {
     if (other.id) _cfg.openProfile(other.id);
@@ -794,7 +1202,21 @@ function _renderMini(thread) {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
   };
-  input.addEventListener('input', autosize);
+  // Module-level _syncSendIcon (below) is the canonical implementation;
+  // the closure here just defers to it so the attach paths can also
+  // call it without needing access to the section's inner refs. Charles
+  // 2026-05-16 + Codex review P1-6.
+  const sync = () => _syncSendIcon(convId);
+  input.addEventListener('input', () => {
+    autosize();
+    sync();
+    _broadcastDockTyping(convId);   // typing presence (#283)
+  });
+  // paste fires BEFORE the input value updates, so defer one tick so
+  // syncSendIcon reads the post-paste value. Mirrors how Safari resolves
+  // paste → input sequencing.
+  input.addEventListener('paste', () => setTimeout(sync, 0));
+  sync();
   input.addEventListener('focus', () => _bumpFocus(convId));
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -816,13 +1238,137 @@ function _renderMini(thread) {
   // without re-binding per render.
   const messagesEl = section.querySelector('.dm-mini-messages');
   messagesEl.addEventListener('click', (e) => {
+    // Load-older sentinel at the top of the messages list. Codex
+    // review (#282). Prepends one page of older messages then
+    // re-renders + restores scroll position so the user doesn't lose
+    // their place.
+    const olderBtn = e.target.closest('[data-action="load-older"]');
+    if (olderBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      _handleLoadOlder(convId);
+      return;
+    }
+    // Reaction pill — toggle. Lives before the image branch so a pill
+    // overlaid on an image bubble (rare but possible with image+caption
+    // messages) doesn't trigger the lightbox.
+    const pill = e.target.closest('.dm-mini-rx-pill');
+    if (pill) {
+      e.preventDefault();
+      e.stopPropagation();
+      _toggleDockReaction(convId, pill.dataset.msg, pill.dataset.emoji);
+      return;
+    }
+    // NOTE — bubble-tap branch lives BELOW the image branch (further
+    // down in this handler). Images need to open the lightbox before
+    // the wrap's tap-to-popover catches the click. Order matters:
+    // pill > older > image > edit save/cancel > reply quote > bubble
+    // wrap. Charles 2026-05-16 (#291).
+    // Edit save / cancel buttons.
+    const editSave = e.target.closest('.dm-mini-edit-save');
+    if (editSave) {
+      e.preventDefault();
+      e.stopPropagation();
+      _saveDockEdit(convId, editSave.dataset.msg);
+      return;
+    }
+    const editCancel = e.target.closest('.dm-mini-edit-cancel');
+    if (editCancel) {
+      e.preventDefault();
+      e.stopPropagation();
+      _cancelDockEdit(convId);
+      return;
+    }
+    // Reply-quote chip → scroll to original message in the mini.
+    const replyQuote = e.target.closest('.dm-mini-reply-quote[data-jump-to]');
+    if (replyQuote) {
+      e.preventDefault();
+      e.stopPropagation();
+      _jumpToDockMessage(convId, replyQuote.dataset.jumpTo);
+      return;
+    }
+    // Image-message actions overlay button. Runs before the image
+    // branch so tapping the ⋯ opens the popover instead of the
+    // lightbox. Codex P1-3.
+    const imgActBtn = e.target.closest('.dm-mini-img-actions');
+    if (imgActBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      _closeDockReactionPicker();
+      const wrap = imgActBtn.closest('.dm-mini-bubble-wrap[data-msg]');
+      _openDockActionPopover(convId, imgActBtn.dataset.msg, wrap || imgActBtn);
+      return;
+    }
     const img = e.target.closest('.dm-mini-image img, .dm-mini-image-cell img');
-    if (!img) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const url = img.getAttribute('src');
-    if (url && typeof window.openLightbox === 'function') {
-      window.openLightbox(url);
+    if (img) {
+      e.preventDefault();
+      e.stopPropagation();
+      const url = img.getAttribute('src');
+      if (!url) return;
+      // If the image is part of a group (2/3/4-up grid), open the
+      // gallery lightbox so the user can prev/next through the rest.
+      // Codex review (#284).
+      const row = img.closest('.dm-mini-row');
+      const msgId = row?.dataset.msgId;
+      const thread = dmDockState.openThreads.get(convId);
+      const msg = thread?.messages.find(m => m.id === msgId);
+      const imgs = Array.isArray(msg?.image_urls) ? msg.image_urls : (msg?.image_url ? [msg.image_url] : []);
+      if (imgs.length > 1 && typeof window.openLightboxGallery === 'function') {
+        const startIndex = Math.max(0, imgs.indexOf(url));
+        window.openLightboxGallery(imgs, startIndex);
+      } else if (typeof window.openLightbox === 'function') {
+        window.openLightbox(url);
+      }
+      return;
+    }
+
+    // Skip the action popover when clicking inside the inline edit
+    // textarea — caret positioning, drag-select, right-click all
+    // bubble up to the wrap and would otherwise pop the action menu
+    // on top of the editor. Codex P0-2.
+    if (e.target.closest('.dm-mini-edit-textarea')) return;
+    // Bubble-wrap tap → open action popover (React / Reply / Copy /
+    // Edit / Delete). Lives at the END so pills / images / reply
+    // quotes / edit buttons / load-older all get first crack at
+    // the click. Charles 2026-05-16 (#291).
+    const wrap = e.target.closest('.dm-mini-bubble-wrap[data-msg]');
+    if (wrap) {
+      e.preventDefault();
+      e.stopPropagation();
+      _closeDockReactionPicker();
+      _openDockActionPopover(convId, wrap.dataset.msg, wrap);
+    }
+  });
+
+  // Edit textarea keyboard handlers — bound here so they survive
+  // bubble re-renders (the textarea itself is rebuilt by _patchMessagesMarkup
+  // on every update). Delegated keydown lets us catch Enter/Esc cheaply.
+  // Also handles Enter/Space on the bubble tap target so keyboard
+  // users can open the action popover. Charles 2026-05-16 (#291).
+  messagesEl.addEventListener('keydown', (e) => {
+    // Edit textarea handler FIRST — Enter/Space inside the editor must
+    // save/cancel + insert space, not open the action popover (the
+    // wrap is an ancestor of the textarea so it'd otherwise match).
+    // Codex P0-2.
+    const ta = e.target.closest('.dm-mini-edit-textarea');
+    if (ta) {
+      const row = ta.closest('.dm-mini-row');
+      const msgId = row?.dataset.msgId;
+      if (!msgId) return;
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        _saveDockEdit(convId, msgId);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        _cancelDockEdit(convId);
+      }
+      return;
+    }
+    const wrap = e.target.closest('.dm-mini-bubble-wrap[data-msg]');
+    if (wrap && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      _closeDockReactionPicker();
+      _openDockActionPopover(convId, wrap.dataset.msg, wrap);
     }
   });
 
@@ -854,10 +1400,21 @@ function _renderMini(thread) {
   attachMenu.querySelectorAll('.dm-mini-attach-opt').forEach(opt => {
     opt.addEventListener('click', () => {
       const kind = opt.dataset.kind;
-      // Switch the file input's accept so the OS picker filters
-      // appropriately. Photo excludes gifs; GIF only accepts gifs.
-      fileInput.accept = kind === 'gif' ? 'image/gif' : 'image/png,image/jpeg,image/webp,image/heic,image/heif';
       closeAttachMenu();
+      if (kind === 'gif') {
+        // Hand off to the shared Giphy picker. Anchor against the +
+        // button so the picker pops above the mini-composer; onPick
+        // routes the chosen URL through _handleAttachGifUrl so the
+        // dock's optimistic-bubble + per-mini reconcile fires (the
+        // full-page sendDmGif targets dmComposer state, not the dock).
+        _cfg.openDmGifPicker({
+          anchor: attachBtn,
+          onPick: (gifUrl) => _handleAttachGifUrl(convId, gifUrl),
+        });
+        return;
+      }
+      // Photo: open the file picker with image MIME filter.
+      fileInput.accept = 'image/png,image/jpeg,image/webp,image/heic,image/heif';
       fileInput.click();
     });
   });
@@ -908,16 +1465,73 @@ function _hasImageFile(e) {
 function _renderMessagesMarkup(thread) {
   const user = _cfg.getCurrentUser();
   const myId = user?.id;
-  if (!thread.messages.length) {
-    const otherName = thread.conv._otherUser?.display_name || thread.conv._otherUser?.username || 'this person';
-    return `<div class="dm-mini-empty">Start the conversation with ${escHTML(otherName)}.</div>`;
+  const isGroup = !!thread.conv.is_group;
+  // Load-older sentinel — sits above the oldest message. Codex review
+  // (#282). Hidden when we've definitively run out (hasOlder=false)
+  // OR while a load is in flight (loadingOlder=true) to prevent
+  // double-clicks racing.
+  let olderHtml = '';
+  if (thread.hasOlder) {
+    olderHtml = thread.loadingOlder
+      ? `<div class="dm-mini-older-row is-loading"><span>Loading older messages…</span></div>`
+      : `<button type="button" class="dm-mini-older-row" data-action="load-older">Load older messages</button>`;
+  }
+  // Sender resolver — for groups looks up the per-message sender from
+  // thread.members; for 1:1 falls back to conv._otherUser (the single
+  // counterparty). Without this groups render every incoming message
+  // with a "?" placeholder because _otherUser is null. Charles
+  // 2026-05-16 group avatar/name bug.
+  const senderProfile = (senderId) => {
+    if (!senderId) return null;
+    if (isGroup) return thread.members?.get(senderId) || null;
+    return senderId === myId ? null : (thread.conv._otherUser || null);
+  };
+  const senderShortName = (p) => {
+    if (!p) return 'Unknown';
+    return p.display_name?.split(' ')[0] || p.username || 'Unknown';
+  };
+  const senderFullName = (p) => p?.display_name || p?.username || 'Unknown';
+  const renderMessages = (thread.messages || []).filter(_isRenderableDockMessage);
+  const messageById = new Map((thread.messages || []).map(m => [m.id, m]));
+  if (!renderMessages.length) {
+    // Distinguish "still loading initial page" from "truly empty conv".
+    // Without this, the open-shell-first optimization (#290) would
+    // briefly flash a "Start the conversation with X" empty state
+    // before the messages land — confusing for chats that aren't
+    // actually new.
+    if (thread.isLoadingMessages) {
+      return `<div class="dm-mini-loading"><span class="dm-mini-loading-dot"></span><span class="dm-mini-loading-dot"></span><span class="dm-mini-loading-dot"></span></div>`;
+    }
+    const otherName = isGroup
+      ? (thread.conv.name || 'this group')
+      : (thread.conv._otherUser?.display_name || thread.conv._otherUser?.username || 'this person');
+    const verb = isGroup ? 'Start the conversation in' : 'Start the conversation with';
+    return `<div class="dm-mini-empty">${escHTML(verb)} ${escHTML(otherName)}.</div>`;
   }
   // Group consecutive same-sender messages so only the LAST bubble in a
-  // run shows the avatar — Messenger pattern.
-  let html = '';
-  let lastSender = null;
-  let lastDate   = null;
-  thread.messages.forEach((m, i) => {
+  // run shows the avatar — Messenger pattern. (We compute "last in run"
+  // by peeking at the next message via index, NOT by tracking
+  // lastSender across iterations — that prior bookkeeping was dead
+  // code, removed Codex review P2-274.)
+  let html = olderHtml;
+  let lastDate = null;
+  // Precompute the id of the LAST own message that the other side has
+  // actually read. We render the seen avatar INLINE right after that
+  // message — not blanket at the bottom — otherwise we'd visually
+  // claim the newest message was seen even when the recipient only
+  // read an older one. Charles bug 2026-05-16 (Codex #283 follow-up).
+  let lastReadOfMineId = null;
+  if (!isGroup && thread.conv._otherUser) {
+    for (let i = renderMessages.length - 1; i >= 0; i--) {
+      const m = renderMessages[i];
+      if (m.sender_id === myId && m.read_at && !m.deleted_at) {
+        lastReadOfMineId = m.id;
+        break;
+      }
+    }
+  }
+
+  renderMessages.forEach((m, i) => {
     const mine = m.sender_id === myId;
     const dateKey = (m.created_at || '').slice(0, 10);
     if (dateKey !== lastDate) {
@@ -925,34 +1539,247 @@ function _renderMessagesMarkup(thread) {
       html += `<div class="dm-mini-date-divider"><span>${escHTML(d)}</span></div>`;
       lastDate = dateKey;
     }
-    const next = thread.messages[i + 1];
+    // Unread divider — render once, just above the first message that
+    // was unread when the chat opened. Codex review (#281).
+    if (thread.unreadAnchorId && m.id === thread.unreadAnchorId) {
+      html += `<div class="dm-mini-unread-divider"><span>New messages</span></div>`;
+    }
+    const prev = renderMessages[i - 1];
+    const next = renderMessages[i + 1];
     const isLastInRun = !next || next.sender_id !== m.sender_id;
     const pendingCls = m._pending ? ' is-pending' : '';
+
+    // ── Deleted-message branch ──────────────────────────────────────
+    // Soft-deleted messages (delete-for-everyone) arrive with
+    // `deleted_at` set and `body` cleared to '' (web + mobile both
+    // clear body now — see deleteMessage in messages.js). Without
+    // this branch the dock rendered an empty bubble for text deletes
+    // and STILL showed the picture for image deletes because
+    // `image_urls` is never cleared (the asset's already on the CDN;
+    // we just hide it in the UI). Suppress images, the react button,
+    // and the reactions strip — show only an "unsent a message"
+    // label. Codex review 2026-05-16, P0-2.
+    if (m.deleted_at) {
+      const sender = senderProfile(m.sender_id);
+      const who = mine ? 'You' : escHTML(senderShortName(sender));
+      const avatarHtml = sender?.avatar_url
+        ? `<img src="${escHTML(sender.avatar_url)}"/>`
+        : `<span class="dm-dock-initials">${escHTML(initials(senderFullName(sender)))}</span>`;
+      html += `
+        <div class="dm-mini-row ${mine ? 'is-mine' : 'is-theirs'}${isLastInRun ? ' is-tail' : ''}" data-msg-id="${escHTML(m.id)}">
+          ${mine
+            ? ''
+            : (isLastInRun
+                ? `<span class="dm-mini-row-avatar">${avatarHtml}</span>`
+                : '<span class="dm-mini-row-avatar dm-mini-row-avatar-spacer"></span>')}
+          <div class="dm-mini-bubble-wrap">
+            <div class="dm-mini-bubble is-deleted" title="${escHTML(new Date(m.deleted_at).toLocaleString())}">
+              <span class="dm-mini-deleted-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+              </span>
+              ${who} unsent a message
+            </div>
+          </div>
+        </div>
+      `;
+      return;   // skip the live-message render path below
+    }
+
     // Image messages render the picture(s) instead of a text bubble.
     // If both image AND text exist (caption), show the image group then
     // the bubble underneath. Multiple images get grouped into a collage:
     // 2-up, 3-up T-layout, or 4-up 2x2 with +N overlay on overflow.
-    const imgs = Array.isArray(m.image_urls) ? m.image_urls : (m.image_url ? [m.image_url] : []);
+    const imgs = _messageImageUrls(m);
     let body = '';
     if (imgs.length > 0) body += _renderImageGroup(imgs, pendingCls);
-    if (m.body) {
-      body += `<div class="dm-mini-bubble${pendingCls}">${escHTML(m.body)}</div>`;
+    const bodyText = (m.body || '').trim();
+    if (bodyText) {
+      body += `<div class="dm-mini-bubble${pendingCls}">${escHTML(bodyText)}</div>`;
     }
-    if (!body) body = `<div class="dm-mini-bubble${pendingCls}"></div>`;
+    if (!body) return;
+
+    // ── Reactions strip + hover "react" affordance ────────────────────
+    // Pills group identical emojis and highlight the ones I added so
+    // tapping toggles the right row. Hover button is a tiny smiley to
+    // the side of the bubble; clicking opens the quick-reactions
+    // picker anchored above the bubble. Both render flags are gated on
+    // !_pending — reacting to an optimistic placeholder before it has
+    // a real id would write to a non-existent message_id.
+    const reactList = thread.reactions?.[m.id] || [];
+    let reactionsHtml = '';
+    if (reactList.length) {
+      const grouped = {};
+      const mineSet = new Set();
+      for (const r of reactList) {
+        grouped[r.emoji] = (grouped[r.emoji] || 0) + 1;
+        if (r.user_id === myId) mineSet.add(r.emoji);
+      }
+      const pills = Object.entries(grouped).map(([emoji, count]) =>
+        `<button type="button" class="dm-mini-rx-pill${mineSet.has(emoji) ? ' is-mine' : ''}" data-msg="${escHTML(m.id)}" data-emoji="${escHTML(emoji)}" title="${mineSet.has(emoji) ? 'Remove your reaction' : 'Toggle reaction'}">
+          <span class="dm-mini-rx-pill-emoji">${emoji}</span>${count > 1 ? `<span class="dm-mini-rx-pill-count">${count}</span>` : ''}
+        </button>`
+      ).join('');
+      // aria-live=polite so screen-readers announce reactions arriving
+      // from realtime without yelling. Codex review P2-269.
+      reactionsHtml = `<div class="dm-mini-bubble-reactions ${mine ? 'is-mine' : 'is-theirs'}" role="group" aria-label="Reactions on this message" aria-live="polite">${pills}</div>`;
+    }
+    // ── Bubble actions are now TAP-TRIGGERED, not hover-revealed.
+    // Charles 2026-05-16 — replaces the absolute-positioned hover
+    // action strip that added ~28px of visual claim above each row.
+    // The bubble itself is the trigger; click opens an action popover
+    // (React / Reply / Copy / Edit / Delete) anchored to the bubble.
+    // No per-message DOM cost in the render path now. Layout is
+    // visibly tighter as a result. */
+
+    // Reply quote chip — show the quoted message above the bubble.
+    // Mirrors the full-page dm-reply-quote rendering. The original
+    // sender's name + a snippet of body (or "unsent message"). For
+    // groups, resolves parentName via the per-message member lookup.
+    let replyQuoteHtml = '';
+    if (m.reply_to_id) {
+      const parent = messageById.get(m.reply_to_id);
+      if (parent) {
+        const parentMine = parent.sender_id === myId;
+        const parentName = parentMine ? 'You' : senderShortName(senderProfile(parent.sender_id));
+        const parentBody = parent.deleted_at ? '(unsent message)' : (parent.body || '').slice(0, 80);
+        replyQuoteHtml = `<div class="dm-mini-reply-quote ${mine ? 'is-mine' : 'is-theirs'}" data-jump-to="${escHTML(parent.id)}">
+          <span class="dm-mini-reply-quote-name">${escHTML(parentName)}</span>
+          <span class="dm-mini-reply-quote-body">${escHTML(parentBody)}</span>
+        </div>`;
+      } else {
+        replyQuoteHtml = `<div class="dm-mini-reply-quote ${mine ? 'is-mine' : 'is-theirs'} is-orphan">Original message unavailable</div>`;
+      }
+    }
+
+    // Edit-mode replaces the bubble body with an inline textarea. The
+    // input wiring (Enter save, Esc cancel) is bound below in _renderMini's
+    // delegated handler since the row is innerHTML-rebuilt on every patch.
+    let bubbleHtml = body;
+    if (thread.editingMessageId === m.id) {
+      bubbleHtml = `<div class="dm-mini-edit-wrap">
+        <textarea class="dm-mini-edit-textarea" maxlength="4000">${escHTML(m.body || '')}</textarea>
+        <div class="dm-mini-edit-actions">
+          <button type="button" class="dm-mini-edit-cancel" data-msg="${escHTML(m.id)}">Cancel</button>
+          <button type="button" class="dm-mini-edit-save" data-msg="${escHTML(m.id)}">Save</button>
+        </div>
+      </div>`;
+    } else if (m.edited_at && m.body) {
+      // Append a small "(edited)" tag inline so users see the bubble was
+      // changed post-send. Mirrors full-page editedTag pattern.
+      bubbleHtml = body.replace(
+        /<div class="dm-mini-bubble([^"]*)">([\s\S]*?)<\/div>/,
+        '<div class="dm-mini-bubble$1">$2 <span class="dm-mini-edited">(edited)</span></div>'
+      );
+    }
+
+    // Per-message sender (groups need this per-bubble; 1:1 reuses _otherUser).
+    const sender = senderProfile(m.sender_id);
+    const senderAvatarHtml = sender?.avatar_url
+      ? `<img src="${escHTML(sender.avatar_url)}"/>`
+      : `<span class="dm-dock-initials">${escHTML(initials(senderFullName(sender)))}</span>`;
+
+    // Group chats show the sender name above the FIRST bubble in a run
+    // (Messenger group pattern). Skip for 1:1 (you know who you're
+    // talking to) and skip for my own messages. Only render at the
+    // top of a run so consecutive bubbles from the same person don't
+    // repeat the name.
+    const isFirstInRun = !prev || prev.sender_id !== m.sender_id;
+    const senderNameHtml = (isGroup && !mine && isFirstInRun)
+      ? `<div class="dm-mini-sender-name">${escHTML(senderFullName(sender))}</div>`
+      : '';
+    // Run-position class — drives the Messenger-style corner-radius
+    // grouping + tighter vertical spacing for consecutive same-sender
+    // bubbles. Charles bug 2026-05-16. Mapping:
+    //   first AND last  → singleton (no class — full rounded bubble)
+    //   first only      → is-run-first (tail corner on bottom of run side)
+    //   neither         → is-run-mid   (both corners on run side tight)
+    //   last only       → is-run-last  (tail corner on top of run side)
+    let runClass = '';
+    if (isFirstInRun && !isLastInRun)       runClass = ' is-run-first';
+    else if (!isFirstInRun && !isLastInRun) runClass = ' is-run-mid';
+    else if (!isFirstInRun && isLastInRun)  runClass = ' is-run-last';
+
+    // Inline seen indicator — render IMMEDIATELY after the row that
+    // matches lastReadOfMineId so the avatar sits under the exact
+    // message the recipient read. Earlier impl appended to the end
+    // of the chat, which made it look like the newest message was
+    // seen even when only an older one was. Charles bug 2026-05-16.
+    let seenInlineHtml = '';
+    if (!isGroup && m.id === lastReadOfMineId && thread.conv._otherUser) {
+      const other = thread.conv._otherUser;
+      const seenAv = other.avatar_url
+        ? `<img src="${escHTML(other.avatar_url)}" alt=""/>`
+        : `<span class="dm-dock-initials">${escHTML(initials(other.display_name || other.username || '?'))}</span>`;
+      seenInlineHtml = `<div class="dm-mini-seen-row" title="Seen ${escHTML(new Date(m.read_at).toLocaleString())}">${seenAv}</div>`;
+    } else if (isGroup && thread.groupSeenByMsg?.[m.id]?.length && m.sender_id === myId) {
+      // Group seen: stacked mini-avatars of members (other than me)
+      // who have read up through THIS message. Codex follow-up for
+      // Charles's group-seen question 2026-05-16.
+      const seers = thread.groupSeenByMsg[m.id];
+      const stackHtml = seers.slice(0, 4).map(p => p.avatar_url
+        ? `<img src="${escHTML(p.avatar_url)}" alt="${escHTML(p.display_name || p.username || '?')}" title="${escHTML(p.display_name || p.username || '?')}"/>`
+        : `<span class="dm-dock-initials" title="${escHTML(p.display_name || p.username || '?')}">${escHTML(initials(p.display_name || p.username || '?'))}</span>`
+      ).join('');
+      const overflow = seers.length > 4 ? `<span class="dm-mini-seen-overflow">+${seers.length - 4}</span>` : '';
+      seenInlineHtml = `<div class="dm-mini-seen-row is-group" title="Seen by ${escHTML(seers.map(p => p.display_name || p.username || '?').join(', '))}">${stackHtml}${overflow}</div>`;
+    }
+
+    // For image-only messages (no .dm-mini-bubble) the image click
+    // opens the lightbox via the image branch — which means the
+    // wrap-tap-to-popover branch never fires. Without an explicit
+    // affordance, users can't React/Reply/Delete pure-image messages
+    // from the dock. Add a small ⋯ overlay button on those rows.
+    // Codex P1-3 (2026-05-16).
+    const isImageOnly = !m.deleted_at && !m._pending && imgs.length > 0 && !m.body;
+    const imgActionsBtn = isImageOnly
+      ? `<button type="button" class="dm-mini-img-actions" data-msg="${escHTML(m.id)}" aria-label="Image message actions" title="Actions">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
+        </button>`
+      : '';
+
+    // seenInlineHtml now lives INSIDE the bubble-wrap (after reactions)
+    // instead of as its own row sibling. Earlier impl appended it
+    // after </div></div> at the row level, so the seen avatar acted
+    // as a third flex item in .dm-mini-messages and got the same row
+    // margin treatment — visually detaching from the message it was
+    // supposed to belong to. Codex 2026-05-16.
     html += `
-      <div class="dm-mini-row ${mine ? 'is-mine' : 'is-theirs'}${isLastInRun ? ' is-tail' : ''}" data-msg-id="${escHTML(m.id)}">
-        ${(!mine && isLastInRun)
-          ? `<span class="dm-mini-row-avatar">${
-              thread.conv._otherUser?.avatar_url
-                ? `<img src="${escHTML(thread.conv._otherUser.avatar_url)}"/>`
-                : `<span class="dm-dock-initials">${escHTML(initials(thread.conv._otherUser?.display_name || thread.conv._otherUser?.username || '?'))}</span>`
-            }</span>`
-          : '<span class="dm-mini-row-avatar dm-mini-row-avatar-spacer"></span>'}
-        <div class="dm-mini-bubble-wrap">${body}</div>
+      <div class="dm-mini-row ${mine ? 'is-mine' : 'is-theirs'}${isLastInRun ? ' is-tail' : ''}${runClass}" data-msg-id="${escHTML(m.id)}">
+        ${mine
+          ? ''
+          : (isLastInRun
+              ? `<span class="dm-mini-row-avatar">${senderAvatarHtml}</span>`
+              : '<span class="dm-mini-row-avatar dm-mini-row-avatar-spacer"></span>')}
+        <div class="dm-mini-bubble-wrap" data-msg="${escHTML(m.id)}" role="button" tabindex="0" aria-label="Message actions">
+          ${senderNameHtml}
+          ${replyQuoteHtml}
+          ${bubbleHtml}
+          ${imgActionsBtn}
+          ${reactionsHtml}
+          ${seenInlineHtml}
+        </div>
       </div>
     `;
-    lastSender = m.sender_id;
   });
+
+  // ── Typing indicator — 3-dot animated bubble. Mirrors full-page
+  // dm-typing-bubble. Codex review (#283).
+  if (thread.otherIsTyping) {
+    const other = thread.conv._otherUser;
+    const avatar = other?.avatar_url
+      ? `<img src="${escHTML(other.avatar_url)}" alt=""/>`
+      : `<span class="dm-dock-initials">${escHTML(initials(other?.display_name || other?.username || '?'))}</span>`;
+    html += `
+      <div class="dm-mini-row is-theirs is-tail dm-mini-typing-row">
+        <span class="dm-mini-row-avatar">${avatar}</span>
+        <div class="dm-mini-bubble-wrap">
+          <div class="dm-mini-bubble dm-mini-typing-bubble" aria-label="Typing">
+            <span class="dm-mini-typing-dot"></span><span class="dm-mini-typing-dot"></span><span class="dm-mini-typing-dot"></span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   return html;
 }
 
@@ -995,6 +1822,17 @@ function _closeMini(convId) {
   const thread = dmDockState.openThreads.get(convId);
   if (!thread) return;
   teardownConversationSubscription(thread.subscription);
+  // Reaction channel is its own handle (different filter, different
+  // table) — tear it down separately so we don't leak.
+  if (thread.reactionSubscription) {
+    try { supabase.removeChannel(thread.reactionSubscription); } catch {}
+  }
+  // Presence/typing channel (Codex review #283).
+  if (thread.presenceChannel) {
+    try { supabase.removeChannel(thread.presenceChannel); } catch {}
+  }
+  if (thread.typingTimer) clearTimeout(thread.typingTimer);
+  if (thread.myTypingThrottle) clearTimeout(thread.myTypingThrottle);
   dmDockState.openThreads.delete(convId);
   const idx = dmDockState.focusOrder.indexOf(convId);
   if (idx >= 0) dmDockState.focusOrder.splice(idx, 1);
@@ -1022,6 +1860,24 @@ function _scrollMiniToBottom(convId) {
   if (list) list.scrollTop = list.scrollHeight;
 }
 
+// Single source of truth for the send-button icon swap. Called from:
+//   • the textarea's input + paste listener (typing → flips to plane)
+//   • _handleSend finally  (clears input → flips back to thumbs-up)
+//   • _handleAttachImage + _handleAttachGifUrl finally (attach paths
+//     don't touch input but we run sync defensively in case future
+//     attach flows pre-fill a caption). Codex review 2026-05-16 P1-6.
+function _syncSendIcon(convId) {
+  const root = _miniContainerEl?.querySelector(`.dm-mini-chat[data-conv-id="${CSS.escape(convId)}"]`);
+  if (!root) return;
+  const input = root.querySelector('.dm-mini-input');
+  const sendBtn = root.querySelector('.dm-mini-send');
+  if (!input || !sendBtn) return;
+  const empty = !(input.value || '').trim();
+  sendBtn.classList.toggle('is-thumb', empty);
+  sendBtn.setAttribute('title', empty ? 'Send 👍' : 'Send');
+  sendBtn.setAttribute('aria-label', empty ? 'Send thumbs-up' : 'Send message');
+}
+
 async function _handleSend(convId) {
   const thread = dmDockState.openThreads.get(convId);
   if (!thread || thread.sendInFlight) return;
@@ -1029,12 +1885,25 @@ async function _handleSend(convId) {
   const input = root?.querySelector('.dm-mini-input');
   const sendBtn = root?.querySelector('.dm-mini-send');
   if (!input) return;
-  const body = (input.value || '').trim();
-  if (!body) return;
+  // Thumbs-up quick send: empty composer + tap-send = ship a 👍 immediately.
+  // Mirrors mobile + full-screen UX (the classic Messenger heart-but-thumbs
+  // button). Same single-flight lock applies. Charles 2026-05-16 parity
+  // pass — was task #238.
+  let body = (input.value || '').trim();
+  if (!body) body = '👍';
 
   thread.sendInFlight = true;
   if (sendBtn) sendBtn.disabled = true;
   input.disabled = true;
+
+  // If user has a pending reply, attach reply_to_id + clear the chip
+  // after we capture the id (the chip clears on the next render anyway,
+  // but we want the optimistic bubble to render with the quote too).
+  const replyToId = thread.replyTo?.id || null;
+  if (replyToId) {
+    thread.replyTo = null;
+    _renderDockReplyChip(convId);
+  }
 
   const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const optimistic = {
@@ -1044,6 +1913,7 @@ async function _handleSend(convId) {
     body,
     created_at: new Date().toISOString(),
     image_urls: [],
+    reply_to_id: replyToId,
     _pending: true,
   };
   thread.messages.push(optimistic);
@@ -1053,7 +1923,7 @@ async function _handleSend(convId) {
   input.style.height = 'auto';
 
   try {
-    const sent = await sendMessageToConversation(convId, { body });
+    const sent = await sendMessageToConversation(convId, { body, replyToId });
     // Swap optimistic for real
     const idx = thread.messages.findIndex(m => m.id === tempId);
     if (idx >= 0) thread.messages[idx] = sent;
@@ -1074,6 +1944,10 @@ async function _handleSend(convId) {
     if (sendBtn) sendBtn.disabled = false;
     input.disabled = false;
     input.focus();
+    // Re-evaluate the icon — after clearing input on success the
+    // empty-state thumbs-up should return. Single helper now lives
+    // module-level (Codex review P1-6 cleanup).
+    _syncSendIcon(convId);
   }
 }
 
@@ -1137,7 +2011,750 @@ async function _handleAttachImage(convId, file) {
     toast(err?.message || 'Image send failed', 'error');
   } finally {
     thread.sendInFlight = false;
+    // Defensive — if a future flow ever pre-fills the input as part of
+    // an attach (e.g. caption from filename), this ensures the icon
+    // tracks the new state. Codex review P1-6.
+    _syncSendIcon(convId);
   }
+}
+
+// Send a GIF (pre-uploaded Giphy URL) as a message. Mirrors
+// _handleAttachImage's optimistic-bubble flow but skips the upload step
+// because the URL is already CDN-hosted by Giphy. Charles 2026-05-16
+// dock parity (#257).
+async function _handleAttachGifUrl(convId, gifUrl) {
+  if (!gifUrl) return;
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread || thread.sendInFlight) return;
+
+  thread.sendInFlight = true;
+  const tempId = `temp-gif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const optimistic = {
+    id: tempId,
+    conversation_id: convId,
+    sender_id: _cfg.getCurrentUser()?.id,
+    body: '',
+    created_at: new Date().toISOString(),
+    image_urls: [gifUrl],
+    image_kind: 'gif',
+    _pending: true,
+  };
+  thread.messages.push(optimistic);
+  _patchMessagesMarkup(thread);
+  _scrollMiniToBottom(convId);
+
+  try {
+    const sent = await sendMessageToConversation(convId, {
+      imageUrl:  gifUrl,
+      imageUrls: [gifUrl],
+      imageKind: 'gif',
+    });
+    const idx = thread.messages.findIndex(m => m.id === tempId);
+    if (idx >= 0) thread.messages[idx] = sent;
+    _patchMessagesMarkup(thread);
+    const c = _convCache.find(x => x.id === convId);
+    if (c) {
+      c.last_message_at = sent.created_at;
+      c.last_message_preview = '🎬 GIF';
+      c.last_message_sender = sent.sender_id;
+    }
+  } catch (err) {
+    thread.messages = thread.messages.filter(m => m.id !== tempId);
+    _patchMessagesMarkup(thread);
+    toast(err?.message || 'GIF send failed', 'error');
+  } finally {
+    thread.sendInFlight = false;
+    _syncSendIcon(convId);   // mirrors _handleAttachImage (P1-6)
+  }
+}
+
+// ── Load older + Presence/Typing/Seen helpers ────────────────────────────
+
+// Prepend one page of older messages above the current oldest. Preserves
+// scroll position so the user doesn't lose their reading spot. Codex
+// review 2026-05-16 (#282).
+async function _handleLoadOlder(convId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread || thread.loadingOlder || !thread.hasOlder) return;
+  thread.loadingOlder = true;
+  _patchMessagesMarkup(thread);
+
+  const root = _miniContainerEl?.querySelector(`.dm-mini-chat[data-conv-id="${CSS.escape(convId)}"]`);
+  const list = root?.querySelector('.dm-mini-messages');
+  const prevScrollHeight = list?.scrollHeight || 0;
+  const prevScrollTop    = list?.scrollTop    || 0;
+
+  const oldest = thread.messages[0];
+  if (!oldest?.created_at) {
+    thread.loadingOlder = false;
+    thread.hasOlder = false;
+    _patchMessagesMarkup(thread);
+    return;
+  }
+  const PAGE = 30;
+  try {
+    const { data: msgs, error } = await supabase
+      .from('messages')
+      .select('id, conversation_id, sender_id, body, created_at, read_at, edited_at, deleted_at, reply_to_id, image_url, image_urls, image_kind')
+      .eq('conversation_id', convId)
+      .lt('created_at', oldest.created_at)
+      .order('created_at', { ascending: false })
+      .limit(PAGE);
+    if (error) {
+      console.warn('[dock] load older failed:', error.message);
+      thread.loadingOlder = false;
+      _patchMessagesMarkup(thread);
+      return;
+    }
+    const older = (msgs || []).slice().reverse().map((m) => {
+      if (Array.isArray(m.image_urls) && m.image_urls.length > 0) return m;
+      if (m.image_url) return { ...m, image_urls: [m.image_url] };
+      return { ...m, image_urls: [] };
+    });
+    // Fetch reactions for the older batch + merge into thread.reactions.
+    // Codex P0-1: use _mergeReactionMaps so we don't drop entries for
+    // older messages that already had reactions added in this session
+    // (rare but possible if a member long-pressed an older message).
+    if (older.length) {
+      const olderReacts = await loadReactionsForMessageIds(older.map(m => m.id));
+      thread.reactions = _mergeReactionMaps(thread.reactions, olderReacts);
+    }
+    // Prepend; mark hasOlder false if the page wasn't full (we hit
+    // the start of the conversation).
+    thread.messages = [...older, ...thread.messages];
+    thread.hasOlder = older.length === PAGE;
+  } catch (e) {
+    console.warn('[dock] load older threw:', e?.message);
+  } finally {
+    thread.loadingOlder = false;
+    _patchMessagesMarkup(thread, { preserveScroll: false });
+    // Restore scroll position so the page grows UPWARD without
+    // pushing the user's view. scrollHeight delta gives us the offset.
+    requestAnimationFrame(() => {
+      if (list) {
+        const delta = (list.scrollHeight || 0) - prevScrollHeight;
+        list.scrollTop = prevScrollTop + delta;
+      }
+    });
+  }
+}
+
+// Subscribe to per-conv presence + typing broadcasts. Mirrors full-page
+// subscribeToPresenceAndTyping. Codex review (#283).
+function _subscribeDockPresence(convId) {
+  const user = _cfg.getCurrentUser();
+  if (!user?.id) return null;
+  const channel = supabase.channel(`dock-presence-${convId}-${Math.random().toString(36).slice(2, 6)}`, {
+    config: { presence: { key: user.id } },
+  });
+  channel
+    .on('broadcast', { event: 'typing' }, (payload) => {
+      const fromId = payload.payload?.userId;
+      if (!fromId || fromId === user.id) return;
+      const thread = dmDockState.openThreads.get(convId);
+      if (!thread) return;
+      thread.otherIsTyping = true;
+      if (thread.typingTimer) clearTimeout(thread.typingTimer);
+      thread.typingTimer = setTimeout(() => {
+        thread.otherIsTyping = false;
+        _patchMessagesMarkup(thread);
+        _scrollMiniToBottom(convId);
+      }, 3500);
+      _patchMessagesMarkup(thread);
+      _scrollMiniToBottom(convId);
+    })
+    .subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        await channel.track({ userId: user.id, online_at: new Date().toISOString() });
+      }
+    });
+  return channel;
+}
+
+// Throttled typing broadcast — fires at most once per 1.5s while user
+// is typing. Mirrors full-page broadcastTyping pattern. Codex review
+// (#283).
+function _broadcastDockTyping(convId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread?.presenceChannel) return;
+  if (thread.myTypingThrottle) return;
+  thread.presenceChannel.send({
+    type: 'broadcast',
+    event: 'typing',
+    payload: { userId: _cfg.getCurrentUser()?.id },
+  });
+  thread.myTypingThrottle = setTimeout(() => {
+    thread.myTypingThrottle = null;
+  }, 1500);
+}
+
+// ── Reply / Copy / Edit / Delete actions ────────────────────────────────
+// Dock parity with the full-page hover menu. Each helper mutates per-thread
+// state then re-renders. Server writes go through the same supabase tables
+// the full page uses, so a reply / edit / delete from the dock and the same
+// action from the full page produce identical rows and realtime echoes.
+// Charles 2026-05-16 (#268).
+
+function _startDockReply(convId, messageId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  const target = thread.messages.find(m => m.id === messageId);
+  if (!target) return;
+  thread.replyTo = target;
+  // Render the reply chip above the composer + focus input.
+  _renderDockReplyChip(convId);
+  _focusMiniInput(convId);
+}
+
+function _cancelDockReply(convId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  thread.replyTo = null;
+  _renderDockReplyChip(convId);
+}
+
+function _renderDockReplyChip(convId) {
+  const root = _miniContainerEl?.querySelector(`.dm-mini-chat[data-conv-id="${CSS.escape(convId)}"]`);
+  if (!root) return;
+  const composer = root.querySelector('.dm-mini-composer');
+  if (!composer) return;
+  // Remove any existing chip first (idempotent).
+  composer.querySelector('.dm-mini-reply-chip')?.remove();
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread?.replyTo) return;
+  const r = thread.replyTo;
+  const myId = _cfg.getCurrentUser()?.id;
+  const rMine = r.sender_id === myId;
+  // Group chats: look up the original sender from thread.members so the
+  // chip shows the right name. For 1:1 falls back to conv._otherUser.
+  // Codex review 2026-05-16 (#277) — earlier impl always used
+  // _otherUser, which is null in groups → chip read "Replying to them".
+  let replyName = 'them';
+  if (rMine) {
+    replyName = 'yourself';
+  } else if (thread.conv.is_group) {
+    const member = thread.members?.get(r.sender_id);
+    replyName = member?.display_name?.split(' ')[0] || member?.username || 'them';
+  } else {
+    replyName = thread.conv._otherUser?.display_name?.split(' ')[0] || thread.conv._otherUser?.username || 'them';
+  }
+  const name = replyName;
+  const preview = r.deleted_at ? '(unsent message)' : (r.body || '').slice(0, 60) || (r.image_urls?.length ? '📷 Photo' : '');
+  const chip = document.createElement('div');
+  chip.className = 'dm-mini-reply-chip';
+  chip.innerHTML = `
+    <span class="dm-mini-reply-chip-meta">
+      <span class="dm-mini-reply-chip-name">Replying to ${escHTML(name)}</span>
+      <span class="dm-mini-reply-chip-body">${escHTML(preview)}</span>
+    </span>
+    <button type="button" class="dm-mini-reply-chip-close" aria-label="Cancel reply" title="Cancel">×</button>
+  `;
+  chip.querySelector('.dm-mini-reply-chip-close').addEventListener('click', () => _cancelDockReply(convId));
+  composer.parentNode.insertBefore(chip, composer);
+}
+
+async function _copyDockMessage(convId, messageId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  const m = thread.messages.find(x => x.id === messageId);
+  if (!m) return;
+  try {
+    await navigator.clipboard.writeText(m.body || '');
+    toast('Copied', 'success');
+  } catch {
+    toast('Copy failed', 'error');
+  }
+}
+
+function _startDockEdit(convId, messageId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  const m = thread.messages.find(x => x.id === messageId);
+  if (!m || m.sender_id !== _cfg.getCurrentUser()?.id) return;
+  thread.editingMessageId = messageId;
+  _patchMessagesMarkup(thread);
+  // Focus the textarea + place caret at end so users can append immediately.
+  setTimeout(() => {
+    const root = _miniContainerEl?.querySelector(`.dm-mini-chat[data-conv-id="${CSS.escape(convId)}"]`);
+    const ta = root?.querySelector(`.dm-mini-row[data-msg-id="${CSS.escape(messageId)}"] .dm-mini-edit-textarea`);
+    if (ta) {
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+  }, 0);
+}
+
+function _cancelDockEdit(convId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  thread.editingMessageId = null;
+  _patchMessagesMarkup(thread);
+}
+
+async function _saveDockEdit(convId, messageId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  const root = _miniContainerEl?.querySelector(`.dm-mini-chat[data-conv-id="${CSS.escape(convId)}"]`);
+  const ta = root?.querySelector(`.dm-mini-row[data-msg-id="${CSS.escape(messageId)}"] .dm-mini-edit-textarea`);
+  if (!ta) return;
+  const trimmed = (ta.value || '').trim();
+  const m = thread.messages.find(x => x.id === messageId);
+  if (!m) return;
+  if (!trimmed) { toast('Message can\'t be empty', 'error'); return; }
+  if (trimmed === m.body) {
+    thread.editingMessageId = null;
+    _patchMessagesMarkup(thread);
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const { error } = await supabase.from('messages')
+    .update({ body: trimmed, edited_at: nowIso })
+    .eq('id', messageId)
+    .eq('sender_id', _cfg.getCurrentUser().id);
+  if (error) { toast(error.message || 'Edit failed', 'error'); return; }
+  // Local patch — realtime UPDATE will also fire for both sides.
+  const idx = thread.messages.findIndex(x => x.id === messageId);
+  if (idx >= 0) thread.messages[idx] = { ...thread.messages[idx], body: trimmed, edited_at: nowIso };
+  thread.editingMessageId = null;
+  _patchMessagesMarkup(thread);
+}
+
+async function _deleteDockMessage(convId, messageId) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  const m = thread.messages.find(x => x.id === messageId);
+  if (!m || m.sender_id !== _cfg.getCurrentUser()?.id) return;
+  const ok = await _cfg.confirmDialog({
+    title: 'Delete message?',
+    body: 'This message will be replaced with "Message deleted" for both of you. Can\'t be undone.',
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
+  const nowIso = new Date().toISOString();
+  // Match mobile + full-page: set deleted_at AND clear body so any
+  // client picking the row up sees a consistent "unsent" shape (the
+  // image_urls column is intentionally left untouched; the dock's
+  // _renderMessagesMarkup deleted_at branch hides images).
+  const { error } = await supabase.from('messages')
+    .update({ deleted_at: nowIso, body: '' })
+    .eq('id', messageId)
+    .eq('sender_id', _cfg.getCurrentUser().id);
+  if (error) { toast(error.message || 'Delete failed', 'error'); return; }
+  // Local patch — realtime UPDATE will also fire for the other side.
+  const idx = thread.messages.findIndex(x => x.id === messageId);
+  if (idx >= 0) {
+    thread.messages[idx] = { ...thread.messages[idx], deleted_at: nowIso, body: '' };
+    _patchMessagesMarkup(thread);
+  }
+}
+
+function _jumpToDockMessage(convId, messageId) {
+  const root = _miniContainerEl?.querySelector(`.dm-mini-chat[data-conv-id="${CSS.escape(convId)}"]`);
+  const target = root?.querySelector(`.dm-mini-row[data-msg-id="${CSS.escape(messageId)}"]`);
+  if (!target) return;
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Brief highlight pulse so the user sees where they landed.
+  target.classList.add('is-jump-highlight');
+  setTimeout(() => target.classList.remove('is-jump-highlight'), 1200);
+}
+
+// ── Bubble action popover (tap-to-open) ────────────────────────────────
+// Charles 2026-05-16 (#291). Replaces the hover-revealed action strip
+// that used absolute positioning above every bubble. Now: tap a bubble
+// → small floating popover appears anchored to it with React / Reply /
+// Copy / Edit (mine only) / Delete (mine only). Same-bubble re-tap
+// dismisses. Tap-outside / Esc dismisses. Action runs + closes.
+
+function _closeDockActionPopover() {
+  if (_dockActionPopoverEl) {
+    try { _dockActionPopoverEl.remove(); } catch {}
+    _dockActionPopoverEl = null;
+  }
+  _dockActionPopoverAnchorId = null;
+  // Codex P2-2: remove the deferred document listeners now so they
+  // don't outlive the popover. (Previously they self-unhooked on the
+  // next event, which could fire orphaned after dock teardown.)
+  if (_dockActionPopoverDocHandler) {
+    document.removeEventListener('click', _dockActionPopoverDocHandler);
+    _dockActionPopoverDocHandler = null;
+  }
+  if (_dockActionPopoverKeyHandler) {
+    document.removeEventListener('keydown', _dockActionPopoverKeyHandler);
+    _dockActionPopoverKeyHandler = null;
+  }
+}
+
+function _openDockActionPopover(convId, messageId, anchorEl) {
+  if (!convId || !messageId || !anchorEl) return;
+  // Toggle: re-tapping the same bubble closes the popover.
+  if (_dockActionPopoverEl && _dockActionPopoverAnchorId === messageId) {
+    _closeDockActionPopover();
+    return;
+  }
+  _closeDockActionPopover();
+
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  const m = thread.messages.find(x => x.id === messageId);
+  if (!m || m.deleted_at || m._pending) return;
+
+  const myId = _cfg.getCurrentUser()?.id;
+  const mine = m.sender_id === myId;
+  // Capability gates mirror the prior in-line action menu (#268 +
+  // Codex #278 — image-only own messages stay deletable).
+  const hasText = (m.body || '').length > 0;
+  const hasImg  = Array.isArray(m.image_urls) && m.image_urls.length > 0;
+  const canEdit = mine && hasText && !hasImg;
+  const canCopy = hasText;
+  const canDelete = mine;
+
+  const pop = document.createElement('div');
+  pop.className = 'dm-mini-action-popover';
+  pop.setAttribute('role', 'menu');
+  pop.setAttribute('aria-label', 'Message actions');
+  pop.innerHTML = `
+    <button type="button" class="dm-mini-pop-act" data-act="react" aria-label="React" title="React">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+    </button>
+    <button type="button" class="dm-mini-pop-act" data-act="reply" aria-label="Reply" title="Reply">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+    </button>
+    ${canCopy ? `
+    <button type="button" class="dm-mini-pop-act" data-act="copy" aria-label="Copy text" title="Copy">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    </button>` : ''}
+    ${canEdit ? `
+    <button type="button" class="dm-mini-pop-act" data-act="edit" aria-label="Edit" title="Edit">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+    </button>` : ''}
+    ${canDelete ? `
+    <button type="button" class="dm-mini-pop-act dm-mini-pop-act-danger" data-act="delete" aria-label="Delete" title="Delete">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+    </button>` : ''}
+  `;
+  // Stage off-screen so we can measure before final placement (same
+  // pattern as the reaction picker).
+  pop.style.position = 'fixed';
+  pop.style.visibility = 'hidden';
+  pop.style.top = '0px';
+  pop.style.left = '0px';
+  document.body.appendChild(pop);
+
+  const r = anchorEl.getBoundingClientRect();
+  const w = pop.offsetWidth;
+  const h = pop.offsetHeight;
+  // Place above the bubble by default. If there's no room above,
+  // flip below. THEN clamp against the viewport bottom too — earlier
+  // impl only clamped the top edge, so a bubble near the bottom of a
+  // tall mini chat would push the popover past window.innerHeight.
+  // Codex P1-2.
+  const viewportBottom = window.innerHeight - 8;
+  let top = r.top - h - 8;
+  if (top < 8) top = r.bottom + 8;
+  if (top + h > viewportBottom) top = Math.max(8, viewportBottom - h);
+  // Horizontal: align to the side of the bubble. Mine → right edge,
+  // theirs → left edge. Clamp inside viewport.
+  let left;
+  if (mine) {
+    left = r.right - w;
+  } else {
+    left = r.left;
+  }
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if (left < 8) left = 8;
+  pop.style.top  = `${top}px`;
+  pop.style.left = `${left}px`;
+  pop.style.visibility = 'visible';
+  _dockActionPopoverEl       = pop;
+  _dockActionPopoverAnchorId = messageId;
+
+  // Wire each action.
+  pop.querySelectorAll('[data-act]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const act = btn.dataset.act;
+      // Close popover first so the action's optimistic re-render
+      // doesn't see a stale popover floating over the new DOM.
+      _closeDockActionPopover();
+      if (act === 'react') {
+        // Chain into the reaction picker — anchored to the bubble too.
+        _openDockReactionPicker(convId, messageId, anchorEl);
+      } else if (act === 'reply')  _startDockReply(convId, messageId);
+      else if (act === 'copy')     _copyDockMessage(convId, messageId);
+      else if (act === 'edit')     _startDockEdit(convId, messageId);
+      else if (act === 'delete')   _deleteDockMessage(convId, messageId);
+    };
+  });
+
+  // Outside-click + Escape dismiss. Deferred one tick so the click
+  // that opened the popover doesn't immediately close it. Listener
+  // refs are stored on module-level handles so _closeDockActionPopover
+  // can remove them explicitly — earlier impl relied on the listeners
+  // self-unhooking on next event, leaving them orphaned after
+  // teardown. Codex P2-2.
+  setTimeout(() => {
+    _dockActionPopoverDocHandler = (ev) => {
+      if (!_dockActionPopoverEl) {
+        // Defensive — close should have cleaned up. Remove just in case.
+        document.removeEventListener('click', _dockActionPopoverDocHandler);
+        _dockActionPopoverDocHandler = null;
+        return;
+      }
+      if (!_dockActionPopoverEl.contains(ev.target)) {
+        _closeDockActionPopover();
+      }
+    };
+    _dockActionPopoverKeyHandler = (ev) => {
+      if (ev.key === 'Escape' && _dockActionPopoverEl) {
+        _closeDockActionPopover();
+        anchorEl.focus?.();
+      }
+    };
+    document.addEventListener('click', _dockActionPopoverDocHandler);
+    document.addEventListener('keydown', _dockActionPopoverKeyHandler);
+  }, 0);
+}
+
+// ── Reactions: picker + toggle + realtime ───────────────────────────────
+
+function _closeDockReactionPicker() {
+  if (_dockReactionPickerEl) {
+    try { _dockReactionPickerEl.remove(); } catch {}
+    _dockReactionPickerEl = null;
+  }
+  _dockReactionPickerAnchor = null;
+}
+
+// Open the quick-reactions strip anchored above the react-button (which
+// sits next to the bubble). Mirrors the full-page openReactionPicker
+// pattern — fixed-position above the trigger, dismissed by outside
+// click. Clicking an emoji toggles the reaction immediately.
+function _openDockReactionPicker(convId, messageId, anchorEl) {
+  // Toggle off if the same anchor is clicked twice in a row. Without
+  // this, re-clicking the React smiley after the picker opens just
+  // re-runs open (close-then-open) and the picker visibly stays up,
+  // which makes it look broken. Compare via dataset.msg since the
+  // anchor element itself may have been re-rendered between clicks
+  // (_patchMessagesMarkup wipes and rebuilds the action menu DOM).
+  if (_dockReactionPickerEl && _dockReactionPickerAnchor?.dataset?.msg === anchorEl?.dataset?.msg) {
+    _closeDockReactionPicker();
+    return;
+  }
+  _closeDockReactionPicker();
+  if (!messageId || !anchorEl) return;
+
+  const picker = document.createElement('div');
+  picker.className = 'dm-mini-rx-picker';
+  picker.setAttribute('role', 'toolbar');
+  picker.setAttribute('aria-label', 'Reactions');
+  // Each pick button gets a real aria-label (the emoji itself isn't
+  // useful for screen-readers) + tabindex so the picker is keyboard-
+  // operable. Codex review P2-269.
+  const emojiNames = {
+    '❤️': 'Heart',
+    '😂': 'Laugh',
+    '😢': 'Sad',
+    '😡': 'Angry',
+    '👍': 'Thumbs up',
+    '🔥': 'Fire',
+  };
+  picker.innerHTML = DOCK_QUICK_REACTIONS.map((em, i) => {
+    const name = emojiNames[em] || `Reaction ${i + 1}`;
+    return `<button type="button" class="dm-mini-rx-pick" data-emoji="${escHTML(em)}" aria-label="${escHTML(name)}" title="${escHTML(name)}" tabindex="0">${em}</button>`;
+  }).join('');
+  // Stage off-screen so we can measure the rendered width before final
+  // placement. The earlier version used a hardcoded PICK_W=240 estimate
+  // but the actual inline-flex picker measures ~80-100px, so the strip
+  // landed ~140px too far left and the right-edge clamp branch was
+  // unreachable. Codex review 2026-05-16 P1-1 fix.
+  picker.style.position = 'fixed';
+  picker.style.visibility = 'hidden';
+  picker.style.top = '0px';
+  picker.style.left = '0px';
+  document.body.appendChild(picker);
+
+  const r = anchorEl.getBoundingClientRect();
+  // Measure now that the picker is in the DOM. offsetWidth includes
+  // padding + border (matches what the browser will actually paint).
+  const pickW = picker.offsetWidth;
+  const pickH = picker.offsetHeight;
+
+  // Vertical: 8px above the trigger, never above the viewport top.
+  picker.style.top = `${Math.max(8, r.top - pickH - 8)}px`;
+  // Horizontal: center on the trigger, clamp inside the viewport.
+  let left = r.left + r.width / 2 - pickW / 2;
+  if (left + pickW > window.innerWidth - 8) left = window.innerWidth - pickW - 8;
+  if (left < 8) left = 8;
+  picker.style.left = `${left}px`;
+  picker.style.visibility = 'visible';
+  _dockReactionPickerEl     = picker;
+  _dockReactionPickerAnchor = anchorEl;
+
+  const pickBtns = [...picker.querySelectorAll('[data-emoji]')];
+  pickBtns.forEach((btn, idx) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      // Close FIRST so the picker disappears before the optimistic
+      // _patchMessagesMarkup re-render inside _toggleDockReaction
+      // fires. Charles 2026-05-16 bug fix — keeps the strip from
+      // visually outliving the click.
+      _closeDockReactionPicker();
+      _toggleDockReaction(convId, messageId, btn.dataset.emoji);
+      // Skip the focus-return — anchorEl was wiped by the re-render
+      // and focusing a detached node does nothing useful.
+    };
+    // Arrow keys move focus within the strip; Escape closes; Enter/
+    // Space activate (default browser button behavior already handles
+    // those). Codex review P2-269.
+    btn.addEventListener('keydown', (ev) => {
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        pickBtns[(idx + 1) % pickBtns.length].focus();
+      } else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        pickBtns[(idx - 1 + pickBtns.length) % pickBtns.length].focus();
+      } else if (ev.key === 'Home') {
+        ev.preventDefault();
+        pickBtns[0].focus();
+      } else if (ev.key === 'End') {
+        ev.preventDefault();
+        pickBtns[pickBtns.length - 1].focus();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        _closeDockReactionPicker();
+        anchorEl.focus?.();
+      }
+    });
+  });
+  // Auto-focus the first reaction so keyboard users can immediately
+  // arrow + Enter without hunting for the strip.
+  pickBtns[0]?.focus();
+
+  // Outside-click dismiss. Deferred so the click that opened us doesn't
+  // immediately close it. Cleans itself up on close OR when the picker
+  // is replaced by another open. Esc on document is also wired so
+  // dismissal works even if focus has moved outside the picker.
+  setTimeout(() => {
+    const onDoc = (ev) => {
+      if (!_dockReactionPickerEl) {
+        document.removeEventListener('click', onDoc);
+        document.removeEventListener('keydown', onKey);
+        return;
+      }
+      if (!_dockReactionPickerEl.contains(ev.target)) {
+        _closeDockReactionPicker();
+        document.removeEventListener('click', onDoc);
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    const onKey = (ev) => {
+      if (ev.key === 'Escape' && _dockReactionPickerEl) {
+        _closeDockReactionPicker();
+        document.removeEventListener('click', onDoc);
+        document.removeEventListener('keydown', onKey);
+        anchorEl.focus?.();
+      }
+    };
+    document.addEventListener('click', onDoc);
+    document.addEventListener('keydown', onKey);
+  }, 0);
+}
+
+// Optimistic toggle — patches the thread's reactions map immediately,
+// kicks the server call, rolls back on failure. Identical model to the
+// full-page toggleReaction in messages.js (the dock can't share that
+// function directly because it writes to dmState.reactions, but the
+// shape is the same).
+//
+// Rollback strategy: INVERSE-OP on the current array, NOT wholesale
+// restore of a pre-mutation snapshot. The earlier implementation
+// snapshotted `list` and restored it on failure, which would have
+// overwritten any reaction inserts that arrived from other users via
+// the realtime channel during the await. Codex review 2026-05-16
+// P1-2 fix.
+async function _toggleDockReaction(convId, messageId, emoji) {
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  const myId = _cfg.getCurrentUser()?.id;
+  if (!myId) return;
+
+  if (!thread.reactions) thread.reactions = {};
+  const list = thread.reactions[messageId] || [];
+  const had  = list.some(r => r.user_id === myId && r.emoji === emoji);
+
+  // Optimistic.
+  if (had) {
+    thread.reactions[messageId] = list.filter(r => !(r.user_id === myId && r.emoji === emoji));
+  } else {
+    thread.reactions[messageId] = [...list, { message_id: messageId, user_id: myId, emoji }];
+  }
+  _patchMessagesMarkup(thread);
+
+  const result = await toggleMessageReaction(messageId, emoji);
+  if (result === null) {
+    // Rollback — undo just OUR optimistic mutation against whatever
+    // the array looks like NOW. If we optimistically added, remove
+    // (myId, emoji). If we optimistically removed, push it back.
+    // This preserves any other-user reactions that landed via the
+    // realtime channel during the await.
+    const current = thread.reactions[messageId] || [];
+    if (had) {
+      // We tried to remove → put our entry back IF it's not already there
+      // (defensive: realtime echo of our own delete cancellation might
+      // still arrive before this rollback).
+      if (!current.some(r => r.user_id === myId && r.emoji === emoji)) {
+        thread.reactions[messageId] = [...current, { message_id: messageId, user_id: myId, emoji }];
+      }
+    } else {
+      // We tried to add → strip our entry. Leaves everyone else's
+      // reactions (including any that arrived during the await) intact.
+      thread.reactions[messageId] = current.filter(r => !(r.user_id === myId && r.emoji === emoji));
+    }
+    _patchMessagesMarkup(thread);
+  }
+}
+
+// Subscribe to message_reactions INSERT/DELETE for any message belonging
+// to THIS thread. We can't filter by conversation_id in the postgres
+// filter (reactions table has no conv FK), so we accept all events for
+// the user's reachable rows (RLS-scoped) and reject in-handler when the
+// message isn't in our open thread.
+function _subscribeReactionsForThread(convId) {
+  return supabase
+    .channel(`dock-rx-${convId}-${Math.random().toString(36).slice(2, 8)}`)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'message_reactions' }, (payload) => {
+      _handleReactionInsert(convId, payload.new);
+    })
+    .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'message_reactions' }, (payload) => {
+      _handleReactionDelete(convId, payload.old);
+    })
+    .subscribe();
+}
+
+function _handleReactionInsert(convId, row) {
+  if (!row?.message_id) return;
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  // Only care about reactions on messages we know about.
+  if (!thread.messages.some(m => m.id === row.message_id)) return;
+  if (!thread.reactions) thread.reactions = {};
+  const list = thread.reactions[row.message_id] || [];
+  // Dedupe — our own optimistic add already inserted this same key.
+  if (list.some(r => r.user_id === row.user_id && r.emoji === row.emoji)) return;
+  thread.reactions[row.message_id] = [...list, row];
+  _patchMessagesMarkup(thread);
+}
+
+function _handleReactionDelete(convId, row) {
+  if (!row?.message_id) return;
+  const thread = dmDockState.openThreads.get(convId);
+  if (!thread) return;
+  if (!thread.reactions?.[row.message_id]) return;
+  const next = thread.reactions[row.message_id].filter(r =>
+    !(r.user_id === row.user_id && r.emoji === row.emoji)
+  );
+  thread.reactions[row.message_id] = next;
+  _patchMessagesMarkup(thread);
 }
 
 function _handleIncomingMessage(convId, msg) {
@@ -1147,6 +2764,34 @@ function _handleIncomingMessage(convId, msg) {
     // already got swapped above).
     if (thread.messages.some(m => m.id === msg.id)) return;
     thread.messages.push(msg);
+    // Group-seen map needs a recompute when a new message arrives —
+    // the latest-message anchor may have shifted. Cheap (O(messages
+    // × members)) per ping.
+    if (thread.conv.is_group) {
+      thread.groupSeenByMsg = _computeGroupSeenByMsg(thread);
+    }
+    // For group chats: if the sender isn't in our members cache
+    // (e.g., added after we opened the chat), refresh members in the
+    // background so subsequent renders resolve the avatar/name. Render
+    // immediately with a placeholder so the message lands without lag.
+    // Guard with an in-flight promise so two parallel unknown-sender
+    // inserts don't fire two refetches that race on assignment.
+    // Codex P2-3 (2026-05-16).
+    if (thread.conv.is_group && msg.sender_id && !thread.members?.has(msg.sender_id) && !thread.membersRefreshPromise) {
+      thread.membersRefreshPromise = loadGroupMembers(convId)
+        .then((members) => {
+          // Only apply if the thread is still open (user may have
+          // closed it during the fetch).
+          if (dmDockState.openThreads.get(convId) === thread) {
+            thread.members = members;
+            _patchMessagesMarkup(thread);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          thread.membersRefreshPromise = null;
+        });
+    }
     _patchMessagesMarkup(thread);
     // Auto-scroll only if user is already near the bottom; otherwise
     // they're reading older content and we shouldn't yank them.
@@ -1170,6 +2815,14 @@ function _handleMessageUpdate(convId, msg) {
   const idx = thread.messages.findIndex(m => m.id === msg.id);
   if (idx >= 0) {
     thread.messages[idx] = { ...thread.messages[idx], ...msg };
+    // For 1:1 the inline-seen lookup re-runs on every render so we get
+    // the latest read_at automatically. For groups we additionally
+    // need a fresh map (members' last_read_at may have advanced
+    // because the same realtime UPDATE that bumped read_at on the
+    // message also implies they're caught up). Recompute defensively.
+    if (thread.conv.is_group) {
+      thread.groupSeenByMsg = _computeGroupSeenByMsg(thread);
+    }
     _patchMessagesMarkup(thread);
   }
 }
@@ -1178,14 +2831,32 @@ function _handleMessageDelete(convId, msg) {
   const thread = dmDockState.openThreads.get(convId);
   if (!thread) return;
   thread.messages = thread.messages.filter(m => m.id !== msg.id);
+  // Free the reactions map slot for the deleted message — otherwise
+  // long-lived dock chats with heavy message churn (active group
+  // chats deleting + reposting) leak orphan reaction lists keyed by
+  // ids no longer in `messages`. Codex review 2026-05-16 P1-5.
+  if (thread.reactions) delete thread.reactions[msg.id];
   _patchMessagesMarkup(thread);
 }
 
-function _patchMessagesMarkup(thread) {
+function _patchMessagesMarkup(thread, opts = {}) {
   const root = _miniContainerEl?.querySelector(`.dm-mini-chat[data-conv-id="${CSS.escape(thread.conv.id)}"]`);
   const list = root?.querySelector('.dm-mini-messages');
   if (!list) return;
+  const preserveScroll = opts.preserveScroll !== false;
+  const prevScrollHeight = list.scrollHeight || 0;
+  const prevScrollTop = list.scrollTop || 0;
+  const wasNearBottom = preserveScroll
+    && (prevScrollHeight - prevScrollTop - list.clientHeight < 80);
+
   list.innerHTML = _renderMessagesMarkup(thread);
+
+  if (!preserveScroll) return;
+  if (wasNearBottom) {
+    list.scrollTop = list.scrollHeight;
+  } else if (prevScrollHeight > 0) {
+    list.scrollTop = prevScrollTop + ((list.scrollHeight || 0) - prevScrollHeight);
+  }
 }
 
 // ── Inbox-level unread badge ─────────────────────────────────────────────
@@ -1197,22 +2868,79 @@ async function _loadAndRefreshUnread() {
     console.warn('[dock] conv list load failed:', e?.message);
   }
   _refreshUnreadBadge();
-  // If inbox is open, re-render the list too.
-  if (dmDockState.inboxOpen && _inboxEl) _renderInbox();
+  // If inbox is open, patch the list in place INSTEAD of nuking the
+  // entire panel. Earlier impl called _renderInbox() which detached
+  // and recreated the section, yanking the user's scroll back to top
+  // on every realtime ping — a jarring papercut, especially when the
+  // user is scrolling through older convs. Now we keep the panel
+  // (and its scrollTop) and only re-render the list contents +
+  // rebind their click handlers. Codex review 2026-05-16 P2-272 fix.
+  if (dmDockState.inboxOpen && _inboxEl) {
+    const listEl = _inboxEl.querySelector('.dm-dock-inbox-list');
+    if (listEl) {
+      const prevScroll = listEl.scrollTop;
+      listEl.innerHTML = _renderConvListMarkup();
+      // Re-bind click handlers (lost when innerHTML wipes the old DOM).
+      listEl.querySelectorAll('.dm-dock-conv-item[data-conv-id]').forEach(item => {
+        item.addEventListener('click', () => {
+          const id = item.dataset.convId;
+          closeMessagesDock();
+          openMessagesDockToConv(id);
+        });
+      });
+      // Restore scroll synchronously so the paint never shows the
+      // top-of-list flash.
+      listEl.scrollTop = prevScroll;
+      // Update the badge inside the inbox header too (was previously
+      // a side-effect of _renderInbox calling _refreshUnreadBadge).
+      _refreshUnreadBadge();
+    } else {
+      // Defensive fallback — if the panel is malformed, fall back to
+      // the old full-rerender path.
+      _renderInbox();
+    }
+  }
+}
+
+// Clear local unread state for a conv WITHOUT waiting for the server
+// round-trip. The earlier flow did `markConversationRead(...).then(()
+// => _refreshUnreadBadge())` which zeroed the server row but left
+// _convCache._unreadCount at its old value until the next inbox
+// reload, so the badge appeared "stuck". Codex P1-4 2026-05-16.
+function _markDockConvReadLocal(convId) {
+  const c = _convCache.find(x => x.id === convId);
+  if (c) c._unreadCount = 0;
+  _refreshUnreadBadge();
+  // Patch the inbox list in place if it's open so the badge drops
+  // visibly the moment the user opens the chat.
+  if (dmDockState.inboxOpen && _inboxEl) {
+    const list = _inboxEl.querySelector('.dm-dock-inbox-list');
+    if (list) {
+      const prevScroll = list.scrollTop;
+      list.innerHTML = _renderConvListMarkup();
+      list.querySelectorAll('.dm-dock-conv-item[data-conv-id]').forEach(item => {
+        item.addEventListener('click', () => {
+          const id = item.dataset.convId;
+          closeMessagesDock();
+          openMessagesDockToConv(id);
+        });
+      });
+      list.scrollTop = prevScroll;
+    }
+  }
 }
 
 function _refreshUnreadBadge() {
-  const user = _cfg.getCurrentUser();
+  // Sum real per-conv unread message counts. Earlier impl counted
+  // CONVERSATIONS (not messages) and used a heuristic that flagged
+  // any conv whose last message wasn't mine — both wrong. Now we sum
+  // c._unreadCount (hydrated by loadUnreadCountsForConvIds), skipping
+  // archived/muted/secret convs. Codex review 2026-05-16 (#280).
   const total = _convCache.reduce((sum, c) => {
     if (c._archived) return sum;
     if (c._mutedUntil && new Date(c._mutedUntil) > new Date()) return sum;
     if (c.is_secret) return sum;
-    // Same "is unread" heuristic as the inbox list — flagged when the
-    // last message exists and wasn't from me. Full per-conv unread
-    // counts require the app.js dmState logic; Stage 9 extraction
-    // will unify the two.
-    const isUnread = c.last_message_at && c.last_message_sender !== user?.id;
-    return sum + (isUnread ? 1 : 0);
+    return sum + (c._unreadCount || 0);
   }, 0);
   const launcherBadge = _launcherEl?.querySelector('.dm-dock-launcher-badge');
   if (launcherBadge) {
@@ -1236,17 +2964,48 @@ function _refreshUnreadBadge() {
   }
 }
 
+// Debounced full reload of the conv list. Codex P2-1 (2026-05-16):
+// the inbox UPDATE channel fires on EVERY change to any conv row the
+// user touches — including mute/archive flag flips and our own
+// markConversationRead writes. Each fire would otherwise run a full
+// loadConversationList (100 convs + profile fetch + per-conv unread
+// COUNT(*)). Trailing 600ms debounce coalesces bursts. Combined with
+// the payload-level last_message_at check below, this drops typical
+// load to <1 reload/sec even in a busy group chat.
+let _refreshUnreadTimer = null;
+function _scheduleRefreshUnread() {
+  if (_refreshUnreadTimer) return;
+  _refreshUnreadTimer = setTimeout(() => {
+    _refreshUnreadTimer = null;
+    _loadAndRefreshUnread();
+  }, 600);
+}
+
 function _subscribeInboxBadge() {
   const user = _cfg.getCurrentUser();
   if (!user?.id) return;
   if (_inboxChannel) try { supabase.removeChannel(_inboxChannel); } catch {}
-  // Coarse: any INSERT into messages pings us. We refresh the conv list
-  // (which gets the new last_message_* via the server trigger). Cheap
-  // enough since most users don't have thousands of conversations.
+  // Pivoted from messages.INSERT (table-wide, no filter) to
+  // conversations.UPDATE (RLS-narrowed to convs the user participates
+  // in). The existing AFTER INSERT trigger on messages already bumps
+  // conversations.last_message_at + .last_message_preview + sender —
+  // so this catches the same signal with naturally narrower scope and
+  // no per-conv re-subscribe machinery. Codex review 2026-05-16 P1-3
+  // fix; supersedes the original table-wide listener that paid a
+  // round-trip on every message insert anywhere in the DB.
+  //
+  // 2026-05-16 Codex P2-1: also filter out UPDATEs that don't change
+  // last_message_at (mute/archive flips fire here too) and debounce
+  // the reload so a burst of N messages = 1 round-trip not N.
   _inboxChannel = supabase
     .channel(`dock-inbox-${user.id}`)
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, () => {
-      _loadAndRefreshUnread();
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' }, (payload) => {
+      const newRow = payload.new;
+      const oldRow = payload.old;
+      // Skip if last_message_at didn't change — this UPDATE was
+      // triggered by mute/archive/etc., not by a new message.
+      if (newRow?.last_message_at === oldRow?.last_message_at) return;
+      _scheduleRefreshUnread();
     })
     .subscribe();
 }
