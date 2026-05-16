@@ -3915,6 +3915,20 @@ body.light .comment-action-btn.reaction-trigger.reacted { color: #db2777; backgr
 .profile-info { flex: 1; min-width: 0; }
 .profile-name-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
 .profile-name { font-size: 1.6rem; font-weight: 700; }
+/* @username subline under the display name. Hides itself when empty so
+   users without a display_name (where the @handle IS the header) don't
+   get an awkward blank row. */
+.profile-handle { font-size: 0.95rem; color: var(--text2); margin-top: -0.25rem; margin-bottom: 0.5rem; }
+.profile-handle:empty { display: none; }
+/* @-prefix input row for the Username field in the edit-profile modal */
+.edit-handle-row { display: flex; align-items: stretch; gap: 0; }
+.edit-handle-row .edit-handle-prefix {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 0.65rem; border: 1px solid var(--border, #e5e5e5); border-right: none;
+  border-radius: 10px 0 0 10px; background: var(--bg2, #fafafa);
+  color: var(--text2, #888); font-weight: 600; font-size: 0.95rem;
+}
+.edit-handle-row .edit-handle-input { border-radius: 0 10px 10px 0; flex: 1; min-width: 0; }
 .profile-badge { font-size: 0.72rem; background: var(--bg3); color: var(--text2); padding: 3px 10px; border-radius: 99px; border: 1px solid var(--border); }
 .profile-badge.guest { background: rgba(251,191,36,0.1); color: var(--accent); border-color: rgba(251,191,36,0.3); }
 
@@ -14575,9 +14589,13 @@ body:not(.light) .chapter-meta-strip.wc-over  .chapter-wc-hint { background: rgb
    ════════════════════════════════════════════════════════════════════════════ */
 
 .edit-profile-hint {
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--text2);
-  margin: -0.5rem 0 0.85rem;
+  /* 0.5rem of breathing room between input and hint — the old -0.5rem
+     negative top pulled the hint up INTO the input bottom border, which
+     looked OK with one-line hints but overlapped once we started wrapping
+     two-line copy ("…30 days. N changes remaining."). 2026-05-16. */
+  margin: 0.5rem 0 0.85rem;
   line-height: 1.45;
 }
 

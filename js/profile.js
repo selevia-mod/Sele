@@ -42,6 +42,15 @@ let _cfg = {
   scrollToTop:              () => {},
   closeAllModals:           () => {},
   closePostActionMenu:      () => {},
+  // Profile kebab menu (share / report / snooze / block) — still owned
+  // by app.js, bridged here. Codex audit 2026-05-16: previously called
+  // bare, which threw in module scope.
+  openProfileActionMenu:    () => {},
+  closeProfileActionMenu:   () => {},
+  // Post visibility filter (hidden / snoozed / blocked / banned) — moved
+  // to feed.js in Stage 5, app.js re-imports and forwards. Profile posts
+  // bypassed this before the Codex audit.
+  shouldHidePost:           () => false,
   updateTopbarUser:         () => {},
   setSidebarActive:         () => {},
   renderRoleSeal:           () => '',
@@ -105,7 +114,7 @@ export async function openProfile(userId) {
 
   // Close any modals/menus from a previous profile (rapid-nav safety)
   _cfg.closeAllModals('.modal-backdrop[data-modal="follow-list"], .modal-backdrop[data-modal="share-profile"], .modal-backdrop[data-modal="report-user"]');
-  closeProfileActionMenu?.();
+  _cfg.closeProfileActionMenu?.();
   _cfg.closePostActionMenu?.();
 
   // ── Paint skeleton instantly so the page never feels frozen ──
@@ -121,7 +130,11 @@ export async function openProfile(userId) {
   const profileP   = fetchProfileWithRetry(userId);
   const followersP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', userId);
   const followingP = supabase.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', userId);
-  const postsP     = supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+  // Hide hidden rows from non-owners so the count agrees with the visible
+  // post list (Codex audit 2026-05-16).
+  let postsQ = supabase.from('posts').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+  if (!isOwn) postsQ = postsQ.eq('is_hidden', false);
+  const postsP = postsQ;
 
   // Filter to status='ready' for EVERYONE — including the owner.
   // Pre-fix the owner's count included processing/uploading rows,
@@ -134,12 +147,16 @@ export async function openProfile(userId) {
   // count as visible. The previous .eq('status','ready') under-counted
   // the videos badge on profile tabs because fresh uploads land with
   // status='published'.
-  const videosP = supabase.from('videos').select('*', { count: 'exact', head: true })
+  // Non-owners also shouldn't see hidden videos / books (Codex audit
+  // 2026-05-16). Owner still sees everything they uploaded.
+  let videosQ = supabase.from('videos').select('*', { count: 'exact', head: true })
     .eq('uploader_id', userId)
     .in('status', ['ready', 'published']);
+  if (!isOwn) videosQ = videosQ.eq('is_hidden', false);
+  const videosP = videosQ;
 
   let booksQ = supabase.from('books').select('*', { count: 'exact', head: true }).eq('author_id', userId);
-  if (!isOwn) booksQ = booksQ.eq('is_public', true).in('status', ['ongoing', 'completed']);
+  if (!isOwn) booksQ = booksQ.eq('is_public', true).eq('is_hidden', false).in('status', ['ongoing', 'completed']);
   const booksP = booksQ;
 
   const badgesP    = supabase.from('user_badges').select('badge').eq('user_id', userId);
@@ -178,7 +195,22 @@ export async function openProfile(userId) {
   avatarBig.innerHTML = profile.avatar_url ? `<img src="${profile.avatar_url}"/>` : initials(profile.username);
 
   // Name / badge / bio
-  document.getElementById('profileName').innerHTML = `${escHTML(profile.username)}${_cfg.renderRoleSeal(profile, 20)}`;
+  // Header prefers display_name (matches feed.js post-author pattern:
+  // `profile.display_name || profile.username || 'Unknown'`). The
+  // @username subline ALWAYS shows when username exists — even when
+  // display_name is unset (so the header IS @username), because the
+  // handle is what users copy/share. The CSS :empty rule collapses
+  // the subline if username is missing.
+  const headerName = profile.display_name || profile.username || 'Unknown';
+  document.getElementById('profileName').innerHTML = `${escHTML(headerName)}${_cfg.renderRoleSeal(profile, 20)}`;
+  const handleEl = document.getElementById('profileHandle');
+  if (handleEl) {
+    // Hide the subline only when it would duplicate the header (no
+    // display_name set + header already shows @username). Otherwise
+    // always surface the @handle.
+    const sameAsHeader = !profile.display_name && profile.username;
+    handleEl.textContent = (profile.username && !sameAsHeader) ? `@${profile.username}` : '';
+  }
   renderProfileBadges(profile, badges);
   document.getElementById('profileBio').textContent = profile.bio || '';
 
@@ -205,7 +237,27 @@ export async function openProfile(userId) {
   document.getElementById('aboutUsername').textContent = profile.username;
   document.getElementById('aboutBio').textContent = profile.bio || '—';
   document.getElementById('aboutLocation').textContent = profile.location || '—';
-  document.getElementById('aboutWebsite').innerHTML = profile.website ? `<a href="${profile.website}" target="_blank">${profile.website}</a>` : '—';
+  // Codex audit 2026-05-16: building the website link via innerHTML
+  // interpolation was XSS-prone (any user-controlled `website` value
+  // with a `"` or javascript: scheme would break out / execute). Build
+  // via DOM APIs + URL parse + http(s)-only protocol check.
+  const websiteEl = document.getElementById('aboutWebsite');
+  websiteEl.textContent = '—';
+  if (profile.website) {
+    try {
+      const raw = String(profile.website).trim();
+      const href = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      const url = new URL(href);
+      if (url.protocol === 'http:' || url.protocol === 'https:') {
+        const a = document.createElement('a');
+        a.href = url.href;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = raw;
+        websiteEl.replaceChildren(a);
+      }
+    } catch { /* malformed URL — leave em-dash */ }
+  }
   document.getElementById('aboutJoined').textContent = joined.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   document.getElementById('aboutType').textContent = profile.is_guest ? 'Guest account' : 'Member';
 
@@ -239,7 +291,7 @@ export async function openProfile(userId) {
   // Wire profile menu (kebab) — share / report / snooze / block
   const menuBtn = document.getElementById('profileMenuBtn');
   if (menuBtn) {
-    menuBtn.onclick = (e) => openProfileActionMenu(e, menuBtn, {
+    menuBtn.onclick = (e) => _cfg.openProfileActionMenu(e, menuBtn, {
       isOwn,
       userId,
       username: profile.username || 'this user',
@@ -607,21 +659,34 @@ async function openFollowListModal(userId, username, mode) {
 
 async function loadProfilePosts(userId) {
   const wrap = document.getElementById('profilePosts');
-  wrap.innerHTML = '<div class="loading">Loading _cfg.getPosts()...</div>';
+  wrap.innerHTML = '<div class="loading">Loading posts...</div>';
   // Fetch by created_at; sort pinned-first client-side. Bulletproof if pinned_at
   // column doesn't exist yet (works pre-migration, just won't have pinning).
-  const { data } = await supabase
+  // Hide hidden + banned-author rows for non-owners — Codex audit 2026-05-16.
+  const isOwner = _cfg.getCurrentUser()?.id === userId;
+  let q = supabase
     .from('posts')
-    .select(`*, profiles!user_id(id, username, avatar_url, is_guest, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, role), videos(id, video_url, thumbnail_url, title, duration))`)
-    .eq('user_id', userId)
+    .select(`*, profiles!user_id(id, username, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration), original:reposted_from(*, profiles!user_id(id, username, avatar_url, is_guest, is_banned, role), videos(id, video_url, thumbnail_url, title, duration))`)
+    .eq('user_id', userId);
+  if (!isOwner) q = q.eq('is_hidden', false);
+  const { data } = await q
     .order('created_at', { ascending: false })
     .limit(40);
-  posts = (data || []).slice().sort((a, b) => {
+  const sortedPosts = (data || []).slice().sort((a, b) => {
     if (a.pinned_at && !b.pinned_at) return -1;
     if (!a.pinned_at && b.pinned_at) return 1;
     if (a.pinned_at && b.pinned_at) return new Date(b.pinned_at) - new Date(a.pinned_at);
     return new Date(b.created_at) - new Date(a.created_at);
   });
+  // Belt + suspenders: shouldHidePost filters snoozed/blocked authors that
+  // server-side RLS doesn't cover. Owners see everything.
+  const visiblePosts = isOwner
+    ? sortedPosts
+    : sortedPosts.filter(p => !_cfg.shouldHidePost(p));
+  // Push the visible list to app.js's shared posts[] array so other modules
+  // (feed action menu, composer prepend dedup) see a consistent view of
+  // what's on screen. ESM bindings are read-only — must go through the setter.
+  _cfg.setPosts(visiblePosts);
   wrap.innerHTML = '';
   if (!_cfg.getPosts().length) {
     wrap.innerHTML = `
@@ -699,6 +764,8 @@ async function loadProfileVideos(userId) {
   // though they showed as Published in the Studio. Same defensive
   // filter the mobile fetchVideos uses.
   q = q.in('status', ['ready', 'published']);
+  // Hide moderated/hidden videos from non-owners — Codex audit 2026-05-16.
+  if (!isOwn) q = q.eq('is_hidden', false);
 
   const { data, error } = await q.limit(60);
 
@@ -770,9 +837,10 @@ async function loadProfileBooks(userId) {
     .select(`id, title, description, cover_url, genre, tags, views_count, likes_count, chapters_count, word_count, status, is_public, published_at, created_at, updated_at, author_id, profiles!books_author_id_fkey ( id, username, avatar_url )`)
     .eq('author_id', userId)
     .order('updated_at', { ascending: false });
-  // Non-owners only see public, non-draft books
+  // Non-owners only see public, non-draft, non-hidden books — Codex
+  // audit 2026-05-16 caught that is_hidden was missing here.
   if (!isOwn) {
-    q = q.eq('is_public', true).in('status', ['ongoing', 'completed']);
+    q = q.eq('is_public', true).eq('is_hidden', false).in('status', ['ongoing', 'completed']);
   }
 
   const { data, error } = await q.limit(60);
@@ -975,15 +1043,52 @@ function parseLocation(loc) {
   return { country: '', city: loc };
 }
 
+// Apply a status object to a name/handle input. Status comes from the
+// server RPC (username_change_status / display_name_change_status) and
+// has shape { ok, changes_remaining, max_per_window, window_days,
+// next_change_allowed_at }. We disable the input and rewrite the hint
+// when changes_remaining is 0; otherwise show "X changes remaining".
+function _applyChangeStatus({ inputEl, hintEl, status, kind, defaultHint }) {
+  if (!status || status.ok === false) {
+    // Soft-fail — server unreachable or column missing. Leave input
+    // enabled so the user can still try (server will re-enforce).
+    inputEl.disabled = false;
+    hintEl.classList.remove('is-locked');
+    hintEl.textContent = defaultHint;
+    return;
+  }
+  const remaining = typeof status.changes_remaining === 'number'
+    ? status.changes_remaining : status.max_per_window;
+  if (remaining === 0) {
+    inputEl.disabled = true;
+    hintEl.classList.add('is-locked');
+    const nextDate = status.next_change_allowed_at
+      ? new Date(status.next_change_allowed_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+      : null;
+    hintEl.textContent = nextDate
+      ? `${kind === 'username' ? 'Username' : 'Display name'} is locked. You can change it again on ${nextDate}.`
+      : `${kind === 'username' ? 'Username' : 'Display name'} is locked. You can change it again soon.`;
+  } else {
+    inputEl.disabled = false;
+    hintEl.classList.remove('is-locked');
+    hintEl.textContent = `${defaultHint} ${remaining} change${remaining === 1 ? '' : 's'} remaining.`;
+  }
+}
+
 async function openEditProfile(profile) {
-  const cfg = await loadProfileEditDefaults();
-  const usernameEl = document.getElementById('editUsername');
-  const bioEl      = document.getElementById('editBio');
-  const hintEl     = document.getElementById('editUsernameHint');
+  await loadProfileEditDefaults();
+  const displayNameEl = document.getElementById('editDisplayName');
+  const usernameEl    = document.getElementById('editUsername');
+  const bioEl         = document.getElementById('editBio');
+  const displayNameHintEl = document.getElementById('editDisplayNameHint');
+  const usernameHintEl    = document.getElementById('editUsernameHint');
 
   // Strip emoji on initial load too — old saved values (from before the emoji
-  // rule shipped) would otherwise re-display in the input.
-  usernameEl.value = stripEmoji(profile.username || '');
+  // rule shipped) would otherwise re-display in the input. Display name and
+  // username are independent fields backed by separate DB columns and
+  // separate rate-limited RPCs (update_display_name, update_username).
+  displayNameEl.value = stripEmoji(profile.display_name || '');
+  usernameEl.value    = stripEmoji(profile.username     || '');
   // Clamp bio on initial load to the line limit (in case it was saved before
   // the limit existed)
   bioEl.value      = clampBioLines(profile.bio || '');
@@ -1004,35 +1109,32 @@ async function openEditProfile(profile) {
     document.getElementById('editCity').value = '';
   }
 
-  // ── Display-name cooldown UI ──
-  // Fetch the cooldown timestamp on-demand. Tolerates the column being absent
-  // (returns null) so the rest of the app still works before the migration runs.
-  let dnChangedAt = profile.display_name_changed_at || null;
-  if (!dnChangedAt) {
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('display_name_changed_at')
-        .eq('id', _cfg.getCurrentUser().id)
-        .single();
-      if (!error && data) dnChangedAt = data.display_name_changed_at || null;
-    } catch {} // column doesn't exist yet — treat as never-changed
-  }
-  const lastChange = dnChangedAt ? new Date(dnChangedAt) : null;
-  const cooldownMs = (cfg.display_name_change_cooldown_days || 60) * 86400 * 1000;
-  const nextAllowed = lastChange ? new Date(lastChange.getTime() + cooldownMs) : null;
-  const onCooldown = nextAllowed && nextAllowed > new Date();
-
-  if (onCooldown) {
-    usernameEl.disabled = true;
-    hintEl.classList.add('is-locked');
-    const dateStr = nextAllowed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-    const days = Math.ceil((nextAllowed - new Date()) / 86400000);
-    hintEl.textContent = `Display name is locked. You can change it again on ${dateStr} (${days} day${days===1?'':'s'} from now).`;
-  } else {
-    usernameEl.disabled = false;
-    hintEl.classList.remove('is-locked');
-    hintEl.textContent = `Letters, numbers and basic punctuation only — no emoji. You can change this once every ${cfg.display_name_change_cooldown_days || 60} days.`;
+  // ── Cooldown UI for both fields ──
+  // Server is the source of truth. Each RPC returns { ok, changes_used,
+  // changes_remaining, max_per_window, window_days, next_change_allowed_at }.
+  // Mobile parity: lib/appwrite.js → getDisplayNameChangeStatus /
+  // getUsernameChangeStatus. Soft-fail to permissive on RPC error so
+  // network blips don't lock users out.
+  // Hint copy reflects the BUSINESS rules (display name 3/30d, username
+  // 1/60d) regardless of what max_per_window/window_days the live RPC
+  // currently returns — server policy may drift but the user-facing copy
+  // should stay stable. Server is still the source of truth for
+  // changes_remaining + the actual lock decision. If the server is
+  // misconfigured (e.g. RPC enforces 2/30d for username), task #211
+  // tracks the migration to align.
+  const defaultDisplayNameHint = 'Letters, numbers and basic punctuation only — no emoji. 3 changes per 30 days.';
+  const defaultUsernameHint    = 'Lowercase letters, numbers, underscore. 1 change per 60 days.';
+  try {
+    const [dnRes, unRes] = await Promise.all([
+      supabase.rpc('display_name_change_status'),
+      supabase.rpc('username_change_status'),
+    ]);
+    _applyChangeStatus({ inputEl: displayNameEl, hintEl: displayNameHintEl, status: dnRes?.data, kind: 'display_name', defaultHint: defaultDisplayNameHint });
+    _applyChangeStatus({ inputEl: usernameEl,    hintEl: usernameHintEl,    status: unRes?.data, kind: 'username',     defaultHint: defaultUsernameHint });
+  } catch (e) {
+    console.warn('[edit-profile] status RPC failed, leaving inputs enabled:', e?.message);
+    displayNameHintEl.textContent = defaultDisplayNameHint;
+    usernameHintEl.textContent    = defaultUsernameHint;
   }
 
   // ── Bio counters ──
@@ -1070,10 +1172,23 @@ document.getElementById('editProfileClose').addEventListener('click', closeEditP
 document.getElementById('editProfileCancel').addEventListener('click', closeEditProfile);
 document.getElementById('editProfileModal').addEventListener('click', (e) => { if (e.target.id === 'editProfileModal') closeEditProfile(); });
 
-// Live: strip emoji as user types into display name
-document.getElementById('editUsername').addEventListener('input', (e) => {
+// Live: strip emoji as user types into either name field. Display name
+// allows mixed-case + spaces (e.g. "John Doe"). Username is the @handle —
+// lowercase, no spaces — so we also lowercase + strip whitespace as the
+// user types so the value the server sees matches the rendered value.
+document.getElementById('editDisplayName').addEventListener('input', (e) => {
   const cleaned = stripEmoji(e.target.value);
   if (cleaned !== e.target.value) e.target.value = cleaned;
+});
+document.getElementById('editUsername').addEventListener('input', (e) => {
+  // Lowercase + collapse whitespace so the visible input matches the
+  // canonical form the update_username RPC will accept.
+  const cleaned = stripEmoji(e.target.value).toLowerCase().replace(/\s+/g, '');
+  if (cleaned !== e.target.value) {
+    const pos = e.target.selectionStart;
+    e.target.value = cleaned;
+    try { e.target.setSelectionRange(pos, pos); } catch {}
+  }
 });
 
 // Hard-cap bio at the configured line count. Blocks Enter past the limit and
@@ -1112,65 +1227,120 @@ document.getElementById('editCountry').addEventListener('change', (e) => {
   document.getElementById('editCityInput').value = '';
 });
 
+// Map RPC error codes to human-readable copy. Mirrors mobile's
+// _humanizeUsernameError / _humanizeDisplayNameError in lib/appwrite.js.
+function _humanizeNameError(code, kind) {
+  const label = kind === 'username' ? 'Username' : 'Display name';
+  switch (code) {
+    case 'username_too_short':
+    case 'display_name_too_short':
+      return `${label} must be at least 3 characters.`;
+    case 'username_too_long':
+    case 'display_name_too_long':
+      return `${label} must be 30 characters or fewer.`;
+    case 'username_invalid_chars':
+      return 'Username can only contain letters, numbers, periods, hyphens, and underscores.';
+    case 'display_name_invalid_chars':
+      return 'Display name can only contain letters, numbers, spaces, periods, hyphens, and underscores.';
+    case 'username_unchanged':
+    case 'display_name_unchanged':
+      return `New ${label.toLowerCase()} is the same as the current one.`;
+    case 'username_taken':
+      return 'That username is already taken. Try a different one.';
+    case 'rate_limit_exceeded':
+      return kind === 'username'
+        ? 'You can only change your username once every 60 days.'
+        : 'You can only change your display name 3 times every 30 days.';
+    case 'not_authenticated':
+      return 'Sign in to update your profile.';
+    case 'emoji_not_allowed':
+      return `${label} cannot contain emoji.`;
+    case 'name_reserved_brand':   return 'This name is reserved. Please choose a different one.';
+    case 'name_reserved_role':    return 'That name is reserved for official accounts.';
+    case 'name_url_blocked':      return 'Links, domains, and platform names are not allowed in this field.';
+    case 'name_phishing_blocked': return 'This name looks like a promotional message and is not allowed.';
+    case 'name_profanity_blocked':return 'Please choose a name that is appropriate for all audiences.';
+    default: return code ? `Couldn't update ${label.toLowerCase()} (${code}).` : `Couldn't update ${label.toLowerCase()}.`;
+  }
+}
+
 document.getElementById('editProfileSave').addEventListener('click', async () => {
-  const btn = document.getElementById('editProfileSave');
-  const usernameEl = document.getElementById('editUsername');
+  const btn           = document.getElementById('editProfileSave');
+  const displayNameEl = document.getElementById('editDisplayName');
+  const usernameEl    = document.getElementById('editUsername');
 
   // Client-side guards — server still re-validates as source of truth
-  let username = stripEmoji(usernameEl.value).trim();
-  const bio    = (document.getElementById('editBio').value || '').trim();
-  const country = (document.getElementById('editCountry').value || '').trim();
-  const city   = getCurrentCity();
-  // Compose location: "City, Country" if both present, just country if no city,
-  // empty string to clear.
+  const displayName = stripEmoji(displayNameEl.value).trim();
+  const username    = stripEmoji(usernameEl.value).toLowerCase().replace(/\s+/g, '');
+  const bio         = (document.getElementById('editBio').value || '').trim();
+  const country     = (document.getElementById('editCountry').value || '').trim();
+  const city        = getCurrentCity();
   const loc = (city && country) ? `${city}, ${country}` : (country || '');
-  // Website field removed from the form — pass null to preserve any existing
-  // value in the DB (the RPC's coalesce-style update won't overwrite when null).
-  const web    = null;
+  const web = null; // website field removed; pass null to preserve
 
-  if (!username) { toast('Display name is required', 'error'); return; }
-  if (hasEmoji(username)) { toast('Display name cannot contain emoji', 'error'); return; }
+  if (!displayName) { toast('Display name is required', 'error'); return; }
+  if (hasEmoji(displayName)) { toast('Display name cannot contain emoji', 'error'); return; }
+  if (!username) { toast('Username is required', 'error'); return; }
 
   const maxC = _profileEditDefaults.max_bio_characters || 200;
   const maxL = _profileEditDefaults.max_bio_lines || 5;
   if (bio.length > maxC) { toast(`Bio is too long (max ${maxC} characters)`, 'error'); return; }
   if (bio && bio.split('\n').length > maxL) { toast(`Bio has too many lines (max ${maxL})`, 'error'); return; }
 
+  // Detect which fields actually changed so we only call the RPCs that
+  // matter — each one consumes a rate-limit slot. Disabled inputs
+  // (cooldown UI) never count as a change.
+  const currentProfile = _cfg.getCurrentProfile() || {};
+  const displayNameChanged = !displayNameEl.disabled && displayName !== (currentProfile.display_name || '');
+  const usernameChanged    = !usernameEl.disabled    && username    !== (currentProfile.username    || '').toLowerCase();
+
   btn.disabled = true; btn.textContent = 'Saving...';
 
-  // If display name field is disabled (cooldown), don't try to send it
-  const sendUsername = usernameEl.disabled ? null : username;
+  try {
+    // 1) Display name (separate RPC, server-enforced 3/month cooldown)
+    if (displayNameChanged) {
+      const { data, error } = await supabase.rpc('update_display_name', { p_new_display_name: displayName });
+      if (error) throw new Error(error.message || 'Failed to update display name');
+      if (!data?.ok) throw new Error(data?.message || _humanizeNameError(data?.error, 'display_name'));
+    }
 
-  const { data, error } = await supabase.rpc('update_profile', {
-    p_username: sendUsername,
-    p_bio: bio,
-    p_location: loc,
-    p_website: web,
-  });
+    // 2) Username (separate RPC, server-enforced 1/60d cooldown + uniqueness)
+    if (usernameChanged) {
+      const { data, error } = await supabase.rpc('update_username', { p_new_username: username });
+      if (error) throw new Error(error.message || 'Failed to update username');
+      if (!data?.ok) throw new Error(data?.message || _humanizeNameError(data?.error, 'username'));
+    }
 
-  btn.disabled = false; btn.textContent = 'Save';
-
-  if (error) { toast(error.message, 'error'); return; }
-  if (!data || data.ok === false) {
-    const code = data?.error;
-    const msg = {
-      not_authenticated:    'Please sign in again',
-      username_required:    'Display name is required',
-      emoji_not_allowed:    'Display name cannot contain emoji',
-      name_change_cooldown: data?.next_allowed_at
-        ? `You can change your name again on ${new Date(data.next_allowed_at).toLocaleDateString()}`
-        : `Display name is locked for ${data?.cooldown_days || 60} days between changes`,
-      bio_too_long:         `Bio is too long (max ${data?.max_chars || maxC} characters)`,
-      bio_too_many_lines:   `Bio has too many lines (max ${data?.max_lines || maxL})`,
-    }[code] || (code || 'Could not save profile');
-    toast(msg, 'error');
+    // 3) Bio + location go through update_profile. Pass null for
+    //    p_username so the RPC doesn't try to also update it (we already
+    //    handled that above via the rate-limited update_username path).
+    const { data: pData, error: pErr } = await supabase.rpc('update_profile', {
+      p_username: null,
+      p_bio:      bio,
+      p_location: loc,
+      p_website:  web,
+    });
+    if (pErr) throw new Error(pErr.message || 'Failed to save profile');
+    if (pData && pData.ok === false) {
+      const code = pData?.error;
+      const msg = {
+        not_authenticated:  'Please sign in again',
+        bio_too_long:       `Bio is too long (max ${pData?.max_chars || maxC} characters)`,
+        bio_too_many_lines: `Bio has too many lines (max ${pData?.max_lines || maxL})`,
+      }[code] || (code || 'Could not save profile');
+      throw new Error(msg);
+    }
+  } catch (err) {
+    btn.disabled = false; btn.textContent = 'Save';
+    toast(err?.message || 'Could not save profile', 'error');
     return;
   }
 
+  btn.disabled = false; btn.textContent = 'Save';
   toast('Profile updated!', 'success');
   closeEditProfile();
   const { data: updated } = await supabase.from('profiles').select(_cfg.PROFILE_DISPLAY_COLS).eq('id', _cfg.getCurrentUser().id).single();
-  if (updated) _cfg.setCurrentProfile(updated);   // keep stale on fetch fail rather than nulling
+  if (updated) _cfg.setCurrentProfile(updated);
   _cfg.updateTopbarUser();
   openProfile(_cfg.getCurrentUser().id);
 });

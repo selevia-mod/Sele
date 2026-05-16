@@ -1662,10 +1662,24 @@ function repostPost(postId) {
   setTimeout(() => document.getElementById('repostCaption').focus(), 100);
 }
 
+// Scope #sharemenu-<id> lookups to the post-card the button lives in.
+// Same id-collision pattern as comment-toggle (2026-05-16): if the same
+// post is rendered in two locations at once (e.g. profile + hidden For
+// You feed), document.getElementById picks the first match — usually the
+// invisible one — so the visible share button looks dead. closest +
+// querySelector restricts the lookup to the user-clicked card.
+function _findShareMenu(triggerEl, postId) {
+  const card = triggerEl?.closest?.('.post-card');
+  return card?.querySelector(`#sharemenu-${CSS.escape(postId)}`)
+      || document.getElementById(`sharemenu-${postId}`);
+}
+
 function toggleShareMenu(e, postId) {
   e.stopPropagation();
-  document.querySelectorAll('.share-menu.visible').forEach(m => { if (m.id !== `sharemenu-${postId}`) m.classList.remove('visible'); });
-  document.getElementById(`sharemenu-${postId}`).classList.toggle('visible');
+  const menu = _findShareMenu(e.currentTarget || e.target, postId);
+  if (!menu) return;
+  document.querySelectorAll('.share-menu.visible').forEach(m => { if (m !== menu) m.classList.remove('visible'); });
+  menu.classList.toggle('visible');
 }
 
 function shareTo(platform, postId) {
@@ -1678,7 +1692,10 @@ function shareTo(platform, postId) {
   };
   if (platform === 'copy') navigator.clipboard.writeText(url).then(() => toast('Link copied!', 'success'));
   else if (urls[platform]) window.open(urls[platform], '_blank');
-  document.getElementById(`sharemenu-${postId}`).classList.remove('visible');
+  // Close whichever menu is currently visible for this postId — there
+  // may be more than one in the document, but only one can be visible
+  // at a time (toggleShareMenu enforces that). Close them all defensively.
+  document.querySelectorAll(`.share-menu#sharemenu-${CSS.escape(postId)}`).forEach(m => m.classList.remove('visible'));
 }
 
 

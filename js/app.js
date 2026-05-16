@@ -45,7 +45,7 @@ import { registerSessionDevice, logRead, logView, getDeviceId } from './event-lo
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
-const PROFILE_DISPLAY_COLS = 'id, username, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, pioneer_at, created_at';
+const PROFILE_DISPLAY_COLS = 'id, username, display_name, avatar_url, bio, banner_url, location, website, is_guest, is_banned, role, pioneer_at, created_at';
 
 // ─── Role-verified seal badge (Facebook-style) ──────────────────────────────────
 // Renders a 12-bump scalloped seal SVG with per-role colors (outer circle, inner
@@ -465,6 +465,11 @@ async function onSignedIn(user) {
     closePostActionMenu,
     updateTopbarUser,
     setSidebarActive,
+    // Codex audit 2026-05-16 — Stage 6 was calling these bare; profile.js
+    // now reaches them through _cfg.
+    openProfileActionMenu,
+    closeProfileActionMenu,
+    shouldHidePost,
     renderRoleSeal,
     renderPost,
     _wireUpNewPosts,
@@ -3512,7 +3517,11 @@ function closeProfileActionMenu() {
   if (_profileActionMenuEl) { _profileActionMenuEl.remove(); _profileActionMenuEl = null; }
 }
 
-window.openProfileActionMenu = (e, btn, ctx) => {
+// Codex audit 2026-05-16: extracted to a named declaration so profile.js
+// can take it via the initProfile config shorthand. Still re-attached to
+// window because inline onclick=""-style call sites (if any are added
+// later in rendered HTML) need a global handle.
+function openProfileActionMenu(e, btn, ctx) {
   e.stopPropagation();
   e.preventDefault();
   if (!currentUser) { toast('Please sign in', 'error'); return; }
@@ -3567,7 +3576,8 @@ window.openProfileActionMenu = (e, btn, ctx) => {
     document.addEventListener('click',  onDocClick);
     document.addEventListener('keydown', onKey);
   }, 0);
-};
+}
+window.openProfileActionMenu = openProfileActionMenu;
 
 // Share profile — modal with copy link, native share, X/Facebook
 async function shareProfile(userId, username) {
@@ -4306,7 +4316,18 @@ document.addEventListener('click', (e) => {
   const ct = e.target.closest('.comment-toggle');
   if (ct) {
     const postId = ct.dataset.postid;
-    const section = document.getElementById(`comments-${postId}`);
+    // Scope the lookup to the card the user actually clicked. The same
+    // post may be rendered in multiple places at once (e.g., it's the
+    // user's most recent post so it shows on their profile AND in the
+    // hidden-but-still-in-DOM For You feed). document.getElementById
+    // returns the FIRST match document-wide, so on a profile click the
+    // toggle was firing on the feed's hidden section while the visible
+    // profile section never opened — classic 2026-05-16 symptom: "1st
+    // post card on profile doesn't open comments, the others do."
+    // querySelector with an id selector IS scoped to the subtree.
+    const card = ct.closest('.post-card');
+    const section = card?.querySelector(`#comments-${CSS.escape(postId)}`)
+                 || document.getElementById(`comments-${postId}`);
     // Defensive: if the section element is missing (post recently
     // re-rendered, dataset typo, etc.), bail loudly instead of
     // throwing on `section.style` and silently dropping the click.

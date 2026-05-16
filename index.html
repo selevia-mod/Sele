@@ -1970,6 +1970,7 @@
               <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
             </button>
           </div>
+          <div class="profile-handle" id="profileHandle"></div>
           <div class="profile-stats">
             <button class="profile-stat" id="statFollowing"><strong>0</strong> following</button>
             <button class="profile-stat" id="statFollowers"><strong>0</strong> followers</button>
@@ -2041,8 +2042,14 @@
       <button class="modal-close-btn" id="editProfileClose">×</button>
     </div>
     <label class="form-label">Display name</label>
-    <input class="form-input" id="editUsername" placeholder="Your name" maxlength="40"/>
-    <div class="edit-profile-hint" id="editUsernameHint">Letters, numbers and basic punctuation only — no emoji. You can change this once every 60 days.</div>
+    <input class="form-input" id="editDisplayName" placeholder="Your name" maxlength="40"/>
+    <div class="edit-profile-hint" id="editDisplayNameHint">Letters, numbers and basic punctuation only — no emoji. 3 changes per month.</div>
+    <label class="form-label">Username</label>
+    <div class="edit-handle-row">
+      <span class="edit-handle-prefix">@</span>
+      <input class="form-input edit-handle-input" id="editUsername" placeholder="username" maxlength="32" autocomplete="off" spellcheck="false"/>
+    </div>
+    <div class="edit-profile-hint" id="editUsernameHint">Lowercase letters, numbers, underscore. You can change this once every 60 days.</div>
     <label class="form-label">Bio</label>
     <textarea class="form-input" id="editBio" rows="5" placeholder="Tell us about yourself..." maxlength="200"></textarea>
     <div class="edit-profile-counter"><span id="editBioCount">0 / 200</span><span id="editBioLines">1 / 5 lines</span></div>
