@@ -1231,7 +1231,16 @@ function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSucce
         </div>`}
     </div>
   `;
-  document.body.appendChild(modal);
+  // Scope the monet paywall to the video player wrap, not the whole page.
+  // The upfront `#videoPaywall` got this treatment in fix #196, but the
+  // time-based gate (this dynamically-created modal) was still being
+  // appended to document.body, inheriting `position: fixed; inset: 0`
+  // from .unlock-modal-backdrop — so it covered the entire screen instead
+  // of just the player. Mount inside .video-player-wrap and override the
+  // positioning in CSS (.video-monet-backdrop block) to position absolute.
+  // Falls back to body if the wrap can't be found (defensive).
+  const monetParent = document.querySelector('#videoPlayerPage .video-player-wrap') || document.body;
+  monetParent.appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('open'));
 
   // ── 5-second auto-coin countdown ──────────────────────────────────

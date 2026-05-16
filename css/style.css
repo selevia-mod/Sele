@@ -12650,9 +12650,18 @@ body:not(.light) .book-lock-warning { color: #fcd34d; background: rgba(251,191,3
 /* Minimalist premium: backdrop-filter blur, semi-transparent white,
    compact sizing so it doesn't dominate the player. */
 .video-monet-backdrop {
+  /* Override .unlock-modal-backdrop's `position: fixed; z-index: 10000` so
+     this paywall stays inside .video-player-wrap instead of covering the
+     whole viewport (matches the upfront #videoPaywall behavior — fix #196
+     scoped that element the same way). Mounting happens in JS — see
+     openVideoMonetThresholdDialog in js/app.js. */
+  position: absolute;
+  inset: 0;
+  z-index: 10;
   background: rgba(15, 10, 28, 0.55);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  border-radius: inherit;
 }
 .video-monet-modal {
   max-width: 380px;
