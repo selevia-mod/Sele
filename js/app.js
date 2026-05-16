@@ -42,6 +42,14 @@ import {
 // Phase 4 detection job. All four helpers are safe to call any time;
 // signed-out callers short-circuit, network errors get swallowed.
 import { registerSessionDevice, logRead, logView, getDeviceId } from './event-log.js';
+// Floating Messages dock — Commit 1 of 2 (foundation). The dock UI itself
+// renders nothing yet; only the shared data helpers + scoped state are
+// live. Commit 2 will mount the launcher + inbox + mini-chat windows.
+// Existing full-page Messages flow is intentionally untouched.
+import {
+  initMessagesDock, teardownMessagesDock,
+  openMessagesDock, openMessagesDockToConv,
+} from './messages-dock.js';
 
 // Columns we actually use from the profiles table — explicit list cuts payload
 // vs SELECT * (which pulls email, legacy ids, server-only fields, etc.).
@@ -660,6 +668,19 @@ window.shareTo = shareTo;
     onPostCreateFallback: () => loadFeed(),
   });
 
+  // ─── messages-dock.js (Commit 1 of 2) ──────────────────────────────
+  // Foundation only — shared data helpers + scoped state are live, no
+  // visible UI yet. Commit 2 will mount #dmFloatingRoot and render the
+  // launcher / inbox / mini chats. Wired now so the import isn't dead
+  // and so smoke testing surfaces any boot-order issues early.
+  initMessagesDock({
+    getCurrentUser:        () => currentUser,
+    openScopedEmojiPicker,      // shared picker — used by future mini-chats
+    openProfile,
+    showMessages,               // hand-off to full-page Messages
+    closeAllModals,
+  });
+
   // Daily-goal: tick "Log in today". Dedupe key is the date so
   // multiple signed-in sessions in one calendar day count ONCE.
   // Mirrors mobile at context/global-provider.js:325. Wrapped in
@@ -831,6 +852,9 @@ async function signOut() {
     teardown(dmState.realtimeChannel);   dmState.realtimeChannel = null;
     teardown(dmState.presenceChannel);   dmState.presenceChannel = null;
   }
+  // Floating dock — tears down any open mini-chat subscriptions + clears
+  // the openThreads Map. No-op if Commit 2 hasn't rendered anything yet.
+  teardownMessagesDock();
 
   await supabase.auth.signOut();
 
@@ -16079,8 +16103,7 @@ export async function openConversation(convId) {
     const c = dmState.conversations.find(x => x.id === convId);
     if (c) c.unread = 0;
     renderConversationList();
-    const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
-    updateUnreadBadge(total);
+    updateUnreadBadge(computeDmUnreadTotal());
   };
   _zeroUnread();
   supabase.rpc('mark_conversation_read', { p_conversation_id: convId })
@@ -16464,8 +16487,17 @@ function scrollMessagesToBottom(opts = {}) {
   });
 }
 
+// Codex audit 2026-05-16: single-flight guard for DM sends. Without this,
+// Enter pressed twice in quick succession (or Enter + click race) fired two
+// sendDmMessage() calls — each one optimistically inserted, each one POSTed,
+// each one came back via realtime. Some users were seeing duplicate
+// messages. Lift the guard outside the function so both text and attachment
+// paths share it.
+let _dmSendInFlight = false;
+
 // ── Send a message ────────────────────────────────────────────────────────
 async function sendDmMessage() {
+  if (_dmSendInFlight) return;
   const input = document.getElementById('dmInput');
   if (!input || !dmState.activeConvId) return;
   const body = input.value.trim();
@@ -16473,6 +16505,18 @@ async function sendDmMessage() {
     // Empty composer + send click = thumbs-up emoji (FB classic)
     return sendDmThumbsUp();
   }
+
+  _dmSendInFlight = true;
+  const sendBtn = document.getElementById('dmSendBtn');
+  if (sendBtn) sendBtn.disabled = true;
+  input.disabled = true;
+  // Release the single-flight lock from every exit path. Defined here so
+  // every early-return below can call it without forgetting.
+  const releaseSendLock = () => {
+    _dmSendInFlight = false;
+    if (sendBtn) sendBtn.disabled = false;
+    input.disabled = false;
+  };
 
   // Capture & clear reply state up front
   const replyToId = dmState.replyingTo?.id || null;
@@ -16493,6 +16537,7 @@ async function sendDmMessage() {
       const stillMutual = await dmIsMutualFollow(currentUser.id, otherId);
       if (!stillMutual) {
         toast('You and this person are no longer mutuals. Secret chat is frozen.', 'error');
+        releaseSendLock();
         return;
       }
     }
@@ -16530,6 +16575,7 @@ async function sendDmMessage() {
     dmState.messages = dmState.messages.filter(m => m.id !== tempId);
     renderMessages();
     toast(error.message, 'error');
+    releaseSendLock();
     return;
   }
   // Replace temp with real — transfer the "already-rendered" status so the
@@ -16545,6 +16591,7 @@ async function sendDmMessage() {
   document.querySelectorAll(`[data-msg-id="${tempId}"]`).forEach(el => {
     el.dataset.msgId = data.id;
   });
+  releaseSendLock();
 }
 
 async function sendDmThumbsUp() {
@@ -16657,8 +16704,7 @@ function subscribeToThread(convId) {
         // count needs explicit clearing here in case it drifted.
         const c = dmState.conversations.find(x => x.id === convId);
         if (c) c.unread = 0;
-        const total = dmState.conversations.reduce((sum, x) => x.muted ? sum : sum + (x.unread || 0), 0);
-        updateUnreadBadge(total);
+        updateUnreadBadge(computeDmUnreadTotal());
         renderConversationList();
       }
     })
@@ -17061,6 +17107,18 @@ function subscribeToInbox() {
     .subscribe();
 }
 
+// Single source of truth for the DM unread badge total. Mute + archive +
+// secret all exclude a conversation from the lower-right badge. Codex audit
+// 2026-05-16: three separate inline `.reduce` sites were drifting (some
+// excluded only `muted`, the initial load excluded mute+archive+secret),
+// so the badge total flickered as you opened/marked threads. Centralize.
+function computeDmUnreadTotal() {
+  return dmState.conversations.reduce((sum, c) => {
+    if (c.muted || c.archived || c.isSecret) return sum;
+    return sum + (c.unread || 0);
+  }, 0);
+}
+
 function updateUnreadBadge(total) {
   dmState.totalUnread = total;
   const badge = document.getElementById('messagesUnreadBadge');
@@ -17308,8 +17366,7 @@ async function toggleConvMute(currentlyMuted) {
   c.muted = !currentlyMuted;
   renderConversationList();
   // Recompute unread badge
-  const total = dmState.conversations.reduce((s, x) => x.muted ? s : s + (x.unread || 0), 0);
-  updateUnreadBadge(total);
+  updateUnreadBadge(computeDmUnreadTotal());
 }
 
 async function archiveConversation() {
@@ -18687,13 +18744,34 @@ const DM_EMOJI_GROUPS = [
 function closeDmEmojiPicker() {
   if (_dmEmojiPickerEl) { _dmEmojiPickerEl.remove(); _dmEmojiPickerEl = null; }
 }
-document.getElementById('dmEmojiBtn')?.addEventListener('click', (e) => {
-  e.stopPropagation();
-  if (_dmEmojiPickerEl) { closeDmEmojiPicker(); return; }
+// Tracks which trigger opened the current picker so a click on a DIFFERENT
+// trigger closes the existing one and opens a fresh one bound to the new
+// input (needed for the floating mini-chats — each has its own emoji button
+// + its own composer textarea).
+let _dmEmojiPickerTrigger = null;
+
+// Bug #202 (2026-05-16): the original `getElementById('dmEmojiBtn')
+// ?.addEventListener('click', ...)` ran ONCE at module load. If the composer
+// DOM was missing or replaced (sign-out → sign-in re-render, mini-chat
+// instance), the binding silently pointed at a detached node. Now delegated
+// + scoped — the picker takes any trigger + any input + any insert callback,
+// so the full-page #dmEmojiBtn AND every mini-chat .dm-mini-emoji share one
+// picker function.
+//
+// Exported via window so js/messages-dock.js can call it (initMessagesDock
+// captures it via the _cfg.openScopedEmojiPicker injection at boot time).
+export function openScopedEmojiPicker({ trigger, input, onInsert } = {}) {
+  if (!trigger) return;
+  // Toggle off if the same trigger is clicked twice in a row.
+  if (_dmEmojiPickerEl) {
+    const wasSameTrigger = _dmEmojiPickerTrigger === trigger;
+    closeDmEmojiPicker();
+    _dmEmojiPickerTrigger = null;
+    if (wasSameTrigger) return;
+  }
   closeDmGifPicker();
   closeDmAttachMenu();
 
-  const trigger = e.currentTarget;
   const picker = document.createElement('div');
   picker.className = 'dm-emoji-picker';
   picker.innerHTML = DM_EMOJI_GROUPS.map(g => `
@@ -18711,23 +18789,56 @@ document.getElementById('dmEmojiBtn')?.addEventListener('click', (e) => {
   picker.style.bottom = `${window.innerHeight - r.top + 8}px`;
   picker.style.right  = `${Math.max(8, window.innerWidth - r.right)}px`;
   _dmEmojiPickerEl = picker;
+  _dmEmojiPickerTrigger = trigger;
+
+  // Caller can pass either (a) an explicit onInsert callback for full
+  // control, or (b) just an input element — in which case we insert at
+  // the cursor + restore focus + dispatch input event so any composer-
+  // local listeners (resize, counters) still fire.
+  const doInsert = (em) => {
+    if (typeof onInsert === 'function') return onInsert(em);
+    if (!input) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end   = input.selectionEnd   ?? input.value.length;
+    input.value = input.value.slice(0, start) + em + input.value.slice(end);
+    const caret = start + em.length;
+    input.focus();
+    try { input.setSelectionRange(caret, caret); } catch {}
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
 
   picker.querySelectorAll('.dm-emoji-cell').forEach(cell => {
     cell.onclick = (ev) => {
       ev.stopPropagation();
-      insertEmojiIntoComposer(cell.dataset.emoji);
+      doInsert(cell.dataset.emoji);
     };
   });
 
   setTimeout(() => {
     const onDoc = (ev) => {
-      if (!_dmEmojiPickerEl?.contains(ev.target) && ev.target !== trigger) {
+      if (!_dmEmojiPickerEl?.contains(ev.target) && !trigger.contains(ev.target)) {
         closeDmEmojiPicker();
+        _dmEmojiPickerTrigger = null;
         document.removeEventListener('click', onDoc);
       }
     };
     document.addEventListener('click', onDoc);
   }, 0);
+}
+
+// Delegated handler for the full-page composer's emoji button. The dock's
+// per-mini-chat triggers wire their OWN delegated handler in messages-dock.js
+// (Commit 2) so this one doesn't have to know about future selectors.
+document.addEventListener('click', (e) => {
+  const trigger = e.target.closest('#dmEmojiBtn');
+  if (!trigger) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openScopedEmojiPicker({
+    trigger,
+    input: document.getElementById('dmInput'),
+    onInsert: insertEmojiIntoComposer,  // full-page-specific insert
+  });
 });
 
 function insertEmojiIntoComposer(emoji) {
