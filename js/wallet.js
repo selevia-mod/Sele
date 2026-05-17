@@ -722,25 +722,30 @@ export async function setupVideoMonetGate(player, sbId, video) {
     if (modalOpen) return;
     if (player.currentTime < nextThreshold) return;
 
-    // Snap the prompt to where the user actually IS — not to the stale
-    // nextThreshold. Bug report 2026-05-17: scrub from 0 → 15min, paywall
-    // opens at threshold=180 (the initial gate), pay 1 star → server
-    // grants paid_through = 180+600-1 = 779s, but currentTime is 900s
-    // → listener fires again → second paywall. Closing the second one
-    // (onCancel) leaves the video paused, because the browser had
-    // already paused for the scrub-seek before the first modal opened.
+    // The threshold we prompt for is ALWAYS the next sequential gate,
+    // never the user's scrub position.
     //
-    // Fix: send the user's actual position as the threshold so the
-    // server's 10-min star window covers wherever they scrubbed to.
-    // For normal (no-scrub) playback this is a no-op — currentTime ≈
-    // nextThreshold at the moment the listener fires.
-    const promptAt = Math.max(nextThreshold, Math.floor(player.currentTime));
+    // Bug report 2026-05-17 round 2: an earlier fix (b542b53) snapped
+    // promptAt to max(nextThreshold, currentTime) so the star window
+    // would cover where the user scrubbed to. That eliminated the
+    // duplicate-paywall symptom but broke the product semantics: a
+    // user could scrub to 60min and pay 1 star to unlock that segment,
+    // bypassing the 3→13, 13→23, 23→33, … sequential gates they were
+    // supposed to pay through.
+    //
+    // Correct design: 1 star = the NEXT sequential 10-min segment only.
+    // If the user scrubbed past their paid range, we still prompt for
+    // the next sequential threshold; on success, we seek the player
+    // BACK to the start of the just-unlocked segment so they consume
+    // what they paid for. To watch a later segment they must pay for
+    // every segment in between (or use 1 coin = permanent unlock).
+    const promptedThreshold = nextThreshold;
 
     modalOpen = true;
     openVideoMonetThresholdDialog({
       videoTitle: video.title,
       videoId:    sbId,
-      threshold:  promptAt,
+      threshold:  promptedThreshold,
       onSuccess: (result) => {
         modalOpen = false;
         if (result.mode === 'permanent') {
@@ -754,24 +759,35 @@ export async function setupVideoMonetGate(player, sbId, video) {
           // is up) or under-charge (skip a prompt the server expects).
           paidThrough = Number.isFinite(result.paidThroughSeconds)
             ? result.paidThroughSeconds
-            : promptAt + recurringSec - 1;
-          // Re-prompt the moment the paid window expires. We deliberately
-          // do NOT round to a canonical 180/780/1380 boundary here —
-          // when promptAt is past the initial threshold (scrub-forward
-          // case), the paid window isn't aligned to that schedule and
-          // walking to the next canonical slot would leave a free-access
-          // gap between paidThrough and the next slot.
+            : promptedThreshold + recurringSec - 1;
+          // Re-prompt the moment the paid window expires. paidThrough+1
+          // is the start of the next sequential gate; for a 10-min
+          // window that's promptedThreshold + recurringSec, matching
+          // the legacy boundary schedule.
           nextThreshold = paidThrough + 1;
+          // Sequential enforcement (the seek-back). If the user
+          // scrubbed past the segment they just paid for, currentTime
+          // is still in the locked range and the listener would
+          // re-fire immediately on the next timeupdate — effectively
+          // letting them watch past their paid range by tapping the
+          // second paywall closed. Move them BACK to the start of the
+          // segment they actually paid for so they consume the
+          // 10 minutes they bought (and the next paywall fires at the
+          // correct sequential gate, not the scrubbed position).
+          if (player.currentTime > paidThrough) {
+            try {
+              player.currentTime = Math.max(0, promptedThreshold);
+            } catch {}
+          }
         }
         _notifyWalletChange();
-        // Defensive resume. The old "we never paused" assumption only
-        // holds for thresholds crossed during continuous playback. When
-        // the user scrubs to a locked position, the browser pauses for
-        // the seek BEFORE the modal opens, and the modal-backdrop
-        // blocks the user from pressing play. After a successful
-        // unlock, kick playback back on. Wrapped in try/catch because
-        // autoplay blockers may reject the promise silently if the
-        // browser doesn't recognize this as a user-gesture chain.
+        // Defensive resume. The browser pauses for any seek (including
+        // the seek-back above, or the user's original scrub-seek that
+        // brought them past nextThreshold in the first place). The
+        // modal-backdrop blocked them from pressing play. Kick
+        // playback back on. Wrapped in try/catch because autoplay
+        // blockers may reject the promise silently if the browser
+        // doesn't recognize this as a user-gesture chain.
         try {
           const playPromise = player.play();
           if (playPromise && typeof playPromise.catch === 'function') {
