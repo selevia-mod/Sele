@@ -91,9 +91,11 @@ let _cfg = {
   // visibility check in renderBookDetail.
   getCurrentProfile:     () => null,
 
-  // Wallet config — read as an object via `.field` from app.js's
-  // top-level `_walletConfigDefaults`. The codemod rewrites every bare
-  // `_walletConfigDefaults.X` read to `_cfg.getWalletConfig().X`.
+  // Wallet config — read as an object via `.field` from the wallet.js
+  // app_config snapshot (getWalletConfig()). Stage 13A moved this out
+  // of app.js's top-level `_walletConfigDefaults` into the wallet
+  // owner module. The codemod rewrites every bare `_walletConfigDefaults.X`
+  // read to `_cfg.getWalletConfig().X`.
   getWalletConfig:       () => ({}),
 
   // Unlock / paywall (shared with feed + videos — app.js owns).
@@ -1804,9 +1806,10 @@ function renderBookDetail() {
   //
   // We log a console warning rather than throwing so a divergence in
   // production surfaces in dev tools without breaking the user's flow.
-  // The `_walletConfigDefaults` and lock detection both live in this
-  // function, so any future logic change touching either will be caught
-  // here on the next render.
+  // The wallet-config snapshot (getWalletConfig() → wallet.js app_config
+  // snapshot) and lock detection both live in this function, so any
+  // future logic change touching either will be caught here on the
+  // next render.
   const renderedLockCount = content.querySelectorAll('.chapter-row.is-locked').length;
   if (renderedLockCount !== lockedChapterCount) {
     console.warn(

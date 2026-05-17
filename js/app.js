@@ -105,6 +105,30 @@ import {
   getActiveBookSearchQuery, setActiveBookSearchQuery,
   resetBooksSessionState,
 } from './books.js';
+// Stage 13A — Wallet (coins + stars + unlocks + paywall dialogs +
+// video monetization gate). Owner module for everything wallet-shaped
+// that was previously inline in app.js. Exports actually used here:
+//   • Lifecycle: initWallet, loadWalletState, teardownWallet, resetWalletState
+//   • Read API: getWallet, getWalletConfig, isUnlocked, resolveUnlockCost
+//   • Subscriber API: onWalletChange (used to keep Store balance cards
+//     in sync — replaces the load-time-fatal monkey-patch on
+//     renderTopbarCoinPill that the inline code used pre-extraction)
+//   • Paywall dialogs: openUnlockDialog, openBulkBookUnlockDialog
+//   • Video monet: setupVideoMonetGate, teardownVideoMonetGate
+// (wallet.js also exports renderTopbarCoinPill + markUnlocked, but
+// those are module-internal as far as app.js is concerned — Codex
+// Round 6, P2.)
+// Bridges receive only what wallet.js can't observe directly —
+// currentUser (via getter so sign-out is observed without re-init),
+// tickGoalUnique (from Goals, still in app.js until Stage 14), and
+// confirmDialog (currently unused but reserved for 13B).
+import {
+  initWallet, loadWalletState, teardownWallet, resetWalletState,
+  getWallet, getWalletConfig, onWalletChange,
+  isUnlocked, resolveUnlockCost,
+  openUnlockDialog, openBulkBookUnlockDialog,
+  setupVideoMonetGate, teardownVideoMonetGate,
+} from './wallet.js';
 // Stage 9A — Direct Messages core. Owns the full-page Messenger flow:
 // conversation list, thread render, message send/edit/delete/react,
 // realtime + presence + typing channels, inbox unread badge. The
@@ -382,32 +406,15 @@ function _initVideoEventLogging() {
 let currentProfile = null;
 let posts = [];
 
-// ── Wallet state (coins + stars + unlocks) ──────────────────────────────────
-// Maintained by loadWalletState() on signin and refreshed via Realtime
-// subscription on the wallets row. Other modules (chapter reader, video
-// player, lock modals) read from these and call refreshWalletAfterUnlock()
-// after a successful unlock_content RPC.
-let _wallet = { coin_balance: 0, star_balance: 0 };
-const _userUnlocks = new Set();   // keys like "video:UUID" or "chapter:aw_xyz"
-let _walletConfigDefaults = {     // mirrors app_config; loaded once on signin
-  default_chapter_unlock_coins:    3,
-  default_chapter_unlock_stars:    3,
-  default_video_unlock_coins:      1,
-  default_video_unlock_stars:      1,
-  star_daily_cap:                  20,
-  book_bulk_unlock_discount_pct:   15,   // Phase 6
-  video_initial_unlock_seconds:    180,  // Phase 6 — 3 min before first video unlock
-  video_recurring_unlock_seconds:  600,  // Phase 6 — 10 min star window
-  min_chapter_words:               100,  // chapter publish floor
-  max_chapter_words:               10000, // chapter publish ceiling
-  // Earnings hold knob — read by the Author Earnings card so the
-  // "available in N days" copy stays in sync with whatever the SQL
-  // app_config.author_earnings_hold_days is set to. Default 7 matches
-  // the current production value (down from 14 on May 2026). Update
-  // SQL → both web + mobile picks it up; no client deploy needed.
-  author_earnings_hold_days:       7,
-};
-let _walletChannel = null;
+// ── Wallet state ────────────────────────────────────────────────────────────
+// Moved into js/wallet.js as part of Stage 13A (2026-05-17). The owner
+// module holds _wallet, _userUnlocks, _walletConfigDefaults, and the
+// realtime channel internally. Read via getWallet() / getWalletConfig()
+// / isUnlocked() and subscribe via onWalletChange() — never touch
+// "private" wallet state from app.js again. The old monkey-patch on
+// renderTopbarCoinPill that used to live around line 2607 was also
+// converted to an onWalletChange() subscriber in the same commit so
+// the Store balance pills refresh whenever the wallet mutates.
 
 // toast() moved to js/supabase.js (Stage 1 prep, 2026-05-15).
 // Imported at the top of this file alongside supabase + timeAgo + initials.
@@ -573,7 +580,15 @@ async function onSignedIn(user) {
   loadUserContentFilters();
 
   // Wallet (coins + stars + unlock map) — fire-and-forget; topbar pill renders
-  // when ready.
+  // when ready. Stage 13A — wallet logic lives in js/wallet.js. initWallet
+  // MUST run before loadWalletState so the bridges (getCurrentUser,
+  // tickGoalUnique, confirmDialog) are wired when the realtime
+  // subscribe + dialog event handlers attach.
+  initWallet({
+    getCurrentUser: () => currentUser,
+    tickGoalUnique,
+    confirmDialog,
+  });
   loadWalletState();
 
   // Notifications — fetch initial batch + start realtime subscription.
@@ -611,7 +626,7 @@ async function onSignedIn(user) {
   // showStudio (sidebar nav entry, still in app.js) can call it.
   initStudio({
     getCurrentUser:            () => currentUser,
-    getWalletConfig:           () => _walletConfigDefaults,
+    getWalletConfig,
     uploadThumbnail:           _vuUploadThumbnailFile,
     uploadImage,                                      // for share-modal photo attach (2026-05-15)
     formatPhpFromMinor,
@@ -696,7 +711,7 @@ initEngagement({
 initEarnings({
   getCurrentUser:           () => currentUser,
   getCurrentProfile:        () => currentProfile,
-  getWalletConfig:          () => _walletConfigDefaults,
+  getWalletConfig,
   setSidebarActive,
   hideAllMainPages,
 });
@@ -776,7 +791,7 @@ initBooks({
   // Wallet config — books.js reads `_cfg.getWalletConfig().X` for the
   // bulk-unlock discount percentage. App.js owns the live object so
   // the realtime app_config subscription keeps everyone in sync.
-  getWalletConfig:          () => _walletConfigDefaults,
+  getWalletConfig,
 
   // Unlock / paywall — same surface as feed.js + videos.js.
   openUnlockDialog,
@@ -1194,8 +1209,14 @@ async function signOut() {
   // session. Public broadcast channels (e.g. 'public-feed') stay subscribed.
   const teardown = (ch) => { try { if (ch) supabase.removeChannel(ch); } catch {} };
 
-  // Wallet
-  teardown(_walletChannel);              _walletChannel = null;
+  // Wallet — Stage 13A. teardownWallet() removes the realtime channel
+  // + video monet listener; resetWalletState() clears _wallet +
+  // _userUnlocks and notifies subscribers so the topbar pill zeros.
+  // Order matters: teardown first so realtime callbacks can't write to
+  // state we're about to reset (mirrors Stage 1's teardownNotifications
+  // pattern). resetWalletState is called below in the same block where
+  // we previously zeroed _wallet + _userUnlocks.
+  teardownWallet();
   // Notifications — _notifChannel moved into js/notifications.js as part
   // of Stage 1 (2026-05-15). We call the exported teardown so the same
   // cleanup happens, without app.js reaching across modules for a private.
@@ -1217,8 +1238,11 @@ async function signOut() {
   currentUser = null;
   currentProfile = null;
   posts = [];
-  _wallet = { coin_balance: 0, star_balance: 0 };
-  _userUnlocks.clear();
+  // Wallet — Stage 13A. resetWalletState() clears _wallet + _userUnlocks
+  // inside the wallet module AND notifies onWalletChange subscribers so
+  // the topbar pill zeros out. Must come AFTER teardownWallet() above so
+  // realtime callbacks can't race a final write into freshly reset state.
+  resetWalletState();
   // Reset books-module session state — public listing pool + per-tab gates
   // + user-taste cache + recs cache. clearPublic:true so memory is fully
   // released on sign-out. (Stage 8A pre-Codex used `typeof X !== 'undefined'`
@@ -1237,835 +1261,6 @@ async function signOut() {
   });
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// WALLET — coins + stars + unlocks (Phase 5 — user-facing)
-// ════════════════════════════════════════════════════════════════════════════
-
-async function loadWalletState() {
-  if (!currentUser) return;
-
-  // Wallet row + unlocks + app_config defaults — three queries in parallel.
-  const [walletRes, unlocksRes, configRes] = await Promise.all([
-    supabase.from('wallets').select('coin_balance, star_balance').eq('user_id', currentUser.id).maybeSingle(),
-    supabase.from('unlocks').select('target_type, target_id').eq('user_id', currentUser.id),
-    supabase.from('app_config').select('key, value_int'),
-  ]);
-
-  if (walletRes.data) _wallet = walletRes.data;
-  // No row yet (e.g. brand new account before trigger fires) → start at zero.
-  else _wallet = { coin_balance: 0, star_balance: 0 };
-
-  _userUnlocks.clear();
-  for (const u of (unlocksRes.data || [])) {
-    markUnlocked(u.target_type, u.target_id);
-  }
-
-  for (const c of (configRes.data || [])) {
-    if (c.key in _walletConfigDefaults) _walletConfigDefaults[c.key] = c.value_int;
-  }
-
-  renderTopbarCoinPill();
-
-  // Live updates: re-render on any change to my wallet row
-  if (_walletChannel) supabase.removeChannel(_walletChannel);
-  _walletChannel = supabase
-    .channel(`wallet-${currentUser.id}`)
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'wallets', filter: `user_id=eq.${currentUser.id}` },
-      (payload) => {
-        _wallet = { coin_balance: payload.new.coin_balance, star_balance: payload.new.star_balance };
-        renderTopbarCoinPill();
-      })
-    .subscribe();
-}
-
-function renderTopbarCoinPill() {
-  const coinEl = document.getElementById('topbarCoinBalance');
-  const starEl = document.getElementById('topbarStarBalance');
-  if (coinEl) coinEl.textContent = formatBalance(_wallet.coin_balance);
-  if (starEl) starEl.textContent = formatBalance(_wallet.star_balance);
-}
-
-function formatBalance(n) {
-  // 1234 → "1,234"; 12345678 → "12.3M"; keeps the pill compact.
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
-  if (n >= 10_000)    return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
-  return n.toLocaleString();
-}
-
-// Normalize an unlock target id BEFORE storing or looking up in _userUnlocks.
-// Codex audit (2026-05-16, bug #192): videos can carry either a bare
-// Supabase UUID or an 'sb_<uuid>' prefixed id depending on which call path
-// produced them — playVideo() uses the prefixed form for the player but
-// strips it down to the bare uuid (`sbId`) before passing to isUnlocked /
-// unlock_content. If we store one shape and look up the other, isUnlocked
-// returns false after a successful unlock and the paywall re-shows.
-// Everything is normalized to the bare server id here.
-function normalizeUnlockTargetId(targetType, targetId) {
-  const id = String(targetId || '');
-  if (targetType === 'video' && id.startsWith('sb_')) return id.slice(3);
-  return id;
-}
-
-// Always add to _userUnlocks through this — keeps the key shape consistent
-// with what isUnlocked() will look up later.
-function markUnlocked(targetType, targetId) {
-  const normalized = normalizeUnlockTargetId(targetType, targetId);
-  _userUnlocks.add(`${targetType}:${normalized}`);
-}
-
-// Has the current user unlocked this content?
-function isUnlocked(targetType, targetId) {
-  const normalized = normalizeUnlockTargetId(targetType, targetId);
-  return _userUnlocks.has(`${targetType}:${normalized}`);
-}
-
-// Resolve cost: per-row override → app_config default
-function resolveUnlockCost(targetType, currency, row) {
-  const colCoins = row?.unlock_cost_coins;
-  const colStars = row?.unlock_cost_stars;
-  if (currency === 'coin') {
-    if (Number.isFinite(colCoins) && colCoins > 0) return colCoins;
-    return _walletConfigDefaults[targetType === 'video' ? 'default_video_unlock_coins' : 'default_chapter_unlock_coins'];
-  } else {
-    if (Number.isFinite(colStars) && colStars > 0) return colStars;
-    return _walletConfigDefaults[targetType === 'video' ? 'default_video_unlock_stars' : 'default_chapter_unlock_stars'];
-  }
-}
-
-// Premium unlock modal — two big buttons (coins or stars), insufficient
-// balance disables the button with a hint. On success, updates _wallet,
-// adds to _userUnlocks, fires onUnlocked() so the caller can re-render.
-function openUnlockDialog({ targetType, targetId, row, title, onUnlocked }) {
-  const costCoins = resolveUnlockCost(targetType, 'coin', row);
-  const costStars = resolveUnlockCost(targetType, 'star', row);
-  const canCoin = _wallet.coin_balance >= costCoins;
-  const canStar = _wallet.star_balance >= costStars;
-
-  // Remove any prior modal (defensive)
-  document.querySelector('.unlock-modal-backdrop')?.remove();
-
-  const modal = document.createElement('div');
-  modal.className = 'unlock-modal-backdrop';
-  modal.innerHTML = `
-    <div class="unlock-modal" role="dialog" aria-modal="true">
-      <button class="unlock-modal-close" aria-label="Close">×</button>
-      <div class="unlock-modal-icon">🔒</div>
-      <h2>Unlock this ${targetType}</h2>
-      ${title ? `<p class="unlock-modal-title">${escHTML(title)}</p>` : ''}
-      <p class="unlock-modal-sub">Pay once and read/watch as many times as you like.</p>
-      <div class="unlock-options">
-        <button class="unlock-option unlock-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
-          <span class="unlock-option-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
-          </span>
-          <span class="unlock-option-cost">${costCoins}</span>
-          <span class="unlock-option-label">Coin${costCoins === 1 ? '' : 's'}</span>
-          <span class="unlock-option-hint">${canCoin ? 'Tap to unlock' : `You have ${_wallet.coin_balance}`}</span>
-        </button>
-        <div class="unlock-or">or</div>
-        <button class="unlock-option unlock-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
-          <span class="unlock-option-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
-          </span>
-          <span class="unlock-option-cost">${costStars}</span>
-          <span class="unlock-option-label">Star${costStars === 1 ? '' : 's'}</span>
-          <span class="unlock-option-hint">${canStar ? 'Tap to unlock' : `You have ${_wallet.star_balance}`}</span>
-        </button>
-      </div>
-      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Not enough coins or stars yet. Open the Store to top up, or watch ads to earn stars.</p>' : ''}
-    </div>
-  `;
-  document.body.appendChild(modal);
-  requestAnimationFrame(() => modal.classList.add('open'));
-
-  // Close gate — same in-flight protection as the bulk dialog. The
-  // user can't dismiss while a charge is mid-RPC.
-  const close = () => {
-    if (_unlockInFlight) return;
-    modal.classList.remove('open');
-    setTimeout(() => modal.remove(), 180);
-  };
-  modal.querySelector('.unlock-modal-close').onclick = close;
-  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
-
-  modal.querySelectorAll('.unlock-option').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (btn.disabled) return;
-      if (_unlockInFlight) return; // a sibling button is already firing
-      const currency = btn.dataset.cur;
-      btn.classList.add('is-loading');
-      // Disable BOTH currency buttons while the first one is in flight.
-      // Closes the "tap coin then immediately tap star" race that
-      // could fire two parallel RPCs before either response landed.
-      modal.querySelectorAll('.unlock-option').forEach(b => { b.disabled = true; });
-      _unlockInFlight = true;
-      let data = null, error = null;
-      try {
-        const res = await supabase.rpc('unlock_content', {
-          p_target_type: targetType,
-          p_target_id:   targetId,
-          p_currency:    currency,
-        });
-        data = res.data; error = res.error;
-      } finally {
-        _unlockInFlight = false;
-        btn.classList.remove('is-loading');
-      }
-      if (error) {
-        // Re-enable both buttons so the user can retry / switch currency.
-        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
-        _handleUnlockFailure(error, {
-          target_type: targetType,
-          target_id: targetId,
-          currency,
-          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
-        });
-        return;
-      }
-      if (!data?.ok) {
-        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
-        _handleUnlockFailure(data, {
-          target_type: targetType,
-          target_id: targetId,
-          currency,
-          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
-        });
-        return;
-      }
-      // Local state update (Realtime will also push, but this avoids the flicker)
-      if (currency === 'coin') _wallet.coin_balance = data.balance_after;
-      else                     _wallet.star_balance = data.balance_after;
-      markUnlocked(targetType, targetId);
-      renderTopbarCoinPill();
-      close();
-      toast(data.already_unlocked ? 'Already unlocked' : `Unlocked! −${data.cost} ${currency}${data.cost === 1 ? '' : 's'}`, 'success');
-      // Weekly/monthly goal: tick "Unlock N items". Skip the
-      // already_unlocked branch (data.already_unlocked === true means
-      // server didn't charge — no new engagement). Dedupe by
-      // target so re-buying the same unlock can't farm. Mirrors
-      // mobile at lib/book-unlocks-supabase.js:39.
-      if (!data.already_unlocked) {
-        try { tickGoalUnique('unlock', `unlock:${targetType}:${targetId}`); } catch {}
-      }
-      if (typeof onUnlocked === 'function') onUnlocked();
-    });
-  });
-}
-
-// ── Phase 6: time-based video monetization gate ─────────────────────────
-//
-// Attaches a `timeupdate` listener to the video player. When the user crosses
-// the next paid threshold (180s initially, then every 600s), pauses the
-// video and prompts: "1 coin to unlock forever, or 1 star for the next 10
-// minutes." Coin path → permanent unlock recorded in `unlocks` table; the
-// listener's nextThreshold is set to Infinity so it never fires again. Star
-// path → bumps nextThreshold by `recurring_window` and waits for the next
-// crossing. Re-watching below paid_through_seconds is always free.
-let _videoMonetGate = null;  // { videoId, listener }
-
-async function setupVideoMonetGate(player, sbId, video) {
-  // Tear down any previous listener
-  teardownVideoMonetGate(player);
-
-  const initialSec   = _walletConfigDefaults.video_initial_unlock_seconds   || 180;
-  const recurringSec = _walletConfigDefaults.video_recurring_unlock_seconds || 600;
-
-  // Fetch the user's progress for this video. Legacy aw_/sb_ prefixed ids
-  // don't have a UUID and aren't tracked in video_progress (the FK target),
-  // so we fall back to "no prior progress" — every threshold is fresh.
-  let paidThrough = 0;
-  const isLegacy = sbId.startsWith('aw_') || sbId.startsWith('sb_');
-  if (!isLegacy && currentUser) {
-    const { data: prog } = await supabase
-      .from('video_progress')
-      .select('paid_through_seconds')
-      .eq('user_id', currentUser.id)
-      .eq('video_id', sbId)
-      .maybeSingle();
-    paidThrough = prog?.paid_through_seconds || 0;
-  }
-
-  const computeNext = (paid) => {
-    if (paid < initialSec) return initialSec;
-    return initialSec + Math.ceil((paid - initialSec + 1) / recurringSec) * recurringSec;
-  };
-  let nextThreshold = computeNext(paidThrough);
-  let modalOpen = false;
-
-  const listener = () => {
-    // Stale listener guard — if user navigated to a different video, no-op
-    if (!_videoMonetGate || _videoMonetGate.videoId !== sbId) return;
-    if (modalOpen) return;
-    if (player.currentTime < nextThreshold) return;
-
-    modalOpen = true;
-    // Note: video keeps playing during the prompt. The 5s auto-coin fallback
-    // means most users won't even notice an interruption — they get a brief
-    // glance at the choice, then it auto-deducts and dismisses.
-    openVideoMonetThresholdDialog({
-      videoTitle: video.title,
-      videoId:    sbId,
-      threshold:  nextThreshold,
-      onSuccess: (result) => {
-        modalOpen = false;
-        if (result.mode === 'permanent') {
-          // Coin path — never prompt again for this video
-          markUnlocked('video', sbId);
-          nextThreshold = Infinity;
-        } else if (result.mode === 'window') {
-          // Star path — paid through end of this window; advance to next
-          paidThrough = nextThreshold + recurringSec - 1;
-          nextThreshold = computeNext(paidThrough);
-        }
-        renderTopbarCoinPill();
-        // No need to call play — we never paused
-      },
-      onCancel: () => {
-        // Modal closed without payment. Pause so the user has to re-engage;
-        // on next play, listener re-fires and re-prompts.
-        //
-        // We do NOT reset modalOpen synchronously. player.pause() doesn't
-        // take effect immediately — the browser typically fires one or two
-        // more 'timeupdate' events before the pause settles. If modalOpen
-        // flipped to false now, those queued events would see the gate
-        // clear + currentTime still past the threshold (nextThreshold
-        // doesn't advance on cancel by design) and open a fresh modal
-        // immediately. Scrubbing past N thresholds amplifies this into
-        // needing N taps to dismiss — once per timeupdate that fires
-        // before pause settles. (Bug report 2026-05-16: tap forward 15
-        // min → 2 taps to close; 30 min → 3 taps.)
-        //
-        // Instead: keep modalOpen=true while paused (listener can't fire
-        // anyway, so the guard is harmless) and clear it on the next
-        // 'play' event — at which point we WANT the listener to re-prompt.
-        try { player.pause(); } catch {}
-        player.addEventListener('play', () => { modalOpen = false; }, { once: true });
-      },
-    });
-  };
-
-  player.addEventListener('timeupdate', listener);
-  _videoMonetGate = { videoId: sbId, listener };
-}
-
-function teardownVideoMonetGate(player) {
-  if (_videoMonetGate?.listener && player) {
-    player.removeEventListener('timeupdate', _videoMonetGate.listener);
-  }
-  _videoMonetGate = null;
-}
-
-// Threshold-crossing dialog — visually distinct from the one-time unlock
-// modal because the choice has different consequences (one-time forever vs
-// pay-as-you-go window).
-function openVideoMonetThresholdDialog({ videoTitle, videoId, threshold, onSuccess, onCancel }) {
-  const coinCost = _walletConfigDefaults.default_video_unlock_coins || 1;
-  const starCost = _walletConfigDefaults.default_video_unlock_stars || 1;
-  const canCoin = _wallet.coin_balance >= coinCost;
-  const canStar = _wallet.star_balance >= starCost;
-  const recurringMin = Math.round((_walletConfigDefaults.video_recurring_unlock_seconds || 600) / 60);
-
-  document.querySelector('.unlock-modal-backdrop')?.remove();
-  const modal = document.createElement('div');
-  modal.className = 'unlock-modal-backdrop video-monet-backdrop';
-  modal.innerHTML = `
-    <div class="unlock-modal video-monet-modal" role="dialog" aria-modal="true">
-      <button class="unlock-modal-close" aria-label="Close">×</button>
-      <div class="video-monet-icon-wrap">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      </div>
-      <h2>Keep watching</h2>
-      ${videoTitle ? `<p class="unlock-modal-title">${escHTML(videoTitle)}</p>` : ''}
-      <p class="unlock-modal-sub">First ${Math.floor(threshold / 60)} minutes done — pick how to continue:</p>
-      <div class="video-monet-options">
-        <button class="video-monet-option video-monet-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
-          <div class="video-monet-option-icon">
-            <svg viewBox="0 0 24 24" width="28" height="28"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
-          </div>
-          <div class="video-monet-option-cost">${coinCost} <small>coin${coinCost === 1 ? '' : 's'}</small></div>
-          <div class="video-monet-option-mode">Forever</div>
-        </button>
-        <button class="video-monet-option video-monet-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
-          <div class="video-monet-option-icon">
-            <svg viewBox="0 0 24 24" width="28" height="28"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
-          </div>
-          <div class="video-monet-option-cost">${starCost} <small>star${starCost === 1 ? '' : 's'}</small></div>
-          <div class="video-monet-option-mode">${recurringMin}-min window</div>
-        </button>
-      </div>
-      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Out of coins and stars. Top up in the Store.</p>' : `
-        <div class="video-monet-countdown" id="vmCountdown">
-          <span class="video-monet-countdown-bar"><span class="video-monet-countdown-fill" id="vmCountdownFill"></span></span>
-          <span class="video-monet-countdown-text">Auto-paying with <strong>${coinCost} coin</strong> in <span id="vmCountdownNum">5</span>s · tap to choose differently</span>
-        </div>`}
-    </div>
-  `;
-  // Scope the monet paywall to the video player wrap, not the whole page.
-  // The upfront `#videoPaywall` got this treatment in fix #196, but the
-  // time-based gate (this dynamically-created modal) was still being
-  // appended to document.body, inheriting `position: fixed; inset: 0`
-  // from .unlock-modal-backdrop — so it covered the entire screen instead
-  // of just the player. Mount inside .video-player-wrap and override the
-  // positioning in CSS (.video-monet-backdrop block) to position absolute.
-  // Falls back to body if the wrap can't be found (defensive).
-  const monetParent = document.querySelector('#videoPlayerPage .video-player-wrap') || document.body;
-  monetParent.appendChild(modal);
-  requestAnimationFrame(() => modal.classList.add('open'));
-
-  // ── 5-second auto-coin countdown ──────────────────────────────────
-  // If user does nothing, we silently deduct a coin and dismiss the dialog
-  // so the video keeps playing without interruption. Any click cancels.
-  let countdownTimer = null;
-  let countdownInterval = null;
-  let cancelCountdown = () => {
-    if (countdownTimer)    { clearTimeout(countdownTimer);    countdownTimer = null; }
-    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
-    const cd = modal.querySelector('#vmCountdown');
-    if (cd) cd.classList.add('is-cancelled');
-  };
-
-  const close = (cancelled) => {
-    cancelCountdown();
-    modal.classList.remove('open');
-    setTimeout(() => modal.remove(), 180);
-    if (cancelled && typeof onCancel === 'function') onCancel();
-  };
-  modal.querySelector('.unlock-modal-close').onclick = () => close(true);
-  modal.addEventListener('click', (e) => { if (e.target === modal) close(true); });
-
-  const tryUnlock = async (currency, btn) => {
-    if (btn?.disabled) return;
-    cancelCountdown();
-    if (btn) btn.classList.add('is-loading');
-    const { data, error } = await supabase.rpc('unlock_video_threshold', {
-      p_video_id:          videoId,
-      p_currency:          currency,
-      p_threshold_seconds: threshold,
-    });
-    if (btn) btn.classList.remove('is-loading');
-    if (error) { toast(error.message, 'error'); return false; }
-    if (!data?.ok) {
-      toast(data?.error === 'insufficient_balance' ? 'Insufficient balance' : (data?.error || 'Unlock failed'), 'error');
-      return false;
-    }
-    if (currency === 'coin') _wallet.coin_balance = data.balance_after;
-    else                     _wallet.star_balance = data.balance_after;
-    renderTopbarCoinPill();
-    close(false);
-    toast(data.mode === 'permanent' ? `Unlocked forever! −${data.cost} coin` : `Continuing ${recurringMin} more min · −${data.cost} star`, 'success');
-    onSuccess({ mode: data.mode || (currency === 'coin' ? 'permanent' : 'window') });
-    return true;
-  };
-
-  modal.querySelectorAll('.video-monet-option').forEach(btn => {
-    btn.addEventListener('click', () => tryUnlock(btn.dataset.cur, btn));
-  });
-
-  // Start countdown only if the user can actually afford coin auto-pay.
-  // If they're out of coins but have stars, they need to choose manually.
-  if (canCoin) {
-    let secsLeft = 5;
-    const fill = modal.querySelector('#vmCountdownFill');
-    const num  = modal.querySelector('#vmCountdownNum');
-    if (fill) fill.style.width = '0%';
-    requestAnimationFrame(() => { if (fill) fill.style.width = '100%'; });
-    countdownInterval = setInterval(() => {
-      secsLeft--;
-      if (num) num.textContent = secsLeft;
-      if (secsLeft <= 0) clearInterval(countdownInterval);
-    }, 1000);
-    countdownTimer = setTimeout(() => {
-      // Auto-deduct silently. tryUnlock handles success + cleanup.
-      tryUnlock('coin', modal.querySelector('.video-monet-option-coin'));
-    }, 5000);
-  }
-}
-
-// ── Unlock error interpretation + recovery (May 2026, Pass B) ───────
-//
-// Single source of truth for unlock error code → user-facing copy.
-// Mirrors mobile's lib/unlock-error-codes.js exactly — keep both
-// sides in sync. When a new error code lands anywhere in the unlock
-// stack, add a row here AND in mobile.
-//
-// Each entry: { title, message, recoverable, kind }
-//   recoverable — true if the user can fix it (retry, top up, contact support)
-//   kind        — 'coin' | 'star' | 'account' (drives the support-ticket form)
-const _UNLOCK_ERROR_REGISTRY = {
-  not_authenticated: { title: 'Reconnecting your account', message: "We're still connecting your account. Please try again in a moment — if the problem keeps happening, sign out and sign back in.", recoverable: true, kind: 'account' },
-  insufficient_balance: { title: 'Not enough balance', message: "You don't have enough to unlock this. Top up in the Store and try again.", recoverable: true, kind: 'coin' },
-  insufficient_coins: { title: 'Not enough coins', message: "You don't have enough coins to unlock this. Top up in the Store and try again.", recoverable: true, kind: 'coin' },
-  insufficient_stars: { title: 'Not enough stars', message: "You don't have enough stars to unlock this. Earn more from the Goals tab or top up in the Store, then try again.", recoverable: true, kind: 'coin' },
-  wallet_missing: { title: 'Setting up your wallet', message: "We're finalizing your wallet. Please try again in a few seconds. If the issue persists, we'll restore it manually within 24 hours.", recoverable: true, kind: 'coin' },
-  cost_unresolved: { title: 'Pricing temporarily unavailable', message: "We couldn't load the unlock price. Please refresh the screen and try again.", recoverable: true, kind: 'coin' },
-  // May 2026 — added to match mobile registry (lib/unlock-error-codes.js).
-  // unlock_content emits `invalid_cost` when a chapter has NULL/<=0
-  // pricing for the requested currency (author didn't set a price).
-  invalid_cost: { title: 'Pricing missing for this chapter', message: "The author hasn't set a price for this chapter yet. Try a different chapter or contact support and we'll fix it within 24 hours.", recoverable: true, kind: 'coin' },
-  // unlock_book_bulk equivalent — bulk pricing missing on the book row.
-  invalid_book_cost: { title: 'Bulk pricing missing', message: "The author hasn't set a whole-book price yet. You can still unlock individual chapters, or contact support and we'll resolve it within 24 hours.", recoverable: true, kind: 'coin' },
-  invalid_currency: { title: 'Unlock unavailable', message: 'Something went wrong with the payment type. Please refresh and try again.', recoverable: true, kind: 'coin' },
-  invalid_target_type: { title: 'Unlock unavailable', message: "This item can't be unlocked right now. Please refresh and try again.", recoverable: false, kind: 'coin' },
-  invalid_target_id: { title: 'Item not found', message: "We couldn't find this chapter or book. It may have been removed by the author.", recoverable: false, kind: 'coin' },
-  book_not_found: { title: 'Book not found', message: "We couldn't find this book. It may have been removed.", recoverable: false, kind: 'coin' },
-  no_locks_on_book: { title: 'Already free to read', message: "This book doesn't have any locked chapters — you can start reading right away.", recoverable: false, kind: 'coin' },
-  kyc_not_approved: { title: 'Verify your account first', message: 'Please complete your Payment Info before unlocking content.', recoverable: true, kind: 'account' },
-  // Alias: withdrawal RPC + future paywall paths emit `kyc_required` while
-  // the registry historically used `kyc_not_approved`. Same user-facing copy.
-  kyc_required: { title: 'Verify your account first', message: 'Please complete your Payment Info before unlocking content.', recoverable: true, kind: 'account' },
-  network: { title: 'Connection issue', message: "We couldn't reach our servers. Check your connection and try again.", recoverable: true, kind: 'coin' },
-  rate_limited: { title: 'Slow down a moment', message: "You're going a little fast. Please wait a few seconds and try again.", recoverable: true, kind: 'coin' },
-  // Wrapper-thrown errors — see _interpretUnlockError's message-string
-  // matchers below. These come from client-side helpers when a legacy
-  // hex id can't be resolved to a Supabase UUID.
-  cannot_resolve_chapter: { title: 'Chapter not ready', message: "This chapter isn't fully synced yet. Please refresh the book and try again.", recoverable: true, kind: 'coin' },
-  cannot_resolve_book: { title: 'Book not ready', message: "This book isn't fully synced yet. Please refresh and try again.", recoverable: true, kind: 'coin' },
-};
-
-// Translate any unlock failure shape (server JSON, thrown Error, raw
-// string) into a uniform UI object. Always returns a populated object.
-// Currency-aware: `insufficient_balance` + payload currency
-// dispatches to `insufficient_coins` / `insufficient_stars`.
-function _interpretUnlockError(input, ctx = {}) {
-  const rawCode = (() => {
-    if (!input) return 'unknown';
-    if (typeof input === 'string') return input;
-    if (typeof input === 'object') {
-      if (typeof input.error === 'string') return input.error;
-      if (typeof input.message === 'string') {
-        // Collapse long wrapper-thrown messages into registry codes
-        // (matches mobile lib/unlock-error-codes.js:213-220). Without
-        // these matchers, the raw error message becomes the lookup key
-        // and falls through to the generic 'Unlock failed' fallback.
-        const m = input.message.toLowerCase();
-        if (m.includes('cannot resolve chapter')) return 'cannot_resolve_chapter';
-        if (m.includes('cannot resolve book')) return 'cannot_resolve_book';
-        if (m.includes('network') || m.includes('fetch')) return 'network';
-        if (m.includes('not signed in') || m.includes('not authenticated')) return 'not_authenticated';
-        return input.message;
-      }
-    }
-    return String(input);
-  })();
-  let lookupCode = rawCode;
-  if (rawCode === 'insufficient_balance') {
-    const cur = ctx.currency || input?.currency;
-    if (cur === 'coin' || cur === 'coins') lookupCode = 'insufficient_coins';
-    else if (cur === 'star' || cur === 'stars') lookupCode = 'insufficient_stars';
-  }
-  const entry = _UNLOCK_ERROR_REGISTRY[lookupCode];
-  if (!entry) {
-    console.warn('[unlock] unmapped error code', rawCode, ctx);
-    return { title: 'Unlock failed', message: "We couldn't complete the unlock. Please try again.", recoverable: true, kind: 'coin', rawCode };
-  }
-  return { ...entry, rawCode };
-}
-
-// File a support ticket against the recovery queue. Server-side
-// per-day dedup prevents spam if the user retries multiple times.
-// Best-effort: any error here is logged and swallowed (we never want
-// to surface "recovery filing failed" on top of the original
-// unlock failure that triggered it).
-async function _submitUnlockRecoveryRequest({ kind, amount, reason, context }) {
-  try {
-    const { error } = await supabase.rpc('submit_balance_recovery_request', {
-      p_kind: kind,
-      p_reported_amount: kind === 'account' ? 1 : Math.max(1, Math.round(Number(amount) || 1)),
-      p_reason: reason || null,
-      p_context: context || {},
-      p_actor_id: currentUser?.id || null,
-    });
-    if (error) console.warn('[unlock] auto-file recovery failed:', error.message);
-  } catch (e) {
-    console.warn('[unlock] auto-file recovery exception:', e?.message || e);
-  }
-}
-
-// Centralized failure handler — toast the friendly message, log the
-// raw code, auto-file a support ticket for recoverable non-balance
-// failures (the user can't fix a wallet_missing or cost_unresolved
-// themselves, so we want admin eyes on it). Mirrors mobile's
-// components/BookChaptersUnlockModal.jsx:893-939.
-function _handleUnlockFailure(errorOrResult, context) {
-  const ui = _interpretUnlockError(errorOrResult, context);
-  toast(ui.message, 'error');
-  console.error('[unlock] failure:', { code: ui.rawCode, ...context });
-  // Don't auto-file for insufficient-* (user just needs to top up)
-  // or hard-data errors (no_locks_on_book — not actually a failure).
-  const shouldFile = ui.recoverable
-    && ui.rawCode !== 'insufficient_balance'
-    && ui.rawCode !== 'insufficient_coins'
-    && ui.rawCode !== 'insufficient_stars'
-    && ui.rawCode !== 'no_locks_on_book';
-  if (shouldFile && currentUser?.id) {
-    _submitUnlockRecoveryRequest({
-      kind: ui.kind === 'account' ? 'account' : (context?.currency === 'star' ? 'star' : 'coin'),
-      amount: context?.cost || 1,
-      reason: [
-        `Unlock failed: ${ui.rawCode}`,
-        context?.target_type && context?.target_id ? `Target: ${context.target_type}/${context.target_id}` : null,
-        context?.currency ? `Currency: ${context.currency}` : null,
-        typeof context?.balance_at_attempt === 'number' ? `Balance at attempt: ${context.balance_at_attempt}` : null,
-      ].filter(Boolean).join('\n'),
-      context: { source: 'web_unlock', ...context },
-    });
-  }
-}
-
-// Diagnostic: after a successful bulk unlock, re-read the user's
-// unlocks rows and warn loudly if the count we expected didn't land.
-// Mirrors mobile's lib/book-unlocks-supabase.js:79-121 — the
-// diagnostic that caught the May 2026 revert-on-refresh bug. Pure
-// observability, doesn't gate any UX. If a mismatch hits production
-// telemetry, admins see it before users complain.
-async function _verifyBulkUnlockPersistence(bookId, expectedUnlocksCount) {
-  try {
-    // Pull all this user's chapter-level unlocks for the book.
-    // Bulk RPC writes chapter rows (one per locked chapter), so the
-    // count comparison is direct.
-    const { data: bookRow } = await supabase
-      .from('books').select('id').eq('id', bookId).maybeSingle();
-    if (!bookRow) return;
-    const { data: chapters } = await supabase
-      .from('chapters').select('id').eq('book_id', bookId);
-    const chapterIds = (chapters || []).map(c => c.id);
-    if (chapterIds.length === 0) return;
-    const { data: unlockRows } = await supabase
-      .from('unlocks')
-      .select('target_id')
-      .eq('user_id', currentUser.id)
-      .eq('target_type', 'chapter')
-      .in('target_id', chapterIds);
-    const persisted = (unlockRows || []).length;
-    if (persisted < expectedUnlocksCount) {
-      console.warn(
-        `[unlock-bulk] PERSISTENCE-MISMATCH book=${bookId}: server said ${expectedUnlocksCount} chapters unlocked, but only ${persisted} unlock rows are visible to the client. Real-money bug — investigate.`,
-        { user_id: currentUser?.id, bookId, expected: expectedUnlocksCount, persisted },
-      );
-    }
-  } catch (e) {
-    // Verification is best-effort — never fail the unlock UX on it.
-    console.warn('[unlock-bulk] verify exception:', e?.message || e);
-  }
-}
-
-// ── Unlock state guard (May 2026 — real-money correctness fix) ──────
-//
-// Module-level boolean that's set the moment ANY unlock RPC fires
-// and cleared in finally. Used by openUnlockDialog +
-// openBulkBookUnlockDialog to short-circuit click handlers and
-// modal-close attempts while a charge is in flight.
-//
-// The exposure this closes: tapping "coin" then "star" on the same
-// unlock modal within ~50ms (before the first RPC's response lands)
-// could fire two parallel RPCs. The server's `unlock_content` is
-// idempotent per (user, target_type, target_id) so the same target
-// won't double-charge — but a coin charge AND a star charge for the
-// same target in flight at once IS a real exposure. This flag
-// blocks the second tap before it gets to the network.
-let _unlockInFlight = false;
-
-// Ask the server for the authoritative bulk-unlock totals. Returns
-// `{ coin: number, star: number }` on success, or `null` if either
-// preview RPC fails — in which case the caller falls back to the
-// client-computed estimate. Mirrors mobile's
-// lib/wallet-supabase.js:253-285 (previewBookBulkUnlock).
-//
-// Rationale: web previously computed the bulk discount client-side
-// (Math.max(1, sum - Math.floor(sum * pct / 100))) and sent the
-// result to unlock_book_bulk, hoping the server agreed. If the
-// discount % gets bumped server-side OR rounding behaves differently
-// than expected, the user could see one price and get charged
-// another. Asking the server for the price BEFORE rendering the
-// modal eliminates that drift.
-async function _previewBookBulkUnlock(bookId) {
-  try {
-    const [coinRes, starRes] = await Promise.all([
-      supabase.rpc('preview_book_bulk_unlock', { p_book_id: bookId, p_currency: 'coin' }),
-      supabase.rpc('preview_book_bulk_unlock', { p_book_id: bookId, p_currency: 'star' }),
-    ]);
-    if (coinRes.error || starRes.error) {
-      console.warn('[bulk-preview] RPC failed; falling back to client estimate',
-        coinRes.error?.message, starRes.error?.message);
-      return null;
-    }
-    const coin = coinRes.data?.total_after ?? coinRes.data?.cost ?? null;
-    const star = starRes.data?.total_after ?? starRes.data?.cost ?? null;
-    if (coin == null || star == null) {
-      console.warn('[bulk-preview] RPC returned no total; falling back to client estimate', coinRes.data, starRes.data);
-      return null;
-    }
-    return { coin, star };
-  } catch (e) {
-    console.warn('[bulk-preview] exception; falling back to client estimate', e);
-    return null;
-  }
-}
-
-// ── Bulk book unlock dialog (Phase 6) ─────────────────────────────────────
-function openBulkBookUnlockDialog({ bookId, bookTitle, lockedCount, coinCost, starCost, discountPct, onUnlocked }) {
-  const canCoin = _wallet.coin_balance >= coinCost;
-  const canStar = _wallet.star_balance >= starCost;
-
-  document.querySelector('.unlock-modal-backdrop')?.remove();
-  const modal = document.createElement('div');
-  modal.className = 'unlock-modal-backdrop';
-  modal.innerHTML = `
-    <div class="unlock-modal" role="dialog" aria-modal="true">
-      <button class="unlock-modal-close" aria-label="Close">×</button>
-      <div class="unlock-modal-icon">📚</div>
-      <h2>Unlock the whole book</h2>
-      <p class="unlock-modal-title">${escHTML(bookTitle)}</p>
-      <p class="unlock-modal-sub">${lockedCount} locked chapter${lockedCount === 1 ? '' : 's'} · ${discountPct}% off vs unlocking individually</p>
-      <div class="unlock-options">
-        <button class="unlock-option unlock-option-coin ${canCoin ? '' : 'is-disabled'}" data-cur="coin" ${canCoin ? '' : 'disabled'}>
-          <span class="unlock-option-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3" fill="#fbbf24" stroke="#b45309" stroke-width="1"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" fill="#fde68a" stroke="#b45309" stroke-width="1"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" fill="#fbbf24" stroke="#b45309" stroke-width="1"/></svg>
-          </span>
-          <span class="unlock-option-cost">${coinCost}</span>
-          <span class="unlock-option-label">Coin${coinCost === 1 ? '' : 's'}</span>
-          <!-- Hint repeats the locked-chapter count next to the
-               action so the user sees exactly what they're paying
-               for. Mirrors mobile's BookChaptersUnlockModal pattern
-               of placing the count inside each option button rather
-               than relying on the modal subtitle alone. -->
-          <span class="unlock-option-hint">${canCoin ? `Unlock all ${lockedCount} part${lockedCount === 1 ? '' : 's'}` : `You have ${_wallet.coin_balance}`}</span>
-        </button>
-        <div class="unlock-or">or</div>
-        <button class="unlock-option unlock-option-star ${canStar ? '' : 'is-disabled'}" data-cur="star" ${canStar ? '' : 'disabled'}>
-          <span class="unlock-option-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M12 2l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16l-5.6 3.2 1.5-6.3L3 8.7l6.4-.5z" fill="#a855f7"/></svg>
-          </span>
-          <span class="unlock-option-cost">${starCost}</span>
-          <span class="unlock-option-label">Star${starCost === 1 ? '' : 's'}</span>
-          <span class="unlock-option-hint">${canStar ? `Unlock all ${lockedCount} part${lockedCount === 1 ? '' : 's'}` : `You have ${_wallet.star_balance}`}</span>
-        </button>
-      </div>
-      ${(!canCoin && !canStar) ? '<p class="unlock-need-more">Not enough coins or stars yet. Open the Store to top up.</p>' : ''}
-    </div>
-  `;
-  document.body.appendChild(modal);
-  requestAnimationFrame(() => modal.classList.add('open'));
-
-  // Refresh displayed prices with the server-authoritative totals
-  // BEFORE the user can tap. If the preview RPC fails, the client
-  // estimates we rendered above stay put as a graceful fallback.
-  _previewBookBulkUnlock(bookId).then((server) => {
-    if (!server) return;
-    const coinEl  = modal.querySelector('.unlock-option-coin .unlock-option-cost');
-    const starEl  = modal.querySelector('.unlock-option-star .unlock-option-cost');
-    const coinLbl = modal.querySelector('.unlock-option-coin .unlock-option-label');
-    const starLbl = modal.querySelector('.unlock-option-star .unlock-option-label');
-    if (coinEl) coinEl.textContent = server.coin;
-    if (starEl) starEl.textContent = server.star;
-    if (coinLbl) coinLbl.textContent = `Coin${server.coin === 1 ? '' : 's'}`;
-    if (starLbl) starLbl.textContent = `Star${server.star === 1 ? '' : 's'}`;
-    // Re-evaluate affordability against the server price — the
-    // displayed totals might be ₱X.XX different from the client
-    // estimate, which could flip a button from enabled to disabled.
-    const canCoinServer = _wallet.coin_balance >= server.coin;
-    const canStarServer = _wallet.star_balance >= server.star;
-    const coinBtn = modal.querySelector('.unlock-option-coin');
-    const starBtn = modal.querySelector('.unlock-option-star');
-    [[coinBtn, canCoinServer, _wallet.coin_balance], [starBtn, canStarServer, _wallet.star_balance]].forEach(([btn, can, bal]) => {
-      if (!btn) return;
-      btn.disabled = !can;
-      btn.classList.toggle('is-disabled', !can);
-      const hint = btn.querySelector('.unlock-option-hint');
-      if (hint) hint.textContent = can
-        ? `Unlock all ${lockedCount} part${lockedCount === 1 ? '' : 's'}`
-        : `You have ${bal}`;
-    });
-    // Cache server totals on the modal so the click handler can use
-    // the same number the user just saw (no race between paint and tap).
-    modal.dataset.coinCost = String(server.coin);
-    modal.dataset.starCost = String(server.star);
-  });
-
-  // Close gate — blocked while an unlock RPC is in flight so we
-  // never tear down the modal mid-charge.
-  const close = () => {
-    if (_unlockInFlight) return;
-    modal.classList.remove('open');
-    setTimeout(() => modal.remove(), 180);
-  };
-  modal.querySelector('.unlock-modal-close').onclick = close;
-  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
-
-  modal.querySelectorAll('.unlock-option').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (btn.disabled) return;
-      if (_unlockInFlight) return; // guard: a sibling button is already firing
-      const currency = btn.dataset.cur;
-      btn.classList.add('is-loading');
-      // Disable BOTH buttons + the close while in flight — the user
-      // shouldn't be able to switch currency or escape mid-charge.
-      modal.querySelectorAll('.unlock-option').forEach(b => { b.disabled = true; });
-      _unlockInFlight = true;
-      let data = null, error = null;
-      try {
-        const res = await supabase.rpc('unlock_book_bulk', {
-          p_book_id:  bookId,
-          p_currency: currency,
-        });
-        data = res.data; error = res.error;
-      } finally {
-        _unlockInFlight = false;
-        btn.classList.remove('is-loading');
-      }
-      if (error) {
-        // Re-enable both buttons so the user can retry / pick the other currency.
-        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
-        _handleUnlockFailure(error, {
-          target_type: 'book',
-          target_id: bookId,
-          currency,
-          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
-          locked_count: lockedCount,
-        });
-        return;
-      }
-      if (!data?.ok) {
-        modal.querySelectorAll('.unlock-option').forEach(b => { if (!b.classList.contains('is-disabled')) b.disabled = false; });
-        _handleUnlockFailure(data, {
-          target_type: 'book',
-          target_id: bookId,
-          currency,
-          balance_at_attempt: currency === 'coin' ? _wallet.coin_balance : _wallet.star_balance,
-          locked_count: lockedCount,
-        });
-        return;
-      }
-      // Update local state — Realtime will push too, but avoid flicker.
-      if (currency === 'coin') _wallet.coin_balance = data.balance_after;
-      else                     _wallet.star_balance = data.balance_after;
-      // Refresh unlocks set from server (cheaper than refetching all)
-      const { data: unlocks } = await supabase.from('unlocks')
-        .select('target_type, target_id').eq('user_id', currentUser.id);
-      _userUnlocks.clear();
-      for (const u of (unlocks || [])) markUnlocked(u.target_type, u.target_id);
-      renderTopbarCoinPill();
-      close();
-      const saved = data.cost_before_discount - data.cost;
-      toast(`Unlocked ${data.chapters_unlocked} chapter${data.chapters_unlocked === 1 ? '' : 's'} — saved ${saved} ${currency}${saved === 1 ? '' : 's'}`, 'success');
-      // Weekly/monthly goal: tick "Unlock N items". Dedupe by book id
-      // so re-clicking the bulk unlock (already-unlocked → no-op data
-      // from server) doesn't farm. Mirrors mobile at
-      // lib/book-unlocks-supabase.js:127.
-      try { tickGoalUnique('unlock', `unlock:book:${bookId}`); } catch {}
-      // Persistence verification — fire-and-forget. If the server
-      // said "12 chapters unlocked" but only 10 unlock rows are
-      // visible afterward, this logs a PERSISTENCE-MISMATCH warning
-      // to the console for our telemetry to pick up. Production
-      // mismatches mean real money was charged without the unlock
-      // landing. Mirrors mobile's diagnostic at
-      // lib/book-unlocks-supabase.js:79-121.
-      const expected = Number(data.chapters_unlocked) || 0;
-      if (expected > 0) _verifyBulkUnlockPersistence(bookId, expected);
-      if (typeof onUnlocked === 'function') onUnlocked();
-    });
-  });
-}
 
 // Topbar pill click → open Store
 document.getElementById('topbarCoinPill')?.addEventListener('click', () => showStore());
@@ -2187,8 +1382,13 @@ document.getElementById('btnMigrateFromAppwrite')?.addEventListener('click', asy
 function renderStoreBalances() {
   const c = document.getElementById('storeCoinBalance');
   const s = document.getElementById('storeStarBalance');
-  if (c) c.textContent = `${_wallet.coin_balance.toLocaleString()} Coin${_wallet.coin_balance === 1 ? '' : 's'}`;
-  if (s) s.textContent = `${_wallet.star_balance.toLocaleString()} Star${_wallet.star_balance === 1 ? '' : 's'}`;
+  // Stage 13A — read from getWallet() rather than the old in-file _wallet
+  // local. Stage 13B will move renderStoreBalances itself into wallet.js
+  // (or a future store.js); for now, this just keeps the Store-page
+  // balance cards in sync with the wallet module's source of truth.
+  const w = getWallet();
+  if (c) c.textContent = `${w.coin_balance.toLocaleString()} Coin${w.coin_balance === 1 ? '' : 's'}`;
+  if (s) s.textContent = `${w.star_balance.toLocaleString()} Star${w.star_balance === 1 ? '' : 's'}`;
 }
 
 // ── Wallet history (May 2026 — canonical ledger version) ───────────
@@ -2421,7 +1621,9 @@ async function openWalletHistory(currency) {
   const balEl = document.getElementById('walletHistoryBalance');
   const summaryGlyphHtml = `<span class="wallet-history-summary-glyph" aria-hidden="true">${_walletCurrencyIconSvg(cur, 14)}</span>`;
   if (balEl) {
-    const bal = cur === 'star' ? (_wallet.star_balance || 0) : (_wallet.coin_balance || 0);
+    // Stage 13A — read from getWallet() (wallet.js owner module).
+    const _w = getWallet();
+    const bal = cur === 'star' ? (_w.star_balance || 0) : (_w.coin_balance || 0);
     balEl.innerHTML = `${bal.toLocaleString()} ${summaryGlyphHtml}`;
   }
 
@@ -2602,13 +1804,19 @@ document.getElementById('walletHistoryModal')?.addEventListener('click', (e) => 
 });
 
 // Re-render store balances on Realtime wallet change too.
-// (renderTopbarCoinPill is called by the wallet realtime; we hook the store
-//  card render off the same callback path by patching it.)
-const _origRenderTopbarCoinPill = renderTopbarCoinPill;
-renderTopbarCoinPill = function () {
-  _origRenderTopbarCoinPill();
+//
+// Stage 13A (2026-05-17): the previous monkey-patch on renderTopbarCoinPill
+// (`const _orig = renderTopbarCoinPill; renderTopbarCoinPill = function(){…}`)
+// was load-time fatal after the extraction — ES module imports are read-only
+// bindings and you can't reassign `renderTopbarCoinPill` from outside its
+// owner module. We switched to the explicit subscriber pattern below:
+// wallet.js notifies every onWalletChange subscriber whenever _wallet
+// mutates (Realtime UPDATE, successful unlock, sign-out reset), and we
+// just re-render the Store balance cards if the page is visible. Same
+// observable behavior, no monkey-patch.
+onWalletChange(() => {
   if (storePage && storePage.style.display === 'block') renderStoreBalances();
-};
+});
 
 async function loadStorePacks() {
   const grid = document.getElementById('storePacks');
@@ -5832,7 +5040,7 @@ function syncVuMonetizeGate() {
   const cb     = document.getElementById('vuMonetized');
   const card   = cb?.closest('.vu-card');
   if (!cb) return;
-  const minSec = _walletConfigDefaults.video_initial_unlock_seconds || 180;
+  const minSec = getWalletConfig().video_initial_unlock_seconds || 180;
   const eligible = pendingVideoDurationSec >= minSec;
   cb.disabled = !eligible;
   if (!eligible) cb.checked = false;
@@ -6476,6 +5684,13 @@ function stopVideoPlayer() {
   const player = document.getElementById('videoPlayer');
   if (player) {
     if (player._saveInterval) { clearInterval(player._saveInterval); player._saveInterval = null; }
+    // Stage 13A — teardown the wallet's video monet gate listener
+    // (timeupdate handler that triggers the threshold paywall). Without
+    // this, the listener leaks across nav-aways: the old player keeps
+    // a reference to a stale `_videoMonetGate.videoId` and stale
+    // `markUnlocked`/`nextThreshold` closure, then on the next video
+    // either re-fires the paywall after unlock or noops forever.
+    teardownVideoMonetGate(player);
     player.pause();
     player.removeAttribute('src');
     player.load();
@@ -8080,8 +7295,9 @@ function updateChapterWordCount() {
   if (!chapterQuill) return;
   const text = chapterQuill.getText().trim();
   const words = text.length ? text.split(/\s+/).length : 0;
-  const min   = _walletConfigDefaults.min_chapter_words || 100;
-  const max   = _walletConfigDefaults.max_chapter_words || 10000;
+  const cfg   = getWalletConfig();
+  const min   = cfg.min_chapter_words || 100;
+  const max   = cfg.max_chapter_words || 10000;
 
   const wcEl = document.getElementById('chapterWordCount');
   if (wcEl) wcEl.textContent = words.toLocaleString();
@@ -8378,8 +7594,9 @@ async function commitChapterPublish() {
   // author currently sees in the meta strip.
   const text = chapterQuill?.getText().trim() || '';
   const words = text.length ? text.split(/\s+/).length : 0;
-  const minW = _walletConfigDefaults.min_chapter_words || 100;
-  const maxW = _walletConfigDefaults.max_chapter_words || 10000;
+  const _wcfg = getWalletConfig();
+  const minW = _wcfg.min_chapter_words || 100;
+  const maxW = _wcfg.max_chapter_words || 10000;
   if (words < minW) {
     toast(`Chapter must be at least ${minW.toLocaleString()} words. Current: ${words.toLocaleString()}.`, 'error');
     return;

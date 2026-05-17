@@ -33,7 +33,7 @@ import { supabase, toast, escHTML, callEdgeFunction } from './supabase.js';
 // ─── Config-injection dependency surface ──────────────────────────────────
 // 9 injected pieces:
 //   getCurrentUser()             → live currentUser or null
-//   getWalletConfig()            → app.js _walletConfigDefaults
+//   getWalletConfig()            → wallet.js app_config snapshot
 //   uploadThumbnail(file)        → calls _vuUploadThumbnailFile; returns URL
 //   uploadImage(file)            → uploads attached photo to Bunny; returns URL
 //                                  (used by share-modal "Add photo" flow)

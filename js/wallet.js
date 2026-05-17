@@ -265,12 +265,14 @@ export function teardownWallet() {
     try { supabase.removeChannel(_walletChannel); } catch {}
     _walletChannel = null;
   }
-  if (_videoMonetGate?.player && _videoMonetGate?.listener) {
-    try {
-      _videoMonetGate.player.removeEventListener('timeupdate', _videoMonetGate.listener);
-    } catch {}
-  }
-  _videoMonetGate = null;
+  // Delegate video monet teardown to teardownVideoMonetGate() rather
+  // than inlining the removeEventListener — the helper also bumps
+  // _videoMonetSetupSeq, which invalidates any in-flight
+  // setupVideoMonetGate() awaiting video_progress. Without the seq
+  // bump, sign-out during an active gate setup could resume after
+  // teardownWallet() and re-attach a stale `timeupdate` listener
+  // (Codex Round 6, P1).
+  teardownVideoMonetGate();
 }
 
 /**
