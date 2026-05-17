@@ -1319,26 +1319,41 @@ async function deleteStudioVideo(videoId) {
   if (row) row.style.opacity = '0.4';
   
   try {
-    // 1. Call Edge Function to delete from Bunny + Supabase videos table
-    await callEdgeFunction('bunny-delete', { videoId });
-    
+    // 1. Delete the video row directly from Supabase. The original code
+    //    called callEdgeFunction('bunny-delete', ...) for combined
+    //    Bunny + DB cleanup — but that Edge Function was never deployed
+    //    (see supabase/functions/, no `bunny-delete/` directory), so
+    //    every delete attempt 404'd. RLS on `videos` (uploader_id =
+    //    auth.uid()) enforces ownership. Bunny storage stays orphaned
+    //    until a real bunny-delete function ships — flagged below.
+    //    (2026-05-17 hotfix.)
+    const { error: vidErr } = await supabase.from('videos').delete().eq('id', videoId);
+    if (vidErr) throw vidErr;
+
     // 2. Also delete any post that links to this video
     await supabase.from('posts').delete().eq('video_id', videoId);
-    
-    // 3. Update local cache
+
+    // 3. Best-effort Bunny cleanup. Call bunny-delete if it exists;
+    //    swallow 404 so the delete still feels successful. TODO: write
+    //    the bunny-delete Edge Function so storage doesn't accumulate
+    //    orphaned video files.
+    try { await callEdgeFunction('bunny-delete', { videoId }); }
+    catch (e) { console.warn('[studio] bunny-delete skipped (function not deployed):', e?.message); }
+
+    // 4. Update local cache
     studioVideosCache = studioVideosCache.filter(x => x.id !== videoId);
-    
-    // 4. Invalidate other caches
+
+    // 5. Invalidate other caches
     _cfg.invalidateAllVideosCache();
-    
+
     toast('Video deleted', 'success');
     renderStudio();
-    
-    // 5. Refresh feed if it's open
+
+    // 6. Refresh feed if it's open
     _cfg.refreshFeedIfVisible();
   } catch (err) {
     console.error('Delete failed:', err);
-    toast('Failed to delete: ' + err.message, 'error');
+    toast('Failed to delete: ' + (err?.message || 'unknown error'), 'error');
     if (row) row.style.opacity = '1';
   }
 }

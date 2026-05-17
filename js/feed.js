@@ -843,7 +843,7 @@ function renderPost(post, idScope = '') {
     ` : ''}
 
     ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id}">${_cfg.linkify(post.body)}</div>` : ''}
-    ${post.body ? _cfg.renderLinkPreview(post.body) : ''}
+    ${(post.body && !post.image_url && !post.videos) ? _cfg.renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div class="post-image" onclick="openLightbox('${post.image_url}')"><img src="${post.image_url}" alt="post image" loading="lazy"/></div>` : ''}
     ${post.videos ? `
       <div class="post-video" data-video-url="${escHTML(post.videos.video_url || '')}" data-video-id="${escHTML(post.videos.id || '')}">
@@ -861,7 +861,7 @@ function renderPost(post, idScope = '') {
           </div>
         </div>
         ${post.original.body ? `<div class="post-body collapsible-body" data-post-id="${post.original.id}">${_cfg.linkify(post.original.body)}</div>` : ''}
-        ${post.original.body ? _cfg.renderLinkPreview(post.original.body) : ''}
+        ${(post.original.body && !post.original.image_url && !post.original.videos) ? _cfg.renderLinkPreview(post.original.body) : ''}
         ${post.original.image_url ? `<div class="post-image" onclick="event.stopPropagation();openLightbox('${post.original.image_url}')"><img src="${post.original.image_url}" loading="lazy"/></div>` : ''}
         ${post.original.videos ? `
           <div class="post-video" data-video-url="${escHTML(post.original.videos.video_url || '')}" data-video-id="${escHTML(post.original.videos.id || '')}">
@@ -936,6 +936,60 @@ function renderPost(post, idScope = '') {
 // Prefixed with `_renderHybrid` to avoid colliding with any existing
 // renderBookCarousel/renderVideoCard in the codebase (the video one
 // already collided once and black-screened the site).
+// ── Books carousel: single-tile renderer ──────────────────────────────
+// Shared by both the initial-payload tiles and the extras pulled from
+// _getWebBookPool, so the markup stays in lock-step. Per 2026-05-17
+// design pass: forced uniform dimensions, trending badge in the cover's
+// top-left corner, metadata line below the author. Reads count
+// compacted (12.3k / 1.2M) so it never wraps. Genre + reads only
+// available on pool extras for now (server jsonb doesn't expose them).
+function _formatReadsCompact(n) {
+  const v = Number(n || 0);
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(v >= 10_000_000 ? 0 : 1) + 'M';
+  if (v >= 1_000)     return (v / 1_000).toFixed(v >= 10_000 ? 0 : 1) + 'k';
+  return String(v);
+}
+function _hbcRoleLabel(role) {
+  switch (role) {
+    case 'trending':       return 'Trending';
+    case 'newly_updated':  return 'Just Updated';
+    case 'low_visibility': return 'Hidden Gem';
+    case 'high_engagement':return 'Reader Favorite';
+    default:               return '';
+  }
+}
+function _renderHbcTile(b) {
+  const cover  = b.cover_url || b.thumbnail_url || '';
+  const title  = escHTML(b.title || 'Untitled');
+  const author = escHTML(b.author_display_name || b.author_name || b.author_username || '');
+  const ratingRaw = Number(b.rating ?? b.average_rating ?? b.avg_rating ?? b.ratings_avg ?? 0);
+  const hasRating = ratingRaw > 0;
+  const ratingStr = hasRating ? ratingRaw.toFixed(1) : '';
+  const views = Number(b.views_count ?? b.reads_count ?? 0);
+  const hasViews = views > 0;
+  const genre = b.genre ? escHTML(String(b.genre)) : '';
+  // Meta line: "Romance · 12.3k reads" if both present; otherwise whichever
+  // one we have; otherwise the role-derived label ("Trending" / "Just
+  // Updated" / etc.) so the row never looks bare.
+  const metaSegments = [];
+  if (genre) metaSegments.push(genre);
+  if (hasViews) metaSegments.push(`${_formatReadsCompact(views)} reads`);
+  const metaText = metaSegments.length ? metaSegments.join(' · ') : _hbcRoleLabel(b.role);
+  const isTrending = b.role === 'trending';
+  return `
+    <div class="hbc-tile" data-book-id="${escHTML(b.id || '')}">
+      <div class="hbc-cover">
+        ${cover ? `<img src="${escHTML(cover)}" alt="" loading="lazy"/>` : ''}
+        <div class="hbc-cover-overlay"></div>
+        ${isTrending ? '<div class="hbc-badge hbc-badge-trending">🔥 Trending</div>' : ''}
+        ${hasRating ? `<div class="hbc-rating-pill"><svg viewBox="0 0 24 24" width="9" height="9" style="fill:#fbbf24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg><span>${ratingStr}</span></div>` : ''}
+      </div>
+      <div class="hbc-title" title="${title}">${title}</div>
+      ${author ? `<div class="hbc-author">${author}</div>` : ''}
+      ${metaText ? `<div class="hbc-meta">${metaText}</div>` : ''}
+    </div>`;
+}
+
 function _renderHybridBookCarousel(payload) {
   const books = Array.isArray(payload?.books) ? payload.books : [];
   if (!books.length) return null;
@@ -945,70 +999,41 @@ function _renderHybridBookCarousel(payload) {
   // self-contained unit — we don't have to touch css/styles.css to
   // get the look right. The :hover effects are wired via a one-time
   // injected <style> below (idempotent — `data-hbc-style` guard).
+  // 2026-05-17 polish: tightened to a denser, Netflix-style row —
+  // smaller paddings, cleaner arrows, metadata pills, trending badge,
+  // brand purple header (was rendering amber via --accent).
   wrap.style.cssText = [
-    'margin:12px 0',
-    'padding:18px 0 18px',
-    'background:linear-gradient(135deg, rgba(121,117,212,0.06) 0%, rgba(121,117,212,0.02) 100%)',
-    'border-radius:16px',
-    'border:1px solid rgba(121,117,212,0.20)',
+    'margin:10px 0',
+    'padding:12px 0 14px',
+    'background:linear-gradient(135deg, rgba(139,92,246,0.06) 0%, rgba(139,92,246,0.02) 100%)',
+    'border-radius:14px',
+    'border:1px solid rgba(139,92,246,0.18)',
     'position:relative',
     'overflow:hidden',
   ].join(';');
 
   const headerHtml = `
-    <div class="hbc-header" style="display:flex;align-items:center;justify-content:space-between;padding:0 20px;margin-bottom:14px">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:16px">📚</span>
-        <span style="font-size:13px;font-weight:700;color:var(--accent,#7975D4);text-transform:uppercase;letter-spacing:0.08em">Books worth reading</span>
+    <div class="hbc-header" style="display:flex;align-items:center;justify-content:space-between;padding:0 16px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:7px">
+        <span style="font-size:14px">📚</span>
+        <span style="font-size:11.5px;font-weight:700;color:var(--purple,#8b5cf6);text-transform:uppercase;letter-spacing:0.08em">Books Worth Reading</span>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:6px">
         <button type="button" class="hbc-arrow hbc-prev" aria-label="Previous">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <button type="button" class="hbc-arrow hbc-next" aria-label="Next">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
     </div>`;
 
-  // Each tile is a fixed 144px wide so we can math the page size off
-  // the viewport width below. Cover is 2:3 aspect. Title clamped to a
-  // single line + ellipsis (Charles's preference for desktop — keeps
-  // every row in the carousel the exact same height). Author single
-  // line. Rating row shows ★ + numeric only when a rating field is
-  // present + non-zero. Hover lifts the tile with a shadow.
-  const tilesHtml = books.map(b => {
-    const cover  = b.cover_url || b.thumbnail_url || '';
-    const title  = escHTML(b.title || 'Untitled');
-    const author = escHTML(b.author_display_name || b.author_name || b.author_username || '');
-    // Rating — server may put it on any of these fields depending on
-    // which fetch path emitted the card. Fall through gracefully.
-    const ratingRaw = Number(b.rating ?? b.average_rating ?? b.avg_rating ?? 0);
-    const hasRating = ratingRaw > 0;
-    const ratingStr = hasRating ? ratingRaw.toFixed(1) : '';
-    const ratingCount = Number(b.rating_count ?? b.ratings_count ?? 0);
-    return `
-      <div class="hbc-tile" data-book-id="${escHTML(b.id || '')}">
-        <div class="hbc-cover">
-          ${cover ? `<img src="${escHTML(cover)}" alt="" loading="lazy"/>` : ''}
-          <div class="hbc-cover-overlay"></div>
-        </div>
-        <div class="hbc-title" title="${title}">${title}</div>
-        ${author ? `<div class="hbc-author">${author}</div>` : ''}
-        ${hasRating
-          ? `<div class="hbc-rating">
-               <svg viewBox="0 0 24 24" width="11" height="11" style="fill:#f5b50a"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
-               <span class="hbc-rating-val">${ratingStr}</span>
-               ${ratingCount > 0 ? `<span class="hbc-rating-count">(${ratingCount.toLocaleString()})</span>` : ''}
-             </div>`
-          : ''}
-      </div>`;
-  }).join('');
+  const tilesHtml = books.map(_renderHbcTile).join('');
 
   wrap.innerHTML = `
     ${headerHtml}
-    <div class="hbc-viewport" style="overflow:hidden;padding:4px 20px">
-      <div class="hbc-track" style="display:flex;gap:16px;transition:transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);will-change:transform">
+    <div class="hbc-viewport" style="overflow:hidden;padding:2px 16px 4px">
+      <div class="hbc-track" style="display:flex;gap:12px;transition:transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);will-change:transform">
         ${tilesHtml}
       </div>
     </div>`;
@@ -1016,113 +1041,154 @@ function _renderHybridBookCarousel(payload) {
   // Inject the supporting styles once. Idempotent guard: a data attr
   // on <head> means subsequent carousels skip the duplicate <style>
   // injection. Doing it this way avoids touching css/styles.css.
+  // 2026-05-17 rewrite: Netflix-style row — uniform 138x207px covers,
+  // smaller (32px) flat arrows, brand-purple hover, trending badge +
+  // rating pill over the cover, metadata line under the author.
   if (!document.documentElement.dataset.hbcStyle) {
     const s = document.createElement('style');
     s.textContent = `
-      /* Glass-style navigation arrows — frosted background with
-         backdrop blur. Picks up whatever colour is behind them so the
-         arrows are visible against light AND dark page backgrounds.
-         The icon uses the accent purple so it's never washed out. */
+      /* ── Navigation arrows: smaller, lighter, brand-purple ────────── */
       .feed-hybrid-book-carousel .hbc-arrow {
-        width: 38px; height: 38px;
+        width: 30px; height: 30px;
         border-radius: 50%;
-        border: 1px solid rgba(121, 117, 212, 0.35);
-        background: rgba(255, 255, 255, 0.55);
-        -webkit-backdrop-filter: blur(14px) saturate(180%);
-        backdrop-filter: blur(14px) saturate(180%);
-        color: var(--accent, #7975D4);
+        border: 1px solid rgba(139, 92, 246, 0.25);
+        background: rgba(255, 255, 255, 0.7);
+        -webkit-backdrop-filter: blur(8px);
+        backdrop-filter: blur(8px);
+        color: var(--purple, #8b5cf6);
         cursor: pointer;
         display: flex; align-items: center; justify-content: center;
-        transition: all 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
-        box-shadow: 0 2px 10px rgba(121, 117, 212, 0.12),
-                    inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+        transition: all 0.18s cubic-bezier(0.22, 0.61, 0.36, 1);
       }
-      body[data-theme="dark"] .feed-hybrid-book-carousel .hbc-arrow {
+      body:not(.light) .feed-hybrid-book-carousel .hbc-arrow {
         background: rgba(30, 30, 45, 0.55);
-        border-color: rgba(121, 117, 212, 0.45);
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3),
-                    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+        border-color: rgba(139, 92, 246, 0.35);
       }
       .feed-hybrid-book-carousel .hbc-arrow:hover:not([disabled]) {
-        background: var(--accent, #7975D4);
-        border-color: var(--accent, #7975D4);
+        background: var(--purple, #8b5cf6);
+        border-color: var(--purple, #8b5cf6);
         color: #fff;
-        transform: translateY(-1px) scale(1.04);
-        box-shadow: 0 6px 18px rgba(121, 117, 212, 0.40);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.30);
       }
       .feed-hybrid-book-carousel .hbc-arrow:active:not([disabled]) {
-        transform: translateY(0) scale(0.98);
+        transform: translateY(0);
       }
       .feed-hybrid-book-carousel .hbc-arrow[disabled] {
-        opacity: 0.35; cursor: not-allowed;
+        opacity: 0.3; cursor: not-allowed;
         transform: none !important;
         box-shadow: none !important;
       }
 
-      /* Tile — 144px wide, hover lifts it up with a deeper shadow */
+      /* ── Tile: locked uniform width, hover lift ───────────────────── */
       .feed-hybrid-book-carousel .hbc-tile {
-        flex: 0 0 144px;
+        flex: 0 0 138px;
+        width: 138px;
+        min-width: 138px;
+        max-width: 138px;
         cursor: pointer;
-        transition: transform 0.22s ease;
+        transition: transform 0.2s ease;
       }
       .feed-hybrid-book-carousel .hbc-tile:hover {
-        transform: translateY(-3px);
+        transform: translateY(-2px);
       }
       .feed-hybrid-book-carousel .hbc-tile:hover .hbc-cover {
-        box-shadow: 0 10px 28px rgba(121, 117, 212, 0.28),
-                    0 2px 6px rgba(0, 0, 0, 0.18);
+        box-shadow: 0 8px 22px rgba(139, 92, 246, 0.28),
+                    0 2px 4px rgba(0, 0, 0, 0.14);
       }
+      /* Explicit width × height kills the wrong-aspect bug where a
+         book whose natural image is wide would balloon past 138px. */
       .feed-hybrid-book-carousel .hbc-cover {
-        aspect-ratio: 2/3;
-        border-radius: 10px;
+        width: 138px;
+        height: 207px; /* 2:3 of 138 — locked, not aspect-ratio */
+        border-radius: 8px;
         overflow: hidden;
-        background: var(--surface-2, #222);
+        background: var(--bg3, #1c1c42);
         position: relative;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-        transition: box-shadow 0.22s ease;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+        transition: box-shadow 0.2s ease;
       }
       .feed-hybrid-book-carousel .hbc-cover img {
         width: 100%; height: 100%; object-fit: cover; display: block;
       }
       .feed-hybrid-book-carousel .hbc-cover-overlay {
         position: absolute; inset: 0;
-        background: linear-gradient(180deg, transparent 60%, rgba(0, 0, 0, 0.35) 100%);
+        background: linear-gradient(180deg, transparent 65%, rgba(0, 0, 0, 0.45) 100%);
         pointer-events: none;
       }
 
-      /* Text rows — single-line title + author + rating */
-      .feed-hybrid-book-carousel .hbc-title {
-        font-size: 13px;
-        font-weight: 600;
-        line-height: 1.35;
-        color: var(--text, #fff);
-        margin-top: 10px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      /* Trending badge: top-left pill on the cover */
+      .feed-hybrid-book-carousel .hbc-badge {
+        position: absolute;
+        top: 6px; left: 6px;
+        padding: 3px 7px;
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        line-height: 1;
       }
-      .feed-hybrid-book-carousel .hbc-author {
-        font-size: 11.5px;
-        color: var(--text2, #aaa);
-        margin-top: 3px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      .feed-hybrid-book-carousel .hbc-badge-trending {
+        background: linear-gradient(135deg, #ef4444 0%, #f97316 100%);
       }
-      .feed-hybrid-book-carousel .hbc-rating {
+
+      /* Rating: small pill in the bottom-right of the cover so it stays
+         visible against the gradient and never collides with the title. */
+      .feed-hybrid-book-carousel .hbc-rating-pill {
+        position: absolute;
+        bottom: 6px; right: 6px;
         display: inline-flex;
         align-items: center;
-        gap: 4px;
-        margin-top: 5px;
-        font-size: 11px;
-        color: var(--text, #fff);
-      }
-      .feed-hybrid-book-carousel .hbc-rating-val {
+        gap: 3px;
+        padding: 2px 6px;
+        font-size: 10px;
         font-weight: 600;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        border-radius: 999px;
+        line-height: 1.2;
       }
-      .feed-hybrid-book-carousel .hbc-rating-count {
+
+      /* ── Text rows: tighter stack, 2-line title clamp ─────────────── */
+      .feed-hybrid-book-carousel .hbc-title {
+        font-size: 12.5px;
+        font-weight: 600;
+        line-height: 1.3;
+        color: var(--text, #fff);
+        margin-top: 7px;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        /* Reserve a 2-line slot so every tile is the same total height
+           regardless of title length. */
+        min-height: 32px;
+      }
+      .feed-hybrid-book-carousel .hbc-author {
+        font-size: 11px;
         color: var(--text2, #aaa);
+        margin-top: 2px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         font-weight: 400;
+      }
+      .feed-hybrid-book-carousel .hbc-meta {
+        font-size: 10.5px;
+        color: var(--text3, #888);
+        margin-top: 2px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 500;
+        letter-spacing: 0.01em;
       }
     `;
     document.head.appendChild(s);
@@ -1130,14 +1196,14 @@ function _renderHybridBookCarousel(payload) {
   }
 
   // Pagination — translate the track by N tiles per click. Tile width
-  // (144px) + gap (16px) = 160px per slot. Page size = floor(viewport
-  // width / 160), measured after the carousel mounts so the count
+  // (138px) + gap (12px) = 150px per slot. Page size = floor(viewport
+  // width / 150), measured after the carousel mounts so the count
   // adapts to the actual rendered width (sidebar collapsed vs not).
   const track = wrap.querySelector('.hbc-track');
   const viewport = wrap.querySelector('.hbc-viewport');
   const prevBtn = wrap.querySelector('.hbc-prev');
   const nextBtn = wrap.querySelector('.hbc-next');
-  const SLOT = 160;             // 144px tile + 16px gap
+  const SLOT = 150;             // 138px tile + 12px gap
   let offset = 0;
 
   function _updateArrows() {
@@ -1177,34 +1243,7 @@ function _renderHybridBookCarousel(payload) {
     _cfg._getWebBookPool().then((pool) => {
       const extras = pool.filter(b => b.id && !existingIds.has(b.id)).slice(0, TARGET_COUNT - books.length);
       if (!extras.length) return;
-      // Build the HTML for the new tiles using the same template as
-      // the inline tilesHtml block above. Extracted to a tiny helper
-      // here so we don't duplicate the markup.
-      const extraHtml = extras.map(b => {
-        const cover  = b.cover_url || b.thumbnail_url || '';
-        const title  = escHTML(b.title || 'Untitled');
-        const author = escHTML(b.author_display_name || b.author_name || b.author_username || '');
-        const ratingRaw = Number(b.rating ?? b.average_rating ?? b.avg_rating ?? 0);
-        const hasRating = ratingRaw > 0;
-        const ratingStr = hasRating ? ratingRaw.toFixed(1) : '';
-        const ratingCount = Number(b.rating_count ?? b.ratings_count ?? 0);
-        return `
-          <div class="hbc-tile" data-book-id="${escHTML(b.id || '')}">
-            <div class="hbc-cover">
-              ${cover ? `<img src="${escHTML(cover)}" alt="" loading="lazy"/>` : ''}
-              <div class="hbc-cover-overlay"></div>
-            </div>
-            <div class="hbc-title" title="${title}">${title}</div>
-            ${author ? `<div class="hbc-author">${author}</div>` : ''}
-            ${hasRating
-              ? `<div class="hbc-rating">
-                   <svg viewBox="0 0 24 24" width="11" height="11" style="fill:#f5b50a"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
-                   <span class="hbc-rating-val">${ratingStr}</span>
-                   ${ratingCount > 0 ? `<span class="hbc-rating-count">(${ratingCount.toLocaleString()})</span>` : ''}
-                 </div>`
-              : ''}
-          </div>`;
-      }).join('');
+      const extraHtml = extras.map(_renderHbcTile).join('');
       track.insertAdjacentHTML('beforeend', extraHtml);
       // Recompute arrow state since track is wider now.
       _updateArrows();
@@ -1227,29 +1266,221 @@ function _renderHybridVideoCard(payload) {
   if (!v.id) return null;
   const wrap = document.createElement('div');
   wrap.className = 'feed-video-card';
-  wrap.style.cssText = 'margin:12px 0;border-radius:12px;overflow:hidden;background:var(--surface,#1a1a24);border:1px solid var(--border,#2a2a3a);cursor:pointer';
   const thumb = v.thumbnail_url || '';
   const title = escHTML(v.title || 'Untitled video');
   const creator = escHTML(v.creator_display_name || v.creator_name || v.creator_username || '');
+  const creatorAvatar = v.creator_avatar_url ? escHTML(v.creator_avatar_url) : '';
   const dur = v.duration ? _cfg._formatDuration(v.duration) : '';
+  const views = Number(v.views || v.views_count || 0);
+  const viewsLabel = views > 0
+    ? `${_cfg.formatCompact(views)} view${views === 1 ? '' : 's'}`
+    : '';
+  const uploaded = v.created_at ? timeAgo(v.created_at) : '';
+  // Hierarchy: thumbnail → title → creator (avatar + name) → views · age
+  // Meta line concatenates with a · separator (omits empty parts).
+  const metaParts = [];
+  if (viewsLabel) metaParts.push(viewsLabel);
+  if (uploaded)   metaParts.push(uploaded);
+  const metaText = metaParts.join(' · ');
   wrap.innerHTML = `
-    <div style="position:relative;aspect-ratio:16/9;background:#000">
-      ${thumb ? `<img src="${escHTML(thumb)}" alt="" style="width:100%;height:100%;object-fit:cover" loading="lazy"/>` : ''}
-      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">
-        <div style="background:rgba(0,0,0,0.55);border-radius:50%;width:64px;height:64px;display:flex;align-items:center;justify-content:center">
-          <svg viewBox="0 0 24 24" width="28" height="28" style="fill:white;margin-left:3px"><polygon points="8 5 19 12 8 19 8 5"/></svg>
-        </div>
+    <div class="fvc-thumb">
+      ${thumb ? `<img src="${escHTML(thumb)}" alt="" loading="lazy"/>` : ''}
+      <div class="fvc-thumb-gradient"></div>
+      <span class="fvc-badge">★ Featured</span>
+      <div class="fvc-play" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22"><polygon points="8 5 19 12 8 19 8 5"/></svg>
       </div>
-      ${dur ? `<div style="position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,0.75);color:white;font-size:12px;font-weight:600;padding:2px 6px;border-radius:4px">${dur}</div>` : ''}
-      <div style="position:absolute;top:10px;left:10px;background:var(--accent,#7975D4);color:white;font-size:11px;font-weight:700;padding:3px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.04em">▶ Featured video</div>
+      ${dur ? `<span class="fvc-duration">${dur}</span>` : ''}
     </div>
-    <div style="padding:12px 14px">
-      <div style="font-size:14px;font-weight:600;color:var(--text,#fff);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${title}</div>
-      ${creator ? `<div style="font-size:12px;color:var(--text2,#aaa)">${creator}</div>` : ''}
+    <div class="fvc-body">
+      <div class="fvc-title" title="${title}">${title}</div>
+      <div class="fvc-meta-row">
+        ${creator ? `<div class="fvc-creator">
+          ${creatorAvatar
+            ? `<img class="fvc-creator-avatar" src="${creatorAvatar}" alt=""/>`
+            : `<div class="fvc-creator-avatar fvc-creator-avatar-fallback">${initials(v.creator_display_name || v.creator_username || 'U')}</div>`}
+          <span class="fvc-creator-name">${creator}</span>
+        </div>` : ''}
+        ${metaText ? `<div class="fvc-meta-text">${metaText}</div>` : ''}
+      </div>
     </div>`;
   wrap.addEventListener('click', () => {
     _cfg.playVideo('sb_' + v.id);
   });
+  // Inject styles once (idempotent guard via head dataset).
+  if (!document.documentElement.dataset.fvcStyle) {
+    const s = document.createElement('style');
+    s.textContent = `
+      /* ── Featured video card — Facebook Watch / YouTube feel ────────
+         Compact card with hover lift, thumbnail zoom, modern play
+         button, subtle Featured badge in brand purple. (2026-05-17) */
+      .feed-video-card {
+        margin: 10px 0;
+        border-radius: 12px;
+        overflow: hidden;
+        background: var(--bg2, #141433);
+        border: 1px solid var(--border, rgba(255,255,255,0.06));
+        cursor: pointer;
+        transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+      }
+      body.light .feed-video-card {
+        background: #fff;
+        border-color: rgba(0, 0, 0, 0.06);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+      }
+      .feed-video-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 28px rgba(139, 92, 246, 0.18),
+                    0 2px 6px rgba(0, 0, 0, 0.12);
+        border-color: rgba(139, 92, 246, 0.25);
+      }
+
+      /* Thumbnail block ── 16:9, modern overlays */
+      .feed-video-card .fvc-thumb {
+        position: relative;
+        aspect-ratio: 16/9;
+        background: #000;
+        overflow: hidden;
+      }
+      .feed-video-card .fvc-thumb img {
+        width: 100%; height: 100%;
+        object-fit: cover;
+        display: block;
+        transition: transform 0.4s cubic-bezier(0.22, 0.61, 0.36, 1);
+      }
+      .feed-video-card:hover .fvc-thumb img {
+        transform: scale(1.04);
+      }
+      .feed-video-card .fvc-thumb-gradient {
+        position: absolute; inset: 0;
+        background: linear-gradient(180deg, rgba(0,0,0,0.35) 0%, transparent 22%, transparent 65%, rgba(0,0,0,0.45) 100%);
+        pointer-events: none;
+      }
+
+      /* Featured badge — top-left subtle pill, brand purple */
+      .feed-video-card .fvc-badge {
+        position: absolute;
+        top: 10px; left: 10px;
+        padding: 3px 8px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: #fff;
+        background: rgba(139, 92, 246, 0.92);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        border-radius: 999px;
+        line-height: 1.3;
+      }
+
+      /* Play button — modern, slightly elevated, scales on hover */
+      .feed-video-card .fvc-play {
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        width: 56px; height: 56px;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        transition: transform 0.22s ease, background 0.22s ease;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+      }
+      .feed-video-card .fvc-play svg {
+        fill: currentColor;
+        margin-left: 2px; /* optical centering of triangle */
+      }
+      .feed-video-card:hover .fvc-play {
+        transform: translate(-50%, -50%) scale(1.08);
+        background: var(--purple, #8b5cf6);
+      }
+
+      /* Duration pill — bottom-right, smaller + blur for YouTube feel */
+      .feed-video-card .fvc-duration {
+        position: absolute;
+        bottom: 8px; right: 8px;
+        padding: 2px 6px;
+        background: rgba(0, 0, 0, 0.78);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 4px;
+        line-height: 1.3;
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+      }
+
+      /* Body — title + creator + meta. Matches the card surface so the
+         section never looks like a bolted-on dark band. */
+      .feed-video-card .fvc-body {
+        padding: 10px 12px 12px;
+      }
+      .feed-video-card .fvc-title {
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1.35;
+        color: var(--text);
+        margin: 0 0 6px;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .feed-video-card .fvc-meta-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+      .feed-video-card .fvc-creator {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .feed-video-card .fvc-creator-avatar {
+        width: 20px; height: 20px;
+        border-radius: 50%;
+        object-fit: cover;
+        flex-shrink: 0;
+        background: var(--purple, #8b5cf6);
+        color: #fff;
+        font-size: 9px;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        text-transform: uppercase;
+      }
+      .feed-video-card .fvc-creator-name {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text2);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .feed-video-card .fvc-meta-text {
+        font-size: 11.5px;
+        color: var(--text3);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .feed-video-card .fvc-meta-row .fvc-creator + .fvc-meta-text::before {
+        content: '·';
+        margin-right: 6px;
+        opacity: 0.7;
+      }
+    `;
+    document.head.appendChild(s);
+    document.documentElement.dataset.fvcStyle = '1';
+  }
   return wrap;
 }
 
@@ -1347,6 +1578,17 @@ async function loadFeed() {
 
   feed.innerHTML = '<div class="loading">Loading feed...</div>';
   if (sentinel) sentinel.style.display = 'none';
+
+  // Refresh the right-rail suggestions in lockstep with the feed so
+  // they don't feel like a static panel hovering next to a dynamic
+  // feed. Bumping cycle + clearing loaded forces the next render to
+  // pick a different shuffled subset of the candidate pool.
+  // (2026-05-17 — feed-refresh tie-in.)
+  if (typeof railSession !== 'undefined') {
+    railSession.cycle += 1;
+    railSession.loaded = false;
+    try { loadSuggestedCreators({ force: true }); } catch {}
+  }
 
   // Reset pagination state
   _feedOffset = 0;
@@ -1534,11 +1776,16 @@ async function deletePost(postId) {
     if (lookupError) throw new Error('Failed to find post: ' + lookupError.message);
 
     if (post?.video_id) {
-      try {
-        await callEdgeFunction('bunny-delete', { videoId: post.video_id });
-      } catch (err) {
-        throw new Error('Failed to delete video file: ' + err.message);
-      }
+      // 2026-05-17 hotfix: the bunny-delete Edge Function isn't
+      // deployed (see supabase/functions/, no `bunny-delete/`), so the
+      // old code threw and the whole post-delete failed. Drop the
+      // videos row directly via Supabase (RLS gates ownership) and
+      // best-effort the storage cleanup — swallow 404s so the user
+      // still sees the post disappear. Bunny orphan is a follow-up.
+      const { error: vidErr } = await supabase.from('videos').delete().eq('id', post.video_id);
+      if (vidErr) throw new Error('Failed to delete video row: ' + vidErr.message);
+      try { await callEdgeFunction('bunny-delete', { videoId: post.video_id }); }
+      catch (e) { console.warn('[feed] bunny-delete skipped (function not deployed):', e?.message); }
     }
 
     const { error } = await supabase.from('posts').delete().eq('id', postId);
@@ -1639,7 +1886,7 @@ function repostPost(postId) {
       <div><span class="post-author">${escHTML(name)}${_cfg.renderRoleSeal(profile)}</span><div class="post-time">${timeAgo(post.created_at)}</div></div>
     </div>
     ${post.body ? `<div class="post-body collapsible-body" data-post-id="${post.id || post.$id || ''}">${_cfg.linkify(post.body)}</div>` : ''}
-    ${post.body ? _cfg.renderLinkPreview(post.body) : ''}
+    ${(post.body && !post.image_url && !post.videos) ? _cfg.renderLinkPreview(post.body) : ''}
     ${post.image_url ? `<div style="border-radius:8px;overflow:hidden;margin-top:0.5rem"><img src="${post.image_url}"/></div>` : ''}
   `;
   document.getElementById('repostCaption').value = '';
@@ -1684,6 +1931,417 @@ function shareTo(platform, postId) {
   document.querySelectorAll(`.share-menu#sharemenu-${CSS.escape(postId)}`).forEach(m => m.classList.remove('visible'));
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// SUGGESTED CREATORS — right-rail panel (2026-05-17)
+// ════════════════════════════════════════════════════════════════════════════
+// Twitter/Threads pattern: surface a handful of creators worth following
+// alongside the Post feed. Heuristic (client-side, no new RPC): pull the
+// last ~120 published videos from the last 14 days, group by uploader_id,
+// rank by upload count + recency, exclude already-followed users + self,
+// take the top ~5.
+//
+// We deliberately skip a server RPC for the first cut — keeps the rail
+// shippable without a migration, lets us tune the heuristic in code, and
+// the query touches the same .from('videos') projection the Home page
+// already hits (page cache friendly). When the heuristic matures we can
+// lift it into a fetch_suggested_creators RPC.
+//
+// Cached per-session so flipping between Post and other tabs doesn't
+// re-hit Supabase. railSession.refreshing guards against double-clicks
+// on the refresh affordance.
+// ────────────────────────────────────────────────────────────────────────────
+
+const railSession = {
+  loaded: false,
+  loading: false,
+  rows: [],     // resolved suggestions (latest fetch)
+  followIds: new Set(),
+  // Cycle index — bumped by the refresh button so each refresh slides
+  // the 5-card window across the ranked pool. Otherwise refresh would
+  // re-show the same top 5 and feel broken. (2026-05-17 fix.)
+  // Also seeded from a random base on first run so different pageloads
+  // see different starting orders.
+  cycle: Math.floor(Math.random() * 9973),
+};
+
+// Deterministic shuffle keyed on (Date.now hour + cycle + index). Same
+// cycle within the same hour returns the same order so React-style
+// re-renders don't shuffle mid-session; bumping cycle or letting the
+// hour roll over produces a different sequence. Mulberry32 over a
+// composite seed gives us cheap, decent variance.
+function _mulberry32(a) {
+  return function() {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function _shuffleWithSeed(arr, seed) {
+  const out = arr.slice();
+  // Seed = (hour bucket << 16) ^ cycle — same hour + same cycle gives
+  // stable order; either changing varies it.
+  const hourBucket = Math.floor(Date.now() / (60 * 60 * 1000));
+  const rnd = _mulberry32(((hourBucket & 0xffff) << 16) ^ (seed | 0));
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+async function loadSuggestedCreators({ force = false } = {}) {
+  const listEl = document.getElementById('suggestedCreatorsList');
+  if (!listEl) return;
+
+  // Bail if already loaded and not forced. Re-using the cached render is
+  // the right call when the user just toggles tabs.
+  if (railSession.loaded && !force) return;
+  if (railSession.loading) return;
+  railSession.loading = true;
+
+  const me = _cfg.getCurrentUser();
+  const myId = me?.id || null;
+
+  // While loading, leave the skeleton rows in place. They were rendered
+  // by index.html on first paint, and remain whenever we wipe the list
+  // below before re-render.
+  try {
+    // Pull a generous pool of recent uploaders. We over-fetch so we have
+    // enough headroom after the follow + self filter.
+    const sinceISO = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: vids, error: vidErr } = await supabase
+      .from('videos')
+      .select('uploader_id, created_at')
+      .eq('status', 'published')
+      .eq('is_hidden', false)
+      .gte('created_at', sinceISO)
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (vidErr) throw vidErr;
+
+    // Tally uploads per creator + record most-recent upload timestamp.
+    const tally = new Map();
+    for (const v of vids || []) {
+      if (!v.uploader_id) continue;
+      const t = tally.get(v.uploader_id) || { count: 0, lastTs: 0 };
+      t.count += 1;
+      const ts = v.created_at ? new Date(v.created_at).getTime() : 0;
+      if (ts > t.lastTs) t.lastTs = ts;
+      tally.set(v.uploader_id, t);
+    }
+    if (tally.size === 0) {
+      _renderRailEmpty(listEl);
+      railSession.loaded = true;
+      return;
+    }
+
+    // Drop already-followed + self. Cache the follow set so the rail's
+    // Follow button can self-update without another fetch.
+    let followIds = new Set();
+    if (myId) {
+      const { data: follows } = await supabase
+        .from('follows')
+        .select('following_id')
+        .eq('follower_id', myId);
+      followIds = new Set((follows || []).map(f => f.following_id));
+      followIds.add(myId);
+    }
+    railSession.followIds = followIds;
+
+    const rankedAll = [...tally.entries()]
+      .filter(([uid]) => !followIds.has(uid))
+      .map(([uid, t]) => ({ uid, count: t.count, lastTs: t.lastTs }))
+      // Rank by upload count, tie-break by most-recent upload.
+      .sort((a, b) => (b.count - a.count) || (b.lastTs - a.lastTs));
+
+    if (rankedAll.length === 0) {
+      _renderRailEmpty(listEl, 'You\'re already following everyone uploading lately.');
+      railSession.loaded = true;
+      return;
+    }
+
+    // 2026-05-17 v3: sample randomly from the top pool instead of strictly
+    // showing the highest-ranked five. Keeps the rail feeling alive on
+    // every page load (the cards rotate) while still privileging active
+    // creators (the candidate pool itself is ranked). Cycle index lets
+    // the explicit refresh button advance through the pool deterministically.
+    const PAGE_SIZE = 5;
+    const POOL_SIZE = 25; // top-25 active uploaders form the candidate pool
+    const pool = rankedAll.slice(0, POOL_SIZE);
+    const shuffled = _shuffleWithSeed(pool, railSession.cycle);
+    const slice = shuffled.slice(0, PAGE_SIZE + 5); // +5 buffer for missing profile rows
+
+    // Resolve the profile rows. Pull a few extra fields so the row can
+    // render avatar + display name + role seal without extra queries.
+    // ── 2026-05-17 fix: dropped `roles` from the select because the
+    // profiles table has the legacy single `role` column only. Querying
+    // a non-existent column is what made the first cut throw → "Couldn't
+    // load suggestions." renderRoleSeal already accepts either shape.
+    const { data: profs, error: profErr } = await supabase
+      .from('profiles')
+      .select('id, username, display_name, avatar_url, role, is_guest, is_banned')
+      .in('id', slice.map(r => r.uid));
+    if (profErr) throw profErr;
+
+    const profById = new Map((profs || []).map(p => [p.id, p]));
+    const rows = slice
+      .map(r => {
+        const p = profById.get(r.uid);
+        if (!p) return null;
+        // Drop guest / banned accounts so we never suggest them.
+        if (p.is_guest || p.is_banned) return null;
+        return { ...p, _count: r.count };
+      })
+      .filter(Boolean)
+      .slice(0, PAGE_SIZE);
+
+    if (rows.length === 0) {
+      _renderRailEmpty(listEl);
+      railSession.loaded = true;
+      return;
+    }
+
+    railSession.rows = rows;
+    railSession.loaded = true;
+    _renderSuggestedCreators(listEl, rows);
+  } catch (err) {
+    // Verbose log so the failure mode is obvious when this happens
+    // (PostgREST messages get swallowed by the generic "Couldn't load"
+    // toast otherwise). message + code + hint help triage RLS vs.
+    // missing-column vs. network promptly.
+    console.warn('[suggested-creators] load failed:', {
+      message: err?.message,
+      code:    err?.code,
+      hint:    err?.hint,
+      details: err?.details,
+      err,
+    });
+    listEl.innerHTML = `<div class="rail-empty">Couldn't load suggestions. <button type="button" class="rail-empty-cta" id="railRetryBtn">Try again</button></div>`;
+    const retry = document.getElementById('railRetryBtn');
+    if (retry) retry.addEventListener('click', () => loadSuggestedCreators({ force: true }));
+  } finally {
+    railSession.loading = false;
+  }
+}
+
+function _renderRailEmpty(listEl, msg) {
+  listEl.innerHTML = `<div class="rail-empty">${escHTML(msg || 'No suggestions right now.')}</div>`;
+}
+
+function _renderSuggestedCreators(listEl, rows) {
+  const html = rows.map(p => {
+    const name = p.display_name || p.username || 'User';
+    const sub  = _railSubtitle(p);
+    const verified = _railIsVerified(p);
+    const avatar = p.avatar_url
+      ? `<img src="${escHTML(p.avatar_url)}" alt=""/>`
+      : escHTML(initials(name));
+    return `
+      <div class="rail-suggest-row" data-user-id="${p.id}" role="button" tabindex="0">
+        <div class="rail-suggest-avatar${verified ? ' is-verified' : ''}">${avatar}</div>
+        <div class="rail-suggest-meta">
+          <div class="rail-suggest-name">${escHTML(name)}${_cfg.renderRoleSeal(p, 14)}</div>
+          <div class="rail-suggest-sub">${escHTML(sub)}</div>
+        </div>
+        <button type="button" class="rail-follow-btn" data-target-id="${p.id}"><span class="rail-follow-label">+ Follow</span></button>
+      </div>
+    `;
+  }).join('');
+  // "See more" footer link — currently routes the user to the Videos
+  // tab (the broadest creator discovery surface today). Once a dedicated
+  // /discover-creators page exists, point it there instead.
+  listEl.innerHTML = html + `
+    <div class="rail-footer">
+      <a href="#videos" class="rail-see-more">
+        See more
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+      </a>
+    </div>
+  `;
+
+  // Row click → open profile (avoid hijacking the Follow button click).
+  listEl.querySelectorAll('.rail-suggest-row').forEach(row => {
+    row.addEventListener('click', (ev) => {
+      if (ev.target.closest('.rail-follow-btn')) return;
+      const uid = row.dataset.userId;
+      if (uid && _cfg.openProfile) _cfg.openProfile(uid);
+    });
+    row.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        const uid = row.dataset.userId;
+        if (uid && _cfg.openProfile) _cfg.openProfile(uid);
+      }
+    });
+  });
+
+  // Follow button → toggle follow, optimistic flip, server write.
+  listEl.querySelectorAll('.rail-follow-btn').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      _railFollowToggle(btn);
+    });
+  });
+}
+
+function _railSubtitle(profile) {
+  // Natural creator-facing labels with more variety per activity tier
+  // (2026-05-17 v2). Tiered by recent upload count so the rail doesn't
+  // read as five identical "Video Creator" rows:
+  //
+  //   count 1-2 → "Rising X"   (new, ramping)
+  //   count 3-5 → "Story X"    (active, building catalog)
+  //   count 6+  → "Video X" / "Book X"   (established)
+  //
+  // Roles override the default ramp so a Pioneer/Mod always reads as
+  // such regardless of count.
+  const rolesArray = Array.isArray(profile.roles) ? profile.roles : [];
+  const roleString = typeof profile.role === 'string' ? profile.role : '';
+  const has = (k) => rolesArray.includes(k) || roleString === k;
+
+  const count = profile._count || 0;
+  const tier = count >= 6 ? 'established'
+             : count >= 3 ? 'active'
+             : 'rising';
+
+  if (has('pioneer'))   return 'Pioneer Creator';
+  if (has('moderator')) return 'Community Mod';
+
+  if (has('writer')) {
+    if (tier === 'established') return 'Book Creator';
+    if (tier === 'active')      return 'Story Author';
+    return 'Rising Writer';
+  }
+  if (has('creator')) {
+    if (tier === 'established') return 'Video Creator';
+    if (tier === 'active')      return 'Story Creator';
+    return 'Rising Creator';
+  }
+  // No declared role — same activity ramp, default to the video-focused
+  // labels since the data source is video uploaders.
+  if (tier === 'established') return 'Video Creator';
+  if (tier === 'active')      return 'Story Creator';
+  return 'Rising Creator';
+}
+
+// True when the profile carries any verified-tier role (pioneer / creator /
+// writer / moderator / auditor). Used to add a subtle purple ring around
+// the avatar in the rail — matches mobile's "verified glow" treatment.
+function _railIsVerified(profile) {
+  if (!profile) return false;
+  const rolesArray = Array.isArray(profile.roles) ? profile.roles : [];
+  const roleString = typeof profile.role === 'string' ? profile.role : '';
+  return ['pioneer', 'moderator', 'creator', 'writer', 'auditor']
+    .some(k => rolesArray.includes(k) || roleString === k);
+}
+
+async function _railFollowToggle(btn) {
+  const me = _cfg.getCurrentUser();
+  if (!me?.id) {
+    toast('Sign in to follow creators.', 'error');
+    return;
+  }
+  const targetId = btn.dataset.targetId;
+  if (!targetId) return;
+  const wasFollowing = btn.classList.contains('following');
+
+  // Optimistic flip
+  btn.disabled = true;
+  if (wasFollowing) {
+    btn.classList.remove('following');
+    btn.textContent = '+ Follow';
+  } else {
+    btn.classList.add('following');
+    btn.textContent = '✓ Following';
+  }
+
+  let error = null;
+  if (wasFollowing) {
+    ({ error } = await supabase.from('follows').delete()
+      .eq('follower_id', me.id).eq('following_id', targetId));
+  } else {
+    ({ error } = await supabase.from('follows').insert({
+      follower_id: me.id, following_id: targetId,
+    }));
+  }
+  btn.disabled = false;
+
+  if (error) {
+    // Revert
+    if (wasFollowing) {
+      btn.classList.add('following');
+      btn.textContent = '✓ Following';
+    } else {
+      btn.classList.remove('following');
+      btn.textContent = '+ Follow';
+    }
+    toast('Couldn\'t update follow: ' + error.message, 'error');
+    return;
+  }
+
+  // Mirror the change into the rail's follow-set cache so a forced
+  // refresh later excludes this id.
+  if (wasFollowing) railSession.followIds.delete(targetId);
+  else              railSession.followIds.add(targetId);
+
+  toast(wasFollowing ? 'Unfollowed' : 'Following!', 'success');
+
+  // If we just followed someone, slide them out of the list after a
+  // short beat so the user can see the state flip first. Keeps the rail
+  // fresh without feeling jumpy.
+  if (!wasFollowing) {
+    const row = btn.closest('.rail-suggest-row');
+    if (row) {
+      setTimeout(() => {
+        row.style.transition = 'opacity 0.3s, transform 0.3s, max-height 0.3s';
+        row.style.opacity = '0';
+        row.style.transform = 'translateX(8px)';
+        row.style.maxHeight = '0';
+        row.style.overflow = 'hidden';
+        setTimeout(() => row.remove(), 320);
+      }, 650);
+    }
+  }
+}
+
+// Refresh button — bumps the cycle so the next render slides the
+// 5-card window forward in the ranked pool. Without bumping, the same
+// top-5 came back and the button felt broken. (2026-05-17 fix.)
+function wireRailRefresh() {
+  const refreshBtn = document.getElementById('railSuggestedRefresh');
+  if (refreshBtn && !refreshBtn._wired) {
+    refreshBtn._wired = true;
+    refreshBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      refreshBtn.classList.add('spinning');
+      setTimeout(() => refreshBtn.classList.remove('spinning'), 700);
+      railSession.cycle += 1;
+      railSession.loaded = false;
+      loadSuggestedCreators({ force: true });
+    });
+  }
+
+  // "See more" footer — delegated because the link is re-rendered each
+  // time the list paints. Calling btnVideos.click() re-uses the
+  // sidebar's existing navigation wiring (setSidebarActive + showVideos)
+  // so we don't have to duplicate that logic here.
+  const listEl = document.getElementById('suggestedCreatorsList');
+  if (listEl && !listEl._seeMoreWired) {
+    listEl._seeMoreWired = true;
+    listEl.addEventListener('click', (ev) => {
+      const link = ev.target.closest('.rail-see-more');
+      if (!link) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const btnVideos = document.getElementById('btnVideos');
+      if (btnVideos) btnVideos.click();
+    });
+  }
+}
+
 
 // ─── Stage 5 exports ─────────────────────────────────────────────
 export {
@@ -1714,6 +2372,8 @@ export {
   repostPost,
   toggleShareMenu,
   shareTo,
+  loadSuggestedCreators,
+  wireRailRefresh,
 };
 
 // ─── State accessor surface ──────────────────────────────────────

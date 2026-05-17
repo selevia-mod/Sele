@@ -305,20 +305,22 @@ export async function loadComments(postId, videoId = null) {
   inputWrap.style.paddingBottom = '0.5rem';
   inputWrap.style.borderBottom = '1px solid var(--border, #eee)';
   inputWrap.style.marginBottom = '0.75rem';
+  // FB-style single-row input: [avatar][textarea][photo icon][Send]
+  // Photo trigger collapsed to an icon-only button inside the input
+  // strip (was a separate row with "Add photo" text — pushed the section
+  // taller without adding info). Preview reveals below when a file is
+  // chosen. 2026-05-17 polish.
   inputWrap.innerHTML = `
-    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
+    <div class="comment-input-row">
       <div class="avatar sm">${_cfg.getCurrentProfile()?.avatar_url ? `<img src="${_cfg.getCurrentProfile().avatar_url}"/>` : initials(_cfg.getCurrentProfile()?.username || 'G')}</div>
       <textarea class="comment-input" placeholder="Write a comment…" rows="1"></textarea>
+      <label class="comment-photo-btn" title="Add photo" aria-label="Add photo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        <input type="file" accept="image/*" class="cimg-input" hidden/>
+      </label>
       <button class="btn-send">Send</button>
     </div>
-    <div id="${previewKey}" style="margin-left:40px"></div>
-    <div style="margin-left:40px;margin-top:-4px">
-      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        Add photo
-        <input type="file" accept="image/*" class="cimg-input"/>
-      </label>
-    </div>
+    <div id="${previewKey}" class="comment-input-preview"></div>
   `;
   section.appendChild(inputWrap);
 
@@ -337,19 +339,42 @@ export async function loadComments(postId, videoId = null) {
     const viewMoreBtn = document.createElement('button');
     viewMoreBtn.className = 'comment-view-more';
     viewMoreBtn.type = 'button';
-    viewMoreBtn.textContent = `View ${hiddenParents.length} previous comment${hiddenParents.length === 1 ? '' : 's'}`;
+    // True toggle (2026-05-17 polish): first click expands the hidden
+    // parents inline; second click removes just those nodes and the
+    // button reverts to its "View N previous…" label. Earlier version
+    // removed itself on first click so there was no way back without a
+    // full reload.
+    const expandLabel = `View ${hiddenParents.length} previous comment${hiddenParents.length === 1 ? '' : 's'}`;
+    const collapseLabel = `Hide previous comment${hiddenParents.length === 1 ? '' : 's'}`;
+    let expanded = false;
+    let insertedNodes = [];
+    viewMoreBtn.textContent = expandLabel;
     viewMoreBtn.addEventListener('click', async () => {
+      if (viewMoreBtn.disabled) return;
       viewMoreBtn.disabled = true;
-      // Insert hidden parents in their original (oldest-first) order
-      // BEFORE the first currently-visible comment. We have to capture
-      // the anchor node first because appendChild on the button itself
-      // would push them out of order.
-      const anchor = viewMoreBtn.nextSibling;
-      for (const c of hiddenParents) {
-        const el = await renderComment(c, postId, false, null, videoId, repliesByParent);
-        section.insertBefore(el, anchor);
+      if (expanded) {
+        // Collapse — drop just the nodes we inserted, leave the rest of
+        // the section intact.
+        for (const node of insertedNodes) node.remove();
+        insertedNodes = [];
+        expanded = false;
+        viewMoreBtn.textContent = expandLabel;
+        viewMoreBtn.classList.remove('expanded');
+      } else {
+        // Expand — insert hidden parents in oldest-first order BEFORE
+        // the first currently-visible comment. Capture the anchor first
+        // so the inserts don't drift relative to one another.
+        const anchor = viewMoreBtn.nextSibling;
+        for (const c of hiddenParents) {
+          const el = await renderComment(c, postId, false, null, videoId, repliesByParent);
+          section.insertBefore(el, anchor);
+          insertedNodes.push(el);
+        }
+        expanded = true;
+        viewMoreBtn.textContent = collapseLabel;
+        viewMoreBtn.classList.add('expanded');
       }
-      viewMoreBtn.remove();
+      viewMoreBtn.disabled = false;
     });
     section.appendChild(viewMoreBtn);
   }
@@ -450,11 +475,17 @@ export async function renderComment(comment, postId, isReply = false, topLevelId
   const replyTargetId = isReply ? topLevelId : comment.id;
   const replyToName = isReply ? name : null;
 
+  // Avatar + author both carry .profile-link + data-user-id so the
+  // global delegated handler at app.js (~L3691) routes clicks to
+  // openProfile(userId). Without these attributes (the prior version
+  // lacked them entirely), tapping a commenter's name/avatar did
+  // nothing. Pattern mirrors renderPost in feed.js. (2026-05-17 fix)
+  const commenterId = comment.user_id || '';
   div.innerHTML = `
-    <div class="avatar sm">${avatarHTML}</div>
+    <div class="avatar sm profile-link" data-user-id="${commenterId}" title="View profile">${avatarHTML}</div>
     <div class="comment-body">
       <div class="comment-meta">
-        <span class="comment-author">${escHTML(name)}${_cfg.renderRoleSeal(profile)}</span>
+        <span class="comment-author profile-link" data-user-id="${commenterId}" title="View profile">${escHTML(name)}${_cfg.renderRoleSeal(profile)}</span>
         <span class="comment-time">${timeAgo(comment.created_at)}</span>
         ${profile.is_guest ? '<span class="post-guest">Guest</span>' : ''}
       </div>
@@ -624,27 +655,32 @@ function showReplyInput(commentId, postId, replyToName = '', videoId = null) {
   wrap.style.flexDirection = 'column';
   wrap.style.gap = '0.5rem';
   const placeholder = replyToName ? `Reply to ${replyToName}…` : 'Write a reply…';
+  // Same inline-icon layout as the top input + a cancel ✕ so users can
+  // back out of the reply mode (previously the wrap could only be
+  // dismissed by submitting or scrolling away). Escape key also closes.
   wrap.innerHTML = `
-    <div style="display:flex;gap:0.5rem;align-items:flex-start;width:100%">
+    <div class="comment-input-row">
       <div class="avatar sm">${_cfg.getCurrentProfile()?.avatar_url ? `<img src="${_cfg.getCurrentProfile().avatar_url}"/>` : initials(_cfg.getCurrentProfile()?.username || 'G')}</div>
       <textarea class="comment-input" placeholder="${placeholder}" rows="1"></textarea>
-      <button class="btn-send">Reply</button>
-    </div>
-    <div id="${previewId}" style="margin-left:40px"></div>
-    <div style="margin-left:40px;margin-top:-4px">
-      <label class="image-upload-btn" style="padding:4px 8px;font-size:0.72rem">
+      <label class="comment-photo-btn" title="Add photo" aria-label="Add photo">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        Add photo
-        <input type="file" accept="image/*" class="rimg-input"/>
+        <input type="file" accept="image/*" class="rimg-input" hidden/>
       </label>
+      <button class="btn-send">Reply</button>
+      <button class="reply-cancel-btn" type="button" title="Cancel reply" aria-label="Cancel reply">✕</button>
     </div>
+    <div id="${previewId}" class="comment-input-preview"></div>
   `;
   const ta = wrap.querySelector('textarea');
   if (replyToName) ta.value = `@${replyToName} `;
   ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, commentId, ta, previewId, videoId); }});
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(postId, commentId, ta, previewId, videoId); }
+    if (e.key === 'Escape') { e.preventDefault(); wrap.remove(); }
+  });
   wrap.querySelector('.btn-send').addEventListener('click', () => submitComment(postId, commentId, ta, previewId, videoId));
   wrap.querySelector('.rimg-input').addEventListener('change', (e) => handleCommentImageSelect(e.target, previewId));
+  wrap.querySelector('.reply-cancel-btn').addEventListener('click', () => wrap.remove());
   container.appendChild(wrap);
   ta.focus();
   ta.setSelectionRange(ta.value.length, ta.value.length);
@@ -767,6 +803,16 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// Map a raw `reactions.emoji` value (which the DB might store as either
+// the key 'heart'/'laugh'/etc. or the literal '❤️'/'😂') to the actual
+// emoji glyph for display. Falls back to the raw value so legacy or
+// unknown entries still render something. (2026-05-17)
+function _reactionEmoji(raw) {
+  if (!raw) return '';
+  const r = REACTIONS.find(x => x.key === raw || x.emoji === raw);
+  return r ? r.emoji : raw;
+}
+
 // ── Reactor list modal ────────────────────────────────────────────────────
 export async function openReactorListModal(targetId, targetType = 'post') {
   _cfg.closeAllModals('.modal-backdrop[data-modal="reactor-list"]');
@@ -774,8 +820,11 @@ export async function openReactorListModal(targetId, targetType = 'post') {
   const modal = document.createElement('div');
   modal.className = 'modal-backdrop';
   modal.dataset.modal = 'reactor-list';
+  // .reactor-list-modal scopes the compact FB-style overrides (defined
+  // in css/style.css). Keeps the follow-list-modal usage elsewhere
+  // untouched while letting this surface be denser.
   modal.innerHTML = `
-    <div class="modal-card follow-list-modal" role="dialog" aria-labelledby="reactor-list-title">
+    <div class="modal-card follow-list-modal reactor-list-modal" role="dialog" aria-labelledby="reactor-list-title">
       <div class="follow-list-header">
         <h2 id="reactor-list-title">Reactions</h2>
       </div>
@@ -821,16 +870,27 @@ export async function openReactorListModal(targetId, targetType = 'post') {
     .in('id', userIds);
   const profileMap = new Map((profiles || []).map(p => [p.id, p]));
 
-  // Build emoji tabs (All, then per-emoji with counts)
+  // Build emoji tabs (All, then per-emoji with counts). The DB column
+  // may store either the key ('heart') or the glyph ('❤️') depending on
+  // when the row was written; _reactionEmoji() normalizes both to the
+  // displayable glyph. We keep the raw value as the filter key (data-
+  // emoji-filter) so renderRows can compare against rxs[].emoji.
   const counts = {};
   rxs.forEach(r => { counts[r.emoji] = (counts[r.emoji] || 0) + 1; });
   const sortedEmojis = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   const tabsEl = modal.querySelector('#reactorTabs');
   tabsEl.innerHTML = `
-    <button class="reactor-tab active" data-emoji-filter="">All ${rxs.length}</button>
-    ${sortedEmojis.map(([emoji, c]) =>
-      `<button class="reactor-tab" data-emoji-filter="${escHTML(emoji)}">${emoji} ${c}</button>`
-    ).join('')}
+    <button class="reactor-tab active" data-emoji-filter="">
+      <span class="reactor-tab-label">All</span>
+      <span class="reactor-tab-count">${rxs.length}</span>
+    </button>
+    ${sortedEmojis.map(([raw, c]) => {
+      const glyph = _reactionEmoji(raw);
+      return `<button class="reactor-tab" data-emoji-filter="${escHTML(raw)}">
+        <span class="reactor-tab-glyph">${escHTML(glyph)}</span>
+        <span class="reactor-tab-count">${c}</span>
+      </button>`;
+    }).join('')}
   `;
 
   function renderRows(filterEmoji) {
@@ -839,6 +899,7 @@ export async function openReactorListModal(targetId, targetType = 'post') {
       const p = profileMap.get(r.user_id) || { id: r.user_id, username: 'Unknown', avatar_url: null };
       const safeName = escHTML(p.username || '');
       const safeAvatar = p.avatar_url ? escHTML(p.avatar_url) : '';
+      const glyph = _reactionEmoji(r.emoji);
       return `
         <div class="follow-list-row">
           <button class="follow-list-avatar" data-uid="${p.id}">
@@ -847,7 +908,7 @@ export async function openReactorListModal(targetId, targetType = 'post') {
           <div class="follow-list-info">
             <button class="follow-list-name" data-uid="${p.id}">@${safeName}</button>
           </div>
-          <span class="reactor-emoji">${escHTML(r.emoji)}</span>
+          <span class="reactor-emoji" title="${escHTML(r.emoji)}">${escHTML(glyph)}</span>
         </div>
       `;
     }).join('');

@@ -2218,8 +2218,13 @@ function _renderDockReplyChip(convId) {
   if (!root) return;
   const composer = root.querySelector('.dm-mini-composer');
   if (!composer) return;
-  // Remove any existing chip first (idempotent).
-  composer.querySelector('.dm-mini-reply-chip')?.remove();
+  // Remove any existing chip first (idempotent). 2026-05-17 fix: the
+  // chip is inserted as a sibling BEFORE the composer (see
+  // insertBefore below), not inside it — so the previous
+  // composer.querySelector lookup never found anything and the chip
+  // stuck around after sending. Scope the removal to the chat root
+  // (or the composer's parent — equivalent) so we actually find it.
+  root.querySelectorAll('.dm-mini-reply-chip').forEach(el => el.remove());
   const thread = dmDockState.openThreads.get(convId);
   if (!thread?.replyTo) return;
   const r = thread.replyTo;

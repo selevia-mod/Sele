@@ -2354,18 +2354,28 @@ function openConvActionsMenu() {
   const c = dmState.activeConv;
   const isGroup = c.isGroup;
   const isMuted = c.muted || isConvMutedForMe(c.raw);
+  // 2026-05-17 fix: detect current archive state from the per-side flag
+  // (archived_by_a / archived_by_b) so the action label flips between
+  // "Archive chat" and "Unarchive chat" instead of always showing
+  // "Archive". Groups don't expose per-side archive yet — fall back to
+  // false so the label reads "Archive chat" (will toast not-supported).
+  const isArchived = !isGroup && c.raw && (
+    (c.raw.user_a === _cfg.getCurrentUser().id && c.raw.archived_by_a) ||
+    (c.raw.user_b === _cfg.getCurrentUser().id && c.raw.archived_by_b)
+  );
+  const archiveLabel = isArchived ? 'Unarchive chat' : 'Archive chat';
 
   const menu = document.createElement('div');
   menu.className = 'post-action-menu dm-conv-menu';
   menu.innerHTML = isGroup ? `
     <button data-act="members">View members (${c.memberCount})</button>
     <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
-    <button data-act="archive">Archive chat</button>
+    <button data-act="archive">${archiveLabel}</button>
     <button data-act="leave" class="pam-danger">Leave group</button>
   ` : `
     <button data-act="profile">View profile</button>
     <button data-act="mute">${isMuted ? 'Unmute notifications' : 'Mute notifications'}</button>
-    <button data-act="archive">Archive chat</button>
+    <button data-act="archive">${archiveLabel}</button>
     <button data-act="report">Report user</button>
     <button data-act="delete" class="pam-danger">Delete conversation</button>
   `;
@@ -2426,11 +2436,23 @@ async function archiveConversation() {
   if (!c || c.isGroup) { toast('Group archive coming soon', ''); return; }
   const conv = c.raw;
   const myCol = conv.user_a === _cfg.getCurrentUser().id ? 'archived_by_a' : 'archived_by_b';
-  const { error } = await supabase.from('conversations').update({ [myCol]: true }).eq('id', conv.id);
+  // 2026-05-17 fix: toggle the flag. Previously this always wrote true,
+  // so the menu's "Archive" item on an already-archived chat was a no-op
+  // and there was no way to unarchive from the action menu.
+  const currentlyArchived = !!conv[myCol];
+  const nextValue = !currentlyArchived;
+  const { error } = await supabase.from('conversations').update({ [myCol]: nextValue }).eq('id', conv.id);
   if (error) { toast(error.message, 'error'); return; }
-  toast('Archived', 'success');
-  // Remove from list, close thread
-  dmState.conversations = dmState.conversations.filter(x => x.id !== c.id);
+  // Mirror server state into the local row so subsequent menu opens read
+  // the correct flag without a refetch.
+  conv[myCol] = nextValue;
+  // Patch the conversation's `archived` boolean in dmState so the tab
+  // bucketing in renderConversationList() puts it in the right place.
+  const local = dmState.conversations.find(x => x.id === c.id);
+  if (local) local.archived = nextValue;
+  toast(nextValue ? 'Archived' : 'Unarchived', 'success');
+  // Close the open thread so the user lands back on the conversation
+  // list — that way they immediately see the row moved between tabs.
   document.getElementById('dmBackBtn')?.click();
   renderConversationList();
 }

@@ -62,6 +62,7 @@ import {
   _fetchHybridFeedPage, _buildAndExecFeedQuery,
   _prependFreshPosts, _applyNewPostsBuffer, _renderNewPostsPill, _pollForNewPosts,
   deletePost, openPostActionMenu, repostPost, toggleShareMenu, shareTo,
+  loadSuggestedCreators, wireRailRefresh,
   FEED_SELECT,
   getFeedMode, setFeedMode,
   getFeedPostObserver, setFeedPostObserver,
@@ -1186,6 +1187,12 @@ window.shareTo = shareTo;
     showStore();
   } else if (hash === '#earnings') {
     showEarnings();
+  } else if (hash === '#post') {
+    // Post feed (For You / Following / Discover). Routed here so a hard
+    // refresh while on the Post tab stays put instead of falling back
+    // to Home. showFeed() also re-asserts this hash defensively.
+    setSidebarActive('btnPost');
+    showFeed();
   } else {
     // Default destination on fresh page load (no deep link hash) —
     // the curated home landing. Pre-May-2026 this just called
@@ -1535,7 +1542,7 @@ function _getWebBookPool() {
   if (!_webBookPoolPromise) {
     _webBookPoolPromise = supabase
       .from('books')
-      .select('id, title, cover_url, author_id, ratings_avg, ratings_count, profiles!author_id(username, display_name, avatar_url)')
+      .select('id, title, cover_url, author_id, ratings_avg, ratings_count, views_count, genre, profiles!author_id(username, display_name, avatar_url)')
       .eq('is_public', true)
       .eq('is_hidden', false)
       .in('status', ['ongoing', 'completed'])
@@ -1543,7 +1550,11 @@ function _getWebBookPool() {
       .limit(40)
       .then(({ data, error }) => {
         if (error) { console.warn('[book-pool] fetch failed:', error.message); return []; }
-        // Adapt to the shape _renderHybridBookCarousel expects.
+        // Adapt to the shape _renderHybridBookCarousel expects. views_count
+        // + genre added 2026-05-17 so the tile can show "Romance · 12k
+        // reads" style metadata. (Server-side fetch_book_carousel jsonb
+        // payload doesn't expose these yet → first 5 cards fall back to
+        // the role label; rest of the carousel gets the richer copy.)
         return (data || []).map(b => ({
           id: b.id,
           title: b.title,
@@ -1553,6 +1564,8 @@ function _getWebBookPool() {
           author_username: b.profiles?.username || null,
           rating: b.ratings_avg,
           rating_count: b.ratings_count,
+          views_count: b.views_count,
+          genre: b.genre,
           role: 'discover',
         }));
       })
@@ -1872,6 +1885,38 @@ function firstUrlInText(str) {
   return m ? m[0] : null;
 }
 
+// Detect selebox.com URLs that point at a book / video / profile and
+// return { type, id } so we can render a rich card instead of the
+// generic favicon preview. Handles both path-style URLs
+// (selebox.com/books/<uuid>) and the legacy hash-style deep-links
+// (#book/<uuid>). Case-insensitive on the hostname; UUID accepted in
+// either canonical-hyphenated or compact form. (2026-05-17)
+function parseSeleboxContentUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  let parsed;
+  try { parsed = new URL(url); } catch { return null; }
+  const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+  if (host !== 'selebox.com' && host !== 'talesofsiren.com') return null;
+  // Hash-style: …#book/<id>, …#video/<id>, …#profile/<id>
+  const hashMatch = (parsed.hash || '').match(/^#(video|book|profile)\/([a-z0-9-]+)/i);
+  if (hashMatch) return { type: hashMatch[1].toLowerCase(), id: hashMatch[2] };
+  // Path-style: /books/<id>, /videos/<id>, /profile/<id> (also handles /book/ + /video/ singulars)
+  const pathMatch = (parsed.pathname || '').match(/^\/(books?|videos?|profiles?)\/([a-z0-9-]+)/i);
+  if (pathMatch) {
+    const seg = pathMatch[1].toLowerCase();
+    const type = seg.startsWith('book')    ? 'book'
+              : seg.startsWith('video')   ? 'video'
+              : 'profile';
+    return { type, id: pathMatch[2] };
+  }
+  return null;
+}
+
+// Module-scoped cache of resolved Selebox link previews so we don't
+// hit Supabase twice for the same book/video on a single page render.
+// Keyed by `${type}:${id}` → { title, thumb, sub }.
+const _seleboxPreviewCache = new Map();
+
 function renderLinkPreview(text) {
   const url = firstUrlInText(text);
   if (!url) return '';
@@ -1893,6 +1938,50 @@ function renderLinkPreview(text) {
     `;
   }
 
+  // Selebox-internal — book / video / profile card with cover + title.
+  // Renders a placeholder that the async hydrator fills in (so we don't
+  // block the comment render on a network call). Cached resolutions
+  // render fully on first paint.
+  const internal = parseSeleboxContentUrl(url);
+  if (internal) {
+    const typeLabel = internal.type === 'book'  ? '📖 Book on Selebox'
+                    : internal.type === 'video' ? '🎬 Video on Selebox'
+                    : '👤 Profile on Selebox';
+    const key = `${internal.type}:${internal.id}`;
+    const cached = _seleboxPreviewCache.get(key);
+    if (cached) {
+      const thumb = cached.thumb
+        ? `<img src="${escHTML(cached.thumb)}" alt="" loading="lazy"/>`
+        : `<div class="link-preview-internal-fallback">${internal.type === 'book' ? '📖' : internal.type === 'video' ? '🎬' : '👤'}</div>`;
+      const sub = cached.sub ? `<div class="link-preview-sub">${escHTML(cached.sub)}</div>` : '';
+      return `
+        <a class="link-preview link-preview-internal" href="${escHTML(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">
+          <div class="link-preview-cover">${thumb}</div>
+          <div class="link-preview-meta">
+            <div class="link-preview-platform">${typeLabel}</div>
+            <div class="link-preview-title">${escHTML(cached.title || 'Untitled')}</div>
+            ${sub}
+          </div>
+        </a>
+      `;
+    }
+    // Placeholder + schedule the hydrator. The data-pending flag lets
+    // the hydrator find unfilled cards across the page.
+    _scheduleSeleboxPreviewHydration();
+    return `
+      <a class="link-preview link-preview-internal is-loading" href="${escHTML(url)}" target="_blank" rel="noopener noreferrer"
+         data-internal-type="${internal.type}" data-internal-id="${escHTML(internal.id)}" data-pending="1"
+         onclick="event.stopPropagation()">
+        <div class="link-preview-cover link-preview-skel"></div>
+        <div class="link-preview-meta">
+          <div class="link-preview-platform">${typeLabel}</div>
+          <div class="link-preview-title link-preview-skel-line"></div>
+          <div class="link-preview-sub link-preview-skel-line link-preview-skel-line-short"></div>
+        </div>
+      </a>
+    `;
+  }
+
   // Generic — favicon + hostname (no thumbnail, but distinguishes link from raw text)
   try {
     const u = new URL(url);
@@ -1909,6 +1998,109 @@ function renderLinkPreview(text) {
       </a>
     `;
   } catch { return ''; }
+}
+
+// Debounced hydrator — runs after one or more Selebox preview placeholders
+// mount. Idempotent: scans the document for any data-pending="1" cards,
+// groups by type, hits Supabase once per type, fills in the placeholders.
+// New placeholders that mount later (e.g. another comment renders)
+// re-schedule and pick up where the last batch left off.
+//
+// 2026-05-17 fix: switched from Promise.resolve().then() (microtask) to
+// setTimeout (macrotask). The microtask fires BEFORE the caller's
+// appendChild lands the host element in the document, so the query
+// found 0 pending cards and skeletons never resolved. setTimeout lets
+// the synchronous render finish first.
+let _seleboxHydrateScheduled = false;
+function _scheduleSeleboxPreviewHydration() {
+  if (_seleboxHydrateScheduled) return;
+  _seleboxHydrateScheduled = true;
+  setTimeout(async () => {
+    _seleboxHydrateScheduled = false;
+    const pending = document.querySelectorAll('.link-preview-internal[data-pending="1"]');
+    if (!pending.length) return;
+    const byType = { book: new Set(), video: new Set(), profile: new Set() };
+    pending.forEach(el => {
+      const t = el.dataset.internalType;
+      const id = el.dataset.internalId;
+      if (byType[t]) byType[t].add(id);
+    });
+    const tasks = [];
+    if (byType.book.size) {
+      tasks.push(
+        supabase.from('books')
+          .select('id, title, cover_url, profiles!books_author_id_fkey(username, display_name)')
+          .in('id', [...byType.book])
+          .then(({ data }) => (data || []).forEach(b => {
+            const authorName = b.profiles?.display_name || b.profiles?.username || '';
+            _seleboxPreviewCache.set(`book:${b.id}`, {
+              title: b.title || 'Untitled book',
+              thumb: b.cover_url || '',
+              sub:   authorName ? `by ${authorName}` : '',
+            });
+          }))
+      );
+    }
+    if (byType.video.size) {
+      tasks.push(
+        supabase.from('videos')
+          .select('id, title, thumbnail_url, profiles!videos_uploader_id_fkey(username, display_name)')
+          .in('id', [...byType.video])
+          .then(({ data }) => (data || []).forEach(v => {
+            const uploaderName = v.profiles?.display_name || v.profiles?.username || '';
+            _seleboxPreviewCache.set(`video:${v.id}`, {
+              title: v.title || 'Untitled video',
+              thumb: v.thumbnail_url || '',
+              sub:   uploaderName ? `by ${uploaderName}` : '',
+            });
+          }))
+      );
+    }
+    if (byType.profile.size) {
+      tasks.push(
+        supabase.from('profiles')
+          .select('id, username, display_name, avatar_url')
+          .in('id', [...byType.profile])
+          .then(({ data }) => (data || []).forEach(p => {
+            const handle = p.username ? `@${p.username}` : '';
+            _seleboxPreviewCache.set(`profile:${p.id}`, {
+              title: p.display_name || p.username || 'Selebox user',
+              thumb: p.avatar_url || '',
+              sub:   handle && p.display_name ? handle : '',
+            });
+          }))
+      );
+    }
+    await Promise.all(tasks);
+    // Fill in any card whose key we just cached. We re-query so we also
+    // catch placeholders that mounted between the schedule call and now.
+    document.querySelectorAll('.link-preview-internal[data-pending="1"]').forEach(el => {
+      const t = el.dataset.internalType;
+      const id = el.dataset.internalId;
+      const entry = _seleboxPreviewCache.get(`${t}:${id}`);
+      if (!entry) return;
+      el.removeAttribute('data-pending');
+      el.classList.remove('is-loading');
+      const cover = el.querySelector('.link-preview-cover');
+      const titleEl = el.querySelector('.link-preview-title');
+      const subEl = el.querySelector('.link-preview-sub');
+      if (cover) {
+        cover.classList.remove('link-preview-skel');
+        cover.innerHTML = entry.thumb
+          ? `<img src="${escHTML(entry.thumb)}" alt="" loading="lazy"/>`
+          : `<div class="link-preview-internal-fallback">${t === 'book' ? '📖' : t === 'video' ? '🎬' : '👤'}</div>`;
+      }
+      if (titleEl) {
+        titleEl.classList.remove('link-preview-skel-line');
+        titleEl.textContent = entry.title;
+      }
+      if (subEl) {
+        subEl.classList.remove('link-preview-skel-line', 'link-preview-skel-line-short');
+        if (entry.sub) subEl.textContent = entry.sub;
+        else subEl.remove();
+      }
+    });
+  }, 0);
 }
 
 // Click handler for internal preview cards (delegated)
@@ -3497,13 +3689,33 @@ export function showFeed() {
     feedSentinel.style.display = 'block';
   }
   document.body.classList.remove('on-videos');
+  // Mark the Post tab as active so CSS unhides the right rail + widens
+  // the .main-wrap to fit the 2-column grid. Removed in hideAllMainPages.
+  document.body.classList.add('on-post-feed');
   setViewingProfileId(null);
   stopVideoPlayer();
-  if (window.location.hash) history.pushState(null, '', window.location.pathname);
+  // Persist tab in the URL so a refresh stays on Post instead of falling
+  // through to the default Home branch in the bootstrap router. We use
+  // pushState only when the hash isn't already #post so we don't spam
+  // history with duplicate entries on every showFeed() call (tab clicks,
+  // back from a profile, etc.). 2026-05-17 fix.
+  if (window.location.hash !== '#post') {
+    history.pushState(null, '', `${window.location.pathname}#post`);
+  }
 
   // Reload feed if it's empty or stuck
   if (!feedEl.querySelector('.post-card') || feedEl.querySelector('.loading')) {
     loadFeed();
+  }
+
+  // Right-rail "Suggested Creators" panel — fire on first reveal of the
+  // Post tab. loadSuggestedCreators caches per-session so subsequent
+  // visits skip the fetch. wireRailRefresh wires the refresh icon once.
+  try {
+    wireRailRefresh();
+    loadSuggestedCreators();
+  } catch (err) {
+    console.warn('[feed-rail] init failed:', err);
   }
 }
 
@@ -4899,8 +5111,9 @@ function hideAllMainPages() {
     try { flushViewEnd(); } catch {}
   }
   // Drop layout-mode body classes — each show* opts back in if it needs a
-  // wider canvas. (Currently used by the videos and books pages.)
-  document.body.classList.remove('on-videos', 'on-books', 'on-home-landing', 'on-studio');
+  // wider canvas. (Currently used by the videos and books pages, plus
+  // the Post tab's right-rail two-column grid.)
+  document.body.classList.remove('on-videos', 'on-books', 'on-home-landing', 'on-studio', 'on-post-feed');
   feedEl.style.display = 'none';
   storiesEl.style.display = 'none';
   composeEl.style.display = 'none';
@@ -5971,16 +6184,17 @@ async function loadBookEditor(bookId) {
     ? `<img src="${escHTML(book.cover_url)}" alt=""/>`
     : `<div class="book-cover-placeholder">${initialLetter}</div>`;
 
-  // Load chapters. Includes is_locked + created_at so the row can
-  // render a lock indicator and we can sort by upload time.
-  // Sort: created_at DESC — author surface shows latest-uploaded first
-  // so a writer's most recent work is at the top of the inline TOC,
-  // mirroring the mobile book editor.
+  // Load chapters. Sort by chapter_number ASC so the visual order in
+  // the editor matches the order readers experience — that way the
+  // reorder ↑↓ buttons feel natural (clicking ↑ moves the row up the
+  // list AND lowers its chapter number). Earlier sort by created_at DESC
+  // made reorder confusing because moving a chapter changed its number
+  // without changing its visible row position. (2026-05-17 reorder fix.)
   const { data: chapters, error: chErr } = await supabase
     .from('chapters')
     .select('id, chapter_number, title, word_count, is_published, is_locked, scheduled_publish_at, created_at, updated_at')
     .eq('book_id', bookId)
-    .order('created_at', { ascending: false });
+    .order('chapter_number', { ascending: true });
 
   const chList = document.getElementById('bookEditorChapters');
   if (chErr) {
@@ -6078,7 +6292,16 @@ function renderAuthorChapterList(chapters, bookId, lockFromChapter) {
     return;
   }
 
-  chList.innerHTML = visible.map(c => {
+  // Reorder support — sort by chapter_number ASC at render time so the
+  // ↑↓ arrows match the visible row order, and pre-compute each row's
+  // index in that order so we can disable the arrows at the extremes.
+  // The list is already sorted ASC from the parent fetch but we re-sort
+  // defensively in case `visible` is re-derived later. (2026-05-17 fix.)
+  const visibleByNum = [...visible].sort((a, b) => (a.chapter_number || 0) - (b.chapter_number || 0));
+  const indexByChapterId = new Map(visibleByNum.map((c, i) => [c.id, i]));
+  const lastVisibleIdx = visibleByNum.length - 1;
+
+  chList.innerHTML = visibleByNum.map(c => {
     const isFutureSch = c.is_published && c.scheduled_publish_at && new Date(c.scheduled_publish_at) > new Date();
     let pillClass, pillLabel;
     if (isFutureSch)        { pillClass = 'author-chapter-pub-scheduled'; pillLabel = 'Scheduled · ' + formatScheduleShort(c.scheduled_publish_at); }
@@ -6091,6 +6314,9 @@ function renderAuthorChapterList(chapters, bookId, lockFromChapter) {
     const lockIcon = isLocked
       ? `<span class="author-chapter-lock" title="Locked"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>`
       : '';
+    const idx = indexByChapterId.get(c.id);
+    const canUp = idx > 0;
+    const canDown = idx < lastVisibleIdx;
     return `
     <div class="author-chapter-row" data-chapter-id="${c.id}">
       <span class="author-chapter-num">Ch ${c.chapter_number}</span>
@@ -6098,6 +6324,12 @@ function renderAuthorChapterList(chapters, bookId, lockFromChapter) {
       <span class="author-chapter-meta">${(c.word_count || 0).toLocaleString()} words</span>
       <span class="author-chapter-pub-pill ${pillClass}">${escHTML(pillLabel)}</span>
       <div class="author-chapter-actions">
+        <button class="author-book-action-btn" data-chapter-action="move-up" data-id="${c.id}" title="Move up" ${canUp ? '' : 'disabled'} style="${canUp ? '' : 'opacity:0.3;cursor:not-allowed'}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+        </button>
+        <button class="author-book-action-btn" data-chapter-action="move-down" data-id="${c.id}" title="Move down" ${canDown ? '' : 'disabled'} style="${canDown ? '' : 'opacity:0.3;cursor:not-allowed'}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
         <button class="author-book-action-btn" data-chapter-action="edit" data-id="${c.id}" title="Edit">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
         </button>
@@ -6116,6 +6348,13 @@ function renderAuthorChapterList(chapters, bookId, lockFromChapter) {
       const chapterId = btn.dataset.id;
       if (action === 'edit') openAuthorChapterEditor(bookId, chapterId);
       else if (action === 'delete') deleteAuthorChapter(chapterId, bookId);
+      else if (action === 'move-up' || action === 'move-down') {
+        const idx = indexByChapterId.get(chapterId);
+        const otherIdx = action === 'move-up' ? idx - 1 : idx + 1;
+        const cur = visibleByNum[idx];
+        const other = visibleByNum[otherIdx];
+        if (cur && other) _swapChapterNumbers(cur, other, bookId);
+      }
     });
   });
   chList.querySelectorAll('.author-chapter-row').forEach(row => {
@@ -6315,6 +6554,47 @@ document.getElementById('btnNewChapter')?.addEventListener('click', () => {
   openAuthorChapterEditor(editingBookId, null);
 });
 
+// Swap two chapters' chapter_number values. The (book_id, chapter_number)
+// unique constraint means we can't simply set b.num = a.num and a.num = b.num
+// directly — the second statement collides. Three-step dance: park the
+// first chapter on a temporary negative number, move the second into the
+// first's slot, then move the first into the second's old slot. Negative
+// numbers are safe because chapter_number is positive in normal use.
+// Per-chapter updates run sequentially so we can roll back on conflict.
+// (2026-05-17 — chapter reorder feature.)
+async function _swapChapterNumbers(a, b, bookId) {
+  if (!a || !b || a.id === b.id) return;
+  const aNum = Number(a.chapter_number);
+  const bNum = Number(b.chapter_number);
+  if (!Number.isFinite(aNum) || !Number.isFinite(bNum)) return;
+  const TEMP = -Math.abs(Date.now() % 1_000_000); // unique negative parking slot
+  try {
+    // Step 1 — park a on TEMP
+    const r1 = await supabase.from('chapters').update({ chapter_number: TEMP }).eq('id', a.id);
+    if (r1.error) throw r1.error;
+    // Step 2 — move b into a's old slot
+    const r2 = await supabase.from('chapters').update({ chapter_number: aNum }).eq('id', b.id);
+    if (r2.error) {
+      // Rollback: restore a
+      await supabase.from('chapters').update({ chapter_number: aNum }).eq('id', a.id);
+      throw r2.error;
+    }
+    // Step 3 — move a into b's old slot
+    const r3 = await supabase.from('chapters').update({ chapter_number: bNum }).eq('id', a.id);
+    if (r3.error) {
+      // Partial state — try to restore both
+      await supabase.from('chapters').update({ chapter_number: bNum }).eq('id', b.id);
+      await supabase.from('chapters').update({ chapter_number: aNum }).eq('id', a.id);
+      throw r3.error;
+    }
+    toast('Chapter order updated', 'success');
+    loadBookEditor(bookId);
+  } catch (err) {
+    toast('Couldn\'t reorder: ' + (err?.message || 'unknown error'), 'error');
+    console.error('[chapter-reorder] failed:', err);
+  }
+}
+
 async function deleteAuthorChapter(chapterId, bookId) {
   const ok = await confirmDialog({
     title: 'Delete this chapter?',
@@ -6456,6 +6736,20 @@ async function openAuthorChapterEditor(bookId, chapterId) {
         div.replaceWith(p);
       });
 
+      // 2026-05-17 — preserve multi-space runs in text nodes. HTML
+      // whitespace collapses consecutive ASCII spaces to one on render;
+      // pasting "Hello    world" loses 3 spaces unless we encode them.
+      // Walk every text node and turn runs of 2+ spaces into one space
+      // followed by N-1 non-breaking spaces (which the renderer keeps
+      // visible while still allowing line wrap at the leading space).
+      const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      const NBSP = ' ';
+      while (walker.nextNode()) {
+        const t = walker.currentNode;
+        if (!t.nodeValue || !/  /.test(t.nodeValue)) continue;
+        t.nodeValue = t.nodeValue.replace(/  +/g, (m) => ' ' + NBSP.repeat(m.length - 1));
+      }
+
       return root.innerHTML;
     }
 
@@ -6469,15 +6763,50 @@ async function openAuthorChapterEditor(bookId, chapterId) {
       if (html) {
         normalized = _normalizePastedManuscriptHtml(html);
       } else {
-        // Plain-text fallback: blank-line-separated chunks → <p>, single
-        // newlines inside a chunk → <br>. Mirrors the reader-side
-        // normalizeChapterContent() so authors and readers agree.
-        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        normalized = text
-          .split(/\n\s*\n/)
-          .filter(chunk => chunk.trim().length > 0)
-          .map(chunk => `<p>${esc(chunk).replace(/\n/g, '<br>')}</p>`)
-          .join('');
+        // Plain-text fallback. 2026-05-17 regression fix: previously
+        // split only on `\n\s*\n` (blank-line-separated), which dropped
+        // paragraph breaks from sources that use single-newline-per-
+        // paragraph (Notepad, Notes, Slack, Discord, most chat exports).
+        // Now: if the text contains any blank-line separators, honor
+        // them as paragraph boundaries (and treat single newlines inside
+        // a chunk as <br>); otherwise split on every newline so each
+        // line becomes its own paragraph. Either way, multi-space runs
+        // are preserved by encoding alternating spaces as &nbsp; — HTML
+        // would otherwise collapse them to one.
+        const esc = (s) => s
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        // Preserve leading spaces on a line + multi-space runs. Encodes
+        // every space at the start of a line with &nbsp; and pairs of
+        // consecutive interior spaces as `&nbsp; ` (one nbsp + one space)
+        // so wrapping still works.
+        const preserveSpaces = (line) => line
+          .replace(/^( +)/, (m) => '&nbsp;'.repeat(m.length))
+          .replace(/  +/g, (m) => ' ' + '&nbsp;'.repeat(m.length - 1));
+        const hasBlankLineSep = /\n\s*\n/.test(text);
+        if (hasBlankLineSep) {
+          normalized = text
+            .split(/\n\s*\n/)
+            .filter(chunk => chunk.trim().length > 0)
+            .map(chunk => {
+              const inner = esc(chunk)
+                .split('\n')
+                .map(preserveSpaces)
+                .join('<br>');
+              return `<p>${inner}</p>`;
+            })
+            .join('');
+        } else {
+          // Single-newline-per-paragraph source: every non-empty line
+          // becomes its own paragraph. Empty lines (which would be
+          // weird in this branch but handle defensively) collapse.
+          normalized = text
+            .split(/\n/)
+            .map(line => line.trim().length ? `<p>${preserveSpaces(esc(line))}</p>` : '')
+            .filter(Boolean)
+            .join('');
+        }
       }
 
       // Empty after normalization (e.g. user pasted only whitespace or
@@ -7993,6 +8322,11 @@ window.addEventListener('popstate', () => {
     showStore();
   } else if (hash === '#earnings') {
     showEarnings();
+  } else if (hash === '#post') {
+    // Mirrors the bootstrap-router branch — back/forward into the Post
+    // tab restores it without bouncing to Home.
+    setSidebarActive('btnPost');
+    showFeed();
   } else {
     // Default destination when no deep link matched — curated home
     // landing (May 2026). The post feed lives behind the Post tab now.

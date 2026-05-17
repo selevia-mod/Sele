@@ -329,6 +329,14 @@
     <!-- Stories / People row — hidden for now (minimalist feed) -->
     <div class="stories-row" id="storiesRow" style="display:none"></div>
 
+    <!-- Post-feed shell — wraps the composer + tabs + feed + sentinel
+         alongside a right-rail of suggested creators. The rail is
+         hidden by default (CSS); body.on-post-feed unhides it on wide
+         viewports (≥1100px). Stays empty on every other tab so no
+         layout shift, no extra column eats space. Added 2026-05-17. -->
+    <div class="post-feed-shell" id="postFeedShell">
+      <div class="post-feed-main">
+
     <!-- Compose. Hidden by default (May 2026) so the page no longer
          flashes the post-feed shell on first paint before the init
          script routes to the new home landing. showFeed() reveals
@@ -458,6 +466,30 @@
     <div id="feedSentinel" class="book-grid-sentinel" style="display:none">
       <div class="book-grid-loadmore">Loading more posts…</div>
     </div>
+
+      </div><!-- /.post-feed-main -->
+
+      <!-- Right rail: suggested creators (Twitter/Threads pattern).
+           Hidden on narrow viewports + on non-Post tabs via CSS gates
+           (body.on-post-feed + min-width:1100px). Populated by
+           loadSuggestedCreators() in js/feed.js the first time the
+           Post tab is opened. -->
+      <aside class="feed-right-rail" id="feedRightRail" aria-label="Suggested creators">
+        <div class="rail-card" id="railSuggestedCreators">
+          <div class="rail-header">
+            <h3 class="rail-title">Suggested Creators</h3>
+            <button class="rail-refresh" id="railSuggestedRefresh" type="button" aria-label="Refresh suggestions" title="Refresh">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+          </div>
+          <div class="rail-list" id="suggestedCreatorsList">
+            <div class="rail-skeleton-row"><div class="rail-skel-avatar"></div><div class="rail-skel-meta"><div class="rail-skel-line"></div><div class="rail-skel-line short"></div></div></div>
+            <div class="rail-skeleton-row"><div class="rail-skel-avatar"></div><div class="rail-skel-meta"><div class="rail-skel-line"></div><div class="rail-skel-line short"></div></div></div>
+            <div class="rail-skeleton-row"><div class="rail-skel-avatar"></div><div class="rail-skel-meta"><div class="rail-skel-line"></div><div class="rail-skel-line short"></div></div></div>
+          </div>
+        </div>
+      </aside>
+    </div><!-- /.post-feed-shell -->
 
     <!--
       Home Landing Page (May 2026 redesign)

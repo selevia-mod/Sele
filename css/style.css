@@ -3481,6 +3481,102 @@ body:not(.light) .reactor-tabs { border-bottom-color: rgba(167, 139, 250, 0.10);
 body:not(.light) .reactor-tab { border-color: rgba(167, 139, 250, 0.20); color: #9ca3af; }
 body:not(.light) .reactor-tab:hover { background: rgba(167, 139, 250, 0.10); color: #c4b5fd; }
 
+/* ════════════════════════════════════════════════════════════════════════
+   REACTIONS MODAL — compact FB/Discord-style overrides (2026-05-17)
+   Scoped to .reactor-list-modal so the shared follow-list styles aren't
+   affected. Goals: smaller width, denser rows, real emoji icons on tabs
+   + rows, cleaner Close footer.
+   ════════════════════════════════════════════════════════════════════════ */
+.reactor-list-modal {
+  max-width: 380px;
+  max-height: 75vh;
+}
+.reactor-list-modal .follow-list-header { padding-bottom: 0.25rem; }
+.reactor-list-modal .follow-list-header h2 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.reactor-list-modal .reactor-tabs {
+  gap: 0.3rem;
+  padding: 0.45rem 0 0.4rem;
+  margin-bottom: 0.3rem;
+}
+.reactor-list-modal .reactor-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  font-size: 0.73rem;
+  font-weight: 600;
+  line-height: 1.3;
+  min-height: 24px;
+}
+.reactor-list-modal .reactor-tab .reactor-tab-glyph {
+  font-size: 0.95rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.reactor-list-modal .reactor-tab .reactor-tab-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+.reactor-list-modal .reactor-tab.active {
+  /* Solid brand purple — flat, not gradient (matches the rest of the
+     2026-05-17 polish). */
+  background: var(--purple);
+  border-color: var(--purple);
+  box-shadow: none;
+}
+
+/* Body — tighter scrollbar, smaller padding */
+.reactor-list-modal .follow-list-body {
+  padding: 0;
+  margin-bottom: 0.4rem;
+}
+.reactor-list-modal .follow-list-body::-webkit-scrollbar { width: 4px; }
+
+/* Rows — Discord/FB density: 32px avatar, 0.35rem row padding */
+.reactor-list-modal .follow-list-row {
+  gap: 0.55rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 8px;
+}
+.reactor-list-modal .follow-list-row:hover {
+  background: rgba(139, 92, 246, 0.06);
+}
+.reactor-list-modal .follow-list-avatar {
+  width: 32px;
+  height: 32px;
+  font-size: 0.75rem;
+}
+.reactor-list-modal .follow-list-name {
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+.reactor-list-modal .reactor-emoji {
+  font-size: 1.05rem;
+  margin-right: 0.1rem;
+  line-height: 1;
+}
+
+/* Footer — tighter Close button, no isolated wide bar */
+.reactor-list-modal .modal-actions {
+  padding-top: 0.35rem;
+  display: flex;
+  justify-content: flex-end;
+}
+.reactor-list-modal .modal-actions .btn-ghost {
+  padding: 0.35rem 0.95rem;
+  font-size: 0.78rem;
+  border-radius: 999px;
+}
+
+body:not(.light) .reactor-list-modal .follow-list-row:hover {
+  background: rgba(167, 139, 250, 0.08);
+}
+
 /* ── ACTION BAR (premium flat) ── */
 .post-actions {
   display: flex; gap: 0.35rem; align-items: center;
@@ -7494,6 +7590,107 @@ body:not(.light) .link-preview-favicon {
 }
 body:not(.light) .link-preview-host { color: #e5e7eb; }
 body:not(.light) .link-preview-url  { color: #9ca3af; }
+
+/* ─── Selebox-internal preview (book / video / profile) ───────────────
+   Shown when a comment or post body links to selebox.com/<type>/<id>.
+   Renders a real cover thumb + title + author instead of the generic
+   globe favicon. Layout mirrors the generic preview (flex row) but
+   with a taller thumbnail slot so book covers don't get squashed. */
+.link-preview-internal {
+  display: flex;
+  align-items: stretch;
+  gap: 0.85rem;
+  padding: 0.6rem 0.85rem 0.6rem 0.6rem;
+}
+.link-preview-internal .link-preview-cover {
+  flex-shrink: 0;
+  width: 56px;
+  height: 84px; /* 2:3 book aspect — fits videos too via object-fit */
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ece9f9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(139, 92, 246, 0.12);
+}
+.link-preview-internal .link-preview-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.link-preview-internal-fallback {
+  font-size: 1.6rem;
+  opacity: 0.5;
+}
+.link-preview-internal .link-preview-meta {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+}
+.link-preview-internal .link-preview-platform {
+  position: static;
+  background: transparent;
+  color: var(--purple);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0;
+  margin: 0;
+}
+.link-preview-internal .link-preview-title {
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.link-preview-internal .link-preview-sub {
+  font-size: 0.74rem;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Skeleton state while we hydrate */
+.link-preview-internal.is-loading .link-preview-cover,
+.link-preview-skel {
+  background: linear-gradient(90deg, #ece9f9 0%, #f5f3fc 50%, #ece9f9 100%);
+  background-size: 200% 100%;
+  animation: link-preview-shimmer 1.4s infinite linear;
+}
+.link-preview-skel-line {
+  display: block;
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #ece9f9 0%, #f5f3fc 50%, #ece9f9 100%);
+  background-size: 200% 100%;
+  animation: link-preview-shimmer 1.4s infinite linear;
+  margin-bottom: 4px;
+}
+.link-preview-skel-line.link-preview-skel-line-short { width: 50%; }
+@keyframes link-preview-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+body:not(.light) .link-preview-internal .link-preview-cover {
+  background: rgba(139, 92, 246, 0.10);
+  border-color: rgba(139, 92, 246, 0.25);
+}
+body:not(.light) .link-preview-internal.is-loading .link-preview-cover,
+body:not(.light) .link-preview-skel,
+body:not(.light) .link-preview-skel-line {
+  background: linear-gradient(90deg, rgba(139,92,246,0.10) 0%, rgba(139,92,246,0.18) 50%, rgba(139,92,246,0.10) 100%);
+  background-size: 200% 100%;
+}
 
 /* ════════════════════════════════════════════════════════════════════════════
    BOOKS — minimalist premium header
@@ -18632,3 +18829,660 @@ body:not(.light) .image-upload-btn:hover {
 /* ── Stories row + composer + tabs: each loses a couple of px of
        bottom margin so the feed starts higher on the page. ─────────── */
 .stories-row { margin-bottom: 0.55rem; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   POST FEED — RIGHT-RAIL SUGGESTED CREATORS (2026-05-17)
+   ────────────────────────────────────────────────────────────────────────────
+   Twitter/Threads pattern: a second column to the right of the post feed
+   surfacing creators worth following. We keep the rail very tightly
+   scoped:
+     • Post tab only — body.on-post-feed gates the entire layout switch
+     • Hidden < 1100px — small viewports get the existing single-column feed
+     • One section for now (Suggested Creators); same .rail-card shell
+       handles future additions (Authors, Rising Writers, etc.)
+   The shell defaults to a single block layout so other tabs render
+   exactly as before. Only when the body gains .on-post-feed AND the
+   viewport is wide enough does the 2-column grid kick in.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Default: stacked, no rail. .post-feed-main is a transparent passthrough. */
+.post-feed-shell { display: block; }
+.post-feed-main  { display: block; }
+.feed-right-rail { display: none; }
+
+/* Activate the 2-column layout only on the Post tab + wide viewports.
+   Widen .main-wrap so the rail has somewhere to live without crushing
+   the feed column below the ~640px sweet spot. */
+@media (min-width: 1100px) {
+  body.on-post-feed .main-wrap {
+    max-width: none !important;
+    /* Anchor the layout to the right edge with a 40px gutter (instead
+       of centering with auto margins) so the rail sits closer to the
+       viewport edge per design feedback 2026-05-17. Left margin grows
+       to fill whatever extra width remains. */
+    width: min(calc(100vw - var(--sidebar-w) - 2rem), 1180px) !important;
+    margin-left: auto !important;
+    margin-right: 50px !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+  body.on-post-feed .post-feed-shell {
+    display: grid;
+    /* Rail widened 360→400px so long usernames + verified seal have
+       plenty of room before the Follow button. Feed column unchanged. */
+    grid-template-columns: minmax(0, 640px) 400px;
+    gap: 1.5rem;
+    justify-content: center;
+    align-items: start;
+  }
+  body.on-post-feed .feed-right-rail {
+    display: block;
+    /* Stick under the topbar so the rail follows the user as they
+       scroll. Falls free when its content scrolls past the column. */
+    position: sticky;
+    top: calc(var(--header-h) + 0.4rem);
+    align-self: start;
+    max-height: calc(100vh - var(--header-h) - 1rem);
+    overflow-y: auto;
+    /* Hide the scrollbar visually (still scrollable). Keeps the rail
+       feeling like a static panel, not a scroll-tied widget. */
+    scrollbar-width: thin;
+  }
+  body.on-post-feed .feed-right-rail::-webkit-scrollbar { width: 4px; }
+  body.on-post-feed .feed-right-rail::-webkit-scrollbar-thumb {
+    background: var(--border2);
+    border-radius: 4px;
+  }
+}
+
+/* ── Rail card shell — mirrors the .post-card visual weight so the rail
+       feels like part of the same surface, just a different column.
+       2026-05-17 hierarchy pass: tightened padding, lighter title weight,
+       softer purple accents (was using --accent which is amber/yellow
+       — wrong palette; SeLeBox brand purple is --purple #8b5cf6). ─── */
+.rail-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0.7rem 0.85rem 0.55rem;
+  margin-bottom: 0.6rem;
+}
+body:not(.light) .rail-card {
+  background: var(--bg2);
+  border-color: var(--border);
+}
+
+.rail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.45rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.08);
+}
+.rail-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin: 0;
+  color: var(--purple);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.rail-refresh {
+  background: transparent;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, background 0.15s, transform 0.4s;
+}
+.rail-refresh:hover {
+  color: var(--purple);
+  background: rgba(139, 92, 246, 0.08);
+}
+.rail-refresh.spinning svg { animation: rail-spin 0.7s linear; }
+@keyframes rail-spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+
+/* Tighter row gap so suggestions read as a single list, not 5 cards. */
+.rail-list { display: flex; flex-direction: column; gap: 0.15rem; }
+
+/* ── Suggestion row — avatar + name/subtitle + Follow button ─────────
+   Reduced vertical breathing, smaller name, lighter subtitle, smaller
+   follow pill. The whole row stays hover-tappable to open the profile.
+   2026-05-17 spacing pass: bumped the avatar column 34→40px so the
+   verified ring has room to breathe + the username badge isn't crowded
+   against the ring edge. Wider gap too. */
+.rail-suggest-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.3rem;
+  margin: 0 -0.3rem; /* hover bg extends past the visual column edge */
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+.rail-suggest-row:hover {
+  background: rgba(139, 92, 246, 0.06);
+}
+.rail-suggest-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--purple);
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.rail-suggest-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.rail-suggest-meta { min-width: 0; }
+.rail-suggest-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+}
+.rail-suggest-sub {
+  font-size: 0.72rem;
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+  font-weight: 400;
+}
+
+/* Follow button — premium outline pill in SeLeBox brand purple. Quiet
+   resting state, fills with a subtle gradient + lifts on hover so the
+   click target feels tactile. 2026-05-17 v2 polish. */
+.rail-follow-btn {
+  position: relative;
+  background: transparent;
+  color: var(--purple);
+  border: 1px solid var(--purple);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.3;
+  overflow: hidden;
+  transition: color 0.18s ease,
+              background 0.22s ease,
+              border-color 0.18s ease,
+              transform 0.12s ease,
+              box-shadow 0.22s ease;
+}
+.rail-follow-btn .rail-follow-label {
+  position: relative;
+  z-index: 1;
+}
+.rail-follow-btn:hover {
+  background: linear-gradient(135deg, var(--purple) 0%, #7c3aed 100%);
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.35);
+}
+.rail-follow-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 6px rgba(139, 92, 246, 0.25);
+}
+.rail-follow-btn.following {
+  background: rgba(139, 92, 246, 0.08);
+  color: var(--purple);
+  border-color: rgba(139, 92, 246, 0.35);
+}
+.rail-follow-btn.following:hover {
+  color: #e74c3c;
+  border-color: #e74c3c;
+  background: rgba(231, 76, 60, 0.08);
+  box-shadow: 0 4px 12px rgba(231, 76, 60, 0.18);
+}
+.rail-follow-btn[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* Verified-creator avatar — soft purple ring + tinted glow. Mirrors
+   mobile's "this person has a role" treatment without competing with
+   the verified seal next to the name. */
+.rail-suggest-avatar.is-verified {
+  box-shadow: 0 0 0 2px var(--bg2),
+              0 0 0 3.5px rgba(139, 92, 246, 0.55),
+              0 2px 8px rgba(139, 92, 246, 0.22);
+}
+body.light .rail-suggest-avatar.is-verified {
+  box-shadow: 0 0 0 2px #fff,
+              0 0 0 3.5px rgba(139, 92, 246, 0.55),
+              0 2px 8px rgba(139, 92, 246, 0.18);
+}
+
+/* Row hover — soft lift + tinted background for the "card-y" feel
+   without rebuilding each row as an actual card. */
+.rail-suggest-row {
+  transition: background 0.18s ease, transform 0.18s ease;
+}
+.rail-suggest-row:hover {
+  transform: translateY(-1px);
+}
+
+/* See more footer — slim purple link that previews discoverability. */
+.rail-footer {
+  margin-top: 0.55rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(139, 92, 246, 0.10);
+  text-align: center;
+}
+.rail-see-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--purple);
+  text-decoration: none;
+  padding: 4px 10px;
+  border-radius: 999px;
+  transition: background 0.15s ease, color 0.15s ease, gap 0.18s ease;
+}
+.rail-see-more:hover {
+  background: rgba(139, 92, 246, 0.10);
+  gap: 7px; /* arrow slides slightly on hover */
+}
+.rail-see-more svg {
+  transition: transform 0.18s ease;
+}
+.rail-see-more:hover svg {
+  transform: translateX(1px);
+}
+
+/* ── Skeleton state while loading ──────────────────────────────────── */
+.rail-skeleton-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 64px;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.3rem 0;
+}
+.rail-skel-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(90deg, var(--bg3) 25%, rgba(121, 117, 212, 0.08) 50%, var(--bg3) 75%);
+  background-size: 200% 100%;
+  animation: rail-shimmer 1.4s infinite linear;
+}
+.rail-skel-meta { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rail-skel-line {
+  height: 10px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg3) 25%, rgba(121, 117, 212, 0.08) 50%, var(--bg3) 75%);
+  background-size: 200% 100%;
+  animation: rail-shimmer 1.4s infinite linear;
+}
+.rail-skel-line.short { width: 60%; }
+@keyframes rail-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Empty / error fallback inside the rail */
+.rail-empty {
+  font-size: 0.8rem;
+  color: var(--text2);
+  padding: 0.4rem 0;
+  text-align: center;
+}
+.rail-empty .rail-empty-cta {
+  display: inline-block;
+  margin-top: 0.4rem;
+  color: var(--purple);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.rail-empty .rail-empty-cta:hover { text-decoration: underline; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   FEED REFINEMENT PASS — 2026-05-17 (round 3)
+   ────────────────────────────────────────────────────────────────────────────
+   Goal: keep the Facebook-style post structure, tighten everything by 10-20%
+   to match modern FB/X density. Specifically:
+     • Post header: cleaner avatar→name→time alignment, smaller gap
+     • Action bar: denser, less vertical air around Like/Comment/Repost/Share
+     • Comments: shorter bubbles, tighter rows, smaller input + send btn,
+       quieter "View previous comments" link
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Post header: tighten the meta column (avatar → name+time stack) ───── */
+.post-header {
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+.post-header .avatar {
+  width: 38px;
+  height: 38px;
+  font-size: 0.85rem;
+}
+/* The name+time wrapper is the second flex child (an unstyled <div>). Tighten
+   the line between author and timestamp so the meta block reads as one
+   unit instead of two stacked labels. */
+.post-header > div:not(.avatar) {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.15;
+}
+.post-author {
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.post-time {
+  font-size: 0.7rem;
+  line-height: 1.2;
+  margin-top: 0;
+}
+
+/* ── Action bar: dense FB-style row ────────────────────────────────────── */
+.post-actions {
+  padding-top: 0.3rem;
+  gap: 0.1rem;
+}
+.action-btn {
+  padding: 0.35rem 0.55rem;
+  font-size: 0.83rem;
+  gap: 0.35rem;
+  border-radius: 8px;
+}
+.action-btn .r-icon { width: 16px; height: 16px; font-size: 14px; }
+.action-btn svg     { width: 15px; height: 15px; }
+/* Reaction count strip — virtually flush with the action bar. */
+.post-stats {
+  padding: 0.15rem 0 0.25rem;
+  font-size: 0.82rem;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   COMMENTS — Facebook-style compact pass (2026-05-17)
+   Targets: density, faster scan, less scroll burden.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Whole section sits closer to the action bar above. */
+.comments-section {
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Comment row: smaller avatar, tighter row spacing. */
+.comment-item {
+  gap: 0.45rem;
+  margin-bottom: 0.45rem;
+}
+.comment-item > .avatar {
+  width: 28px;
+  height: 28px;
+  font-size: 0.7rem;
+  flex-shrink: 0;
+}
+
+/* Bubble — FB style: short, hugged tight to the text. The previous 0.65rem
+   vertical padding gave a balloon feel; 0.4rem makes it conversational. */
+.comment-bubble {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.835rem;
+  line-height: 1.4;
+  border-radius: 4px 14px 14px 14px;
+}
+
+/* Meta row no longer needs its own slot — FB renders the username INSIDE the
+   bubble. Keep the existing structure (meta above bubble) but compact it. */
+.comment-meta {
+  gap: 0.35rem;
+  margin-bottom: 1px;
+}
+.comment-author {
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+.comment-time {
+  font-size: 0.66rem;
+  opacity: 0.8;
+}
+
+/* Action row (Like / Reply) directly under bubble — denser, smaller pills. */
+.comment-actions {
+  gap: 0;
+  margin-top: 2px;
+}
+.comment-action-btn {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 6px;
+  line-height: 1.3;
+  gap: 0.25rem;
+}
+.comment-action-btn:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+
+/* Replies: pulled in tighter, smaller indent (avatar+gap+a hair). */
+.replies {
+  margin-left: 1.85rem;
+  margin-top: 0.3rem;
+}
+.reply-item {
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+.reply-item > .avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 0.65rem;
+}
+
+/* "View previous comments" / "View N replies" — recedes into a subtle link. */
+.comment-view-more,
+.comment-view-replies {
+  margin: 2px 0 6px;
+  padding: 3px 6px;
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: var(--text3);
+  gap: 4px;
+  border-radius: 4px;
+}
+.comment-view-more::before,
+.comment-view-replies::before {
+  width: 14px;
+  opacity: 0.5;
+}
+.comment-view-more:hover,
+.comment-view-replies:hover {
+  color: var(--purple);
+  background: transparent;
+  text-decoration: underline;
+}
+
+/* Inline image attached to a comment — smaller cap so it doesn't blow up
+   the row height. */
+.comment-image {
+  margin-top: 0.3rem;
+  max-width: 200px;
+}
+.comment-image img { max-height: 170px; }
+
+/* ── Comment input — compact row, smaller send button ──────────────────── */
+.comment-input-wrap {
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+  align-items: stretch;
+}
+.comment-input {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.82rem;
+  min-height: 32px;
+  border-radius: 999px;
+  line-height: 1.4;
+}
+.btn-send {
+  padding: 0.35rem 0.85rem;
+  font-size: 0.74rem;
+  border-radius: 999px;
+}
+
+/* ── Single-row composer (avatar | textarea | photo icon | Send | ✕) ─────
+   The wrap is flex-column (set inline by engagement.js so the preview
+   sits below). The row inside is its own flex layout so all controls
+   ride the same baseline. */
+.comment-input-row {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  width: 100%;
+}
+.comment-input-preview {
+  margin-left: 36px;
+}
+.comment-input-preview:empty { display: none; }
+
+/* Photo trigger — icon-only square with subtle hover. Sits between the
+   text field and the Send button so users can drop a photo without
+   leaving the row. */
+.comment-photo-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--text3);
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.comment-photo-btn:hover {
+  color: var(--purple);
+  background: rgba(139, 92, 246, 0.08);
+  border-color: var(--purple);
+}
+.comment-photo-btn svg { width: 16px; height: 16px; display: block; }
+.comment-photo-btn input { display: none; }
+
+/* Cancel-reply ✕ — only appears on reply inputs. Subtle and matches the
+   photo-btn footprint so the row reads as a balanced strip. */
+.reply-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.reply-cancel-btn:hover {
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.08);
+}
+
+/* ── Comment author: black/white per theme, not light purple ────────────
+   Earlier rule colored the author name with --purple-lt which read as a
+   "tag" rather than a name. Reverting to the standard text color makes
+   the username the heaviest element in the row (per design feedback). */
+.comment-author {
+  color: var(--text);
+}
+body.light .comment-author { color: var(--text); }
+
+/* Clickable affordance for comment avatar + author (2026-05-17 fix —
+   both now carry .profile-link so the global delegate routes to
+   openProfile). Earlier they had no hover indication and felt static. */
+.comment-author.profile-link,
+.comment-item > .avatar.profile-link,
+.reply-item > .avatar.profile-link {
+  cursor: pointer;
+  transition: color 0.15s, opacity 0.15s;
+}
+.comment-author.profile-link:hover {
+  color: var(--purple);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.comment-item > .avatar.profile-link:hover,
+.reply-item > .avatar.profile-link:hover {
+  opacity: 0.85;
+}
+
+/* ── Like + Reply alignment fix ────────────────────────────────────────
+   The Like button has icon+text inside .reaction-wrap (an extra flex
+   parent that introduces a baseline mismatch with the plain Reply
+   button). Force the row + its children to center-align so the heart,
+   "Like", and "Reply" all sit on the same line. */
+.comment-actions {
+  align-items: center;
+}
+.comment-actions .reaction-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+.comment-actions .comment-action-btn {
+  display: inline-flex;
+  align-items: center;
+}
+.comment-actions .comment-action-btn svg,
+.comment-actions .comment-action-btn .r-icon svg {
+  display: block;
+  vertical-align: middle;
+}
+
+/* "View previous comments" toggle — when expanded show a small minus
+   instead of the dash so users see the row IS a toggle. */
+.comment-view-more.expanded::before,
+.comment-view-replies.expanded::before {
+  width: 14px;
+  opacity: 0.75;
+  background: var(--purple);
+}
+.comment-view-more.expanded,
+.comment-view-replies.expanded {
+  color: var(--purple);
+}

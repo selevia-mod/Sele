@@ -4497,6 +4497,13 @@ async function _sendBroadcast() {
         `Scheduled for ${new Date(data.scheduled_for).toLocaleString()}.`,
         'ok',
       );
+    } else if (data.status === 'pending' || data.queued) {
+      // Dispatch happens on the next cron tick (≤60s). The History pane
+      // will flip from Pending → Sent once the worker processes it.
+      setStatus(
+        'Queued — will be delivered within 60 seconds. Refresh History to see status.',
+        'ok',
+      );
     } else {
       setStatus(
         `Sent. In-app: ${data.in_app_count}. Push dispatched: ${data.push_dispatched}.`,
