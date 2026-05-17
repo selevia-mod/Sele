@@ -18320,3 +18320,224 @@ body:not(.light) .dm-mini-input:focus { background: #211c33; border-color: rgba(
 body:not(.light) .dm-mini-composer,
 body:not(.light) .dm-mini-header { background: #1f1b2e; border-color: rgba(167, 139, 250, 0.14); }
 body:not(.light) .dm-mini-header { background: linear-gradient(180deg, #1f1b2e, #25203a); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   FEED UI POLISH — 2026-05-17
+   ════════════════════════════════════════════════════════════════════════════
+   Premium pass on the post-feed surface per UX feedback. Additive
+   overrides only — earlier rules in this file still apply and these
+   refine. Touch points:
+     • Post card (hover/elevation, transitions, body legibility)
+     • Username + timestamp hierarchy
+     • Vertical rhythm between cards + inside cards
+     • Link preview (clickable cursor, hover lift, larger generic favicon
+       block, bolder host)
+     • Action buttons (smoother transitions, scale-on-press)
+     • Engagement counts (more prominent on hover)
+     • Composer (focus glow ring, polished tool buttons, loading state
+       on Post submit when [disabled])
+   Skipped per user instruction: post-type badges, right-side
+   suggestion panel.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Card: subtle lift on hover, premium shadow, breathing room ─────────── */
+.post-card {
+  margin-bottom: 0.85rem;
+  box-shadow: 0 1px 2px rgba(15, 10, 28, 0.03);
+  transition: box-shadow 0.22s ease, border-color 0.22s ease, transform 0.18s ease;
+}
+.post-card:hover {
+  box-shadow: 0 6px 22px rgba(15, 10, 28, 0.08), 0 1px 3px rgba(15, 10, 28, 0.04);
+  border-color: rgba(124, 58, 237, 0.18);
+}
+body:not(.light) .post-card {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+body:not(.light) .post-card:hover {
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.22);
+  border-color: rgba(167, 139, 250, 0.22);
+}
+
+/* ── Header: clearer username, lighter/smaller timestamp ────────────────── */
+.post-author {
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  color: var(--text);
+  transition: color 0.15s ease;
+}
+.post-author.profile-link:hover { color: var(--purple, #7c3aed); }
+body:not(.light) .post-author.profile-link:hover { color: var(--purple-lt, #a78bfa); }
+.post-time {
+  font-size: 0.72rem;
+  color: var(--text3);
+  opacity: 0.85;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.post-header { margin-bottom: 0.75rem; }
+
+/* ── Body: slightly larger, comfier reading ─────────────────────────────── */
+.post-body {
+  font-size: 0.95rem;
+  line-height: 1.7;
+  letter-spacing: -0.003em;
+  color: var(--text);
+  margin-bottom: 0.85rem;
+}
+
+/* ── Link preview: clickable cursor, premium hover, bigger generic block ── */
+.link-preview { cursor: pointer; }
+.link-preview-generic {
+  padding: 0.85rem 1rem;
+  gap: 1rem;
+  align-items: center;
+}
+.link-preview-favicon {
+  width: 52px;
+  height: 52px;
+  border-radius: 11px;
+}
+.link-preview-favicon img { width: 30px; height: 30px; }
+.link-preview-host {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #111827;
+}
+.link-preview-url {
+  font-size: 0.76rem;
+  color: #6b7280;
+  margin-top: 0.18rem;
+}
+.link-preview:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px rgba(15, 10, 28, 0.09);
+  border-color: rgba(124, 58, 237, 0.32);
+}
+body:not(.light) .link-preview-host { color: #f3f4f6; }
+body:not(.light) .link-preview:hover {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38);
+  border-color: rgba(167, 139, 250, 0.42);
+}
+/* Thumbnail (YouTube) — slight zoom-in on hover for liveliness. */
+.link-preview-youtube .link-preview-thumb img {
+  transition: transform 0.35s ease;
+}
+.link-preview-youtube:hover .link-preview-thumb img { transform: scale(1.025); }
+
+/* ── Engagement counts: a touch more prominent on hover, subtle pop ───── */
+.post-stats {
+  padding: 0.35rem 0 0.6rem;
+  font-size: 0.82rem;
+}
+.post-stats .rcount,
+.post-stats .ccount {
+  transition: background 0.18s ease, color 0.18s ease, transform 0.12s ease;
+}
+.post-stats .rcount:not(:empty):hover,
+.post-stats .ccount:not(:empty):hover {
+  transform: translateY(-1px);
+}
+
+/* ── Action buttons: smoother transitions, clearer hover, premium press ── */
+.action-btn {
+  transition: background 0.18s ease, color 0.18s ease, transform 0.14s ease, box-shadow 0.18s ease;
+}
+.action-btn:hover {
+  background: rgba(124, 58, 237, 0.10);
+  color: var(--purple, #7c3aed);
+  transform: translateY(-1px);
+}
+.action-btn:active {
+  transform: scale(0.96);
+  transition-duration: 0.08s;
+}
+body:not(.light) .action-btn:hover {
+  background: rgba(167, 139, 250, 0.14);
+  color: var(--purple-lt, #c4b5fd);
+}
+/* The "reacted" pink state — give it a tiny soft glow so it reads as
+   "this is your active reaction" rather than just a color swap. */
+.action-btn.reacted {
+  box-shadow: 0 1px 3px rgba(236, 72, 153, 0.20);
+}
+.action-btn.reacted:hover {
+  background: rgba(236, 72, 153, 0.16);
+  color: #ec4899;
+}
+
+/* ── Action bar: a hair more air above the buttons ──────────────────────── */
+.post-actions {
+  padding-top: 0.7rem;
+  gap: 0.5rem;
+}
+
+/* ── Composer: premium focus ring, polished tool buttons, loading state ── */
+.compose {
+  transition: border-color 0.22s ease, box-shadow 0.22s ease;
+}
+.compose:focus-within {
+  border-color: rgba(124, 58, 237, 0.42);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.10);
+}
+body:not(.light) .compose:focus-within {
+  border-color: rgba(167, 139, 250, 0.45);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.12);
+}
+.compose textarea {
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+.compose textarea:focus {
+  border-color: rgba(124, 58, 237, 0.55);
+  background: var(--bg2);
+}
+body:not(.light) .compose textarea:focus {
+  border-color: rgba(167, 139, 250, 0.55);
+}
+
+/* Tool buttons (Photo / Video / Book / Schedule) — premium hover + press */
+.image-upload-btn {
+  transition: background 0.18s ease, color 0.18s ease, transform 0.14s ease;
+  border-radius: 8px;
+  padding: 7px 12px;
+}
+.image-upload-btn:hover {
+  background: rgba(124, 58, 237, 0.10);
+  color: var(--purple, #7c3aed);
+  transform: translateY(-1px);
+}
+.image-upload-btn:active {
+  transform: scale(0.96);
+  transition-duration: 0.08s;
+}
+body:not(.light) .image-upload-btn:hover {
+  background: rgba(167, 139, 250, 0.14);
+  color: var(--purple-lt, #c4b5fd);
+}
+
+/* Composer submit Post button — loading/disabled feedback. Any code path
+   that sets [disabled] on btnPostSubmit will pick this up automatically. */
+#btnPostSubmit { transition: transform 0.14s ease, opacity 0.18s ease, box-shadow 0.18s ease; }
+#btnPostSubmit:not([disabled]):hover { transform: translateY(-1px); }
+#btnPostSubmit:not([disabled]):active { transform: scale(0.97); }
+#btnPostSubmit[disabled] {
+  opacity: 0.62;
+  cursor: progress;
+  transform: none;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.18);
+}
+
+/* ── Feed spacing: a bit more breathing room between cards ─────────────── */
+#feed .post-card + .post-card { margin-top: 0.25rem; }
+#feed { padding-bottom: 1rem; }
+
+/* ── Post image: slight shadow + smoother zoom on hover ─────────────────── */
+.post-image {
+  transition: box-shadow 0.22s ease;
+}
+.post-image:hover {
+  box-shadow: 0 4px 14px rgba(15, 10, 28, 0.10);
+}
+.post-image img { transition: transform 0.35s ease; }
+.post-image:hover img { transform: scale(1.015); }
