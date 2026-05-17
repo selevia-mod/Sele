@@ -705,11 +705,16 @@ export async function setupVideoMonetGate(player, sbId, video) {
   // already run and our continuation here is stale — bail.
   if (seq !== _videoMonetSetupSeq) return;
 
-  const computeNext = (paid) => {
-    if (paid < initialSec) return initialSec;
-    return initialSec + Math.ceil((paid - initialSec + 1) / recurringSec) * recurringSec;
-  };
-  let nextThreshold = computeNext(paidThrough);
+  // nextThreshold = the wallclock-seconds position at which the listener
+  // should next prompt the user to pay. On fresh load: if the user has
+  // no prior payment, that's the initial free-window boundary; if they
+  // do, it's one second past the end of their paid window (the moment
+  // their granted access expires). We used to derive this with a
+  // computeNext() that walked the canonical 180/780/1380/... boundary
+  // schedule, but that schedule misaligns with windows granted from a
+  // scrubbed-forward promptAt (see bug fix below), so we just use
+  // paidThrough + 1 directly.
+  let nextThreshold = paidThrough > 0 ? paidThrough + 1 : initialSec;
   let modalOpen = false;
 
   const listener = () => {
@@ -717,11 +722,25 @@ export async function setupVideoMonetGate(player, sbId, video) {
     if (modalOpen) return;
     if (player.currentTime < nextThreshold) return;
 
+    // Snap the prompt to where the user actually IS — not to the stale
+    // nextThreshold. Bug report 2026-05-17: scrub from 0 → 15min, paywall
+    // opens at threshold=180 (the initial gate), pay 1 star → server
+    // grants paid_through = 180+600-1 = 779s, but currentTime is 900s
+    // → listener fires again → second paywall. Closing the second one
+    // (onCancel) leaves the video paused, because the browser had
+    // already paused for the scrub-seek before the first modal opened.
+    //
+    // Fix: send the user's actual position as the threshold so the
+    // server's 10-min star window covers wherever they scrubbed to.
+    // For normal (no-scrub) playback this is a no-op — currentTime ≈
+    // nextThreshold at the moment the listener fires.
+    const promptAt = Math.max(nextThreshold, Math.floor(player.currentTime));
+
     modalOpen = true;
     openVideoMonetThresholdDialog({
       videoTitle: video.title,
       videoId:    sbId,
-      threshold:  nextThreshold,
+      threshold:  promptAt,
       onSuccess: (result) => {
         modalOpen = false;
         if (result.mode === 'permanent') {
@@ -735,10 +754,30 @@ export async function setupVideoMonetGate(player, sbId, video) {
           // is up) or under-charge (skip a prompt the server expects).
           paidThrough = Number.isFinite(result.paidThroughSeconds)
             ? result.paidThroughSeconds
-            : nextThreshold + recurringSec - 1;
-          nextThreshold = computeNext(paidThrough);
+            : promptAt + recurringSec - 1;
+          // Re-prompt the moment the paid window expires. We deliberately
+          // do NOT round to a canonical 180/780/1380 boundary here —
+          // when promptAt is past the initial threshold (scrub-forward
+          // case), the paid window isn't aligned to that schedule and
+          // walking to the next canonical slot would leave a free-access
+          // gap between paidThrough and the next slot.
+          nextThreshold = paidThrough + 1;
         }
         _notifyWalletChange();
+        // Defensive resume. The old "we never paused" assumption only
+        // holds for thresholds crossed during continuous playback. When
+        // the user scrubs to a locked position, the browser pauses for
+        // the seek BEFORE the modal opens, and the modal-backdrop
+        // blocks the user from pressing play. After a successful
+        // unlock, kick playback back on. Wrapped in try/catch because
+        // autoplay blockers may reject the promise silently if the
+        // browser doesn't recognize this as a user-gesture chain.
+        try {
+          const playPromise = player.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(() => {});
+          }
+        } catch {}
       },
       onCancel: () => {
         // Pause so the user has to re-engage; on next play, listener
