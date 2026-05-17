@@ -511,6 +511,21 @@ export function tickDailyLogin(now = new Date()) {
   return tickGoalUnique('login', `daily-login:${_periodKeyDaily(now)}`);
 }
 
+/**
+ * Companion to tickDailyLogin — ticks the monthly 'Stay active N days'
+ * counter (m_active30, the required-quest gate for the monthly pool).
+ * Mobile fires this on every authenticated session start; web didn't
+ * call it AT ALL pre-2026-05-17, so every web-only user's monthly
+ * counter sat at 0/30 forever and the monthly pool was unclaimable.
+ *
+ * Deduped by today's local-time date so a multi-tab open in the same
+ * day still counts as exactly ONE active day. Call from the same
+ * sign-in hook as tickDailyLogin.
+ */
+export function tickActiveDay(now = new Date()) {
+  return tickGoalUnique('active_day', `active:${_periodKeyDaily(now)}`);
+}
+
 // Fire the tick_user_goal RPC for a given (period, deltas) pair.
 // Fire-and-forget — local optimistic write already happened, so a
 // failed RPC just logs.
@@ -917,48 +932,32 @@ function renderDailyQuests() {
   }
 }
 
-// ─── Reset countdown timer ─────────────────────────────────────────────────
-// Renders "Resets in Xh Ym" inline next to the streak pill. Updates every
-// minute via _scheduleQuestsCountdown.
-
-function _msUntilDailyReset() {
-  const now = new Date();
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
-  return tomorrow - now;
-}
-function _msUntilWeeklyReset() {
-  const now = new Date();
-  const day = now.getDay(); // 0 = Sunday
-  const daysToMonday = (8 - (day === 0 ? 7 : day)) % 7 || 7;
-  const nextMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToMonday, 0, 0, 0, 0);
-  return nextMonday - now;
-}
-function _msUntilMonthlyReset() {
-  const now = new Date();
-  const firstNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0);
-  return firstNextMonth - now;
-}
-function _formatCountdown(ms) {
-  if (ms <= 0) return '0m';
-  const totalMin = Math.floor(ms / 60000);
-  const days = Math.floor(totalMin / (60 * 24));
-  const hours = Math.floor((totalMin % (60 * 24)) / 60);
-  const mins = totalMin % 60;
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${mins}m`;
-  return `${mins}m`;
-}
+// ─── Reset cadence label ───────────────────────────────────────────────────
+// User feedback (2026-05-17): the dynamic "Resets in 14d 2h" countdown
+// was confusing (users want to know the cadence, not the precise next-
+// reset time) AND visibly buggy (countdown stayed stale on tab switch
+// for up to 60s because the timer hadn't fired). Replaced with static
+// labels per cadence. _scheduleQuestsCountdown shape preserved so the
+// toggleDailyQuestsPanel call site stays stable.
+const _QUESTS_RESET_LABEL = {
+  daily:   'Resets in 24 hrs',
+  weekly:  'Resets in 7 days',
+  monthly: 'Resets in 30 days',
+};
 function _renderQuestsCountdown() {
   const el = document.getElementById('questsCountdown');
   if (!el) return;
   const tab = _dailyQuestsState.activeTab;
-  const ms = tab === 'monthly' ? _msUntilMonthlyReset() : (tab === 'weekly' ? _msUntilWeeklyReset() : _msUntilDailyReset());
-  el.textContent = `Resets in ${_formatCountdown(ms)}`;
+  el.textContent = _QUESTS_RESET_LABEL[tab] || _QUESTS_RESET_LABEL.daily;
 }
 function _scheduleQuestsCountdown() {
   _renderQuestsCountdown();
-  if (_questsCountdownInterval) clearInterval(_questsCountdownInterval);
-  _questsCountdownInterval = setInterval(_renderQuestsCountdown, 60 * 1000);
+  // Static labels don't need a timer, but clear any prior interval
+  // defensively (defensive against hot-reload state in dev).
+  if (_questsCountdownInterval) {
+    clearInterval(_questsCountdownInterval);
+    _questsCountdownInterval = null;
+  }
 }
 
 // ─── Flying "+N" reward animation ──────────────────────────────────────────
@@ -1054,6 +1053,9 @@ document.querySelectorAll('.quests-tab').forEach((tab) => {
     _dailyQuestsState.activeTab = tab.dataset.questsTab || 'daily';
     _saveDailyQuestsToStorage();
     renderDailyQuests();
+    // Reset-cadence label is keyed off activeTab; re-render on
+    // switch so it doesn't lag a tick behind the rest of the panel.
+    _renderQuestsCountdown();
   });
 });
 
@@ -1064,4 +1066,23 @@ document.addEventListener('click', (e) => {
   const panel = document.getElementById('dailyQuestsPanel');
   if (panel) panel.style.display = 'none';
   _dailyQuestsPanelOpen = false;
+});
+
+// Cross-device sync (lite): refetch goal counters when the user
+// returns to the tab. Catches the common case where they ticked a
+// quest on mobile during lunch and come back to web. 2 indexed
+// SELECT queries per visibility transition — cheap. Throttled to
+// avoid bursty visibility flaps. Realtime push (websocket) was
+// considered and explicitly deferred — see the Goals system audit
+// commit message for the cost analysis.
+let _lastGoalsFetchAt = 0;
+const _GOALS_REFETCH_MIN_MS = 5000;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!_cfg.getCurrentUser()?.id) return;
+  if (Date.now() - _lastGoalsFetchAt < _GOALS_REFETCH_MIN_MS) return;
+  _lastGoalsFetchAt = Date.now();
+  _fetchGoalsFromSupabase().then(() => {
+    if (_dailyQuestsPanelOpen) renderDailyQuests();
+  }).catch(() => { /* non-fatal */ });
 });

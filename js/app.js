@@ -612,6 +612,11 @@ async function onSignedIn(user) {
     getCurrentUser: () => currentUser,
     hideAllMainPages,
     setSidebarActive,
+    // Bridges the goals 'purchase_coin' tick into handleStoreReturn so
+    // the weekly/monthly purchase goals credit on successful HitPay
+    // payments. Inline tickGoalUnique today; Stage 14 wiring will
+    // swap it for the goals.js direct import (same shape).
+    tickGoalUnique,
   });
 
   // Notifications — fetch initial batch + start realtime subscription.
@@ -1074,6 +1079,17 @@ window.shareTo = shareTo;
   try {
     const today = _periodKeyDaily();
     tickGoalUnique('login', `daily-login:${today}`);
+    // Pre-existing bug fix (2026-05-17): the monthly 'Stay active 30
+    // days' quest (m_active30) was defined in _QUEST_ID_MAP under
+    // category 'active_day' but NOTHING ever called tickGoal for it.
+    // Result: every user's monthly m_active30 counter stayed at 0/30
+    // forever, blocking the entire monthly pool reward (m_active30 is
+    // server-required for the monthly claim). Reported by Charles
+    // after 10+ days of active use with the counter still at 0.
+    // Fix: tick active_day from the same daily sign-in hook as login,
+    // deduped by today's date so a multi-tab open in the same day
+    // counts as ONE active day. Mirrors mobile's behavior.
+    tickGoalUnique('active_day', `active:${today}`);
   } catch {}
 
   // Path-based book deep links. Two acceptable inbound shapes:
@@ -2221,6 +2237,14 @@ async function shareProfile(userId, username) {
     if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
   });
 
+  // Goals: tick 'share' on either copy-link OR native-share success.
+  // Deduped by `share:profile:${userId}` so copying + sharing the same
+  // profile in one day counts once (weekly w_share / monthly m_share).
+  // Wrapped in try/catch — never let a goal hiccup break the share UX.
+  const _tickShareGoal = () => {
+    try { tickGoalUnique('share', `share:profile:${userId}`); } catch {}
+  };
+
   // Copy
   const copyBtn = modal.querySelector('[data-action="copy"]');
   copyBtn.onclick = async () => {
@@ -2229,12 +2253,14 @@ async function shareProfile(userId, username) {
       copyBtn.textContent = 'Copied!';
       copyBtn.classList.add('copied');
       setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('copied'); }, 1600);
+      _tickShareGoal();
     } catch {
       // Fallback: select the input
       const inp = modal.querySelector('.share-link-input');
       inp.select();
       document.execCommand?.('copy');
       toast('Link copied', 'success');
+      _tickShareGoal();
     }
   };
 
@@ -2242,7 +2268,7 @@ async function shareProfile(userId, username) {
   const nativeBtn = modal.querySelector('[data-action="native"]');
   if (nativeBtn) {
     nativeBtn.onclick = async () => {
-      try { await navigator.share({ title, text, url }); close(); }
+      try { await navigator.share({ title, text, url }); _tickShareGoal(); close(); }
       catch { /* user cancelled */ }
     };
   }
@@ -6955,6 +6981,9 @@ async function showChapterPublishSuccess(bookId, chapterId, isScheduled, schedul
         await navigator.clipboard.writeText(shareUrl);
         toast('Link copied to clipboard', 'success');
       }
+      // Goals: tick 'share' on either path. Deduped by the chapter id
+      // so multiple shares of the same chapter today count once.
+      try { tickGoalUnique('share', `share:chapter:${chapterId}`); } catch {}
     } catch { /* user cancelled */ }
   };
   previewBtn.onclick = () => {
@@ -8839,49 +8868,41 @@ function renderDailyQuests() {
   }
 }
 
-// ── Reset countdown timer ────────────────────────────────────────────────
-// Renders "Resets in Xh Ym" inline next to the streak pill. Updates every
-// minute via _scheduleQuestsCountdown. Daily resets at midnight local time;
-// weekly resets Monday midnight; monthly resets first of next month.
-function _msUntilDailyReset() {
-  const now = new Date();
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
-  return tomorrow - now;
-}
-function _msUntilWeeklyReset() {
-  const now = new Date();
-  const day = now.getDay(); // 0 = Sunday
-  const daysToMonday = (8 - (day === 0 ? 7 : day)) % 7 || 7;
-  const nextMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToMonday, 0, 0, 0, 0);
-  return nextMonday - now;
-}
-function _msUntilMonthlyReset() {
-  const now = new Date();
-  const firstNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0);
-  return firstNextMonth - now;
-}
-function _formatCountdown(ms) {
-  if (ms <= 0) return '0m';
-  const totalMin = Math.floor(ms / 60000);
-  const days = Math.floor(totalMin / (60 * 24));
-  const hours = Math.floor((totalMin % (60 * 24)) / 60);
-  const mins = totalMin % 60;
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${mins}m`;
-  return `${mins}m`;
-}
+// ── Reset cadence label ──────────────────────────────────────────────────
+// User feedback (2026-05-17): the dynamic "Resets in 14d 2h" countdown
+// was confusing (it told users the precise next-reset time but they
+// just want to know the cadence) AND visibly buggy (the countdown
+// stayed stale when the user switched tabs, because the 60s timer
+// hadn't fired yet — a Daily tab could show the Monthly countdown's
+// "14d 2h" value for up to 60 seconds after switching).
+//
+// Fix: static labels per cadence — "Resets in 24 hrs" / "Resets in
+// 7 days" / "Resets in 30 days". No timer needed because nothing
+// changes; just re-render on tab change. _msUntil*/_formatCountdown
+// helpers retired (dead code) but the _renderQuestsCountdown +
+// _scheduleQuestsCountdown shape is preserved so call sites stay
+// stable.
+const _QUESTS_RESET_LABEL = {
+  daily:   'Resets in 24 hrs',
+  weekly:  'Resets in 7 days',
+  monthly: 'Resets in 30 days',
+};
 function _renderQuestsCountdown() {
   const el = document.getElementById('questsCountdown');
   if (!el) return;
   const tab = _dailyQuestsState.activeTab;
-  const ms = tab === 'monthly' ? _msUntilMonthlyReset() : (tab === 'weekly' ? _msUntilWeeklyReset() : _msUntilDailyReset());
-  el.textContent = `Resets in ${_formatCountdown(ms)}`;
+  el.textContent = _QUESTS_RESET_LABEL[tab] || _QUESTS_RESET_LABEL.daily;
 }
 let _questsCountdownInterval = null;
 function _scheduleQuestsCountdown() {
   _renderQuestsCountdown();
-  if (_questsCountdownInterval) clearInterval(_questsCountdownInterval);
-  _questsCountdownInterval = setInterval(_renderQuestsCountdown, 60 * 1000);
+  // Static labels don't need a timer, but we clear any prior interval
+  // defensively in case an older deploy left one running across a
+  // hot-reload during dev.
+  if (_questsCountdownInterval) {
+    clearInterval(_questsCountdownInterval);
+    _questsCountdownInterval = null;
+  }
 }
 
 // ── Floating "+N ⭐" / "+N 🪙" reward animation ──────────────────────────
@@ -8977,6 +8998,11 @@ document.querySelectorAll('.quests-tab').forEach(tab => {
     _dailyQuestsState.activeTab = tab.dataset.questsTab || 'daily';
     _saveDailyQuestsToStorage();
     renderDailyQuests();
+    // Update the reset-cadence label too — without this the user sees
+    // the previous tab's label until the next 60s tick (now obsolete
+    // since labels are static, but still: cadence label depends on
+    // activeTab so re-render on switch).
+    _renderQuestsCountdown();
   });
 });
 // Click outside → close
@@ -8986,6 +9012,27 @@ document.addEventListener('click', (e) => {
   const panel = document.getElementById('dailyQuestsPanel');
   if (panel) panel.style.display = 'none';
   _dailyQuestsPanelOpen = false;
+});
+
+// Cross-device sync (lite): refetch goal counters when the user
+// returns to the tab. Catches the common case where they ticked a
+// quest on mobile during lunch and come back to web. 2 indexed
+// SELECT queries per visibility transition — cheap. Throttled to
+// avoid bursty visibility flaps (e.g. quick window switches).
+// Realtime subscription (true push) was considered and explicitly
+// deferred — adds a persistent websocket channel per user even when
+// the panel is closed, which is overkill for goal counters that
+// nobody's actively watching most of the time.
+let _lastGoalsFetchAt = 0;
+const _GOALS_REFETCH_MIN_MS = 5000;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!currentUser?.id) return;
+  if (Date.now() - _lastGoalsFetchAt < _GOALS_REFETCH_MIN_MS) return;
+  _lastGoalsFetchAt = Date.now();
+  _fetchGoalsFromSupabase().then(() => {
+    if (_dailyQuestsPanelOpen) renderDailyQuests();
+  }).catch(() => { /* non-fatal */ });
 });
 
 // ════════════════════════════════════════

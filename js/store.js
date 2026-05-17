@@ -59,6 +59,10 @@ let _cfg = {
   getCurrentUser:    () => null,
   hideAllMainPages:  () => {},
   setSidebarActive:  () => {},
+  // Stage 14 wiring (goals.js): tick the 'purchase_coin' goal when
+  // handleStoreReturn confirms a credited HitPay purchase. Default
+  // no-op so the pre-init / no-goals path stays silent.
+  tickGoalUnique:    () => false,
 };
 
 // Flag set by initStore. handleStoreReturn polls this so it can wait
@@ -847,6 +851,16 @@ async function handleStoreReturn() {
   // silent (the realtime wallet subscription will catch a late credit).
   if (purchaseStatus === 'failed' || purchaseStatus === 'cancelled') {
     toast('Payment was not completed. No coins added.', 'error');
+  }
+
+  // Goals: tick 'purchase_coin' when the server confirms the purchase
+  // landed (weekly w_purchase_coin / monthly m_purchase_coin). Deduped
+  // by the purchase ref so a back-and-forward browser jaunt to the
+  // success page doesn't double-tick. Pending/null are skipped — if
+  // the webhook lands later, the goal will tick on the user's next
+  // active_day cycle when they re-open the panel (acceptable gap).
+  if (purchaseStatus === 'credited' || purchaseStatus === 'paid' || purchaseStatus === 'completed') {
+    try { _cfg.tickGoalUnique('purchase_coin', `purchase:${ref}`); } catch {}
   }
 }
 
