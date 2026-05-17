@@ -18541,3 +18541,94 @@ body:not(.light) .image-upload-btn:hover {
 }
 .post-image img { transition: transform 0.35s ease; }
 .post-image:hover img { transform: scale(1.015); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   FEED DENSITY TWEAKS — 2026-05-18
+   ════════════════════════════════════════════════════════════════════════════
+   Follow-up to the 2026-05-17 polish (above). User feedback: cards
+   feel slightly too tall and images dominate the feed. Goal is a
+   Facebook/Threads-like density — more posts visible per screen,
+   faster scanning, image supports the post instead of overpowering
+   it. All adjustments preserve yesterday's hover/transition polish,
+   rounded corners, soft shadows, and purple theme.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Card: tighter padding + tighter inter-card spacing ─────────────────── */
+.post-card {
+  padding: 0.8rem 0.95rem;
+  margin-bottom: 0.55rem;
+}
+/* Override the inter-card extra margin from yesterday's polish so cards
+   sit closer together. Keeps the hover-lift intact (transform only,
+   not margin). */
+#feed .post-card + .post-card { margin-top: 0; }
+
+/* ── Header: a hair less air below the username/timestamp row ──────────── */
+.post-header { margin-bottom: 0.55rem; }
+
+/* ── Body: still readable but tighter line-height for density ──────────── */
+.post-body {
+  font-size: 0.93rem;
+  line-height: 1.55;
+  margin-bottom: 0.6rem;
+}
+
+/* ── Image: cap height at 480px (between user's 400-550 sweet spot),
+       keep aspect ratio, tighter margin below so the image hugs the
+       stats/actions row instead of leaving a gap. ────────────────────── */
+.post-image {
+  margin-bottom: 0.5rem;
+  max-height: 480px;
+  /* When the image's natural aspect ratio is taller than the wrapper,
+     contain it so we never blow past the cap on tall portrait photos.
+     The earlier rule on .post-image img kept object-fit: cover at
+     500px; we override here. */
+}
+.post-image img {
+  max-height: 480px;
+  object-fit: cover;
+}
+
+/* ── Reaction count strip: tighter padding so it doesn't add a band
+       between the image and the action bar. ────────────────────────── */
+.post-stats {
+  padding: 0.2rem 0 0.35rem;
+  min-height: 0;
+}
+
+/* ── Action bar: tighter top padding so Like/Comment/Repost/Share sit
+       closer to the post content. Keep the divider border from yesterday. */
+.post-actions {
+  padding-top: 0.4rem;
+  gap: 0.25rem;
+}
+/* Smaller hit-area on each action button — still finger-friendly but
+   less visually heavy than yesterday's 0.55rem 1rem padding. */
+.action-btn {
+  padding: 0.45rem 0.8rem;
+  font-size: 0.88rem;
+  gap: 0.45rem;
+}
+.action-btn .r-icon { width: 18px; height: 18px; font-size: 16px; }
+.action-btn svg     { width: 16px; height: 16px; }
+
+/* ── Reposted card inside a post: slightly tighter too ─────────────────── */
+.reposted-card { padding: 0.75rem 0.85rem; }
+.reposted-banner { margin-bottom: 0.5rem; }
+
+/* ── Compose: slightly less padding for parity with the denser cards ──── */
+.compose {
+  padding: 0.75rem 0.95rem;
+  margin-bottom: 0.55rem;
+}
+.compose-footer { margin-top: 0.6rem; }
+
+/* ── Link preview: trim the top margin so it tucks under the body text
+       without leaving an obvious gap. ──────────────────────────────── */
+.link-preview {
+  margin: 0.55rem 0 0.2rem;
+}
+
+/* ── Stories row + composer + tabs: each loses a couple of px of
+       bottom margin so the feed starts higher on the page. ─────────── */
+.stories-row { margin-bottom: 0.55rem; }
