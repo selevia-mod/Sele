@@ -753,16 +753,15 @@ function renderDailyQuests() {
     let actionHtml = '';
     let labelExtras = '';
     if (isPoolTab) {
-      // REQUIRED pill renders BEFORE the bonus tag so it's the most
-      // prominent label decoration. Today only m_active30 shows this,
-      // and it visually telegraphs "this one is mandatory" so the
-      // user knows why their 9/10 isn't claimable yet. Inline style
-      // so it renders as a proper pill without needing new CSS — the
-      // amber/orange palette stands out against the panel's purple
-      // chrome without being as alarming as red. Class kept so future
-      // CSS can override the inline styles.
+      // "[Required]" suffix renders inline with the quest title text
+      // (e.g. "Stay active 30 days [Required]") — user-confirmed visual
+      // 2026-05-17 follow-up. Today only m_active30 shows this, and
+      // it telegraphs "this one is mandatory" so the user knows why
+      // their 9/10 isn't claimable. Amber tint to draw the eye
+      // without being as alarming as red. Class kept so future CSS
+      // can restyle if needed.
       const requiredTag = q.required
-        ? '<span class="quest-required-tag" style="display:inline-block;margin-left:6px;padding:2px 7px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-size:10px;font-weight:800;letter-spacing:0.6px;border-radius:4px;text-transform:uppercase;vertical-align:middle;box-shadow:0 1px 2px rgba(217,119,6,0.35);">Required</span>'
+        ? '<span class="quest-required-tag" style="margin-left:6px;color:#d97706;font-weight:700;font-size:0.85em;">[Required]</span>'
         : '';
       const bonusTag = q.bonus
         ? `<span class="quest-bonus-tag">+${q.bonus.coins || 0} ${COIN_SVG} BONUS</span>`
