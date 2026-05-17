@@ -8201,7 +8201,13 @@ const _dailyQuestsState = {
     { id: 'm_share',         icon: 'compass',  label: 'Share 20 books or videos',  progress: 0, target: 20,  unit: '' },
     { id: 'm_unlock',        icon: 'gift',     label: 'Unlock 30 books or videos', progress: 0, target: 30,  unit: '' },
     { id: 'm_watch_ads',     icon: 'ad',       label: 'Watch 100 ads',             progress: 0, target: 100, unit: '' },
-    { id: 'm_active30',      icon: 'door',     label: 'Stay active 30 days',       progress: 0, target: 30,  unit: ' days' },
+    // `required: true` — server-side claim_user_goal_pool RPC v2
+    // (migration_goals_required_gate.sql) rejects monthly claims with
+    // error 'required_goal_incomplete' if m_active30 < 30 even when
+    // 9 of the other 9 quests are done. Mirror the gate client-side
+    // so the Claim button is BLOCKED instead of merely failing on
+    // click. Mobile already enforces this; web was the parity gap.
+    { id: 'm_active30',      icon: 'door',     label: 'Stay active 30 days',       progress: 0, target: 30,  unit: ' days', required: true },
     { id: 'm_purchase_coin', icon: 'gift',     label: 'Purchase coins 4 times',    progress: 0, target: 4,   unit: '', bonus: { stars: 0, coins: 5 } },
     { id: 'm_invite_friend', icon: 'userplus', label: 'Invite 10 friends',         progress: 0, target: 10,  unit: '', bonus: { stars: 0, coins: 5 } },
   ],
@@ -8695,6 +8701,12 @@ function renderDailyQuests() {
     const completedCount = quests.filter(q => q.progress >= q.target).length;
     const required = pool.questsRequired || 4;
     const reachedThreshold = completedCount >= required;
+    // Required-quest gate — mirrors the server's claim_user_goal_pool
+    // v2 RPC. Quests marked `required: true` MUST be at target before
+    // the pool can be claimed regardless of threshold. Today only
+    // m_active30 ('Stay active 30 days') is required.
+    const requiredIncomplete = quests.filter(q => q.required && q.progress < q.target);
+    const hasRequiredBlock = requiredIncomplete.length > 0;
     const isClaimed = !!pool.claimed;
     const stars = pool.reward?.stars || 0;
     const coins = pool.reward?.coins || 0;
@@ -8708,13 +8720,27 @@ function renderDailyQuests() {
       stars > 0 ? `${stars} ${STAR_SVG} ${starWord}` : '',
       coins > 0 ? `${coins} ${COIN_SVG} ${coinWord}` : '',
     ].filter(Boolean).join(' &nbsp;·&nbsp; ');
-    const action = isClaimed
-      ? '<span class="quest-pool-claimed">✓ Claimed</span>'
-      : (reachedThreshold
-          ? `<button class="quest-pool-claim-btn" id="${POOL_BTN_ID_BY_TAB[tab]}">Claim Reward</button>`
-          : '<span class="quest-pool-progress">' + completedCount + '/' + required + ' quests</span>');
+    // Action priority:
+    //   1. Already claimed → ✓
+    //   2. Required quest still incomplete → tell user which one,
+    //      regardless of threshold (a 9/10 user is still blocked
+    //      if m_active30 isn't done)
+    //   3. Threshold met → enable Claim button
+    //   4. Threshold not met → progress counter
+    let action;
+    if (isClaimed) {
+      action = '<span class="quest-pool-claimed">✓ Claimed</span>';
+    } else if (hasRequiredBlock) {
+      const names = requiredIncomplete.map(q => q.label).join(', ');
+      action = `<span class="quest-pool-progress quest-pool-required-block" style="color:#d97706;font-weight:600;">⚠ Required: ${names}</span>`;
+    } else if (reachedThreshold) {
+      action = `<button class="quest-pool-claim-btn" id="${POOL_BTN_ID_BY_TAB[tab]}">Claim Reward</button>`;
+    } else {
+      action = '<span class="quest-pool-progress">' + completedCount + '/' + required + ' quests</span>';
+    }
+    const canClaim = reachedThreshold && !hasRequiredBlock && !isClaimed;
     poolHeader = `
-      <div class="quest-pool-header ${reachedThreshold && !isClaimed ? 'is-claimable' : ''} ${isClaimed ? 'is-claimed' : ''}">
+      <div class="quest-pool-header ${canClaim ? 'is-claimable' : ''} ${isClaimed ? 'is-claimed' : ''}">
         <div class="quest-pool-row">
           <div class="quest-pool-meta">
             <div class="quest-pool-title">${POOL_TITLE_BY_TAB[tab]}</div>
@@ -8744,9 +8770,18 @@ function renderDailyQuests() {
     let actionHtml = '';
     let labelExtras = '';
     if (isPoolTab) {
-      labelExtras = q.bonus
+      // "[Required]" suffix renders inline with the quest title
+      // (e.g. "Stay active 30 days [Required]"). Today only m_active30
+      // shows this — it telegraphs why a 9/10 user's Claim button
+      // is blocked. Amber tint to draw the eye. Inline style so it
+      // renders without new CSS; class kept for future overrides.
+      const requiredTag = q.required
+        ? '<span class="quest-required-tag" style="margin-left:6px;color:#d97706;font-weight:700;font-size:0.85em;">[Required]</span>'
+        : '';
+      const bonusTag = q.bonus
         ? `<span class="quest-bonus-tag">+${q.bonus.coins || 0} ${COIN_SVG} BONUS</span>`
         : '';
+      labelExtras = requiredTag + bonusTag;
       // No per-quest action in pool mode.
     } else {
       const currency = q.currency === 'coin' ? 'coin' : 'star';
@@ -8790,6 +8825,21 @@ function renderDailyQuests() {
       e.stopPropagation();
       const pool = _dailyQuestsState[poolKey];
       if (!pool || pool.claimed || pool._claiming) return;
+
+      // Defense in depth: even though renderDailyQuests blocks the
+      // Claim button when a required quest is incomplete, a stale-
+      // state race could briefly leave it enabled. If we let the RPC
+      // fire, server rejects with 'required_goal_incomplete' and the
+      // user sees a generic toast. Refuse client-side and tell them
+      // exactly which required quest is missing.
+      const periodTab = POOL_PERIOD_BY_KEY[poolKey] || 'daily';
+      const periodQuests = _dailyQuestsState[periodTab] || [];
+      const requiredIncomplete = periodQuests.filter((q) => q.required && q.progress < q.target);
+      if (requiredIncomplete.length > 0) {
+        const names = requiredIncomplete.map((q) => q.label).join(', ');
+        toast(`Finish required: ${names}`, 'error');
+        return;
+      }
 
       // Disable the button + show "Claiming…" while the RPC is in
       // flight. Without this, an unresolved RPC can leave the user
