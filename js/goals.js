@@ -397,7 +397,17 @@ async function _fetchGoalsFromSupabase() {
       for (const tab of periods) {
         const counters = byPeriod[tab] || {};
         for (const q of _dailyQuestsState[tab]) {
-          if (typeof counters[q.id] === 'number') q.progress = counters[q.id];
+          if (typeof counters[q.id] === 'number') {
+            // Cap at target so a server over-count (e.g. mobile + web
+            // both ticked the same day-keyed login before the user-
+            // scoped client dedupe was in place) doesn't render as
+            // '2/1'. Bug report 2026-05-17: sign-out + sign-in as a
+            // different user whose server counter was already 1 from
+            // earlier today bumped it to 2 via the fresh-session tick.
+            // Quest is complete at target; counts beyond target are
+            // server data drift, not user-visible engagement.
+            q.progress = Math.min(counters[q.id], q.target || Infinity);
+          }
         }
       }
     }
@@ -802,7 +812,7 @@ function renderDailyQuests() {
           </div>
           <div class="quest-progress">
             <div class="quest-progress-bar"><div class="quest-progress-fill" style="width:${pct}%"></div></div>
-            <div class="quest-progress-label">${q.progress}${q.unit}/${q.target}${q.unit}</div>
+            <div class="quest-progress-label">${Math.min(q.progress, q.target)}${q.unit}/${q.target}${q.unit}</div>
           </div>
         </div>
         ${actionHtml ? `<div class="quest-action">${actionHtml}</div>` : ''}
